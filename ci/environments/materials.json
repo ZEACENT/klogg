@@ -1,0 +1,268 @@
+{
+  "schema_version": 1,
+  "assets": {
+    "cmake3202": {
+      "url": "https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh",
+      "sha256": "ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d",
+      "checksum_source": "https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-SHA-256.txt",
+      "license": "BSD-3-Clause; bundled licenses retained by installer",
+      "source_url": "https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2.tar.gz"
+    },
+    "cmake3316": {
+      "url": "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz",
+      "sha256": "5a1133ff103c71eb5120e2cc3de922733e7d8a26a98ae716397e8676adb367bf",
+      "checksum_source": "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-SHA-256.txt",
+      "license": "BSD-3-Clause; complete vendor share/cmake-3.31/Licenses retained",
+      "source_url": "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6.tar.gz"
+    },
+    "ninja1121": {
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip",
+      "sha256": "6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255",
+      "checksum_source": "Official release bytes downloaded and independently SHA-256 hashed on 2026-09-24; 123084 bytes; upstream release API has no digest or checksum asset",
+      "license": "Apache-2.0; official COPYING acquired separately",
+      "source_url": "https://github.com/ninja-build/ninja/archive/refs/tags/v1.12.1.tar.gz"
+    },
+    "ninja1121-license": {
+      "url": "https://raw.githubusercontent.com/ninja-build/ninja/v1.12.1/COPYING",
+      "sha256": "eb7e9ab9690124c5c9f42bdc81383d886a3dede26345b6ed15bbad7caf81f7ea",
+      "checksum_source": "Official v1.12.1 source file independently SHA-256 hashed on 2026-09-24",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/ninja-build/ninja/tree/v1.12.1"
+    },
+    "boost1860": {
+      "url": "https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.bz2",
+      "sha256": "1bed88e40401b2cb7a1f76d4bab499e352fa4d0c5f31c0dbae64e24d34d7513b",
+      "checksum_source": "https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.bz2.json",
+      "license": "BSL-1.0; full source tree and LICENSE_1_0.txt retained",
+      "source_url": "https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.bz2"
+    },
+    "qt51519-base": {
+      "url": "https://qt.mirror.constant.com/archive/qt/5.15/5.15.19/submodules/qtbase-everywhere-opensource-src-5.15.19.tar.xz",
+      "sha256": "51e91c73abacab81e64efd01bf95794e79c0e605ad80947a024769f0dd620a32",
+      "checksum_source": "Existing reviewed docker/ubuntu22.04-tsan/Dockerfile QTBASE_SHA256 pin",
+      "license": "Qt open-source licenses and third-party notices retained in full source archive",
+      "source_url": "https://download.qt.io/archive/qt/5.15/5.15.19/submodules/qtbase-everywhere-opensource-src-5.15.19.tar.xz"
+    },
+    "qt51519-svg": {
+      "url": "https://qt.mirror.constant.com/archive/qt/5.15/5.15.19/submodules/qtsvg-everywhere-opensource-src-5.15.19.tar.xz",
+      "sha256": "cabc95fc12fa84c92e95f08660742a0ce297e6db3deadbefbe7fbec4769b8c13",
+      "checksum_source": "Existing reviewed docker/ubuntu22.04-tsan/Dockerfile QTSVG_SHA256 pin",
+      "license": "Qt open-source licenses and third-party notices retained in full source archive",
+      "source_url": "https://download.qt.io/archive/qt/5.15/5.15.19/submodules/qtsvg-everywhere-opensource-src-5.15.19.tar.xz"
+    },
+    "qt51519-tools": {
+      "url": "https://qt.mirror.constant.com/archive/qt/5.15/5.15.19/submodules/qttools-everywhere-opensource-src-5.15.19.tar.xz",
+      "sha256": "2694af886130d63b8a42bcd138f4035fd8108273ebd16781f87300da352f1aa6",
+      "checksum_source": "Existing reviewed docker/ubuntu22.04-tsan/Dockerfile QTTOOLS_SHA256 pin",
+      "license": "Qt open-source licenses and third-party notices retained in full source archive",
+      "source_url": "https://download.qt.io/archive/qt/5.15/5.15.19/submodules/qttools-everywhere-opensource-src-5.15.19.tar.xz"
+    },
+    "qt51519-translations": {
+      "url": "https://qt.mirror.constant.com/archive/qt/5.15/5.15.19/submodules/qttranslations-everywhere-opensource-src-5.15.19.tar.xz",
+      "sha256": "967e0d259af13f47e853f183cffc9671cc054380188fee28402f6425132a2c7b",
+      "checksum_source": "Existing reviewed docker/ubuntu22.04-tsan/Dockerfile QTTRANSLATIONS_SHA256 pin",
+      "license": "Qt open-source licenses and third-party notices retained in full source archive",
+      "source_url": "https://download.qt.io/archive/qt/5.15/5.15.19/submodules/qttranslations-everywhere-opensource-src-5.15.19.tar.xz"
+    },
+    "qt693-base": {
+      "url": "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.linux_gcc_64/6.9.3-0-202509261207qtbase-Linux-RHEL_8_10-GCC-Linux-RHEL_8_10-X86_64.7z",
+      "sha256": "2f02d19183df1b011fd7fe57aa2a1e9073b981f5bda7a8f9c96a6c64b8b7b06c",
+      "checksum_source": "Official archive URL plus .sha256; verified 2026-09-24",
+      "license": "Qt open-source license selection; complete archive and bundled third-party notices retained",
+      "source_url": "https://download.qt.io/archive/qt/6.9/6.9.3/submodules/qtbase-everywhere-src-6.9.3.tar.xz"
+    },
+    "qt693-svg": {
+      "url": "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.linux_gcc_64/6.9.3-0-202509261207qtsvg-Linux-RHEL_8_10-GCC-Linux-RHEL_8_10-X86_64.7z",
+      "sha256": "02466f4028c14a9c49f82153d17367fd5a2bde26b6d19b72fe9da9245483da76",
+      "checksum_source": "Official archive URL plus .sha256; verified 2026-09-24",
+      "license": "Qt open-source license selection; complete archive and bundled third-party notices retained",
+      "source_url": "https://download.qt.io/archive/qt/6.9/6.9.3/submodules/qtsvg-everywhere-src-6.9.3.tar.xz"
+    },
+    "qt693-tools": {
+      "url": "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.linux_gcc_64/6.9.3-0-202509261207qttools-Linux-RHEL_8_10-GCC-Linux-RHEL_8_10-X86_64.7z",
+      "sha256": "77ff4d0085def2fc62efb93c0c2c93961433b1ed1bb30f230ee1b7c1ef90d116",
+      "checksum_source": "Official archive URL plus .sha256; verified 2026-09-24",
+      "license": "Qt open-source license selection; complete archive and bundled third-party notices retained",
+      "source_url": "https://download.qt.io/archive/qt/6.9/6.9.3/submodules/qttools-everywhere-src-6.9.3.tar.xz"
+    },
+    "qt693-translations": {
+      "url": "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.linux_gcc_64/6.9.3-0-202509261207qttranslations-Linux-RHEL_8_10-GCC-Linux-RHEL_8_10-X86_64.7z",
+      "sha256": "12f042e7cf059e390ee695d71db01cfbd3e9c9ac4957b318ea1c2729795026f6",
+      "checksum_source": "Official archive URL plus .sha256; verified 2026-09-24",
+      "license": "Qt open-source license selection; complete archive and bundled third-party notices retained",
+      "source_url": "https://download.qt.io/archive/qt/6.9/6.9.3/submodules/qttranslations-everywhere-src-6.9.3.tar.xz"
+    },
+    "qt693-5compat": {
+      "url": "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.addons.qt5compat.linux_gcc_64/6.9.3-0-202509261207qt5compat-Linux-RHEL_8_10-GCC-Linux-RHEL_8_10-X86_64.7z",
+      "sha256": "1027edb0d3fefdd724b0d7a228f94f3234febcf18511ada59b08960a07293859",
+      "checksum_source": "Official archive URL plus .sha256; verified 2026-09-24",
+      "license": "Qt open-source license selection; complete archive and bundled third-party notices retained",
+      "source_url": "https://download.qt.io/archive/qt/6.9/6.9.3/submodules/qt5compat-everywhere-src-6.9.3.tar.xz"
+    },
+    "qt693-icu": {
+      "url": "https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.linux_gcc_64/6.9.3-0-202509261207icu-linux-Rhel8.6-x86_64.7z",
+      "sha256": "419bf0ce8db44ce83b309564c1686bd897a8b36ae0c6a78498905ba4c30a0439",
+      "checksum_source": "Official archive URL plus .sha256; verified 2026-09-24; layout uses Updates.xml Operation target gcc_64/lib",
+      "license": "ICU/Unicode license; complete vendor ICU 73.2 kit retained; version verified from all six ELF library filenames",
+      "source_url": "https://github.com/unicode-org/icu/releases/download/release-73-2/icu4c-73_2-src.tgz"
+    },
+    "icu732-license": {
+      "url": "https://raw.githubusercontent.com/unicode-org/icu/release-73-2/icu4c/LICENSE",
+      "sha256": "f3005e195ff74d8812cc1f182a1c446fab678d70a10e3dada497585befee5416",
+      "checksum_source": "Official release-73-2 source license independently SHA-256 hashed on 2026-09-24; 25505 bytes",
+      "license": "Unicode/ICU license and bundled third-party notices",
+      "source_url": "https://github.com/unicode-org/icu/releases/download/release-73-2/icu4c-73_2-src.tgz"
+    },
+    "qt693-lgpl3-license": {
+      "url": "https://raw.githubusercontent.com/qt/qtbase/v6.9.3/LICENSES/LGPL-3.0-only.txt",
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+      "checksum_source": "Official v6.9.3 source file independently SHA-256 hashed on 2026-09-24",
+      "license": "LGPL-3.0-only",
+      "source_url": "https://github.com/qt/qtbase/tree/v6.9.3/LICENSES"
+    },
+    "qt693-gpl2-license": {
+      "url": "https://raw.githubusercontent.com/qt/qtbase/v6.9.3/LICENSES/GPL-2.0-only.txt",
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+      "checksum_source": "Official v6.9.3 source file independently SHA-256 hashed on 2026-09-24",
+      "license": "GPL-2.0-only",
+      "source_url": "https://github.com/qt/qtbase/tree/v6.9.3/LICENSES"
+    },
+    "qt693-gpl3-license": {
+      "url": "https://raw.githubusercontent.com/qt/qtbase/v6.9.3/LICENSES/GPL-3.0-only.txt",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "checksum_source": "Official v6.9.3 source file independently SHA-256 hashed on 2026-09-24",
+      "license": "GPL-3.0-only",
+      "source_url": "https://github.com/qt/qtbase/tree/v6.9.3/LICENSES"
+    },
+    "qt693-exception-license": {
+      "url": "https://raw.githubusercontent.com/qt/qtbase/v6.9.3/LICENSES/Qt-GPL-exception-1.0.txt",
+      "sha256": "40678d338ce53cd93f8b22b281a2ecbcaa3ee65ce60b25ffb0c462b0530846b2",
+      "checksum_source": "Official v6.9.3 source file independently SHA-256 hashed on 2026-09-24",
+      "license": "Qt-GPL-exception-1.0",
+      "source_url": "https://github.com/qt/qtbase/tree/v6.9.3/LICENSES"
+    }
+  },
+  "families": {
+    "focal-qt5-gcc13": {
+      "base_image": "ubuntu@sha256:c664f8f86ed5a386b0a340d981b8f81714e21a8b9c73f658c4bea56aa179d54a",
+      "build_args": {},
+      "apt_stages": [
+        {
+          "stage": "bootstrap", "path": "inputs/bootstrap", "build_arg": "APT_BOOTSTRAP_LOCK_SHA256", "prerequisites": [],
+          "sources": ["deb http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse", "deb http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse", "deb http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse"],
+          "requested_packages": ["software-properties-common", "build-essential", "python3", "python-is-python3", "gnupg", "dirmngr", "wget", "ca-certificates", "ccache"],
+          "acquisition": {"mode": "apt-signed"}
+        },
+        {
+          "stage": "runtime", "path": "inputs/apt", "build_arg": "APT_RUNTIME_LOCK_SHA256", "prerequisites": ["bootstrap"],
+          "sources": ["deb http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse", "deb http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse", "deb http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse", "deb https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu focal main"],
+          "requested_packages": ["qtbase5-dev", "qt5-qmake", "qtbase5-dev-tools", "qttools5-dev", "qttranslations5-l10n", "libqt5svg5-dev", "libxkbcommon-dev", "libxkbcommon-x11-dev", "libboost-dev", "libssl-dev", "libicu-dev", "libcurl4-openssl-dev", "ragel", "ninja-build", "zlib1g-dev", "git", "pkg-config", "cppcheck", "gcc-13", "g++-13", "fuse", "file"],
+          "acquisition": {"mode": "apt-signed"},
+          "source_keyrings": [{"source_index": 3, "keys": [
+            {"name": "toolchain-current.asc", "sha256": "aa6927526a6e522ddeac8b82920f72098e558677255f86ce7278aa68d9df7e47", "fingerprints": ["C8EC952E2A0E1FBDC5090F6A2C277A0A352154E5"]},
+            {"name": "toolchain-legacy.asc", "sha256": "2646b417592e0f5216bc6242268a72163123c99da0ba2350fcb0fadaaf8197ec", "fingerprints": ["60C317803A41BA51845E371A1E9377A2BA9EF27F"]}
+          ]}]
+        }
+      ],
+      "downloads": [{"asset": "cmake3202", "path": "cmake-3.20.2-linux-x86_64.sh"}], "tools": []
+    },
+    "jammy-qt5": {
+      "base_image": "ubuntu@sha256:281c5745f657873d78e5531fc5ba8575f46ab7769b94550ac99543f122679986",
+      "build_args": {},
+      "apt_stages": [{
+        "stage": "runtime", "path": "inputs/apt", "build_arg": "APT_RUNTIME_LOCK_SHA256", "prerequisites": [],
+        "sources": ["deb http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse", "deb http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse", "deb http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse"],
+        "requested_packages": ["build-essential", "python3", "python-is-python3", "ccache", "qtbase5-dev", "qt5-qmake", "qtbase5-dev-tools", "qttools5-dev", "qttranslations5-l10n", "libqt5svg5-dev", "libxkbcommon-dev", "libxkbcommon-x11-dev", "libboost-dev", "libssl-dev", "libcurl4-openssl-dev", "ragel", "ninja-build", "zlib1g-dev", "git", "pkg-config", "cppcheck", "clang", "llvm-14", "wget", "ca-certificates", "fuse", "file"],
+        "acquisition": {"mode": "apt-signed"}
+      }],
+      "downloads": [{"asset": "cmake3202", "path": "cmake-3.20.2-linux-x86_64.sh"}], "tools": []
+    },
+    "noble-qt6": {
+      "base_image": "ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4",
+      "build_args": {},
+      "apt_stages": [{
+        "stage": "runtime", "path": "inputs/apt", "build_arg": "APT_RUNTIME_LOCK_SHA256", "prerequisites": [],
+        "sources": ["deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse", "deb http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse", "deb http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse"],
+        "requested_packages": ["build-essential", "python3", "python-is-python3", "ccache", "qt6-base-dev", "qt6-5compat-dev", "qt6-svg-dev", "qt6-translations-l10n", "qt6-tools-dev-tools", "qt6-base-dev-tools", "qt6-tools-dev", "libxkbcommon-dev", "libxkbcommon-x11-dev", "libboost-dev", "libicu-dev", "libssl-dev", "libcurl4-openssl-dev", "ragel", "ninja-build", "zlib1g-dev", "git", "pkg-config", "cppcheck", "wget", "ca-certificates", "fuse", "file"],
+        "acquisition": {"mode": "apt-signed"}
+      }],
+      "downloads": [{"asset": "cmake3202", "path": "cmake-3.20.2-linux-x86_64.sh"}], "tools": []
+    },
+    "resolute-qt6": {
+      "base_image": "ubuntu@sha256:61ebaa5cc23ca45450db85eac015435199ec569e28ec222ea13f2aed2110b8a6",
+      "build_args": {},
+      "apt_stages": [{
+        "stage": "runtime", "path": "inputs/apt", "build_arg": "APT_RUNTIME_LOCK_SHA256", "prerequisites": [],
+        "sources": ["deb http://archive.ubuntu.com/ubuntu resolute main restricted universe multiverse", "deb http://archive.ubuntu.com/ubuntu resolute-updates main restricted universe multiverse", "deb http://security.ubuntu.com/ubuntu resolute-security main restricted universe multiverse"],
+        "requested_packages": ["build-essential", "python3", "python-is-python3", "ccache", "qt6-base-dev", "qt6-5compat-dev", "qt6-svg-dev", "qt6-translations-l10n", "qt6-tools-dev-tools", "qt6-base-dev-tools", "qt6-tools-dev", "libxkbcommon-dev", "libxkbcommon-x11-dev", "libboost-dev", "libicu-dev", "libssl-dev", "libcurl4-openssl-dev", "ragel", "ninja-build", "cmake", "zlib1g-dev", "git", "pkg-config", "cppcheck", "wget", "ca-certificates", "fuse", "file"],
+        "acquisition": {"mode": "apt-signed"}
+      }],
+      "downloads": [], "tools": []
+    },
+    "jammy-qt5-tsan": {
+      "base_image": "public.ecr.aws/ubuntu/ubuntu:22.04@sha256:0199853f6d6b20b0424f3c5694a72a62764f01e6a771b1eb48a4197848986c7e",
+      "build_args": {"UBUNTU_SNAPSHOT": "20260731T000000Z", "QT_VERSION": "5.15.19"},
+      "apt_stages": [
+        {
+          "stage": "bootstrap", "path": "inputs/bootstrap", "build_arg": "APT_BOOTSTRAP_LOCK_SHA256", "prerequisites": [],
+          "sources": ["deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy main universe", "deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy-updates main universe", "deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy-security main universe"],
+          "requested_packages": ["ca-certificates"],
+          "acquisition": {"mode": "apt-signed", "snapshot": {"timestamp": "20260731T000000Z", "check_valid_until": false}, "tls_bootstrap": {"host": "snapshot.ubuntu.com"}}
+        },
+        {
+          "stage": "source", "path": "inputs/source", "build_arg": "APT_SOURCE_LOCK_SHA256", "prerequisites": ["bootstrap"],
+          "sources": ["deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy main universe", "deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy-updates main universe", "deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy-security main universe"],
+          "requested_packages": ["ca-certificates", "curl", "patch", "xz-utils"],
+          "acquisition": {"mode": "apt-signed", "snapshot": {"timestamp": "20260731T000000Z", "check_valid_until": false}}
+        },
+        {
+          "stage": "qt-builder", "path": "inputs/qt-builder", "build_arg": "APT_BUILDER_LOCK_SHA256", "prerequisites": ["bootstrap"],
+          "sources": ["deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy main universe", "deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy-updates main universe", "deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy-security main universe"],
+          "requested_packages": ["clang-14", "g++", "llvm-14", "make", "perl", "pkg-config", "python3", "libfontconfig1-dev", "libfreetype6-dev", "libglib2.0-dev", "libssl-dev", "libx11-dev", "libx11-xcb-dev", "libxcb1-dev", "libxcb-glx0-dev", "libxcb-keysyms1-dev", "libxcb-image0-dev", "libxcb-shm0-dev", "libxcb-icccm4-dev", "libxcb-sync-dev", "libxcb-xfixes0-dev", "libxcb-shape0-dev", "libxcb-randr0-dev", "libxcb-render-util0-dev", "libxcb-xinerama0-dev", "libxcb-xkb-dev", "libxkbcommon-dev", "libxkbcommon-x11-dev", "zlib1g-dev"],
+          "acquisition": {"mode": "apt-signed", "snapshot": {"timestamp": "20260731T000000Z", "check_valid_until": false}}
+        },
+        {
+          "stage": "runtime", "path": "inputs/runtime", "build_arg": "APT_RUNTIME_LOCK_SHA256", "prerequisites": ["bootstrap"],
+          "sources": ["deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy main universe", "deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy-updates main universe", "deb https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/ jammy-security main universe"],
+          "requested_packages": ["build-essential", "python3", "python-is-python3", "clang-14", "llvm-14", "libboost-dev", "libssl-dev", "libcurl4-openssl-dev", "libfontconfig1", "libfreetype6", "libglib2.0-0", "libpcre2-16-0", "libx11-6", "libx11-xcb1", "libxcb1", "libxcb-glx0", "libxcb-keysyms1", "libxcb-image0", "libxcb-shm0", "libxcb-icccm4", "libxcb-sync1", "libxcb-xfixes0", "libxcb-shape0", "libxcb-randr0", "libxcb-render-util0", "libxcb-xinerama0", "libxcb-xkb1", "libxkbcommon0", "libxkbcommon-x11-0", "ragel", "ninja-build", "zlib1g-dev", "git", "pkg-config", "cppcheck", "wget", "ca-certificates", "fuse", "file"],
+          "acquisition": {"mode": "apt-signed", "snapshot": {"timestamp": "20260731T000000Z", "check_valid_until": false}}
+        }
+      ],
+      "downloads": [
+        {"asset": "qt51519-base", "path": "inputs/qt/qtbase-everywhere-opensource-src-5.15.19.tar.xz"},
+        {"asset": "qt51519-svg", "path": "inputs/qt/qtsvg-everywhere-opensource-src-5.15.19.tar.xz"},
+        {"asset": "qt51519-tools", "path": "inputs/qt/qttools-everywhere-opensource-src-5.15.19.tar.xz"},
+        {"asset": "qt51519-translations", "path": "inputs/qt/qttranslations-everywhere-opensource-src-5.15.19.tar.xz"},
+        {"asset": "cmake3202", "path": "inputs/cmake-3.20.2-linux-x86_64.sh"}
+      ], "tools": []
+    },
+    "noble-qt693-analysis": {
+      "base_image": "ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4",
+      "build_args": {},
+      "apt_stages": [{
+        "stage": "runtime", "path": "inputs/apt", "build_arg": "APT_RUNTIME_LOCK_SHA256", "prerequisites": [],
+        "sources": ["deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse", "deb http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse", "deb http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse"],
+        "requested_packages": ["build-essential", "gcc-13", "g++-13", "clang-tidy", "clang", "cppcheck", "gcovr", "lcov", "python3", "python3-pip", "python3-venv", "python-is-python3", "git", "ca-certificates", "curl", "wget", "pkg-config", "ragel", "zlib1g-dev", "libssl-dev", "libcurl4-openssl-dev", "libfontconfig1-dev", "libfreetype6-dev", "libglib2.0-dev", "libdbus-1-3", "libegl1", "libgl1", "libopengl0", "libx11-6", "libx11-xcb1", "libxcb1", "libxcb-cursor0", "libxcb-glx0", "libxcb-icccm4", "libxcb-image0", "libxcb-keysyms1", "libxcb-randr0", "libxcb-render-util0", "libxcb-shape0", "libxcb-shm0", "libxcb-sync1", "libxcb-xfixes0", "libxcb-xinerama0", "libxcb-xkb1", "libxkbcommon-dev", "libxkbcommon-x11-dev", "file", "unzip"],
+        "acquisition": {"mode": "apt-signed"}
+      }],
+      "downloads": [],
+      "tools": [
+        {"asset": "cmake3316", "format": "tar", "source_root": "cmake-3.31.6-linux-x86_64", "destination": "cmake"},
+        {"asset": "ninja1121", "format": "zip", "source_root": ".", "destination": "bin"},
+        {"asset": "ninja1121-license", "format": "file", "source_root": ".", "destination": "licenses/ninja/COPYING"},
+        {"asset": "boost1860", "format": "tar", "source_root": "boost_1_86_0", "destination": "boost"},
+        {"asset": "qt693-base", "format": "7z", "source_root": ".", "destination": "qt/6.9.3/gcc_64"},
+        {"asset": "qt693-icu", "format": "7z", "source_root": ".", "destination": "qt/6.9.3/gcc_64/lib"},
+        {"asset": "icu732-license", "format": "file", "source_root": ".", "destination": "licenses/icu/LICENSE"},
+        {"asset": "qt693-svg", "format": "7z", "source_root": ".", "destination": "qt/6.9.3/gcc_64"},
+        {"asset": "qt693-tools", "format": "7z", "source_root": ".", "destination": "qt/6.9.3/gcc_64"},
+        {"asset": "qt693-translations", "format": "7z", "source_root": ".", "destination": "qt/6.9.3/gcc_64"},
+        {"asset": "qt693-5compat", "format": "7z", "source_root": ".", "destination": "qt/6.9.3/gcc_64"},
+        {"asset": "qt693-lgpl3-license", "format": "file", "source_root": ".", "destination": "licenses/qt/LGPL-3.0-only.txt"},
+        {"asset": "qt693-gpl2-license", "format": "file", "source_root": ".", "destination": "licenses/qt/GPL-2.0-only.txt"},
+        {"asset": "qt693-gpl3-license", "format": "file", "source_root": ".", "destination": "licenses/qt/GPL-3.0-only.txt"},
+        {"asset": "qt693-exception-license", "format": "file", "source_root": ".", "destination": "licenses/qt/Qt-GPL-exception-1.0.txt"}
+      ]
+    }
+  }
+}

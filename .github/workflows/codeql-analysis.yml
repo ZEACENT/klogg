@@ -69,6 +69,7 @@ jobs:
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DKLOGG_GENERIC_CPU=ON \
             -DKLOGG_USE_SENTRY=OFF \
             -DKLOGG_USE_VECTORSCAN=OFF \

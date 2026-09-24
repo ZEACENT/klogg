@@ -1,0 +1,1157 @@
+name: CI Environment Producer
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Qualify only, or qualify and publish after protected approval
+        required: true
+        type: string
+      expected-source-sha:
+        description: Exact source revision validated by the registered dispatch entry
+        required: true
+        type: string
+      analysis-base-sha:
+        description: Explicit earlier source commit for static analysis
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+env:
+  KLOGG_ENVIRONMENT_MODE: ${{ inputs.mode }}
+  KLOGG_EXPECTED_SOURCE_SHA: ${{ inputs.expected-source-sha }}
+  KLOGG_ANALYSIS_BASE_SHA: ${{ inputs.analysis-base-sha }}
+  KLOGG_WORKSPACE: ${{ github.workspace }}
+jobs:
+  Source:
+    name: Environment source preflight
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate exact producer source and operation
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$KLOGG_ENVIRONMENT_MODE" in
+            qualify|publish) ;;
+            *) printf '%s\n' 'Unsupported environment producer mode' >&2; exit 1 ;;
+          esac
+          python3 scripts/ci_environment_pipeline.py source-context \
+            --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+      - uses: ./.github/actions/klogg-version
+      - name: Expose one version for all fixture and qualification jobs
+        id: version
+        shell: bash
+        run: printf 'version=%s\n' "$KLOGG_VERSION" >> "$GITHUB_OUTPUT"
+
+  CpmSources:
+    name: Environment shared CPM source preparation
+    needs: [Source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/prefetch-cpm-cache
+      - name: Archive exact prefetched source closure
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$GITHUB_WORKSPACE/cpm-cache.tar.gz" -C "$GITHUB_WORKSPACE" cpm_cache
+          printf 'archive-sha256=%s\n' "$(sha256sum "$GITHUB_WORKSPACE/cpm-cache.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: environment-cpm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cpm-cache.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  LinuxFixture:
+    name: Environment Linux-only package fixture
+    needs: [Source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    env:
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare same-run Linux ADB, legal assets, and locked AppImage tool
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py source-context \
+            --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+          python3 scripts/ci_environment_pipeline.py prepare-fixture \
+            --repo-root "$GITHUB_WORKSPACE" --source "$RUNNER_TEMP/source.json" \
+            --version "$KLOGG_VERSION" --output "$RUNNER_TEMP/fixture"
+          tar -czf "$RUNNER_TEMP/fixture.tar.gz" -C "$RUNNER_TEMP/fixture" .
+          printf 'archive-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/fixture.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: environment-linux-fixture-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  BuildFocal:
+    name: Environment candidate focal-qt5-gcc13
+    needs: [Source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    env:
+      KLOGG_FAMILY: focal-qt5-gcc13
+    steps: &candidate_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - name: Resolve authenticated inputs and build one local candidate
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py source-context \
+            --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+          python3 scripts/ci_environment_pipeline.py materialize \
+            --repo-root "$GITHUB_WORKSPACE" --family "$KLOGG_FAMILY" \
+            --source "$RUNNER_TEMP/source.json" --output "$RUNNER_TEMP/materialized"
+          scripts/build_ci_environment.sh --repo-root "$GITHUB_WORKSPACE" \
+            --family "$KLOGG_FAMILY" --inputs "$RUNNER_TEMP/materialized/inputs.json" \
+            --materials "$RUNNER_TEMP/materialized/materials" --source "$RUNNER_TEMP/source.json" \
+            --output "$RUNNER_TEMP/candidate"
+          printf 'archive-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/candidate/candidate.oci.tar" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: environment-candidate-${{ env.KLOGG_FAMILY }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  BuildJammy:
+    name: Environment candidate jammy-qt5
+    needs: [Source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    env:
+      KLOGG_FAMILY: jammy-qt5
+    steps: *candidate_steps
+
+  BuildNoble:
+    name: Environment candidate noble-qt6
+    needs: [Source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    env:
+      KLOGG_FAMILY: noble-qt6
+    steps: *candidate_steps
+
+  BuildResolute:
+    name: Environment candidate resolute-qt6
+    needs: [Source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    env:
+      KLOGG_FAMILY: resolute-qt6
+    steps: *candidate_steps
+
+  BuildTsan:
+    name: Environment candidate jammy-qt5-tsan
+    needs: [Source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    env:
+      KLOGG_FAMILY: jammy-qt5-tsan
+    steps: *candidate_steps
+
+  BuildAnalysis:
+    name: Environment candidate noble-qt693-analysis
+    needs: [Source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    env:
+      KLOGG_FAMILY: noble-qt693-analysis
+    steps: *candidate_steps
+
+  QualifyAppImage:
+    name: Environment qualification focal / appimage
+    needs: [Source, BuildFocal, CpmSources, LinuxFixture]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: focal-qt5-gcc13
+      KLOGG_PROFILE: appimage
+      KLOGG_PACKAGE_PROFILE: "true"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildFocal.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildFocal.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+      KLOGG_FIXTURE_ARTIFACT_ID: ${{ needs.LinuxFixture.outputs.artifact-id }}
+      KLOGG_FIXTURE_ARCHIVE_SHA256: ${{ needs.LinuxFixture.outputs.archive-sha256 }}
+    steps: &linux_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind exact producer source and analysis base
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py source-context \
+            --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ env.KLOGG_CANDIDATE_ARTIFACT_ID }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/candidate
+      - name: Verify same-run candidate bytes and loaded image identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py prepare-candidate \
+            --repo-root "$GITHUB_WORKSPACE" --family "$KLOGG_FAMILY" \
+            --candidate-root "$RUNNER_TEMP/candidate" --candidate-artifact-id "$KLOGG_CANDIDATE_ARTIFACT_ID" \
+            --archive-sha256 "$KLOGG_CANDIDATE_ARCHIVE_SHA256" --source "$RUNNER_TEMP/source.json" \
+            --output "$RUNNER_TEMP/prepared-candidate"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ env.KLOGG_CPM_ARTIFACT_ID }}
+          merge-multiple: true
+          path: ${{ github.workspace }}
+      - name: Verify exact shared CPM archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$KLOGG_CPM_ARCHIVE_SHA256" "$GITHUB_WORKSPACE/cpm-cache.tar.gz" | sha256sum --check --strict
+      - uses: ./.github/actions/restore-cpm-cache
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: ${{ env.KLOGG_PACKAGE_PROFILE == 'true' }}
+        with:
+          artifact-ids: ${{ env.KLOGG_FIXTURE_ARTIFACT_ID }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/fixture-transport
+      - name: Verify and stage exact Linux package fixture
+        if: ${{ env.KLOGG_PACKAGE_PROFILE == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py consume-fixture \
+            --repo-root "$GITHUB_WORKSPACE" --source "$RUNNER_TEMP/source.json" \
+            --fixture-root "$RUNNER_TEMP/fixture-transport" --fixture-artifact-id "$KLOGG_FIXTURE_ARTIFACT_ID" \
+            --archive-sha256 "$KLOGG_FIXTURE_ARCHIVE_SHA256" --output "$GITHUB_WORKSPACE"
+      - uses: ./.github/actions/linux-validate
+        with:
+          family: ${{ env.KLOGG_FAMILY }}
+          profile: ${{ env.KLOGG_PROFILE }}
+      - name: Issue receipt only after successful real qualification
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/profile-receipt"
+          python3 scripts/ci_environment_pipeline.py profile-receipt \
+            --repo-root "$GITHUB_WORKSPACE" --family "$KLOGG_FAMILY" --profile "$KLOGG_PROFILE" \
+            --candidate-root "$RUNNER_TEMP/candidate" --candidate-artifact-id "$KLOGG_CANDIDATE_ARTIFACT_ID" \
+            --source "$RUNNER_TEMP/source.json" --output "$RUNNER_TEMP/profile-receipt/receipt.json"
+          printf 'receipt-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/profile-receipt/receipt.json" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          tar -czf "$RUNNER_TEMP/qualification.tar.gz" -C "$RUNNER_TEMP/profile-receipt" receipt.json
+          printf 'archive-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/qualification.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: environment-qualification-${{ env.KLOGG_FAMILY }}-${{ env.KLOGG_PROFILE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  QualifyJammyDeb:
+    name: Environment qualification jammy / deb
+    needs: [Source, BuildJammy, CpmSources, LinuxFixture]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: jammy-qt5
+      KLOGG_PROFILE: deb
+      KLOGG_PACKAGE_PROFILE: "true"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildJammy.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildJammy.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+      KLOGG_FIXTURE_ARTIFACT_ID: ${{ needs.LinuxFixture.outputs.artifact-id }}
+      KLOGG_FIXTURE_ARCHIVE_SHA256: ${{ needs.LinuxFixture.outputs.archive-sha256 }}
+    steps: *linux_steps
+
+  QualifyAsan:
+    name: Environment qualification jammy / asan-lsan
+    needs: [Source, BuildJammy, CpmSources]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: jammy-qt5
+      KLOGG_PROFILE: asan-lsan
+      KLOGG_PACKAGE_PROFILE: "false"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildJammy.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildJammy.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+    steps: *linux_steps
+
+  QualifyUbsan:
+    name: Environment qualification jammy / ubsan
+    needs: [Source, BuildJammy, CpmSources]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: jammy-qt5
+      KLOGG_PROFILE: ubsan
+      KLOGG_PACKAGE_PROFILE: "false"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildJammy.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildJammy.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+    steps: *linux_steps
+
+  QualifyNobleDeb:
+    name: Environment qualification noble / deb
+    needs: [Source, BuildNoble, CpmSources, LinuxFixture]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: noble-qt6
+      KLOGG_PROFILE: deb
+      KLOGG_PACKAGE_PROFILE: "true"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildNoble.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildNoble.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+      KLOGG_FIXTURE_ARTIFACT_ID: ${{ needs.LinuxFixture.outputs.artifact-id }}
+      KLOGG_FIXTURE_ARCHIVE_SHA256: ${{ needs.LinuxFixture.outputs.archive-sha256 }}
+    steps: *linux_steps
+
+  QualifyResoluteDeb:
+    name: Environment qualification resolute / deb
+    needs: [Source, BuildResolute, CpmSources, LinuxFixture]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: resolute-qt6
+      KLOGG_PROFILE: deb
+      KLOGG_PACKAGE_PROFILE: "true"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildResolute.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildResolute.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+      KLOGG_FIXTURE_ARTIFACT_ID: ${{ needs.LinuxFixture.outputs.artifact-id }}
+      KLOGG_FIXTURE_ARCHIVE_SHA256: ${{ needs.LinuxFixture.outputs.archive-sha256 }}
+    steps: *linux_steps
+
+  QualifyTsan:
+    name: Environment qualification jammy-tsan / tsan
+    needs: [Source, BuildTsan, CpmSources]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: jammy-qt5-tsan
+      KLOGG_PROFILE: tsan
+      KLOGG_PACKAGE_PROFILE: "false"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildTsan.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildTsan.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+    steps: *linux_steps
+
+  QualifyStatic:
+    name: Environment qualification analysis / static
+    needs: [Source, BuildAnalysis, CpmSources]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: noble-qt693-analysis
+      KLOGG_PROFILE: static
+      KLOGG_PACKAGE_PROFILE: "false"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildAnalysis.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildAnalysis.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+    steps: &analysis_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind exact producer source and analysis base
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py source-context \
+            --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ env.KLOGG_CANDIDATE_ARTIFACT_ID }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/candidate
+      - name: Verify same-run candidate bytes and loaded image identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py prepare-candidate \
+            --repo-root "$GITHUB_WORKSPACE" --family "$KLOGG_FAMILY" \
+            --candidate-root "$RUNNER_TEMP/candidate" --candidate-artifact-id "$KLOGG_CANDIDATE_ARTIFACT_ID" \
+            --archive-sha256 "$KLOGG_CANDIDATE_ARCHIVE_SHA256" --source "$RUNNER_TEMP/source.json" \
+            --output "$RUNNER_TEMP/prepared-candidate"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ env.KLOGG_CPM_ARTIFACT_ID }}
+          merge-multiple: true
+          path: ${{ github.workspace }}
+      - name: Verify exact shared CPM archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$KLOGG_CPM_ARCHIVE_SHA256" "$GITHUB_WORKSPACE/cpm-cache.tar.gz" | sha256sum --check --strict
+      - uses: ./.github/actions/restore-cpm-cache
+      - name: Execute exact static, coverage, or official CodeQL role
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/qualify_ci_analysis.py --role "$KLOGG_PROFILE" \
+            --candidate-root "$RUNNER_TEMP/candidate" --workspace "$GITHUB_WORKSPACE" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" \
+            --role-materials "$GITHUB_WORKSPACE/ci/environments/role-materials.json" \
+            --output "$RUNNER_TEMP/analysis-result"
+      - name: Bind SARIF bytes without transporting CodeQL tools
+        id: sarif_identity
+        if: ${{ env.KLOGG_PROFILE == 'codeql' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'sarif-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/analysis-result/codeql.sarif" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: sarif
+        if: ${{ env.KLOGG_PROFILE == 'codeql' }}
+        with:
+          name: environment-codeql-sarif-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/analysis-result/codeql.sarif
+          if-no-files-found: error
+          retention-days: 7
+      - name: Issue receipt only after successful real qualification
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/profile-receipt"
+          python3 scripts/ci_environment_pipeline.py profile-receipt \
+            --repo-root "$GITHUB_WORKSPACE" --family "$KLOGG_FAMILY" --profile "$KLOGG_PROFILE" \
+            --candidate-root "$RUNNER_TEMP/candidate" --candidate-artifact-id "$KLOGG_CANDIDATE_ARTIFACT_ID" \
+            --source "$RUNNER_TEMP/source.json" --output "$RUNNER_TEMP/profile-receipt/receipt.json" \
+            --role-materials "$GITHUB_WORKSPACE/ci/environments/role-materials.json"
+          printf 'receipt-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/profile-receipt/receipt.json" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          tar -czf "$RUNNER_TEMP/qualification.tar.gz" -C "$RUNNER_TEMP/profile-receipt" receipt.json
+          printf 'archive-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/qualification.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: environment-qualification-${{ env.KLOGG_FAMILY }}-${{ env.KLOGG_PROFILE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  QualifyCoverage:
+    name: Environment qualification analysis / coverage
+    needs: [Source, BuildAnalysis, CpmSources]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+    env:
+      KLOGG_FAMILY: noble-qt693-analysis
+      KLOGG_PROFILE: coverage
+      KLOGG_PACKAGE_PROFILE: "false"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildAnalysis.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildAnalysis.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+    steps: *analysis_steps
+
+  QualifyCodeql:
+    name: Environment qualification analysis / codeql
+    needs: [Source, BuildAnalysis, CpmSources]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+      receipt-sha256: ${{ steps.identity.outputs.receipt-sha256 }}
+      sarif-artifact-id: ${{ steps.sarif.outputs.artifact-id }}
+      sarif-sha256: ${{ steps.sarif_identity.outputs.sarif-sha256 }}
+    env:
+      KLOGG_FAMILY: noble-qt693-analysis
+      KLOGG_PROFILE: codeql
+      KLOGG_PACKAGE_PROFILE: "false"
+      KLOGG_VERSION: ${{ needs.Source.outputs.version }}
+      KLOGG_CANDIDATE_ARTIFACT_ID: ${{ needs.BuildAnalysis.outputs.candidate-artifact-id }}
+      KLOGG_CANDIDATE_ARCHIVE_SHA256: ${{ needs.BuildAnalysis.outputs.archive-sha256 }}
+      KLOGG_CPM_ARTIFACT_ID: ${{ needs.CpmSources.outputs.artifact-id }}
+      KLOGG_CPM_ARCHIVE_SHA256: ${{ needs.CpmSources.outputs.archive-sha256 }}
+    steps: *analysis_steps
+
+  UploadCodeqlSarif:
+    name: Environment isolated CodeQL SARIF upload
+    needs: [QualifyCodeql]
+    if: ${{ inputs.mode == 'publish' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyCodeql.outputs.sarif-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/sarif
+      - name: Check exact SARIF identity before privileged upload
+        shell: bash
+        env:
+          KLOGG_SARIF_SHA256: ${{ needs.QualifyCodeql.outputs.sarif-sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$KLOGG_SARIF_SHA256" "$RUNNER_TEMP/sarif/codeql.sarif" | sha256sum --check --strict
+      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938
+        with:
+          sarif_file: ${{ runner.temp }}/sarif/codeql.sarif
+          category: environment-qualification
+          wait-for-processing: true
+
+  QualificationGate:
+    name: environment-qualification-gate
+    needs: [BuildFocal, BuildJammy, BuildNoble, BuildResolute, BuildTsan, BuildAnalysis, QualifyAppImage, QualifyJammyDeb, QualifyAsan, QualifyUbsan, QualifyNobleDeb, QualifyResoluteDeb, QualifyTsan, QualifyStatic, QualifyCoverage, QualifyCodeql, UploadCodeqlSarif]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      qualified-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require every exact builder and qualification result
+        id: results
+        shell: bash
+        env:
+          KLOGG_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py source-context \
+            --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          needs = json.loads(os.environ['KLOGG_NEEDS_JSON'])
+          mode = os.environ['KLOGG_ENVIRONMENT_MODE']
+          expected_upload = 'success' if mode == 'publish' else 'skipped'
+          if mode not in ('qualify', 'publish') or needs['UploadCodeqlSarif']['result'] != expected_upload:
+              raise SystemExit('isolated SARIF uploader did not reach its exact mode-specific result')
+          builders = {
+              'BuildFocal': 'focal-qt5-gcc13', 'BuildJammy': 'jammy-qt5', 'BuildNoble': 'noble-qt6',
+              'BuildResolute': 'resolute-qt6', 'BuildTsan': 'jammy-qt5-tsan', 'BuildAnalysis': 'noble-qt693-analysis',
+          }
+          profiles = {
+              'QualifyAppImage': ('focal-qt5-gcc13', 'appimage'), 'QualifyJammyDeb': ('jammy-qt5', 'deb'),
+              'QualifyAsan': ('jammy-qt5', 'asan-lsan'), 'QualifyUbsan': ('jammy-qt5', 'ubsan'),
+              'QualifyNobleDeb': ('noble-qt6', 'deb'), 'QualifyResoluteDeb': ('resolute-qt6', 'deb'),
+              'QualifyTsan': ('jammy-qt5-tsan', 'tsan'), 'QualifyStatic': ('noble-qt693-analysis', 'static'),
+              'QualifyCoverage': ('noble-qt693-analysis', 'coverage'), 'QualifyCodeql': ('noble-qt693-analysis', 'codeql'),
+          }
+          expected = set(builders) | set(profiles)
+          if set(needs) != expected | {'UploadCodeqlSarif'} or any(needs[job]['result'] != 'success' for job in expected):
+              raise SystemExit('every explicit candidate builder and qualification lane must succeed')
+          identities = {'schema_version': 1, 'candidates': {}, 'profiles': {}}
+          for job, family in builders.items():
+              values = needs[job]['outputs']
+              identities['candidates'][family] = {'job': job, 'artifact_id': int(values['candidate-artifact-id']), 'archive_sha256': values['archive-sha256']}
+          for job, (family, profile) in profiles.items():
+              values = needs[job]['outputs']
+              identities['profiles'].setdefault(family, {})[profile] = {'job': job, 'artifact_id': int(values['receipt-artifact-id']), 'archive_sha256': values['archive-sha256'], 'receipt_sha256': values['receipt-sha256']}
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          (root / 'artifact-identities.json').write_text(json.dumps(identities), encoding='utf-8')
+          (root / 'job-results.json').write_text(json.dumps({job: needs[job]['result'] for job in expected}), encoding='utf-8')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+              stream.write('sarif-result=' + expected_upload + '\n')
+          PY
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildFocal.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/focal-qt5-gcc13
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildJammy.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/jammy-qt5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildNoble.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/noble-qt6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildResolute.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/resolute-qt6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildTsan.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/jammy-qt5-tsan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildAnalysis.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/noble-qt693-analysis
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyAppImage.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/focal-qt5-gcc13/appimage
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyJammyDeb.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/jammy-qt5/deb
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyAsan.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/jammy-qt5/asan-lsan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyUbsan.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/jammy-qt5/ubsan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyNobleDeb.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/noble-qt6/deb
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyResoluteDeb.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/resolute-qt6/deb
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyTsan.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/jammy-qt5-tsan/tsan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyStatic.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/noble-qt693-analysis/static
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyCoverage.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/noble-qt693-analysis/coverage
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyCodeql.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/noble-qt693-analysis/codeql
+      - name: Aggregate exact source, artifact, policy, and qualification evidence
+        id: identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLOGG_SARIF_RESULT: ${{ steps.results.outputs.sarif-result }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py aggregate --repo-root "$GITHUB_WORKSPACE" \
+            --source "$RUNNER_TEMP/source.json" --evidence-root "$RUNNER_TEMP/evidence" \
+            --job-results "$RUNNER_TEMP/job-results.json" --artifact-identities "$RUNNER_TEMP/artifact-identities.json" \
+            --operation "$KLOGG_ENVIRONMENT_MODE" --sarif-result "$KLOGG_SARIF_RESULT" \
+            --output "$RUNNER_TEMP/qualified"
+          tar -czf "$RUNNER_TEMP/qualified.tar.gz" -C "$RUNNER_TEMP/qualified" .
+          printf 'archive-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/qualified.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: environment-qualified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualified.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  Publisher:
+    name: Environment protected publication
+    needs: [QualificationGate, BuildFocal, BuildJammy, BuildNoble, BuildResolute, BuildTsan, BuildAnalysis, QualifyAppImage, QualifyJammyDeb, QualifyAsan, QualifyUbsan, QualifyNobleDeb, QualifyResoluteDeb, QualifyTsan, QualifyStatic, QualifyCoverage, QualifyCodeql]
+    if: ${{ inputs.mode == 'publish' && needs.QualificationGate.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: ci-environment-publish
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      publication-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive-sha256: ${{ steps.identity.outputs.archive-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind exact producer source and analysis base
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py source-context \
+            --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualificationGate.outputs.qualified-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/qualified-transport
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildFocal.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/focal-qt5-gcc13
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildJammy.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/jammy-qt5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildNoble.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/noble-qt6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildResolute.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/resolute-qt6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildTsan.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/jammy-qt5-tsan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.BuildAnalysis.outputs.candidate-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/candidates/noble-qt693-analysis
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyAppImage.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/focal-qt5-gcc13/appimage
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyJammyDeb.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/jammy-qt5/deb
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyAsan.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/jammy-qt5/asan-lsan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyUbsan.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/jammy-qt5/ubsan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyNobleDeb.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/noble-qt6/deb
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyResoluteDeb.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/resolute-qt6/deb
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyTsan.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/jammy-qt5-tsan/tsan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyStatic.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/noble-qt693-analysis/static
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyCoverage.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/noble-qt693-analysis/coverage
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.QualifyCodeql.outputs.receipt-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence/receipts/noble-qt693-analysis/codeql
+      - name: Copy only qualified original OCI bytes to the registry
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLOGG_QUALIFIED_ARTIFACT_ID: ${{ needs.QualificationGate.outputs.qualified-artifact-id }}
+          KLOGG_QUALIFIED_ARCHIVE_SHA256: ${{ needs.QualificationGate.outputs.archive-sha256 }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py publish --repo-root "$GITHUB_WORKSPACE" \
+            --source "$RUNNER_TEMP/source.json" --qualified-root "$RUNNER_TEMP/qualified-transport" \
+            --qualified-artifact-id "$KLOGG_QUALIFIED_ARTIFACT_ID" --qualified-archive-sha256 "$KLOGG_QUALIFIED_ARCHIVE_SHA256" \
+            --evidence-root "$RUNNER_TEMP/evidence" --output "$RUNNER_TEMP/publication"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import pathlib
+          import re
+          publication = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'publication/publication.json').read_text())
+          families = {'focal-qt5-gcc13': 'focal', 'jammy-qt5': 'jammy', 'noble-qt6': 'noble', 'resolute-qt6': 'resolute', 'jammy-qt5-tsan': 'tsan', 'noble-qt693-analysis': 'analysis'}
+          if set(publication['families']) != set(families):
+              raise SystemExit('publication must contain all six exact families')
+          for family, key in families.items():
+              item = publication['families'][family]
+              if not re.fullmatch('sha256:[0-9a-f]{64}', item['image_digest']) or not re.fullmatch('[0-9a-f]{64}', item['receipt_sha256']):
+                  raise SystemExit('invalid publication attestation subject digest')
+              print(key + '_image_digest=' + item['image_digest'])
+              print(key + '_receipt_sha256=' + item['receipt_sha256'])
+          PY
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_focal_image
+        with:
+          subject-name: ghcr.io/zeacent/klogg-ci-env
+          subject-digest: ${{ steps.publish.outputs.focal_image_digest }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_focal_receipt
+        with:
+          subject-name: verification.json
+          subject-digest: sha256:${{ steps.publish.outputs.focal_receipt_sha256 }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_jammy_image
+        with:
+          subject-name: ghcr.io/zeacent/klogg-ci-env
+          subject-digest: ${{ steps.publish.outputs.jammy_image_digest }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_jammy_receipt
+        with:
+          subject-name: verification.json
+          subject-digest: sha256:${{ steps.publish.outputs.jammy_receipt_sha256 }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_noble_image
+        with:
+          subject-name: ghcr.io/zeacent/klogg-ci-env
+          subject-digest: ${{ steps.publish.outputs.noble_image_digest }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_noble_receipt
+        with:
+          subject-name: verification.json
+          subject-digest: sha256:${{ steps.publish.outputs.noble_receipt_sha256 }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_resolute_image
+        with:
+          subject-name: ghcr.io/zeacent/klogg-ci-env
+          subject-digest: ${{ steps.publish.outputs.resolute_image_digest }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_resolute_receipt
+        with:
+          subject-name: verification.json
+          subject-digest: sha256:${{ steps.publish.outputs.resolute_receipt_sha256 }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_tsan_image
+        with:
+          subject-name: ghcr.io/zeacent/klogg-ci-env
+          subject-digest: ${{ steps.publish.outputs.tsan_image_digest }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_tsan_receipt
+        with:
+          subject-name: verification.json
+          subject-digest: sha256:${{ steps.publish.outputs.tsan_receipt_sha256 }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_analysis_image
+        with:
+          subject-name: ghcr.io/zeacent/klogg-ci-env
+          subject-digest: ${{ steps.publish.outputs.analysis_image_digest }}
+          push-to-registry: false
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        id: attest_analysis_receipt
+        with:
+          subject-name: verification.json
+          subject-digest: sha256:${{ steps.publish.outputs.analysis_receipt_sha256 }}
+          push-to-registry: false
+      - name: Retain signed evidence before anonymous visibility checks
+        id: identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLOGG_FOCAL_IMAGE_BUNDLE: ${{ steps.attest_focal_image.outputs.bundle-path }}
+          KLOGG_FOCAL_RECEIPT_BUNDLE: ${{ steps.attest_focal_receipt.outputs.bundle-path }}
+          KLOGG_JAMMY_IMAGE_BUNDLE: ${{ steps.attest_jammy_image.outputs.bundle-path }}
+          KLOGG_JAMMY_RECEIPT_BUNDLE: ${{ steps.attest_jammy_receipt.outputs.bundle-path }}
+          KLOGG_NOBLE_IMAGE_BUNDLE: ${{ steps.attest_noble_image.outputs.bundle-path }}
+          KLOGG_NOBLE_RECEIPT_BUNDLE: ${{ steps.attest_noble_receipt.outputs.bundle-path }}
+          KLOGG_RESOLUTE_IMAGE_BUNDLE: ${{ steps.attest_resolute_image.outputs.bundle-path }}
+          KLOGG_RESOLUTE_RECEIPT_BUNDLE: ${{ steps.attest_resolute_receipt.outputs.bundle-path }}
+          KLOGG_TSAN_IMAGE_BUNDLE: ${{ steps.attest_tsan_image.outputs.bundle-path }}
+          KLOGG_TSAN_RECEIPT_BUNDLE: ${{ steps.attest_tsan_receipt.outputs.bundle-path }}
+          KLOGG_ANALYSIS_IMAGE_BUNDLE: ${{ steps.attest_analysis_image.outputs.bundle-path }}
+          KLOGG_ANALYSIS_RECEIPT_BUNDLE: ${{ steps.attest_analysis_receipt.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          families = {'focal-qt5-gcc13': 'FOCAL', 'jammy-qt5': 'JAMMY', 'noble-qt6': 'NOBLE', 'resolute-qt6': 'RESOLUTE', 'jammy-qt5-tsan': 'TSAN', 'noble-qt693-analysis': 'ANALYSIS'}
+          bundles = {family: {'image_bundle': os.environ['KLOGG_' + key + '_IMAGE_BUNDLE'], 'receipt_bundle': os.environ['KLOGG_' + key + '_RECEIPT_BUNDLE']} for family, key in families.items()}
+          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle-map.json').write_text(json.dumps(bundles), encoding='utf-8')
+          PY
+          python3 scripts/ci_environment_pipeline.py finalize-publication --repo-root "$GITHUB_WORKSPACE" \
+            --source "$RUNNER_TEMP/source.json" --qualified-root "$RUNNER_TEMP/qualified-transport" \
+            --publication-root "$RUNNER_TEMP/publication" --bundle-map "$RUNNER_TEMP/bundle-map.json" \
+            --output "$RUNNER_TEMP/publication-evidence"
+          tar -czf "$RUNNER_TEMP/publication-evidence.tar.gz" -C "$RUNNER_TEMP/publication-evidence" .
+          printf 'archive-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/publication-evidence.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: environment-publication-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication-evidence.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  PublicVerification:
+    name: Environment anonymous public verification
+    needs: [Publisher]
+    if: ${{ inputs.mode == 'publish' && needs.Publisher.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      verified-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.Publisher.outputs.publication-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/publication-transport
+      - name: Require anonymous image visibility and exact detached provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLOGG_PUBLICATION_ARTIFACT_ID: ${{ needs.Publisher.outputs.publication-artifact-id }}
+          KLOGG_PUBLICATION_ARCHIVE_SHA256: ${{ needs.Publisher.outputs.archive-sha256 }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_pipeline.py source-context \
+            --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+          python3 scripts/ci_environment_pipeline.py verify-publication --repo-root "$GITHUB_WORKSPACE" \
+            --source "$RUNNER_TEMP/source.json" --publication-root "$RUNNER_TEMP/publication-transport" \
+            --publication-artifact-id "$KLOGG_PUBLICATION_ARTIFACT_ID" --archive-sha256 "$KLOGG_PUBLICATION_ARCHIVE_SHA256" \
+            --output "$RUNNER_TEMP/public-verified"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: environment-public-verified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public-verified/
+          if-no-files-found: error
+          retention-days: 7

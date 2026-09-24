@@ -4,7 +4,9 @@
 
 These instructions cover local source builds. See the [documentation hub](README.md)
 for related guides and the [dependency inventory](DEPENDENCIES.md) for dependency
-versions, provenance, and packaged live-source helpers.
+versions, provenance, and packaged live-source helpers. The
+[CI environment guide](CI_ENVIRONMENTS.md) separately documents qualified
+compiler images, producer bootstrap, and fail-closed consumption.
 Local builds can be faster because code can be optimized for current CPU instead of generic x86-64. Support for SSE4/AVX code paths
 will be enabled if available on build machine.
 

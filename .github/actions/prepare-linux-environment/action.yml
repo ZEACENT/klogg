@@ -1,0 +1,45 @@
+name: Prepare verified Linux environment
+description: Verify locked public provenance and optionally pull and locally retag the exact image
+inputs:
+  family:
+    description: Family from the reviewed environment catalog
+    required: true
+  pull:
+    description: Pull the verified digest into the job's Docker daemon
+    required: false
+    default: "true"
+  retag:
+    description: Assign the fixed existing Linux build tag after image identity verification
+    required: false
+    default: "true"
+outputs:
+  image:
+    description: Fully verified immutable image reference for a downstream job container
+    value: ${{ steps.resolve.outputs.image }}
+runs:
+  using: composite
+  steps:
+    - name: Verify locked environment identity and provenance
+      id: resolve
+      shell: bash
+      env:
+        KLOGG_ENV_FAMILY: ${{ inputs.family }}
+        KLOGG_ENV_PULL: ${{ inputs.pull }}
+        KLOGG_ENV_RETAG: ${{ inputs.retag }}
+      run: |
+        set -euo pipefail
+        for value in "$KLOGG_ENV_PULL" "$KLOGG_ENV_RETAG"; do
+          case "$value" in
+            true|false) ;;
+            *) printf '%s\n' '::error::Environment pull/retag inputs must be true or false' >&2; exit 1 ;;
+          esac
+        done
+        if [ "$KLOGG_ENV_RETAG" = true ] && [ "$KLOGG_ENV_PULL" != true ]; then
+          printf '%s\n' '::error::Retag requires a verified image pull' >&2
+          exit 1
+        fi
+        args=(--family "$KLOGG_ENV_FAMILY" --repo-root "$GITHUB_WORKSPACE"
+              --github-output "$GITHUB_OUTPUT")
+        if [ "$KLOGG_ENV_PULL" = true ]; then args+=(--pull); fi
+        if [ "$KLOGG_ENV_RETAG" = true ]; then args+=(--retag); fi
+        python3 scripts/consume_ci_environment.py "${args[@]}"

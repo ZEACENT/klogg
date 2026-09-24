@@ -99,6 +99,18 @@ CI_BUILD_REQUIRED_JOBS = {
 }
 
 CI_BUILD_POST_GATE_JOBS = {"DispatchContinuous"}
+CI_BUILD_ENVIRONMENT_JOBS = {"EnvironmentModePreflight", "EnvironmentProducer"}
+CI_BUILD_ORDINARY_EVENT = "(github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off')"
+CI_BUILD_ORDINARY_IF = "${{ " + CI_BUILD_ORDINARY_EVENT + " && !contains(github.event.head_commit.message, '[skip ci]') }}"
+CI_BUILD_ORDINARY_GATE_IF = "${{ always() && " + CI_BUILD_ORDINARY_EVENT + " }}"
+CI_BUILD_PRODUCER_NAME_PREFIX = (
+    "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' "
+    "&& '[environment-mode skipped] ' || '' }}"
+)
+CI_ENVIRONMENT_CALL_PERMISSIONS = {
+    "contents": "read", "actions": "read", "packages": "write", "id-token": "write",
+    "attestations": "write", "security-events": "write",
+}
 
 CI_BUILD_PACKAGE_ENABLEMENT = {
     "LinuxPackages": "true",
@@ -1039,6 +1051,333 @@ def workflow_artifact_actions(text: str) -> dict[str, dict[str, set[str]]]:
     return actions
 
 
+CI_ENVIRONMENT_BUILDERS = {
+    "BuildFocal": "focal-qt5-gcc13", "BuildJammy": "jammy-qt5", "BuildNoble": "noble-qt6",
+    "BuildResolute": "resolute-qt6", "BuildTsan": "jammy-qt5-tsan", "BuildAnalysis": "noble-qt693-analysis",
+}
+CI_ENVIRONMENT_PROFILES = {
+    "QualifyAppImage": ("focal-qt5-gcc13", "appimage", "BuildFocal", True),
+    "QualifyJammyDeb": ("jammy-qt5", "deb", "BuildJammy", True),
+    "QualifyAsan": ("jammy-qt5", "asan-lsan", "BuildJammy", False),
+    "QualifyUbsan": ("jammy-qt5", "ubsan", "BuildJammy", False),
+    "QualifyNobleDeb": ("noble-qt6", "deb", "BuildNoble", True),
+    "QualifyResoluteDeb": ("resolute-qt6", "deb", "BuildResolute", True),
+    "QualifyTsan": ("jammy-qt5-tsan", "tsan", "BuildTsan", False),
+    "QualifyStatic": ("noble-qt693-analysis", "static", "BuildAnalysis", False),
+    "QualifyCoverage": ("noble-qt693-analysis", "coverage", "BuildAnalysis", False),
+    "QualifyCodeql": ("noble-qt693-analysis", "codeql", "BuildAnalysis", False),
+}
+
+
+def environment_shell_commands(step: list[str]) -> list[list[str]]:
+    """Read literal shell commands, excluding comments and heredoc payloads."""
+    fields, _ = workflow_step_fields(step)
+    result: list[list[str]] = []
+    pending = ""
+    delimiter: str | None = None
+    for line in fields.get("run", "").splitlines():
+        line = line.strip()
+        if delimiter is not None:
+            if line == delimiter:
+                delimiter = None
+            continue
+        line = strip_yaml_comment(line)
+        if not line:
+            continue
+        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if match:
+            delimiter = match.group(1)
+        pending += " " + (line[:-1].rstrip() if line.endswith("\\") else line)
+        if line.endswith("\\"):
+            continue
+        try:
+            result.append(shlex.split(pending))
+        except ValueError:
+            result.append(["<unsupported-shell>"])
+        pending = ""
+    if pending or delimiter:
+        result.append(["<unsupported-shell>"])
+    return result
+
+
+def ci_environment_workflow_issues(text: str) -> list[str]:
+    """Require the explicit producer DAG and its closed privilege boundaries."""
+    issues: list[str] = []
+    builders = set(CI_ENVIRONMENT_BUILDERS)
+    qualifiers = set(CI_ENVIRONMENT_PROFILES)
+    evidence_jobs = builders | qualifiers
+    expected_jobs = evidence_jobs | {"Source", "CpmSources", "LinuxFixture", "UploadCodeqlSarif", "QualificationGate", "Publisher", "PublicVerification"}
+    blocks = workflow_job_blocks(text)
+    needs = workflow_job_needs(text)
+    triggers = workflow_trigger_mapping(text)
+    if triggers is None or set(triggers) != {"workflow_call"}:
+        issues.append("Environment producer must be reusable-only with no timer or direct publication event")
+    call_inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
+    if call_inputs is None or set(call_inputs) != {"mode", "expected-source-sha", "analysis-base-sha"}:
+        issues.append("Environment producer requires exact operation and source/base inputs")
+    elif any((fields := workflow_mapping_block(block, key, 6)) is None
+             or fields.get("type", (None,))[0] != "string" or fields.get("required", (None,))[0] != "true"
+             for key, (_, block) in call_inputs.items()):
+        issues.append("Environment producer inputs must be required strings")
+    if set(blocks) != expected_jobs or workflow_mapping_block(text.splitlines(), "jobs", 0) is None:
+        issues.append("Environment producer requires exactly six explicit builders and ten qualification lanes plus reviewed gates")
+    root_permissions = workflow_mapping_block(text.splitlines(), "permissions", 0)
+    read_only = {"contents": "read", "actions": "read"}
+    if root_permissions is None or {key: value for key, (value, _) in root_permissions.items()} != read_only:
+        issues.append("Environment workflow default permissions must be read-only")
+    root_env = workflow_mapping_block(text.splitlines(), "env", 0)
+    if root_env is None or {key: value for key, (value, _) in root_env.items()} != {
+        "KLOGG_ENVIRONMENT_MODE": "${{ inputs.mode }}", "KLOGG_EXPECTED_SOURCE_SHA": "${{ inputs.expected-source-sha }}",
+        "KLOGG_ANALYSIS_BASE_SHA": "${{ inputs.analysis-base-sha }}", "KLOGG_WORKSPACE": "${{ github.workspace }}",
+    }:
+        issues.append("Environment producer must bind current source/operation and host workspace explicitly")
+    if re.search(r"\bsecrets\b", active_script_content(text)):
+        issues.append("Environment producer must not inherit or reference external secrets")
+    try:
+        steps = workflow_job_steps(text)
+        ancestors = {job: workflow_job_ancestors(needs, job) for job in needs}
+    except ValueError as error:
+        return issues + [str(error)]
+
+    def mapping(job: str, key: str) -> dict[str, str]:
+        values = workflow_mapping_block(blocks.get(job, []), key, 4)
+        return {} if values is None else {name: value for name, (value, _) in values.items()}
+
+    def command_step(job: str, executable: list[str], flags: dict[str, str] | None = None) -> int | None:
+        matches = []
+        for index, step in enumerate(steps.get(job, [])):
+            fields, _ = workflow_step_fields(step)
+            for command in environment_shell_commands(step):
+                if command[:len(executable)] != executable:
+                    continue
+                if fields.get("if") is not None or fields.get("shell") != "bash":
+                    continue
+                if any(token in command for token in ("||", "&&", ";", "<unsupported-shell>")):
+                    continue
+                valid = True
+                for key, expected in (flags or {}).items():
+                    positions = [offset for offset, value in enumerate(command) if value == key]
+                    if len(positions) != 1 or positions[0] + 1 >= len(command) or command[positions[0] + 1] != expected:
+                        valid = False
+                if valid:
+                    matches.append(index)
+        return matches[0] if len(matches) == 1 else None
+
+    helper = ["python3", "scripts/ci_environment_pipeline.py"]
+    direct = {"Source": set(), "CpmSources": {"Source"}, "LinuxFixture": {"Source"},
+              "UploadCodeqlSarif": {"QualifyCodeql"}, "QualificationGate": evidence_jobs | {"UploadCodeqlSarif"},
+              "Publisher": evidence_jobs | {"QualificationGate"}, "PublicVerification": {"Publisher"}}
+    direct.update({job: {"Source"} for job in builders})
+    direct.update({job: {"Source", builder, "CpmSources"} | ({"LinuxFixture"} if package else set())
+                   for job, (_, _, builder, package) in CI_ENVIRONMENT_PROFILES.items()})
+    conditions = {"QualificationGate": "${{ always() }}", "UploadCodeqlSarif": "${{ inputs.mode == 'publish' }}",
+                  "Publisher": "${{ inputs.mode == 'publish' && needs.QualificationGate.result == 'success' }}",
+                  "PublicVerification": "${{ inputs.mode == 'publish' && needs.Publisher.result == 'success' }}"}
+    source_flags = {"--expected-source-sha": "$KLOGG_EXPECTED_SOURCE_SHA", "--analysis-base-sha": "$KLOGG_ANALYSIS_BASE_SHA", "--output": "$RUNNER_TEMP/source.json"}
+    for job, block in blocks.items():
+        permissions = mapping(job, "permissions")
+        expected_permissions = dict(read_only)
+        if job == "Publisher":
+            expected_permissions.update({"packages": "write", "id-token": "write", "attestations": "write"})
+        elif job == "UploadCodeqlSarif":
+            expected_permissions["security-events"] = "write"
+        if permissions != expected_permissions:
+            issues.append("Environment executable build/qualification jobs must be read-only: " + job if job not in {"Publisher", "UploadCodeqlSarif"}
+                          else "Environment privileged job requires exact isolated permissions: " + job)
+        if needs.get(job) != direct.get(job):
+            issues.append("Environment job must have exact reviewed artifact ancestors: " + job)
+        if workflow_job_direct_value(block, "if") != conditions.get(job):
+            issues.append("Environment job has an unreviewed event/success condition: " + job)
+        if (not workflow_job_direct_fields_are_unique(block)
+                or workflow_job_direct_value(block, "strategy") is not None
+                or workflow_job_direct_value(block, "continue-on-error") is not None
+                or workflow_job_direct_value(block, "uses") is not None
+                or workflow_job_direct_value(block, "environment") != ("ci-environment-publish" if job == "Publisher" else None)):
+            issues.append("Environment jobs must be explicit fail-closed lanes with only a protected publisher: " + job)
+        if job != "CpmSources" and job != "UploadCodeqlSarif" and command_step(job, helper + ["source-context"], source_flags) is None:
+            issues.append("Environment job must bind exact source/ref/run/attempt through source-context: " + job)
+        env = mapping(job, "env")
+        for step in steps.get(job, []):
+            fields, children = workflow_step_fields(step)
+            if not workflow_step_direct_fields_are_unique(step) or fields.get("continue-on-error") not in {None, "false"}:
+                issues.append("Environment qualification/publication steps must fail closed: " + job)
+            action = fields.get("uses", "")
+            values = children.get("with", {})
+            if action.startswith("actions/checkout@") and (values.get("ref") != "${{ inputs.expected-source-sha }}" or values.get("persist-credentials") != "false"):
+                issues.append("Environment checkout must use the exact source pin without persisted credentials: " + job)
+            if action.startswith("actions/download-artifact@"):
+                identifier = values.get("artifact-ids", "")
+                match = re.fullmatch(r"\$\{\{ needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+) \}\}", identifier)
+                env_match = re.fullmatch(r"\$\{\{ env\.([A-Z0-9_]+) \}\}", identifier)
+                # A package-only fixture step is present in the shared Linux
+                # anchor but cannot execute for a sanitizer/analysis profile.
+                skipped_fixture = (job in qualifiers and not CI_ENVIRONMENT_PROFILES[job][3]
+                                   and identifier == "${{ env.KLOGG_FIXTURE_ARTIFACT_ID }}"
+                                   and fields.get("if") == "${{ env.KLOGG_PACKAGE_PROFILE == 'true' }}"
+                                   and env.get("KLOGG_PACKAGE_PROFILE") == "false")
+                if env_match and not skipped_fixture:
+                    match = re.fullmatch(r"\$\{\{ needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+) \}\}", env.get(env_match.group(1), ""))
+                if (set(values) != {"artifact-ids", "merge-multiple", "path"} or values.get("merge-multiple") != "true"
+                        or (not skipped_fixture and (match is None or match.group(1) not in needs.get(job, set())))):
+                    issues.append("Environment artifact downloads require exact same-run IDs: " + job)
+            if action.startswith("actions/upload-artifact@") and (values.get("if-no-files-found") != "error" or "${{ github.run_attempt }}" not in values.get("name", "")):
+                issues.append("Environment evidence uploads must be exact nonempty current-attempt artifacts: " + job)
+            if action.startswith("actions/attest-build-provenance@") and job != "Publisher":
+                issues.append("Only the protected environment publisher may create attestations")
+            if action.startswith("github/codeql-action/") and (job != "UploadCodeqlSarif" or not action.startswith("github/codeql-action/upload-sarif@")):
+                issues.append("CodeQL execution must be read-only and SARIF upload isolated")
+            for command in environment_shell_commands(step):
+                if (command[:2] == ["docker", "push"] or "--push" in command
+                        or command[:2] in (["skopeo", "copy"], ["oras", "push"])):
+                    issues.append("Environment registry writes must use only the qualified publication helper")
+
+    for job, family in CI_ENVIRONMENT_BUILDERS.items():
+        if job not in blocks:
+            continue
+        if mapping(job, "env") != {"KLOGG_FAMILY": family}:
+            issues.append("Environment builder family must be a literal reviewed mapping: " + job)
+        if mapping(job, "outputs") != {"candidate-artifact-id": "${{ steps.upload.outputs.artifact-id }}", "archive-sha256": "${{ steps.identity.outputs.archive-sha256 }}"}:
+            issues.append("Environment candidate IDs and original archive hashes must be explicit job outputs: " + job)
+        materialize = command_step(job, helper + ["materialize"], {"--family": "$KLOGG_FAMILY", "--source": "$RUNNER_TEMP/source.json"})
+        build = command_step(job, ["scripts/build_ci_environment.sh"], {"--family": "$KLOGG_FAMILY", "--inputs": "$RUNNER_TEMP/materialized/inputs.json", "--materials": "$RUNNER_TEMP/materialized/materials", "--source": "$RUNNER_TEMP/source.json"})
+        if materialize is None or build is None or materialize > build:
+            issues.append("Environment builder must materialize authenticated inputs then build original local OCI bytes: " + job)
+
+    for job, (family, profile, builder, package) in CI_ENVIRONMENT_PROFILES.items():
+        if job not in blocks:
+            continue
+        env = mapping(job, "env")
+        expected = {"KLOGG_FAMILY": family, "KLOGG_PROFILE": profile, "KLOGG_PACKAGE_PROFILE": str(package).lower(),
+                    "KLOGG_VERSION": "${{ needs.Source.outputs.version }}",
+                    "KLOGG_CANDIDATE_ARTIFACT_ID": "${{ needs." + builder + ".outputs.candidate-artifact-id }}",
+                    "KLOGG_CANDIDATE_ARCHIVE_SHA256": "${{ needs." + builder + ".outputs.archive-sha256 }}",
+                    "KLOGG_CPM_ARTIFACT_ID": "${{ needs.CpmSources.outputs.artifact-id }}",
+                    "KLOGG_CPM_ARCHIVE_SHA256": "${{ needs.CpmSources.outputs.archive-sha256 }}"}
+        if package:
+            expected.update({"KLOGG_FIXTURE_ARTIFACT_ID": "${{ needs.LinuxFixture.outputs.artifact-id }}", "KLOGG_FIXTURE_ARCHIVE_SHA256": "${{ needs.LinuxFixture.outputs.archive-sha256 }}"})
+        if env != expected:
+            issues.append("Environment qualifier family/profile/source artifact mapping must be exact: " + job)
+        if not package and "LinuxFixture" in ancestors.get(job, set()):
+            issues.append("Environment sanitizer/analysis lanes must not acquire mobile fixture ancestors: " + job)
+        expected_outputs = {"receipt-artifact-id": "${{ steps.upload.outputs.artifact-id }}", "archive-sha256": "${{ steps.identity.outputs.archive-sha256 }}", "receipt-sha256": "${{ steps.identity.outputs.receipt-sha256 }}"}
+        if profile == "codeql":
+            expected_outputs.update({"sarif-artifact-id": "${{ steps.sarif.outputs.artifact-id }}", "sarif-sha256": "${{ steps.sarif_identity.outputs.sarif-sha256 }}"})
+        if mapping(job, "outputs") != expected_outputs:
+            issues.append("Environment qualifier artifact/archive/receipt identities must be explicit outputs: " + job)
+        prepare = command_step(job, helper + ["prepare-candidate"], {"--candidate-artifact-id": "$KLOGG_CANDIDATE_ARTIFACT_ID", "--archive-sha256": "$KLOGG_CANDIDATE_ARCHIVE_SHA256", "--source": "$RUNNER_TEMP/source.json"})
+        receipt = command_step(job, helper + ["profile-receipt"], {"--family": "$KLOGG_FAMILY", "--profile": "$KLOGG_PROFILE", "--candidate-artifact-id": "$KLOGG_CANDIDATE_ARTIFACT_ID", "--source": "$RUNNER_TEMP/source.json"})
+        if family == "noble-qt693-analysis":
+            validation = command_step(job, ["python3", "scripts/qualify_ci_analysis.py"], {"--role": "$KLOGG_PROFILE", "--analysis-base-sha": "$KLOGG_ANALYSIS_BASE_SHA", "--role-materials": "$GITHUB_WORKSPACE/ci/environments/role-materials.json"})
+        else:
+            validations = [index for index, step in enumerate(steps.get(job, []))
+                           if (parsed := workflow_step_fields(step))[0].get("uses") == "./.github/actions/linux-validate"
+                           and parsed[0].get("if") is None
+                           and parsed[1].get("with") == {"family": "${{ env.KLOGG_FAMILY }}", "profile": "${{ env.KLOGG_PROFILE }}"}]
+            validation = validations[0] if len(validations) == 1 else None
+        if prepare is None or validation is None or receipt is None or not prepare < validation < receipt:
+            issues.append("Environment qualification must verify candidate, execute real profile, then issue its bound receipt: " + job)
+        allowed_uploads = {"${{ runner.temp }}/qualification.tar.gz"}
+        if family == "noble-qt693-analysis":
+            allowed_uploads.add("${{ runner.temp }}/analysis-result/codeql.sarif")
+        for step in steps.get(job, []):
+            fields, children = workflow_step_fields(step)
+            if fields.get("uses", "").startswith("actions/upload-artifact@") and children.get("with", {}).get("path") not in allowed_uploads:
+                issues.append("Environment qualification artifacts must not transport CodeQL binaries or unbounded workspaces: " + job)
+
+    aggregate = command_step("QualificationGate", helper + ["aggregate"], {"--job-results": "$RUNNER_TEMP/job-results.json", "--artifact-identities": "$RUNNER_TEMP/artifact-identities.json", "--operation": "$KLOGG_ENVIRONMENT_MODE", "--sarif-result": "$KLOGG_SARIF_RESULT"})
+    if aggregate is None:
+        issues.append("Environment gate must bind exact authoritative results and operation/SARIF publication policy")
+    publish = command_step("Publisher", helper + ["publish"], {"--qualified-artifact-id": "$KLOGG_QUALIFIED_ARTIFACT_ID", "--qualified-archive-sha256": "$KLOGG_QUALIFIED_ARCHIVE_SHA256", "--evidence-root": "$RUNNER_TEMP/evidence"})
+    finalize = command_step("Publisher", helper + ["finalize-publication"], {"--bundle-map": "$RUNNER_TEMP/bundle-map.json", "--publication-root": "$RUNNER_TEMP/publication"})
+    attestations = []
+    for index, step in enumerate(steps.get("Publisher", [])):
+        fields, children = workflow_step_fields(step)
+        if fields.get("uses", "").startswith("actions/attest-build-provenance@"):
+            attestations.append((index, fields, children.get("with", {})))
+    expected_subjects = {}
+    for key in ("focal", "jammy", "noble", "resolute", "tsan", "analysis"):
+        expected_subjects["attest_" + key + "_image"] = {"subject-name": "ghcr.io/zeacent/klogg-ci-env", "subject-digest": "${{ steps.publish.outputs." + key + "_image_digest }}", "push-to-registry": "false"}
+        expected_subjects["attest_" + key + "_receipt"] = {"subject-name": "verification.json", "subject-digest": "sha256:${{ steps.publish.outputs." + key + "_receipt_sha256 }}", "push-to-registry": "false"}
+    if (publish is None or finalize is None or len(attestations) != 12
+            or {fields.get("id"): values for _, fields, values in attestations} != expected_subjects
+            or any(fields.get("if") is not None or not publish < index < finalize for index, fields, _ in attestations)):
+        issues.append("Environment publisher must attest all six image and exact raw receipt subjects between qualified copy and evidence retention")
+    public = command_step("PublicVerification", helper + ["verify-publication"], {"--publication-artifact-id": "$KLOGG_PUBLICATION_ARTIFACT_ID", "--archive-sha256": "$KLOGG_PUBLICATION_ARCHIVE_SHA256"})
+    if public is None or any(command[:3] == helper + ["verify-publication"] for step in steps.get("Publisher", []) for command in environment_shell_commands(step)):
+        issues.append("Environment public availability verification must be separate and read-only after evidence retention")
+    return issues
+
+
+def ci_build_environment_mode_issues(text: str) -> list[str]:
+    """Model the producer branch without letting skipped jobs satisfy app checks."""
+    issues: list[str] = []
+    blocks = workflow_job_blocks(text)
+    needs = workflow_job_needs(text)
+    for job in sorted(CI_BUILD_REQUIRED_JOBS & set(blocks)):
+        name = workflow_job_direct_value(blocks[job], "name") or ""
+        if not name.startswith(CI_BUILD_PRODUCER_NAME_PREFIX):
+            issues.append("CI producer mode must distinguish every skipped ordinary check name: " + job)
+        if job == "ci-gate" and name != CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate":
+            issues.append("CI ordinary required gate name must remain exactly ci-gate")
+        expected = CI_BUILD_ORDINARY_GATE_IF if job == "ci-gate" else CI_BUILD_ORDINARY_IF
+        if job != "DispatchContinuous" and workflow_job_direct_value(blocks[job], "if") != expected:
+            issues.append("CI ordinary job must exclude only the explicit producer event branch: " + job)
+        if needs.get(job, set()) & CI_BUILD_ENVIRONMENT_JOBS:
+            issues.append("CI ordinary jobs must not depend on the environment producer: " + job)
+
+    dispatch_inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
+    expected_input_names = {"qualification-mode", "environment-mode", "expected-source-sha", "analysis-base-sha"}
+    if dispatch_inputs is None or set(dispatch_inputs) != expected_input_names:
+        issues.append("CI environment dispatch requires exact mode and source/base inputs")
+    else:
+        mode_block = dispatch_inputs["environment-mode"][1]
+        mode = workflow_mapping_block(mode_block, "environment-mode", 6)
+        options = [scalar(line.strip()[2:]) for line in mode_block if line.startswith("          - ")]
+        if (mode is None or mode.get("type", (None,))[0] != "choice"
+                or mode.get("default", (None,))[0] != "off"
+                or mode.get("required", (None,))[0] != "true"
+                or options != ["off", "qualify", "publish"]):
+            issues.append("CI environment mode must default off with exact off/qualify/publish choices")
+        for pin in ("expected-source-sha", "analysis-base-sha"):
+            pin_fields = workflow_mapping_block(dispatch_inputs[pin][1], pin, 6)
+            if (pin_fields is None or pin_fields.get("type", (None,))[0] != "string"
+                    or pin_fields.get("required", (None,))[0] != "false"
+                    or pin_fields.get("default", (None,))[0] != ""):
+                issues.append("CI producer source pins must not change ordinary dispatch defaults: " + pin)
+
+    preflight = blocks.get("EnvironmentModePreflight", [])
+    call = blocks.get("EnvironmentProducer", [])
+    call_permissions = workflow_mapping_block(call, "permissions", 4)
+    call_inputs = workflow_mapping_block(call, "with", 4)
+    if (workflow_job_direct_value(call, "uses") != "./.github/workflows/ci-environments.yml"
+            or workflow_job_direct_value(call, "if") != "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode == 'qualify' || inputs.environment-mode == 'publish') }}"
+            or needs.get("EnvironmentProducer") != {"EnvironmentModePreflight"}
+            or any(workflow_job_direct_value(call, field) is not None for field in ("secrets", "runs-on", "steps", "environment", "continue-on-error"))
+            or call_permissions is None
+            or {key: value for key, (value, _) in call_permissions.items()} != CI_ENVIRONMENT_CALL_PERMISSIONS
+            or call_inputs is None
+            or {key: value for key, (value, _) in call_inputs.items()} != {
+                "mode": "${{ inputs.environment-mode }}", "expected-source-sha": "${{ inputs.expected-source-sha }}",
+                "analysis-base-sha": "${{ inputs.analysis-base-sha }}"}):
+        issues.append("CI environment caller must use the exact source-local reusable workflow and narrow permission ceiling")
+    permissions = workflow_mapping_block(preflight, "permissions", 4)
+    if (workflow_job_direct_value(preflight, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' }}"
+            or needs.get("EnvironmentModePreflight") != set()
+            or permissions is None or {key: value for key, (value, _) in permissions.items()} != {"contents": "read"}):
+        issues.append("CI environment dispatch preflight must be a read-only producer-only root")
+    preflight_steps = [workflow_step_fields(step) for step in workflow_step_blocks(preflight)]
+    validation = [fields.get("run", "") for fields, _ in preflight_steps
+                  if fields.get("name") == "Validate isolated producer mode and exact source" and fields.get("shell") == "bash"]
+    required_validation = (
+        "environment producer modes cannot combine with release qualification",
+        "dispatched source does not match expected-source-sha", "analysis base must precede the qualification source",
+        "git merge-base --is-ancestor", "git rev-parse HEAD",
+    )
+    if len(validation) != 1 or any(marker not in validation[0] for marker in required_validation):
+        issues.append("CI environment dispatch must reject release mixing and stale/non-ancestor source pins")
+    return issues
+
+
 def ci_build_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
     active = active_script_content(text)
@@ -1057,8 +1396,9 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     if re.search(r"(?m)^\s*push:\s*\{[^}]*paths-ignore", trigger_prefix):
         issues.append("master pushes must not skip CI Build by path")
     needs = workflow_job_needs(text)
-    missing_jobs = CI_BUILD_REQUIRED_JOBS - set(needs)
-    unexpected_jobs = set(needs) - CI_BUILD_REQUIRED_JOBS
+    expected_jobs = CI_BUILD_REQUIRED_JOBS | CI_BUILD_ENVIRONMENT_JOBS
+    missing_jobs = expected_jobs - set(needs)
+    unexpected_jobs = set(needs) - expected_jobs
     for job in sorted(missing_jobs):
         issues.append(f"CI build workflow must define job {job}")
     if unexpected_jobs:
@@ -1125,7 +1465,9 @@ def ci_build_workflow_issues(text: str) -> list[str]:
                 )
 
     gate = "ci-gate"
-    validation_jobs = set(needs) - {gate} - CI_BUILD_POST_GATE_JOBS
+    # The producer is an explicitly modeled alternate event branch, never an
+    # ordinary validation ancestor or a replacement for its required gate.
+    validation_jobs = set(needs) - {gate} - CI_BUILD_POST_GATE_JOBS - CI_BUILD_ENVIRONMENT_JOBS
     if gate in needs:
         consumed_before_gate = {
             dependency
@@ -1213,8 +1555,9 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             )
 
     job_blocks = workflow_job_blocks(text)
-    if workflow_job_direct_value(job_blocks.get("ci-gate", []), "if") != "always()":
-        issues.append("CI gate must run with if: always()")
+    if workflow_job_direct_value(job_blocks.get("ci-gate", []), "if") != CI_BUILD_ORDINARY_GATE_IF:
+        issues.append("CI gate must run with if: always() for ordinary events only")
+    issues.extend(ci_build_environment_mode_issues(text))
     for job in (
         "LinuxPackages",
         "LinuxSanitizers",
@@ -1258,6 +1601,8 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     )
     windows_block = job_blocks.get("WindowsPackages", [])
     windows_job_condition = workflow_job_direct_value(windows_block, "if") or ""
+    if windows_job_condition == CI_BUILD_ORDINARY_IF:
+        windows_job_condition = "!contains(github.event.head_commit.message, '[skip ci]')"
     windows_steps = workflow_job_steps(text).get("WindowsPackages", [])
     # Any of event_name / github.ref / inputs.qualification-mode in the
     # condition can suppress pull-request validation runs, so all three count
@@ -2184,8 +2529,9 @@ def workflow_shape_issues(path: Path, text: str) -> list[str]:
                 and entry.group("key") == "name"
                 and len(entry.group("indent")) == expected_indent
             ]
-            if gate_names != ["ci-gate"]:
-                issues.append('CI Build job ci-gate must set name: "ci-gate"')
+            expected_gate_name = CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate" if "EnvironmentProducer" in blocks else "ci-gate"
+            if gate_names != [expected_gate_name]:
+                issues.append('CI Build job ci-gate must preserve its ordinary name and isolate producer-mode skips')
     return issues
 
 
@@ -3836,7 +4182,7 @@ def platform_fragile_preflight_issues(
         return [message]
 
     expected_name = (
-        "Release and platform-fragile preflight"
+        CI_BUILD_PRODUCER_NAME_PREFIX + "Release and platform-fragile preflight"
         if ci_build
         else "Platform-fragile preflight"
     )
@@ -3853,7 +4199,7 @@ def platform_fragile_preflight_issues(
 
     condition = workflow_job_direct_value(block, "if")
     if ci_build:
-        if condition != "!contains(github.event.head_commit.message, '[skip ci]')":
+        if condition != CI_BUILD_ORDINARY_IF:
             return [message]
     elif condition is not None:
         return [message]
@@ -3868,7 +4214,7 @@ def platform_fragile_preflight_issues(
 
     if ci_build:
         protected_jobs = CI_PLATFORM_PREFLIGHT_APPLICATION_JOBS
-        if roots != {preflight} | CI_PLATFORM_PARALLEL_ROOTS:
+        if roots != {preflight, "EnvironmentModePreflight"} | CI_PLATFORM_PARALLEL_ROOTS:
             return [message]
         if any(
             preflight not in ancestors.get(job, set()) for job in protected_jobs
@@ -4031,6 +4377,13 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/ci-continuous.yml: {issue}"
         for issue in continuous_release_workflow_issues(continuous_release_text)
     )
+
+    producer_path = workflows / "ci-environments.yml"
+    if not producer_path.is_file():
+        issues.append(".github/workflows/ci-environments.yml: explicit environment producer workflow is missing")
+    else:
+        issues.extend(f".github/workflows/ci-environments.yml: {issue}"
+                      for issue in ci_environment_workflow_issues(producer_path.read_text()))
 
     ci_text = (workflows / "ci-build.yml").read_text()
     issues.extend(

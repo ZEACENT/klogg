@@ -16,10 +16,16 @@ runs:
     - name: configure
       shell: sh
       run: |
+        # A conflicting caller-supplied export-database setting must not hide
+        # behind the duplicate CMake option: fail before entering the container.
+        case " $KLOGG_CMAKE_OPTS " in
+          *" -DCMAKE_EXPORT_COMPILE_COMMANDS=OFF "*|*" -DCMAKE_EXPORT_COMPILE_COMMANDS=0 "*)
+            echo "::error::KLOGG_CMAKE_OPTS conflicts with the required compile database"; exit 1 ;;
+        esac
         attempt=1
         max_attempts=3
         while [ $attempt -le $max_attempts ]; do
-          if docker run \
+          if docker run --pull=never \
             --env KLOGG_VERSION="$KLOGG_VERSION" \
             --env KLOGG_BUILD_ROOT="$KLOGG_BUILD_ROOT" \
             --env ASAN_OPTIONS \
@@ -30,7 +36,7 @@ runs:
             -v "$KLOGG_WORKSPACE":/usr/local \
             ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} \
             /bin/bash -lc \
-            "rm -rf /usr/local/$KLOGG_BUILD_ROOT && mkdir -p /usr/local/$KLOGG_BUILD_ROOT && cmake -B /usr/local/$KLOGG_BUILD_ROOT $KLOGG_CMAKE_OPTS -DCPM_SOURCE_CACHE=/usr/local/cpm_cache /usr/local"; then
+            "rm -rf /usr/local/$KLOGG_BUILD_ROOT && mkdir -p /usr/local/$KLOGG_BUILD_ROOT && cmake -B /usr/local/$KLOGG_BUILD_ROOT $KLOGG_CMAKE_OPTS -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCPM_SOURCE_CACHE=/usr/local/cpm_cache /usr/local"; then
             exit 0
           fi
 
@@ -46,8 +52,17 @@ runs:
     - name: build
       shell: sh
       run: |
-        docker run \
+        # One unchanged ci_build invocation; the wrapper measures its real wall
+        # time and fresh Ninja log without prebuilding or deleting anything.
+        # Global ccache counters are observed, never inferred per party; the
+        # TSan lane has no compiler cache, so it is reported as disabled.
+        case "${KLOGG_SANITIZER:-}" in
+          thread) KLOGG_OBJECT_CACHE=disabled ;;
+          *) KLOGG_OBJECT_CACHE=measured ;;
+        esac
+        docker run --pull=never \
           --env KLOGG_BUILD_ROOT="$KLOGG_BUILD_ROOT" \
+          --env KLOGG_OBJECT_CACHE="$KLOGG_OBJECT_CACHE" \
           --env ASAN_OPTIONS \
           --env UBSAN_OPTIONS \
           --env LSAN_OPTIONS \
@@ -55,4 +70,4 @@ runs:
           -v "$KLOGG_WORKSPACE":/usr/local \
           ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} \
           /bin/bash -c \
-          "cmake --build /usr/local/$KLOGG_BUILD_ROOT --target ci_build"
+          "python3 /usr/local/scripts/ci_build_metrics.py run-build --repo-root /usr/local --build-root /usr/local/$KLOGG_BUILD_ROOT --output /usr/local/$KLOGG_BUILD_ROOT/ci-build-metrics.json --object-cache $KLOGG_OBJECT_CACHE -- cmake --build /usr/local/$KLOGG_BUILD_ROOT --target ci_build"

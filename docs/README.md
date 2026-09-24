@@ -27,6 +27,7 @@ release may not expose every control. Refer to its
 | [Contributing](../CONTRIBUTING.md) | Bug reports, proposed changes, review expectations, and documentation maintenance. |
 | [Portability and engineering guidance](PORTABILITY.md) | Cross-platform contracts, concurrency, Qt differences, and deterministic testing. |
 | [Dependency reference](DEPENDENCIES.md) | Main dependency roles and source pins, with links to authoritative manifests and notices. |
+| [Qualified CI environments](CI_ENVIRONMENTS.md) | Producer bootstrap status, immutable inputs, qualification, publication, verification, and rollback. |
 | [Source-built ADB helper](../packaging/adb/README.md) | Packaging-specific source closure, toolchains, verification, and legal assets. |
 
 ## Understand the implementation

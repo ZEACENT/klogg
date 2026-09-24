@@ -13,7 +13,9 @@ Most C++ dependencies are fetched through [CPM](https://github.com/cpm-cmake/CPM
 Qt and Boost are provided by the build environment. Some dependencies can use
 local packages; dependencies requiring verified patches or source-tree checks
 must use their pinned sources. See the build guide before substituting system
-libraries.
+libraries. Compiler-image acquisition and qualification have a separate
+[CI environment contract](CI_ENVIRONMENTS.md); a reused environment does not
+reuse an old application binary or test result.
 
 ## Application, search, and storage
 

@@ -44,17 +44,24 @@ mkdir ./packages
 package="./packages/klogg-${KLOGG_VERSION}-appimage-${KLOGG_PACKAGE_TAG}.AppImage"
 cp "./klogg-${KLOGG_VERSION}-x86_64.AppImage" "$package"
 
+# Qualify the shipped artifact, not only the intermediate appdir: extract the
+# final AppImage and execute its own AppRun plus the packaged ADB helper.
+rm -rf squashfs-root
+"$package" --appimage-extract >/dev/null
+test -d squashfs-root
+QT_QPA_PLATFORM=offscreen ./squashfs-root/AppRun --version
+
 python3 ../scripts/smoke_adb_helper.py \
-  --adb appdir/usr/bin/helpers/adb \
+  --adb squashfs-root/usr/bin/helpers/adb \
   --port 0 --timeout-seconds 15 \
   --json-output adb-helper-appimage-final-smoke.json
 python3 ../scripts/verify_adb_helper_artifact.py \
   --lock ../packaging/adb/adb-helper.lock.json \
   --receipt adb-helper-staged/receipt.json \
   --binary-smoke-receipt adb-helper-appimage-final-smoke.json \
-  --package-root appdir \
+  --package-root squashfs-root \
   --asset-scope package \
-  --source-assets-root appdir/usr/share/doc/klogg/adb-helper \
+  --source-assets-root squashfs-root/usr/share/doc/klogg/adb-helper \
   --layout appimage \
   --expected-target linux-x86_64 \
   --maximum-glibc-version 2.31 \

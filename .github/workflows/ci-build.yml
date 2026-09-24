@@ -22,6 +22,25 @@ on:
         options:
           - validation
           - release
+      environment-mode:
+        description: Run ordinary application CI, qualify environments, or qualify and publish environments
+        required: true
+        default: "off"
+        type: choice
+        options:
+          - "off"
+          - qualify
+          - publish
+      expected-source-sha:
+        description: Exact dispatched commit required for environment producer modes
+        required: false
+        default: ""
+        type: string
+      analysis-base-sha:
+        description: Explicit ancestor commit for environment static-analysis qualification
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -29,15 +48,77 @@ permissions:
 concurrency:
   # Release qualification must not share a queue with ordinary master pushes.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'validation') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'validation' && inputs.environment-mode == 'off') }}
 
 env:
   KLOGG_CI_IMAGE_PREFIX: zeacent/klogg
 
 jobs:
+  EnvironmentModePreflight:
+    name: "Environment producer dispatch preflight"
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate isolated producer mode and exact source
+        shell: bash
+        env:
+          KLOGG_ENVIRONMENT_MODE: ${{ inputs.environment-mode }}
+          KLOGG_QUALIFICATION_MODE: ${{ inputs.qualification-mode }}
+          KLOGG_EXPECTED_SOURCE_SHA: ${{ inputs.expected-source-sha }}
+          KLOGG_ANALYSIS_BASE_SHA: ${{ inputs.analysis-base-sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          if os.environ['KLOGG_ENVIRONMENT_MODE'] not in ('qualify', 'publish'):
+              raise SystemExit('environment-mode must be off, qualify, or publish')
+          if os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation':
+              raise SystemExit('environment producer modes cannot combine with release qualification')
+          if os.environ['GITHUB_REPOSITORY'] != 'ZEACENT/klogg' or not os.environ['GITHUB_REF'].startswith('refs/heads/'):
+              raise SystemExit('environment production requires a canonical repository branch')
+          for key in ('KLOGG_EXPECTED_SOURCE_SHA', 'KLOGG_ANALYSIS_BASE_SHA'):
+              value = os.environ[key]
+              if not re.fullmatch('[0-9a-f]{40}', value) or value == '0' * 40:
+                  raise SystemExit(key + ' must be an explicit nonzero full commit SHA')
+          if os.environ['KLOGG_EXPECTED_SOURCE_SHA'] != os.environ['GITHUB_SHA']:
+              raise SystemExit('dispatched source does not match expected-source-sha')
+          if os.environ['KLOGG_ANALYSIS_BASE_SHA'] == os.environ['GITHUB_SHA']:
+              raise SystemExit('analysis base must precede the qualification source')
+          PY
+          test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"
+          git cat-file -e "$KLOGG_ANALYSIS_BASE_SHA^{commit}"
+          git merge-base --is-ancestor "$KLOGG_ANALYSIS_BASE_SHA" "$KLOGG_EXPECTED_SOURCE_SHA"
+
+  EnvironmentProducer:
+    name: "Environment producer pipeline"
+    needs: [EnvironmentModePreflight]
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode == 'qualify' || inputs.environment-mode == 'publish') }}
+    # This is a reusable-workflow permission ceiling, not an executable build job.
+    # The child grants writes only to isolated SARIF upload and protected publish.
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+    uses: ./.github/workflows/ci-environments.yml
+    with:
+      mode: ${{ inputs.environment-mode }}
+      expected-source-sha: ${{ inputs.expected-source-sha }}
+      analysis-base-sha: ${{ inputs.analysis-base-sha }}
+
   ReleaseQualificationPreflight:
-    name: "Release and platform-fragile preflight"
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Release and platform-fragile preflight"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,8 +161,8 @@ jobs:
           test "$missing" -eq 0
 
   SaveVersion:
-    name: "Resolve build version"
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Resolve build version"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-22.04
     outputs:
       klogg_version: ${{ steps.save-version.outputs.klogg_version }}
@@ -108,8 +189,8 @@ jobs:
           if-no-files-found: error
 
   PrefetchCpmCache:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch CPM cache"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch CPM cache"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
@@ -140,8 +221,8 @@ jobs:
           compression-level: 0
 
   PrefetchBoost:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch Boost"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch Boost"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
@@ -205,8 +286,8 @@ jobs:
           if-no-files-found: error
 
   PrefetchOpenSsl:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch Windows Qt 5 OpenSSL"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch Windows Qt 5 OpenSSL"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
@@ -253,8 +334,8 @@ jobs:
           if-no-files-found: error
 
   PrefetchLinuxDeployQt:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch linuxdeployqt"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch linuxdeployqt"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
@@ -300,8 +381,8 @@ jobs:
           if-no-files-found: error
 
   PrefetchCmakeInstaller:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch Linux CMake installer"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch Linux CMake installer"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
@@ -350,8 +431,8 @@ jobs:
           if-no-files-found: error
 
   PrefetchWindowsTools:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch Windows MSYS2 tools"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch Windows MSYS2 tools"
     runs-on: windows-2022
     steps:
       - name: Restore MSYS2 tools cache
@@ -472,8 +553,8 @@ jobs:
           if-no-files-found: error
 
   PrefetchAdbHelperSources:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch locked ADB helper source closure"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch locked ADB helper source closure"
     runs-on: ubuntu-24.04
     env:
       KLOGG_ADB_SOURCE_CACHE_MAX_BYTES: 536870912
@@ -553,8 +634,8 @@ jobs:
 
   BuildAdbHelperLegalAssets:
     needs: [SaveVersion, PrefetchAdbHelperSources]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Build ADB helper legal assets"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Build ADB helper legal assets"
     runs-on: ubuntu-24.04
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
@@ -608,8 +689,8 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper linux-x86_64"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Source-built ADB helper linux-x86_64"
     runs-on: ubuntu-24.04
     env:
       KLOGG_ADB_HELPER_TARGET: linux-x86_64
@@ -722,8 +803,8 @@ jobs:
   BuildAdbLinuxArm64:
     needs: [BuildAdbHelperLegalAssets]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper linux-arm64"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Source-built ADB helper linux-arm64"
     runs-on: ubuntu-24.04-arm
     env:
       KLOGG_ADB_HELPER_TARGET: linux-arm64
@@ -733,8 +814,8 @@ jobs:
   BuildAdbWindowsX64:
     needs: [BuildAdbHelperLegalAssets]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper windows-x86_64"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Source-built ADB helper windows-x86_64"
     runs-on: windows-2022
     env:
       KLOGG_ADB_HELPER_TARGET: windows-x86_64
@@ -744,8 +825,8 @@ jobs:
   BuildAdbMacX64:
     needs: [BuildAdbHelperLegalAssets]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper macos-x86_64"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Source-built ADB helper macos-x86_64"
     runs-on: macos-15-intel
     env:
       KLOGG_ADB_HELPER_TARGET: macos-x86_64
@@ -755,8 +836,8 @@ jobs:
   BuildAdbMacArm64:
     needs: [BuildAdbHelperLegalAssets]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper macos-arm64"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Source-built ADB helper macos-arm64"
     runs-on: macos-15
     env:
       KLOGG_ADB_HELPER_TARGET: macos-arm64
@@ -768,8 +849,8 @@ jobs:
     permissions: &artifact_verification_permissions
       contents: read
       attestations: read
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
@@ -1202,8 +1283,8 @@ jobs:
 
   LinuxSanitizers:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchCmakeInstaller, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
@@ -1267,8 +1348,8 @@ jobs:
 
   LinuxTsan:
     needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Linux ubuntu-22.04-tsan [tsan]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Linux ubuntu-22.04-tsan [tsan]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_ARCH: x64
@@ -1288,8 +1369,8 @@ jobs:
     steps: *linux_steps
 
   PrefetchIosNativeSources:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch locked iOS native sources"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch locked iOS native sources"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1320,8 +1401,8 @@ jobs:
   BuildIosNativeX64:
     needs: [SaveVersion, PrefetchIosNativeSources]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "iOS native stack x86_64"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}iOS native stack x86_64"
     runs-on: macos-15-intel
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
@@ -1461,8 +1542,8 @@ jobs:
   BuildIosNativeArm64:
     needs: [SaveVersion, PrefetchIosNativeSources]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "iOS native stack arm64"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}iOS native stack arm64"
     runs-on: macos-15
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
@@ -1474,8 +1555,8 @@ jobs:
   MacPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacX64, BuildIosNativeX64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "macOS intel-qt6 [vs-gen]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}macOS intel-qt6 [vs-gen]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: macos-15-intel
@@ -1801,8 +1882,8 @@ jobs:
   MacArmPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacArm64, BuildIosNativeArm64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "macOS arm64-qt6 [vs-arm64]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}macOS arm64-qt6 [vs-arm64]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: macos-latest
@@ -1826,8 +1907,8 @@ jobs:
 
   MacSanitizers:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: ${{ matrix.config.os }}
@@ -1883,8 +1964,8 @@ jobs:
   WindowsPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, BuildAdbWindowsX64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Windows x64-qt6 [vs-avx2]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Windows x64-qt6 [vs-avx2]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: windows
@@ -2317,8 +2398,8 @@ jobs:
 
   WindowsX86:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Windows x86-qt5 [QTRegex]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Windows x86-qt5 [QTRegex]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: windows
@@ -2340,8 +2421,8 @@ jobs:
 
   WindowsAsan:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Windows x64-qt6 ASan [asan]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Windows x64-qt6 ASan [asan]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: windows
@@ -2362,8 +2443,8 @@ jobs:
     steps: *windows_steps
 
   ci-gate:
-    name: "ci-gate"
-    if: always()
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}ci-gate"
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') }}
     needs: [BuildAdbLinuxArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsX86, WindowsAsan]
     runs-on: ubuntu-22.04
     steps:
@@ -2379,7 +2460,7 @@ jobs:
           echo "CI passed: $results"
 
   DispatchContinuous:
-    name: "Dispatch Continuous publisher"
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Dispatch Continuous publisher"
     needs: [ci-gate]
     if: >-
       ${{

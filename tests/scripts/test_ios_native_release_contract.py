@@ -64,6 +64,15 @@ IOS_NATIVE_JOBS = (
     "BuildIosNativeArm64",
 )
 
+# Ordinary jobs are additionally guarded against producer dispatches; the
+# environment-mode clause is event-neutral for normal pull_request/push runs
+# and keeps producer-mode skips under a distinct check name, so it does not
+# narrow native event coverage.
+ORDINARY_JOB_GUARD = (
+    "${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') "
+    "&& !contains(github.event.head_commit.message, '[skip ci]') }}"
+)
+
 
 def ios_startup_ci_issues(text: str) -> list[str]:
     """Require the small, unconditional C gate in both native source consumers.
@@ -87,8 +96,7 @@ def ios_startup_ci_issues(text: str) -> list[str]:
             issues.append(f"{name}: missing or malformed native job")
             continue
         if (
-            direct.get("if", (None,))[0]
-            != "!contains(github.event.head_commit.message, '[skip ci]')"
+            direct.get("if", (None,))[0] != ORDINARY_JOB_GUARD
             or "continue-on-error" in direct
         ):
             issues.append(f"{name}: native event gate changed")
@@ -283,12 +291,12 @@ class IosStartupCiContractTest(unittest.TestCase):
             "on:\n  pull_request:\n  push:\n  workflow_dispatch:\n"
             "jobs:\n"
             "  BuildIosNativeX64:\n"
-            "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n"
+            f'    if: {ORDINARY_JOB_GUARD}\n'
             "    runs-on: macos-15-intel\n"
             "    steps: &ios_native_steps\n"
             + (self.download + self.startup if steps is None else steps)
             + "  BuildIosNativeArm64:\n"
-            "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n"
+            f'    if: {ORDINARY_JOB_GUARD}\n'
             "    runs-on: macos-15\n"
             "    steps: *ios_native_steps\n"
         )
