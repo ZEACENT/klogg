@@ -92,7 +92,11 @@ def run(command, runner=None, *, timeout=120, cwd=None):
         result = (runner or subprocess.run)(command, check=True, capture_output=True, text=True,
                                              timeout=timeout, cwd=cwd)
     except (OSError, subprocess.SubprocessError) as error:
-        raise PipelineError("pipeline command failed: " + " ".join(command[:3])) from error
+        detail = ""
+        stderr = getattr(error, "stderr", None)
+        if isinstance(stderr, str) and stderr.strip():
+            detail = ": " + stderr.strip()[-512:]
+        raise PipelineError("pipeline command failed: " + " ".join(command[:3]) + detail) from error
     require(isinstance(result.stdout, str), "command did not return text output")
     return result.stdout
 

@@ -593,7 +593,21 @@ def resolve_stage(stage, output_directory, *, docker="docker", runner=None, time
                 iidfile = workspace / "prepared.iid"
                 # The original base must also be local for the independent
                 # offline replay: buildx's container driver has its own cache.
-                run_command([docker, "pull", "--platform=linux/amd64", stage["base_image"]], "pinned base acquisition")
+                # Pulling one pinned digest is idempotent; hosted runners do
+                # hit transient registry deadlines (public.ecr.aws timeout).
+                pull_error = None
+                for pull_attempt in range(3):
+                    try:
+                        run_command([docker, "pull", "--platform=linux/amd64", stage["base_image"]],
+                                    "pinned base acquisition")
+                        pull_error = None
+                        break
+                    except InputError as error:
+                        pull_error = error
+                        if pull_attempt < 2:
+                            time.sleep(5 * (pull_attempt + 1))
+                if pull_error is not None:
+                    raise pull_error
                 run_command([docker, "buildx", "build", "--platform=linux/amd64", "--network=none",
                              "--load", "--iidfile", str(iidfile), "--file", str(dockerfile), str(context)],
                             "offline prerequisite preparation")

@@ -449,6 +449,42 @@ class AptInputsTest(unittest.TestCase):
         self.assertEqual(self.module.validate_materialized_inputs(self.root / "bundle"), manifest)
         self.assertFalse((self.root / "bundle" / "resolution.tsv").exists())
 
+    def test_transient_base_pull_failure_retries_the_same_pinned_digest(self):
+        first, first_path = self.prerequisite("first")
+        stage = descriptor()
+        stage["prerequisites"] = [first]
+        failures = [2]
+        def flaky(command, **kwargs):
+            if command[1] == "pull" and failures[0] > 0:
+                failures[0] -= 1
+                self.commands.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="context deadline exceeded")
+            return self.docker(command, **kwargs)
+        with mock.patch.object(self.module.time, "sleep") as sleep:
+            manifest = self.module.resolve_stage(stage, self.root / "bundle", runner=flaky,
+                                                 prerequisite_bundles={"first": first_path})
+        self.assertEqual(manifest["stage"], "build")
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual([command[1] for command in self.commands if command[1] == "pull"],
+                         ["pull", "pull", "pull"])
+
+    def test_persistent_base_pull_failure_reports_after_bounded_attempts(self):
+        first, first_path = self.prerequisite("first")
+        stage = descriptor()
+        stage["prerequisites"] = [first]
+        def broken(command, **kwargs):
+            if command[1] == "pull":
+                self.commands.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="context deadline exceeded")
+            return self.docker(command, **kwargs)
+        with mock.patch.object(self.module.time, "sleep"):
+            with self.assertRaisesRegex(self.module.InputError, "pinned base acquisition"):
+                self.module.resolve_stage(stage, self.root / "bundle", runner=broken,
+                                          prerequisite_bundles={"first": first_path})
+        self.assertEqual([command[1] for command in self.commands if command[1] == "pull"],
+                         ["pull", "pull", "pull"])
+        self.assertFalse((self.root / "bundle").exists())
+
     def test_repeated_resolution_is_byte_identical(self):
         first = self.resolve()
         second = self.module.resolve_stage(descriptor(), self.root / "other", runner=self.docker)
