@@ -86,11 +86,13 @@ dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\t${db:Status-St
 sort /inputs/base-packages.unsorted > /inputs/base-packages.tsv
 rm /inputs/base-packages.unsorted
 # Older APT releases can ignore Error-Mode and exit zero after partial index
-# failures. Check their C-locale diagnostics as well as the process status.
+# failures. Check their C-locale diagnostics as well as the process status, but
+# only for actual fetch/index failure lines: the scoped snapshot CA bootstrap
+# legitimately warns that no system certificates exist yet.
 update_status=0
 apt_locked update > /inputs/update.log 2>&1 || update_status=$?
 cat /inputs/update.log
-if [ "$update_status" -eq 0 ] && grep -Eq '^(W:|E:|Err:)' /inputs/update.log; then
+if [ "$update_status" -eq 0 ] && grep -Eq '^(E:|Err:|W: Failed to fetch|W: Some index files failed)' /inputs/update.log; then
     update_status=100
 fi
 rm -f /inputs/update.log
@@ -373,7 +375,8 @@ def check_records(root, manifest):
         if name.endswith(":amd64"):
             name = name[:-len(":amd64")]
         require(any(package["package"] == name and (not version or package["version"] == version)
-                    for package in manifest["packages"]), "requested package is absent from downloaded closure")
+                    for package in manifest["packages"]),
+                "requested package is absent from downloaded closure: " + request)
     return paths
 
 

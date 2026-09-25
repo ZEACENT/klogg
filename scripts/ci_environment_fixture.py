@@ -245,7 +245,8 @@ def _validate_fixture(repo_root, root, source, version, runner):
         core._relative_path(record["path"], "fixture file")
         core._digest(record["sha256"], "fixture file hash", prefix=False)
         require(type(record["size"]) is int and record["size"] >= 0 and type(record["mode"]) is int
-                and record["mode"] in (0o644, 0o755), "invalid fixture file size or mode")
+                and record["mode"] in (0o644, 0o755),
+                "invalid fixture file size or mode: {} mode={:o}".format(record["path"], record["mode"]))
     require(len(records) == len({record["path"] for record in records})
             and {record["path"] for record in records} == _expected_paths(lock, pin), "fixture payload is incomplete or contains undeclared material")
     require(records == _inventory(root), "fixture payload bytes, modes or inventory changed")
