@@ -160,8 +160,14 @@ def _inventory(root):
         info = _regular(path)
         if name == "fixture.json":
             continue
+        # Container and hosted-runner umasks vary (a package smoke receipt
+        # arrived as 664 in CI); modes are transport detail, not content.
+        mode = info.st_mode & 0o777
+        normalized = 0o755 if mode & 0o111 else 0o644
+        if mode != normalized:
+            path.chmod(normalized)
         total += info.st_size
-        records.append({"path": name, "size": info.st_size, "sha256": pipeline.sha256(path), "mode": info.st_mode & 0o777})
+        records.append({"path": name, "size": info.st_size, "sha256": pipeline.sha256(path), "mode": normalized})
         require(len(records) <= MAX_FILES and total <= MAX_BYTES, "fixture exceeds size/count limits")
     expected_directories = {parent.as_posix() for record in records for parent in pathlib.PurePosixPath(record["path"]).parents
                             if parent.as_posix() != "."}

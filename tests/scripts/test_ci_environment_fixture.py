@@ -193,6 +193,23 @@ class EnvironmentFixtureTest(unittest.TestCase):
         return self.module.consume_fixture(self.repo, SOURCE, root, 987, digest, self.repo,
                                           runner=self.runner, version=VERSION, **kwargs)
 
+    def test_group_writable_payload_modes_are_normalized_before_recording(self):
+        # Hosted runners can hand container-produced receipts a 664 mode
+        # (umask 002); the fixture inventory must be mode-deterministic.
+        original = self.docker_build_output
+        def group_writable(work):
+            original(work)
+            (work / "fixture/prefetch_artifacts/adb-helper/package-smoke.json").chmod(0o664)
+        self.docker_build_output = group_writable
+        document = self.prepare()
+        record = next(item for item in document["files"]
+                      if item["path"] == "prefetch_artifacts/adb-helper/package-smoke.json")
+        self.assertEqual(record["mode"], 0o644)
+        path = self.output / "prefetch_artifacts/adb-helper/package-smoke.json"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(next(item for item in document["files"]
+                              if item["path"] == "prefetch_artifacts/adb-helper/helpers/adb")["mode"], 0o755)
+
     def test_prepare_reuses_real_legal_binary_smoke_and_envelope_contracts(self):
         document = self.prepare()
         self.assertEqual(document["kind"], "ci-linux-package-fixture")
