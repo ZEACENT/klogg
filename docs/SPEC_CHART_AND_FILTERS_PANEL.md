@@ -1,5 +1,12 @@
 # Specification: Chart Panel + Filters Panel
 
+> **Proposal, not shipped functionality.** Neither panel described here is part
+> of the current UI. This design record preserves intended scope and open
+> questions; it is not a user guide or a claim that its dependencies, APIs, or
+> estimates have been validated for implementation. Current documentation is
+> indexed in the [documentation hub](README.md); status is tracked in
+> [BACKLOG.md](BACKLOG.md).
+
 This document specifies two new dock-widget features for klogg, drafted as the
 next iteration after the TASK-001 generation-ID refactor.  The features are
 inspired by features observed in `64x-lunicorn/LogSquirl` (see the comparison

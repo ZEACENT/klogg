@@ -463,6 +463,49 @@ TEST_CASE( "TabbedCrawlerWidget context menu uses app Title Case and semantic el
     }
 }
 
+TEST_CASE( "Close This follows the targeted tab across reordering" )
+{
+    TabbedCrawlerWidget tabWidget;
+    tabWidget.setMovable( true );
+    tabWidget.resize( 640, 240 );
+    for ( int i = 0; i < 3; ++i ) {
+        tabWidget.addCrawler( new DummyCrawlerWidget(),
+                              QStringLiteral( "file:///tmp/close-this-%1.log" ).arg( i ),
+                              QStringLiteral( "Tab %1" ).arg( i ) );
+    }
+    auto* selected = tabWidget.widget( 1 );
+    auto* tabBar = tabWidget.findChild<QTabBar*>();
+    REQUIRE( tabBar != nullptr );
+    int requestedIndex = -1;
+    QObject::connect( &tabWidget, &TabbedCrawlerWidget::tabCloseRequested, &tabWidget,
+                      [ & ]( int index ) { requestedIndex = index; } );
+
+    QString popupError;
+    QTimer::singleShot( 0, Qt::PreciseTimer, &tabWidget, [ & ] {
+        auto* menu = qobject_cast<QMenu*>( QApplication::activePopupWidget() );
+        if ( menu == nullptr ) {
+            popupError = QStringLiteral( "Tab context menu was not active" );
+            return;
+        }
+        tabBar->moveTab( 1, 2 );
+        for ( auto* action : menu->actions() ) {
+            if ( action->text() == QStringLiteral( "Close This" ) ) {
+                action->trigger();
+                menu->close();
+                return;
+            }
+        }
+        popupError = QStringLiteral( "Close This action was not found" );
+        menu->close();
+    } );
+    REQUIRE( QMetaObject::invokeMethod(
+        &tabWidget, "showContextMenu", Qt::DirectConnection, Q_ARG( int, 1 ),
+        Q_ARG( QPoint, tabWidget.mapToGlobal( QPoint( 20, 20 ) ) ) ) );
+    REQUIRE( popupError.isEmpty() );
+    REQUIRE( tabWidget.indexOf( selected ) == 2 );
+    CHECK( requestedIndex == 2 );
+}
+
 TEST_CASE( "TabbedCrawlerWidget does not handle Ctrl+Tab in keyPressEvent" )
 {
     // Test that our keyPressEvent no longer calls selectNextTab/selectPreviousTab

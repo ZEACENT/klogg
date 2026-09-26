@@ -2,7 +2,17 @@
 
 **Date:** 2026-07-25
 
-## Summary
+> Historical, point-in-time audit. Counts, file paths, line numbers, and
+> recommendations below have not been re-audited against the current tree and
+> are not a current quality score or a claim that the listed issues remain.
+> Some implementation references describe retired process-backed live capture.
+> Explicit deterministic test seams are part of current correctness/liveness
+> coverage; their presence alone is not evidence of an architectural defect.
+> See the [documentation hub](README.md),
+> [current architecture](TECHNICAL_DOCUMENTATION.md), and
+> [test policy](BUILD.md#performance-budgets-local-only-gates).
+
+## Historical Summary
 
 | Category | Files Affected | Occurrences | Severity |
 |---|---|---|---|
@@ -15,7 +25,8 @@
 | Perf Measurement Instrumentation | 4 | ~10 | Low (dead code) |
 | Build Config Injection | N/A (CMake) | 6 definitions | Medium | |
 
-> ✅ No test-specific code, friend declarations, or `#ifdef` blocks exist in production source files.
+> The original blanket absence claim is withdrawn: it conflicts with this
+> report's instrumentation inventory and does not describe current source.
 
 ---
 

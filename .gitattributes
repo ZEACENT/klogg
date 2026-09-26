@@ -4,3 +4,8 @@
 **/patches/**/*.def text eol=lf -whitespace
 packaging/adb/adb-helper.lock.json text eol=lf
 packaging/windows/*.nsi -text whitespace=cr-at-eol
+# Signed receipts and bundles are verified as exact bytes, including on Windows.
+ci/environments/evidence/** -text
+ci/dependencies/evidence/** -text
+# Public key armor is upstream data; preserve its hash, including header spacing.
+ci/environments/keys/*.asc -text -whitespace

@@ -310,6 +310,11 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
         return view->selection_.selectedLine();
     }
 
+    static klogg::vector<LineNumber> selectedLines( const AbstractLogView* view )
+    {
+        return view->selection_.getLines();
+    }
+
     static const std::vector<AbstractLogView::QuickHighlighters>&
     quickHighlighters( const AbstractLogView* view )
     {
@@ -748,18 +753,17 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         QTest::qWait( 50 );
     }
 
-    // Resolves the viewport y at which the view renders a source line,
-    // growing the view if the current viewport cannot show that row (font
-    // metrics and default viewport sizes differ across platforms; the Linux
-    // CI legs resolved raw charHeight-derived clicks to the wrong rows).
-    // ensureLineMapFresh() is required before every scan: the visible-line
-    // map is otherwise rebuilt only as a paint side effect, so a viewport
-    // grown by resizeViews would still expose the map of the old (smaller)
-    // geometry and rows beyond it would never resolve. Returns -1 when the
-    // line is still not visible at the largest size.
-    int mainYForLine( LineNumber line )
+    // Resolves the viewport y at which a log view renders a row, growing the
+    // view if the current viewport cannot show it (font metrics and default
+    // viewport sizes differ across platforms; the Linux CI legs resolved raw
+    // charHeight-derived clicks to the wrong rows). ensureLineMapFresh() is
+    // required before every scan: the visible-line map is otherwise rebuilt
+    // only as a paint side effect, so a viewport grown by resizeViews would
+    // still expose the map of the old (smaller) geometry and rows beyond it
+    // would never resolve. Returns -1 when the row is still not visible at the
+    // largest size.
+    int viewYForLine( AbstractLogView* view, LineNumber line )
     {
-        auto* view = crawler->logMainView_;
         const auto scan = [ & ]() -> int {
             view->ensureLineMapFresh();
             const int viewportHeight = view->viewport()->height();
@@ -774,7 +778,7 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         if ( const int y = scan(); y >= 0 ) {
             return y;
         }
-        // setFixedSize, not resize(): logMainView_ is managed by the crawler's
+        // setFixedSize, not resize(): both views are managed by the crawler's
         // layout, which snaps a plain resize() back to the splitter-assigned
         // size when the event loop pumps -- the growth below would never take
         // effect. setFixedSize overrides the layout constraints (same
@@ -783,7 +787,7 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         while ( height <= 2400 ) {
             height += 300;
             crawler->filteredView_->setFixedSize( 900, height );
-            view->setFixedSize( 900, height );
+            crawler->logMainView_->setFixedSize( 900, height );
             QTest::qWait( 10 );
             render();
             if ( const int y = scan(); y >= 0 ) {
@@ -791,6 +795,11 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
             }
         }
         return -1;
+    }
+
+    int mainYForLine( LineNumber line )
+    {
+        return viewYForLine( crawler->logMainView_, line );
     }
 
     void resizeViewsToPartialTextLineHeight( int width )
@@ -3172,7 +3181,73 @@ SCENARIO( "Selection uses selectionChanged flag instead of cache invalidation", 
     }
 }
 
-SCENARIO( "Shift-click extending a ctrl-click selection announces the full selected line count",
+SCENARIO( "Platform primary-modifier clicks toggle non-contiguous lines in both log views",
+          "[ui][selection][primary-modifier][regression]" )
+{
+    QTemporaryFile file{ "crawler_primary_modifier_selection_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    REQUIRE( waitUiState(
+        [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == SL_NB_LINES; } ) );
+
+    crawlerVisitor.render();
+
+    const auto exerciseToggle = [ & ]( AbstractLogView* view ) {
+        const int xPos
+            = AbstractLogView::access_by<AbstractLogViewPrivate>::leftMargin( view ) + 20;
+        const int y5 = crawlerVisitor.viewYForLine( view, 5_lnum );
+        const int y10 = crawlerVisitor.viewYForLine( view, 10_lnum );
+        REQUIRE( y5 >= 0 );
+        REQUIRE( y10 >= 0 );
+
+        auto* viewport = view->viewport();
+        QSignalSpy selectionSpy( view, &AbstractLogView::newSelection );
+
+        QTest::mouseClick( viewport, Qt::LeftButton, klogg::platform::PrimaryMod,
+                           QPoint( xPos, y5 ) );
+        selectionSpy.clear();
+        QTest::mouseClick( viewport, Qt::LeftButton, klogg::platform::PrimaryMod,
+                           QPoint( xPos, y10 ) );
+
+        auto lines
+            = AbstractLogView::access_by<AbstractLogViewPrivate>::selectedLines( view );
+        REQUIRE( lines.size() == 2 );
+        REQUIRE( lines[ 0 ] == 5_lnum );
+        REQUIRE( lines[ 1 ] == 10_lnum );
+        REQUIRE( selectionSpy.count() >= 1 );
+        const auto addPressArgs = selectionSpy.at( 0 );
+        REQUIRE( addPressArgs.at( 0 ).value<LineNumber>() == 10_lnum );
+        REQUIRE( addPressArgs.at( 1 ).value<LinesCount>() == 2_lcount );
+
+        selectionSpy.clear();
+        QTest::mouseClick( viewport, Qt::LeftButton, klogg::platform::PrimaryMod,
+                           QPoint( xPos, y5 ) );
+
+        lines = AbstractLogView::access_by<AbstractLogViewPrivate>::selectedLines( view );
+        REQUIRE( lines.size() == 1 );
+        REQUIRE( lines[ 0 ] == 10_lnum );
+        REQUIRE( selectionSpy.count() >= 1 );
+        const auto removePressArgs = selectionSpy.at( 0 );
+        REQUIRE( removePressArgs.at( 0 ).value<LineNumber>() == 5_lnum );
+        REQUIRE( removePressArgs.at( 1 ).value<LinesCount>() == 1_lcount );
+    };
+
+    exerciseToggle( crawlerVisitor.mainView() );
+    exerciseToggle( crawlerVisitor.activeFilteredView() );
+}
+
+SCENARIO( "Shift-click extending a primary-modifier selection announces the full selected line count",
           "[ui][selection][regression]" )
 {
     QTemporaryFile file{ "crawler_shift_click_count_XXXXXX" };
@@ -3190,7 +3265,7 @@ SCENARIO( "Shift-click extending a ctrl-click selection announces the full selec
 
     crawlerVisitor.render();
 
-    GIVEN( "a loaded log file with lines 5 and 10 ctrl-click selected" )
+    GIVEN( "a loaded log file with lines 5 and 10 primary-modifier selected" )
     {
         const auto leftMargin = crawlerVisitor.mainLeftMargin();
         const int xPos = leftMargin + 20;
@@ -3210,9 +3285,9 @@ SCENARIO( "Shift-click extending a ctrl-click selection announces the full selec
 
         QSignalSpy selectionSpy( crawlerVisitor.mainView(), &AbstractLogView::newSelection );
 
-        QTest::mouseClick( viewport, Qt::LeftButton, Qt::ControlModifier,
+        QTest::mouseClick( viewport, Qt::LeftButton, klogg::platform::PrimaryMod,
                            QPoint( xPos, y5 ) );
-        QTest::mouseClick( viewport, Qt::LeftButton, Qt::ControlModifier,
+        QTest::mouseClick( viewport, Qt::LeftButton, klogg::platform::PrimaryMod,
                            QPoint( xPos, y10 ) );
 
         WHEN( "shift-clicking line 12 to extend a range from the last toggled line" )

@@ -1,0 +1,9 @@
+{
+  "codeql": [
+    {
+      "name": "codeql-bundle",
+      "url": "https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.26.4/codeql-bundle-linux64.tar.gz",
+      "sha256": "48e1ab8b874d57bd6fd7c90fefee75addc5a45e9bd063982df9beb45a62dd5d3"
+    }
+  ]
+}

@@ -88,6 +88,7 @@ jobs:
             -DKLOGG_USE_LTO=OFF \
             -DKLOGG_OVERRIDE_MALLOC=OFF \
             -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
+            -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             "$KLOGG_WORKSPACE"
 

@@ -57,14 +57,14 @@ runs:
       if: ${{ inputs.cpack-generator }}
       shell: sh
       run: |
-        docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c "cd /usr/local/build_root && cpack -G ${{ inputs.cpack-generator }} "
-        docker run --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c "cd /usr/local/build_root && mv ./packages/klogg-$KLOGG_VERSION-Linux.${{ inputs.package-suffix }} ./packages/klogg-$KLOGG_VERSION-${{ inputs.artifact-id }}-$KLOGG_PACKAGE_TAG.${{ inputs.package-suffix }}"
+        docker run --pull=never -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c "cd /usr/local/build_root && cpack -G ${{ inputs.cpack-generator }} "
+        docker run --pull=never --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c "cd /usr/local/build_root && mv ./packages/klogg-$KLOGG_VERSION-Linux.${{ inputs.package-suffix }} ./packages/klogg-$KLOGG_VERSION-${{ inputs.artifact-id }}-$KLOGG_PACKAGE_TAG.${{ inputs.package-suffix }}"
 
     - name: Verify source-built ADB helper in DEB
       if: ${{ inputs.cpack-generator == 'DEB' }}
       shell: sh
       run: |
-        docker run --rm -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c '
+        docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c '
           set -euo pipefail
           cd /usr/local/build_root
           package=$(find packages -maxdepth 1 -name "*.deb" -type f -print -quit)
@@ -104,13 +104,13 @@ runs:
       if: ${{ inputs.os == 'ubuntu_appimage' }}
       shell: sh
       run: |
-        docker run --device /dev/fuse --privileged --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c "cd /usr/local/build_root && ../packaging/linux/appimage/generate_appimage.sh"
+        docker run --pull=never --device /dev/fuse --privileged --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c "cd /usr/local/build_root && ../packaging/linux/appimage/generate_appimage.sh"
 
     - name: Collect Linux symbols
       if: ${{ inputs.collect-symbols == 'true' }}
       shell: sh
       run: |
-        docker run --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c '
+        docker run --pull=never --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} /bin/bash -c '
           set -euo pipefail
           cd /usr/local/build_root
           mkdir -p symbols

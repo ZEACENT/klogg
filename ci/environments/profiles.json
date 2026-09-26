@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "verification_files": [
+    "ci/environments/profiles.json",
+    "scripts/ci_environment.py",
+    "scripts/ci_environment_profiles.py",
+    "scripts/ci_environment_pipeline.py",
+    ".github/workflows/ci-environments.yml"
+  ],
+  "linux_defaults": {
+    "cmake_options": [
+      "-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+      "-DKLOGG_GENERIC_CPU=ON", "-DKLOGG_USE_SENTRY=ON",
+      "-DWARNINGS_AS_ERRORS=ON", "-DCMAKE_INSTALL_PREFIX=/usr",
+      "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+    ],
+    "verification_files": [
+      ".github/actions/linux-validate/action.yml",
+      ".github/actions/prepare-workspace-env/action.yml",
+      ".github/actions/docker-build/action.yml",
+      ".github/actions/docker-run-tests/action.yml"
+    ]
+  },
+  "families": {
+    "focal-qt5-gcc13": {
+      "appimage": {
+        "configuration": {
+          "cmake_options": ["-DKLOGG_GENERIC_CPU=ON"],
+          "sanitizer": "", "package": true, "role": "build",
+          "build_root": "build_root",
+          "environment": {"CC": "/usr/bin/gcc-13", "CXX": "/usr/bin/g++-13", "LANG": "C.UTF-8"},
+          "package_settings": {
+            "tag": "vs-gen", "generator": "", "suffix": "AppImage",
+            "artifacts_id": "appimage", "os": "ubuntu_appimage",
+            "check_container": "", "check_command": ""
+          }
+        },
+        "verification_files": [
+          ".github/actions/docker-package/action.yml",
+          "packaging/linux/appimage/generate_appimage.sh",
+          "packaging/adb/adb-helper.lock.json",
+          "scripts/verify_adb_helper_artifact.py", "scripts/smoke_adb_helper.py"
+        ],
+        "role_materials": []
+      }
+    },
+    "jammy-qt5": {
+      "deb": {
+        "configuration": {
+          "cmake_options": ["-DKLOGG_GENERIC_CPU=ON"],
+          "sanitizer": "", "package": true, "role": "build",
+          "build_root": "build_root", "environment": {"LANG": "C.UTF-8"},
+          "package_settings": {
+            "tag": "vs-gen", "generator": "DEB", "suffix": "deb",
+            "artifacts_id": "jammy", "os": "ubuntu_jammy", "check_container": "ubuntu:22.04",
+            "check_command": "for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ \"$attempt\" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /packages/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v"
+          }
+        },
+        "verification_files": [
+          ".github/actions/docker-package/action.yml", "packaging/adb/adb-helper.lock.json",
+          "scripts/verify_adb_helper_artifact.py", "scripts/smoke_adb_helper.py"
+        ],
+        "role_materials": []
+      },
+      "asan-lsan": {
+        "configuration": {
+          "cmake_options": [
+            "-DKLOGG_GENERIC_CPU=ON", "-DKLOGG_USE_LTO=OFF", "-DKLOGG_USE_SENTRY=OFF",
+            "-DENABLE_SANITIZER_ADDRESS=ON", "-DKLOGG_CI_LIGHT_DEBUG=ON"
+          ],
+          "sanitizer": "address", "package": false, "role": "build",
+          "build_root": "build_root",
+          "environment": {
+            "LANG": "C.UTF-8",
+            "ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=@WORKSPACE@/tests/sanitizers/asan_suppressions.txt",
+            "LSAN_OPTIONS": "suppressions=@WORKSPACE@/tests/sanitizers/lsan_suppressions.txt:fast_unwind_on_malloc=0"
+          },
+          "package_settings": {"tag": "asan"}
+        },
+        "verification_files": ["tests/sanitizers/asan_suppressions.txt", "tests/sanitizers/lsan_suppressions.txt"],
+        "role_materials": []
+      },
+      "ubsan": {
+        "configuration": {
+          "cmake_options": [
+            "-DKLOGG_GENERIC_CPU=ON", "-DKLOGG_USE_LTO=OFF", "-DKLOGG_USE_SENTRY=OFF",
+            "-DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON", "-DKLOGG_CI_LIGHT_DEBUG=ON"
+          ],
+          "sanitizer": "undefined", "package": false, "role": "build",
+          "build_root": "build_root",
+          "environment": {"LANG": "C.UTF-8", "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"},
+          "package_settings": {"tag": "ubsan"}
+        },
+        "verification_files": [], "role_materials": []
+      }
+    },
+    "noble-qt6": {
+      "deb": {
+        "configuration": {
+          "cmake_options": ["-DENABLE_CPPCHECK=ON", "-DKLOGG_GENERIC_CPU=ON"],
+          "sanitizer": "", "package": true, "role": "build",
+          "build_root": "build_root", "environment": {"LANG": "C.UTF-8"},
+          "package_settings": {
+            "tag": "vs-gen", "generator": "DEB", "suffix": "deb",
+            "artifacts_id": "noble", "os": "ubuntu_noble", "check_container": "ubuntu:24.04",
+            "check_command": "for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ \"$attempt\" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /packages/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v"
+          }
+        },
+        "verification_files": [
+          ".github/actions/docker-package/action.yml", "packaging/adb/adb-helper.lock.json",
+          "scripts/verify_adb_helper_artifact.py", "scripts/smoke_adb_helper.py"
+        ],
+        "role_materials": []
+      }
+    },
+    "resolute-qt6": {
+      "deb": {
+        "configuration": {
+          "cmake_options": ["-DENABLE_CPPCHECK=ON", "-DKLOGG_GENERIC_CPU=ON"],
+          "sanitizer": "", "package": true, "role": "build",
+          "build_root": "build_root", "environment": {"LANG": "C.UTF-8"},
+          "package_settings": {
+            "tag": "vs-gen", "generator": "DEB", "suffix": "deb",
+            "artifacts_id": "resolute", "os": "ubuntu_resolute", "check_container": "ubuntu:26.04",
+            "check_command": "for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ \"$attempt\" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /packages/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v"
+          }
+        },
+        "verification_files": [
+          ".github/actions/docker-package/action.yml", "packaging/adb/adb-helper.lock.json",
+          "scripts/verify_adb_helper_artifact.py", "scripts/smoke_adb_helper.py"
+        ],
+        "role_materials": []
+      }
+    },
+    "jammy-qt5-tsan": {
+      "tsan": {
+        "configuration": {
+          "cmake_options": [
+            "-DCMAKE_C_COMPILER=clang-14", "-DCMAKE_CXX_COMPILER=clang++-14",
+            "-DCMAKE_PREFIX_PATH=/opt/qt5-tsan", "-DQt5_DIR=/opt/qt5-tsan/lib/cmake/Qt5",
+            "-DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan", "-DKLOGG_TSAN_QT_VERSION=5.15.19",
+            "-DKLOGG_GENERIC_CPU=ON", "-DKLOGG_USE_LTO=OFF", "-DKLOGG_USE_SENTRY=OFF",
+            "-DENABLE_SANITIZER_THREAD=ON"
+          ],
+          "sanitizer": "thread", "package": false, "role": "build",
+          "build_root": "build_root",
+          "environment": {
+            "LANG": "C.UTF-8", "QT_TSAN_PREFIX": "/opt/qt5-tsan",
+            "LD_LIBRARY_PATH": "/opt/qt5-tsan/lib", "PKG_CONFIG_PATH": "/opt/qt5-tsan/lib/pkgconfig",
+            "TSAN_OPTIONS": "halt_on_error=1:external_symbolizer_path=/usr/bin/llvm-symbolizer-14"
+          },
+          "package_settings": {"tag": "tsan"}
+        },
+        "verification_files": ["scripts/verify_tsan_qt_runtime.sh", "scripts/verify_tsan_qt_sources.py"], "role_materials": []
+      }
+    },
+    "noble-qt693-analysis": {
+      "static": {
+        "configuration": {
+          "cmake_options": [
+            "-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            "-DKLOGG_BUILD_TESTS=ON", "-DKLOGG_USE_VECTORSCAN=ON", "-DKLOGG_USE_LTO=OFF",
+            "-DKLOGG_USE_SENTRY=ON", "-DKLOGG_GENERIC_CPU=ON", "-DKLOGG_UI_AUTOGEN_ORIGIN_DEPENDS=OFF",
+            "-DCPM_SOURCE_CACHE=@WORKSPACE@/cpm_cache", "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          ],
+          "sanitizer": "", "package": false, "role": "static",
+          "build_root": "build_root",
+          "environment": {
+            "CC": "gcc-13", "CXX": "g++-13", "BOOST_ROOT": "/opt/klogg-tools/boost",
+            "KLOGG_QT_VERSION": "6.9.3", "KLOGG_QT_ARCH": "linux_gcc_64",
+            "KLOGG_QT_MODULES": "qt5compat", "KLOGG_QT_ARCHIVES": "qtbase icu qtsvg qttools qttranslations"
+          },
+          "package_settings": {}
+        },
+        "verification_files": [
+          "scripts/qualify_ci_analysis.py", "scripts/run_linux_analysis.sh",
+          ".clang-tidy", "tests/cppcheck_suppressions.txt", "scripts/first_party_compile_units.py",
+          "scripts/filter_compile_database.py", "scripts/run_changed_clang_tidy.py", "scripts/clang_tidy_header_filter.py"
+        ],
+        "role_materials": []
+      },
+      "coverage": {
+        "configuration": {
+          "cmake_options": [
+            "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKLOGG_BUILD_TESTS=ON",
+            "-DENABLE_COVERAGE=ON", "-DKLOGG_USE_VECTORSCAN=OFF", "-DKLOGG_USE_LTO=OFF",
+            "-DKLOGG_OVERRIDE_MALLOC=OFF", "-DCPM_SOURCE_CACHE=@WORKSPACE@/cpm_cache",
+            "-DFETCHCONTENT_FULLY_DISCONNECTED=ON", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          ],
+          "sanitizer": "", "package": false, "role": "coverage",
+          "build_root": "build_root",
+          "environment": {
+            "CC": "gcc-13", "CXX": "g++-13", "BOOST_ROOT": "/opt/klogg-tools/boost",
+            "KLOGG_QT_VERSION": "6.9.3", "KLOGG_QT_ARCH": "linux_gcc_64",
+            "KLOGG_QT_MODULES": "qt5compat", "KLOGG_QT_ARCHIVES": "qtbase icu qtsvg qttools qttranslations"
+          },
+          "package_settings": {}
+        },
+        "verification_files": [
+          "scripts/qualify_ci_analysis.py", "scripts/run_linux_analysis.sh",
+          "scripts/enforce_coverage_ratchet.py", ".github/baselines/coverage-line.txt", ".github/baselines/coverage-branch.txt"
+        ],
+        "role_materials": []
+      },
+      "codeql": {
+        "configuration": {
+          "cmake_options": [
+            "-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            "-DKLOGG_GENERIC_CPU=ON", "-DKLOGG_USE_SENTRY=OFF", "-DKLOGG_USE_VECTORSCAN=OFF",
+            "-DCPM_SOURCE_CACHE=@WORKSPACE@/cpm_cache", "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          ],
+          "sanitizer": "", "package": false, "role": "codeql",
+          "build_root": "build",
+          "environment": {
+            "CC": "gcc-13", "CXX": "g++-13", "BOOST_ROOT": "/opt/klogg-tools/boost",
+            "KLOGG_QT_VERSION": "6.9.3", "KLOGG_QT_ARCH": "linux_gcc_64",
+            "KLOGG_QT_MODULES": "qt5compat", "KLOGG_QT_ARCHIVES": "qtbase icu qtsvg qttools qttranslations",
+            "CODEQL_ACTION_OVERLAY_ANALYSIS": "false", "CODEQL_ACTION_OVERLAY_ANALYSIS_CODE_SCANNING_CPP": "false"
+          },
+          "package_settings": {}
+        },
+        "verification_files": [
+          "scripts/qualify_ci_analysis.py", "scripts/run_linux_analysis.sh",
+          "scripts/ci_build_metrics.py", "scripts/first_party_compile_units.py",
+          "scripts/prefetch_adb_helper_sources.py"
+        ],
+        "role_materials": ["codeql-bundle"]
+      }
+    }
+  }
+}

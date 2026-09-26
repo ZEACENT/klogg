@@ -631,9 +631,12 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
 
         blocks = CI_MODULE.workflow_job_blocks(workflow)
         legal_block = blocks["BuildAdbHelperLegalAssets"]
+        # Ordinary jobs now additionally skip producer-mode dispatches under a
+        # distinct check name; normal events still run unconditionally.
         self.assertEqual(
             CI_MODULE.workflow_job_direct_value(legal_block, "if"),
-            "!contains(github.event.head_commit.message, '[skip ci]')",
+            "${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') "
+            "&& !contains(github.event.head_commit.message, '[skip ci]') }}",
             "the unconditional package-support upload is useless if its job is event-gated",
         )
         uploads = {}
@@ -849,6 +852,10 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     or "Signed release qualification must run from master" in line
                 ):
                     line = line.replace("refs/heads/master", "trusted-master-ref")
+                if "startswith('refs/heads/')" in line:
+                    # Producer preflight validates the dispatch ref shape; it is
+                    # not a floating source revision for helper materials.
+                    line = line.replace("refs/heads/", "trusted-branch-prefix/")
                 lines.append(line)
             normalized_sources.append("\n".join(lines))
         combined = "\n".join(normalized_sources)

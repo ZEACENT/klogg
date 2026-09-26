@@ -33,6 +33,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <QCoreApplication>
 #include <QDir>
@@ -230,6 +231,16 @@ class CaptureStoreTestAccess {
             timeoutMs );
     }
 
+    static std::vector<int> capturePathGateWaits()
+    {
+        return CaptureStore::capturePathGateWaitsForTesting();
+    }
+
+    static void clearCapturePathGateWaits()
+    {
+        CaptureStore::clearCapturePathGateWaitsForTesting();
+    }
+
     static bool hasCapturePathCoordinationOwnership( const CaptureStore& store )
     {
         return store.hasCapturePathCoordinationOwnershipForTesting();
@@ -371,6 +382,35 @@ QString makeTestDir( const QString& prefix )
 QString makeCaptureId()
 {
     return QUuid::createUuid().toString( QUuid::WithoutBraces );
+}
+
+// The gate timeout is a functional contract, not a speed budget: a contended
+// gate must be waited on for the *configured* timeout instead of a hardcoded
+// default. Asserting it on the timeout that reached the gate keeps the check
+// active on every CI leg, which a wall-clock bound cannot do --
+// KLOGG_CHECK_PERF_BUDGET never evaluates its expression unless
+// KLOGG_PERF_GATES is set, and CI never sets it. Callers clear the record
+// immediately before the operation under test and snapshot it before restoring
+// the configured timeout, so every recorded value belongs to that window.
+// The label names the window; a window may also contain a contending store's
+// acquisition, which consults the same configured value.
+void requireConfiguredGateTimeoutWasUsed( const char* operation,
+                                          const std::vector<int>& gateWaits,
+                                          int expectedTimeoutMs )
+{
+    std::string rendered;
+    for ( const auto waitMs : gateWaits ) {
+        if ( !rendered.empty() ) {
+            rendered += ", ";
+        }
+        rendered += std::to_string( waitMs );
+    }
+    INFO( operation << " gate waits (ms): [" << rendered << "], expected "
+                    << expectedTimeoutMs );
+    REQUIRE_FALSE( gateWaits.empty() );
+    for ( const auto waitMs : gateWaits ) {
+        REQUIRE( waitMs == expectedTimeoutMs );
+    }
 }
 
 QStringList segmentFiles( const QString& capturePath )
@@ -2076,7 +2116,9 @@ TEST_CASE( "CaptureStore cleanupUnusedCapturesAsync removes orphan captures off 
     const auto elapsedMs = timer.elapsed();
 
     INFO( "cleanup scheduling elapsed ms: " << elapsedMs );
-    KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );
+    // Local-only: CI checks the async contract through the orphan-directory
+    // wait below, not through this scheduling latency.
+    KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );  // lint-allow: perf-budget -- Local scheduling speed; CI checks orphan removal.
     REQUIRE( QDir{ retainedPath }.exists() );
 
     QElapsedTimer deadline;
@@ -2247,21 +2289,29 @@ TEST_CASE( "CaptureStore releases retired leases after dropping the path mutex" 
             }
         } );
 
+    const auto previousTimeout
+        = CaptureStoreTestAccess::setCapturePathGateTimeout( 20 );
+
     QElapsedTimer clearTimer;
     clearTimer.start();
+    CaptureStoreTestAccess::clearCapturePathGateWaits();
     owner.clear();
     const auto clearElapsed = clearTimer.elapsed();
     if ( siblingThread.joinable() ) {
         siblingThread.join();
     }
+    const auto clearGateWaits = CaptureStoreTestAccess::capturePathGateWaits();
+    CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
 
     REQUIRE( siblingHoldsGate.load( std::memory_order_acquire ) );
     REQUIRE( siblingCompleted );
-    // A clear() that wrongly blocked on the contended gate would cost the
-    // full default 5000ms gate timeout (plus QLockFile contention sleeps).
-    // Keep the bound comfortably below that regression floor while allowing
-    // sanitizer-instrumented runs several seconds of legitimate headroom.
-    KLOGG_CHECK_PERF_BUDGET( clearElapsed < 4000 );
+    // A clear() that wrongly waited the full default 5000ms gate timeout
+    // (plus QLockFile contention sleeps) instead of the configured 20ms must
+    // fail in CI. Assert it on the timeout that reached the gate: the previous
+    // wall-clock bound was routed through KLOGG_CHECK_PERF_BUDGET, which CI
+    // never evaluates.
+    INFO( "clear elapsed ms: " << clearElapsed );
+    requireConfiguredGateTimeoutWasUsed( "clear()", clearGateWaits, 20 );
     sibling.reset();
     REQUIRE( waitForNoSegments( owner.capturePath() ) );
 }
@@ -2300,6 +2350,7 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
         std::this_thread::yield();
     }
 
+    CaptureStoreTestAccess::clearCapturePathGateWaits();
     QElapsedTimer deletionTimer;
     deletionTimer.start();
     std::thread deletion( [ & ] {
@@ -2324,6 +2375,7 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
     deletion.join();
     const auto deletionCompletedAfterRelease
         = waitForMissingFile( capturePath );
+    const auto deletionGateWaits = CaptureStoreTestAccess::capturePathGateWaits();
     CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
 
     REQUIRE( gateHeld.load( std::memory_order_acquire ) );
@@ -2331,10 +2383,11 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
     REQUIRE( deletionStartedBeforeDeadline );
     REQUIRE( deletionFinishedBeforeRelease );
     // The 15000ms watchdog alone would still pass a regression that wrongly
-    // waited the full default 5000ms gate timeout. Keep an elapsed bound
-    // below that regression floor while allowing sanitizer-instrumented runs
-    // several seconds of legitimate headroom.
-    KLOGG_CHECK_PERF_BUDGET( deletionElapsed < 4000 );
+    // waited the full default 5000ms gate timeout, so assert the timeout that
+    // actually reached the gate: a perf-budget wall-clock bound could not carry
+    // this check into CI, because KLOGG_PERF_GATES is unset there.
+    INFO( "deletion elapsed ms: " << deletionElapsed );
+    requireConfiguredGateTimeoutWasUsed( "deleteCaptureFiles()", deletionGateWaits, 20 );
     REQUIRE( deletionFinished.load( std::memory_order_acquire ) );
     REQUIRE( deletionCompletedAfterRelease );
 }
@@ -2374,6 +2427,7 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
         std::this_thread::yield();
     }
 
+    CaptureStoreTestAccess::clearCapturePathGateWaits();
     QElapsedTimer destructionTimer;
     destructionTimer.start();
     std::thread destruction( [ & ] {
@@ -2395,16 +2449,18 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
     holder.join();
     destruction.join();
     survivingStore.deleteCaptureFiles();
+    const auto destructionGateWaits = CaptureStoreTestAccess::capturePathGateWaits();
     CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
 
     REQUIRE( gateHeld.load( std::memory_order_acquire ) );
     REQUIRE( holderCompleted );
     REQUIRE( destructionStartedBeforeDeadline );
     REQUIRE( destructionFinishedBeforeRelease );
-    // Same regression floor as the deletion case: a destruction that wrongly
-    // waited the full default 5000ms gate timeout must not slip past the
-    // generous watchdog.
-    KLOGG_CHECK_PERF_BUDGET( destructionElapsed < 4000 );
+    // Same contract as the deletion case: a destruction that wrongly waited the
+    // full default 5000ms gate timeout must be caught by CI, which the previous
+    // perf-budget bound was not.
+    INFO( "destruction elapsed ms: " << destructionElapsed );
+    requireConfiguredGateTimeoutWasUsed( "~CaptureStore", destructionGateWaits, 20 );
     REQUIRE( destructionFinished.load( std::memory_order_acquire ) );
     // The directory removal is deferred to a background retry thread, so an
     // immediate existence check races it (it flaked under the ubsan-only leg).
@@ -3942,7 +3998,9 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget
     // Instrumented and unoptimized builds validate correctness above without
     // turning hosted-runner speed into a performance regression signal.
 #if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
-    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < 2000 );
+    // Multi-sample speed budget, local-only by design: CI must not gate on
+    // hosted-runner speed, and every correctness assertion above still runs.
+    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < 2000 );  // lint-allow: perf-budget -- Local append speed; CI checks line counts and contents.
 #endif
 }
 
@@ -3987,7 +4045,8 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
     // optimized implementation itself is being measured.
 #if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
     constexpr int MetadataOverheadBudgetMs = 200;
-    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < MetadataOverheadBudgetMs );
+    // Multi-sample speed budget, local-only by design (see the sibling case).
+    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < MetadataOverheadBudgetMs );  // lint-allow: perf-budget -- Local metadata speed; CI checks contents and memory accounting.
 #endif
 }
 

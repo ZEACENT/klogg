@@ -285,6 +285,14 @@ public:
     bool holdCapturePathGateForTesting( std::function<void()> gateAcquired,
                                         std::function<void()> waitForRelease );
     static int setCapturePathGateTimeoutForTesting( int timeoutMs );
+    // Effective timeouts used by the configured (non-override) gate wait path
+    // since the last clear. The contract "a contended gate is waited on for
+    // the configured timeout, not a hardcoded default" is asserted on this
+    // record instead of on elapsed wall-clock time, because CI never sets
+    // KLOGG_PERF_GATES and a perf-budget expression therefore never runs
+    // there. See the definition in capturestore.cpp.
+    static std::vector<int> capturePathGateWaitsForTesting();
+    static void clearCapturePathGateWaitsForTesting();
     static void failNextCapturePathNamespaceTransitionForTesting();
     // Operation counts stay outside business Stats and are scoped to one path state.
     struct MaintenanceOperationsForTesting {

@@ -115,7 +115,9 @@ jobs:
             with self.subTest(workflow=path.name):
                 self.assertEqual(MODULE.workflow_schedule_issues(text), [])
                 expected = {"workflow_dispatch"}
-                if path.name not in ("ci-release.yml", "ci-continuous.yml"):
+                if path.name == "ci-environments.yml":
+                    expected = {"workflow_call"}
+                elif path.name not in ("ci-release.yml", "ci-continuous.yml"):
                     expected |= {"push", "pull_request"}
                 self.assertEqual(set(MODULE.workflow_trigger_mapping(text)), expected)
 
@@ -260,7 +262,7 @@ class WorkflowShapeOptimizationPolicyTest(unittest.TestCase):
     STATIC_SINGLETON_MESSAGE = "static matrix must fan out to at least two jobs"
     COMPOSITE_MATRIX_MESSAGE = "local composite actions must not reference matrix.*"
     EXPLICIT_NAME_MESSAGE = "CI Build jobs must define explicit name values"
-    GATE_NAME_MESSAGE = 'CI Build job ci-gate must set name: "ci-gate"'
+    GATE_NAME_MESSAGE = 'CI Build job ci-gate must preserve its ordinary name and isolate producer-mode skips'
 
     def manifest_issues(self, text: str, path: str = ".github/workflows/ci-build.yml"):
         return MODULE.check_checkout_blocks(pathlib.Path(path), text)
@@ -685,7 +687,7 @@ jobs:
         self.assertEqual(missing_names, [])
         self.assertEqual(
             MODULE.workflow_job_direct_value(blocks["ci-gate"], "name"),
-            "ci-gate",
+            MODULE.CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate",
         )
 
     def test_real_ci_build_static_matrices_are_reserved_for_true_fanout(self):
@@ -736,10 +738,12 @@ jobs:
         self.assertEqual(missing_names, [])
         self.assertEqual(
             MODULE.workflow_job_direct_value(blocks["ci-gate"], "name"),
-            "ci-gate",
+            MODULE.CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate",
         )
 
         expected_needs = {
+            "EnvironmentModePreflight": set(),
+            "EnvironmentProducer": {"EnvironmentModePreflight"},
             "ReleaseQualificationPreflight": set(),
             "SaveVersion": set(),
             "PrefetchCpmCache": set(),
@@ -939,6 +943,7 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                 protected_jobs = set(needs) - {preflight}
                 if name == "ci-build.yml":
                     expected_roots.update(self.CI_PARALLEL_ROOTS)
+                    expected_roots.add("EnvironmentModePreflight")
                     protected_jobs = self.CI_APPLICATION_JOBS
                 self.assertEqual(
                     {job for job, dependencies in needs.items() if not dependencies},
@@ -1023,7 +1028,7 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                 1,
             ),
             "conditional event bypass": ci_build.replace(
-                "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n",
+                f"    if: {MODULE.CI_BUILD_ORDINARY_IF}\n",
                 "    if: ${{ github.event_name == 'pull_request' }}\n",
                 1,
             ),
@@ -1078,7 +1083,7 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
             "application job runs after failed preflight": ci_build.replace(
                 "  LinuxTsan:\n"
                 "    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]\n"
-                "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n",
+                f"    if: {MODULE.CI_BUILD_ORDINARY_IF}\n",
                 "  LinuxTsan:\n"
                 "    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]\n"
                 "    if: ${{ always() }}\n",
@@ -2028,10 +2033,10 @@ jobs:
 
     def test_ci_build_gate_must_run_after_failures(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
-        mutated = workflow.replace("    if: always()\n", "    if: success()\n", 1)
+        mutated = workflow.replace(f"    if: {MODULE.CI_BUILD_ORDINARY_GATE_IF}\n", "    if: success()\n", 1)
         self.assertNotEqual(mutated, workflow)
         self.assertIn(
-            "CI gate must run with if: always()",
+            "CI gate must run with if: always() for ordinary events only",
             MODULE.ci_build_workflow_issues(mutated),
         )
 
@@ -2551,8 +2556,8 @@ jobs:
         self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
         post_gate_message = "CI post-gate job DispatchContinuous must directly need only ci-gate"
         wrong_need = workflow.replace(
-            "  DispatchContinuous:\n    name: \"Dispatch Continuous publisher\"\n    needs: [ci-gate]",
-            "  DispatchContinuous:\n    name: \"Dispatch Continuous publisher\"\n    needs: [LinuxPackages]",
+            "  DispatchContinuous:\n    name: \"" + MODULE.CI_BUILD_PRODUCER_NAME_PREFIX + "Dispatch Continuous publisher\"\n    needs: [ci-gate]",
+            "  DispatchContinuous:\n    name: \"" + MODULE.CI_BUILD_PRODUCER_NAME_PREFIX + "Dispatch Continuous publisher\"\n    needs: [LinuxPackages]",
             1,
         )
         self.assertIn(post_gate_message, MODULE.ci_build_workflow_issues(wrong_need))

@@ -33,6 +33,12 @@
 
 #include "filewatcher.h"
 
+// Generous bound for "the dispatched efsw work completed"; it only has to
+// outlast a loaded runner, it is not a latency budget. The unit tests assert
+// the executing thread instead of the elapsed time, so CI keeps checking the
+// non-blocking contract without gating on machine speed.
+constexpr int WorkerIdleTimeoutMs = 5000;
+
 TEST_CASE( "FileWatcher named slot accepts queued cross-thread notifications" )
 {
     auto& watcher = FileWatcher::getFileWatcher();
@@ -81,13 +87,15 @@ TEST_CASE( "FileWatcher addFile returns immediately without blocking caller" )
 
     auto& watcher = FileWatcher::getFileWatcher();
 
-    QElapsedTimer timer;
-    timer.start();
+    // The contract is that addFile only *dispatches* the efsw work to the
+    // serial worker; it must never run it on the calling thread. Asserting on
+    // the executing thread keeps this check active on every CI leg, where a
+    // wall-clock bound would not be: KLOGG_CHECK_PERF_BUDGET skips its
+    // expression unless KLOGG_PERF_GATES is set, and CI never sets it.
+    const auto callerThread = std::this_thread::get_id();
     watcher.addFile( tempFile.fileName() );
-    const auto elapsed = timer.elapsed();
-
-    // addFile should return in well under 100ms (it dispatches to worker thread)
-    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );
+    REQUIRE( watcher.waitForIdleForTest( WorkerIdleTimeoutMs ) );
+    REQUIRE( watcher.efswOperationThreadForTest() != callerThread );
 
     watcher.removeFile( tempFile.fileName() );
 }
@@ -117,32 +125,22 @@ TEST_CASE( "FileWatcher::updateConfiguration returns immediately" )
 {
     auto& watcher = FileWatcher::getFileWatcher();
 
-    QElapsedTimer timer;
-    timer.start();
+    // enableWatch must run on the serial worker, not on the calling thread.
+    const auto callerThread = std::this_thread::get_id();
     watcher.updateConfiguration();
-    const auto elapsed = timer.elapsed();
-
-    // updateConfiguration should return in well under 100ms —
-    // it dispatches enableWatch to the worker thread asynchronously
-    // rather than calling into efsw synchronously on the calling thread.
-    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );
+    REQUIRE( watcher.waitForIdleForTest( WorkerIdleTimeoutMs ) );
+    REQUIRE( watcher.efswOperationThreadForTest() != callerThread );
 }
 
 TEST_CASE( "FileWatcher::checkWatches returns immediately" )
 {
     auto& watcher = FileWatcher::getFileWatcher();
 
-    QElapsedTimer timer;
-    timer.start();
     // checkWatches is a private slot; invoke it via the meta-object
+    const auto callerThread = std::this_thread::get_id();
     const bool invoked
         = QMetaObject::invokeMethod( &watcher, "checkWatches", Qt::DirectConnection );
     REQUIRE( invoked );
-    const auto elapsed = timer.elapsed();
-
-    // checkWatches should return in well under 100ms —
-    // it dispatches the efsw check to the worker thread asynchronously
-    // rather than calling efswWatcher_->checkWatches() synchronously
-    // on the calling thread.
-    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );
+    REQUIRE( watcher.waitForIdleForTest( WorkerIdleTimeoutMs ) );
+    REQUIRE( watcher.efswOperationThreadForTest() != callerThread );
 }
