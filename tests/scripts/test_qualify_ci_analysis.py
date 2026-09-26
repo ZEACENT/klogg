@@ -186,6 +186,26 @@ class AnalysisRoleTest(unittest.TestCase):
         strict = [command for command in self.commands if command[0] == "cppcheck" and "--error-exitcode=1" in command]
         self.assertEqual(len(strict), 1)
 
+    def test_coverage_build_lives_inside_the_workspace_for_gcovr_resolution(self):
+        # gcovr 7.0 computes object directories relative to --root; a build
+        # tree outside the workspace produces bogus ../../../ escapes and
+        # "no_working_dir_found" (observed on the real qualification leg).
+        self.run_role("coverage")
+        build_commands = [command for command in self.commands
+                          if command[0] == "cmake" and ("--build" in command or "-B" in command)]
+        gcovr = [command for command in self.commands if command[0] == "gcovr"]
+        self.assertTrue(build_commands and gcovr)
+        for command in build_commands + gcovr:
+            paths = [value for value in command if isinstance(value, str) and "build" in value
+                     and (value.startswith("/") or value == "build_root")]
+            for value in paths:
+                if value == "build_root" or value.startswith("-D"):
+                    continue
+                resolved = value.split("=", 1)[-1]
+                if resolved.startswith("/"):
+                    self.assertTrue(resolved.startswith(str(self.workspace) + "/"),
+                                    "coverage build path escapes the workspace: " + resolved)
+
     def test_coverage_builds_all_targets_runs_all_ctest_and_current_ratchet(self):
         result = self.run_role("coverage")
         configure = next(command for command in self.commands if command[0] == "cmake" and "-S" in command)

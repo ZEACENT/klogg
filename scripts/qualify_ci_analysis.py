@@ -362,7 +362,12 @@ def run_analysis(role, workspace, work_root, output, analysis_base_sha, *, codeq
     document, environment = role_environment(workspace, role)
     environment["HOME"] = str(private_home)
     execute(runner, ["git", "cat-file", "-e", analysis_base_sha + "^{commit}"], cwd=workspace, env=environment)
-    build = work_root / profiles.profile_configuration(document, FAMILY, role)["build_root"]
+    build_root = profiles.profile_configuration(document, FAMILY, role)["build_root"]
+    # gcovr 7.0 derives relative object directories from --root; a build tree
+    # outside the workspace makes them escape with bogus ../../../ prefixes and
+    # gcov fails with no_working_dir_found. Coverage therefore builds inside
+    # the workspace, matching the production coverage workflow's geometry.
+    build = (workspace / build_root) if role == "coverage" else (work_root / build_root)
     configure(role, workspace, build, runner, environment, document)
     if role == "static":
         checks = static_analysis(workspace, build, work_root, analysis_base_sha, runner, environment, jobs)
