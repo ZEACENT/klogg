@@ -167,6 +167,19 @@ class PipelineCandidateTest(unittest.TestCase):
         self.assertEqual(self.commands, [])
 
 
+class PipelineRunTest(unittest.TestCase):
+    def test_failed_child_carries_bounded_stdout_and_stderr_tails(self):
+        pipeline = importlib.import_module("ci_environment_pipeline")
+        def runner(command, **kwargs):
+            raise subprocess.CalledProcessError(7, command, output="progress: downloading pinned source\n",
+                                                stderr="urllib.error.HTTPError: HTTP Error 503\n")
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            pipeline.run(["python3", "tool.py", "--flag"], runner)
+        message = str(caught.exception)
+        self.assertIn("stdout=progress: downloading pinned source", message)
+        self.assertIn("stderr=urllib.error.HTTPError: HTTP Error 503", message)
+
+
 class PipelineSourceTest(unittest.TestCase):
     def test_only_exact_dispatch_checkout_and_ancestor_base_are_accepted(self):
         pipeline = importlib.import_module("ci_environment_pipeline")
