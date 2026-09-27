@@ -171,6 +171,185 @@ publish_component(
             self.assertRegex((result.stdout + result.stderr).lower(), r"unsafe|file name")
             self.assertFalse(any(output.iterdir()))
 
+    def test_adb_preparer_publishes_only_core_support_plus_bound_overlay_offer(self):
+        code = """
+import json, pathlib, sys
+from prepare_source_publication import publish_component
+record, digest, support = publish_component(
+    "adb-helper", pathlib.Path(sys.argv[1]),
+    "adb-helper-source-set-receipt.json", "26.09.05.1701", "continuous",
+    "https://github.com/ZEACENT/klogg", pathlib.Path(sys.argv[2]),
+)
+print(json.dumps({"component": record, "support": support}))
+"""
+        for mutation in (None, "missing", "wrong-version", "wrong-url", "wrong-core", "wrong-offer-hash", "forged-offer-url", "wrong-component", "malformed"):
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = pathlib.Path(temporary)
+                    sources = root / "source"
+                    output = root / "output"
+                    sources.mkdir()
+                    output.mkdir()
+                    archive = sources / "adb-helper-source-archive.tar.gz"
+                    archive.write_bytes(b"core archive")
+                    offer = sources / "ADB-HELPER-SOURCE-OFFER.txt"
+                    offer.write_text(
+                        "Published archive: klogg-v26.09.05.1701-adb-helper-source-"
+                        + sha256(archive)[:12] + ".tar.gz\n"
+                        + "SHA-256: " + sha256(archive) + "\n"
+                        + "Versioned releases page: https://github.com/ZEACENT/klogg/releases\n"
+                        + "Rolling continuous release page: https://github.com/ZEACENT/klogg/releases/tag/continuous\n",
+                        encoding="utf-8",
+                    )
+                    notices = sources / "adb-helper-notices.tar.gz"
+                    notices.write_bytes(b"core notices")
+                    receipt = sources / "adb-helper-source-set-receipt.json"
+                    receipt.write_text(json.dumps({
+                        "receipt_kind": "component-source-set",
+                        "component": "adb-helper",
+                        "archive": {"file_name": archive.name, "sha256": sha256(archive)},
+                        "package_support_assets": [{"kind": "notices", "file_name": notices.name, "sha256": sha256(notices)}],
+                    }), encoding="utf-8")
+                    overlay = {
+                        "schema_version": 1,
+                        "receipt_kind": "component-source-overlay",
+                        "component": "adb-helper",
+                        "version": "26.09.05.1701",
+                        "base_url": "https://github.com/ZEACENT/klogg",
+                        "source_set_receipt_sha256": sha256(receipt),
+                        "assets": [{"kind": "source-offer", "file_name": offer.name, "sha256": sha256(offer)}],
+                        "distribution": {"package_required": True, "release_required": True},
+                    }
+                    if mutation == "wrong-version":
+                        overlay["version"] = "26.08.27"
+                    elif mutation == "wrong-url":
+                        overlay["base_url"] = "https://example.invalid/other"
+                    elif mutation == "wrong-core":
+                        overlay["source_set_receipt_sha256"] = "0" * 64
+                    elif mutation == "wrong-offer-hash":
+                        overlay["assets"][0]["sha256"] = "0" * 64
+                    elif mutation == "wrong-component":
+                        overlay["component"] = "ios-native"
+                    elif mutation == "forged-offer-url":
+                        offer.write_bytes(offer.read_bytes().replace(
+                            b"https://github.com/ZEACENT/klogg",
+                            b"https://example.invalid/other",
+                        ))
+                        overlay["assets"][0]["sha256"] = sha256(offer)
+                    if mutation != "missing":
+                        (sources / "adb-helper-overlay-receipt.json").write_text(
+                            "{invalid json" if mutation == "malformed" else json.dumps(overlay),
+                            encoding="utf-8",
+                        )
+                    result = subprocess.run(
+                        [sys.executable, "-c", code, str(sources), str(output)],
+                        cwd=ROOT / "scripts", capture_output=True, text=True, timeout=10, check=False,
+                    )
+                    if mutation is not None:
+                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertRegex((result.stdout + result.stderr).lower(), r"overlay|offer")
+                        continue
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    published = json.loads(result.stdout)
+                    self.assertEqual(
+                        {item["file_name"] for item in published["support"]},
+                        {offer.name, notices.name},
+                    )
+                    self.assertEqual(
+                        published["component"]["overlay_receipt"]["sha256"],
+                        sha256(output / "adb-helper-overlay-receipt.json"),
+                    )
+                    self.assertEqual((output / offer.name).read_bytes(), offer.read_bytes())
+
+    def test_ios_preparer_publishes_bound_overlay_offer_and_guide(self):
+        code = """
+import json, pathlib, sys
+from prepare_source_publication import publish_component
+record, digest, support = publish_component(
+    "ios-native", pathlib.Path(sys.argv[1]), "ios-native-source-set-receipt.json",
+    "26.09.05.1701", "continuous", "https://github.com/ZEACENT/klogg",
+    pathlib.Path(sys.argv[2]),
+)
+print(json.dumps({"component": record, "support": support}))
+"""
+        for mutation in (None, "missing", "wrong-version", "wrong-url", "wrong-core", "wrong-guide", "wrong-offer", "extra-asset", "malformed"):
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = pathlib.Path(temporary)
+                    sources, output = root / "source", root / "output"
+                    sources.mkdir()
+                    output.mkdir()
+                    archive = sources / "ios-native-corresponding-source.tar.gz"
+                    archive.write_bytes(b"iOS source closure")
+                    published = f"klogg-v26.09.05.1701-ios-native-source-{sha256(archive)[:12]}.tar.gz"
+                    offer = sources / "ios-native-source-offer.txt"
+                    offer.write_text(
+                        f"Published archive: {published}\n"
+                        f"SHA-256: {sha256(archive)}\n"
+                        "Versioned releases page: https://github.com/ZEACENT/klogg/releases\n"
+                        "Rolling continuous release page: https://github.com/ZEACENT/klogg/releases/tag/continuous\n",
+                        encoding="utf-8",
+                    )
+                    guide = sources / "ios-native-lgpl-replacement.txt"
+                    guide.write_text(f"Rebuild from {published} and replace the dylibs.\n", encoding="utf-8")
+                    notice = sources / "NOTICE-ios-native.txt"
+                    notice.write_bytes(b"core notices")
+                    core = sources / "ios-native-source-set-receipt.json"
+                    core.write_text(json.dumps({
+                        "receipt_kind": "component-source-set", "component": "ios-native",
+                        "archive": {"file_name": archive.name, "sha256": sha256(archive)},
+                        "package_support_assets": [{"kind": "notices", "file_name": notice.name, "sha256": sha256(notice)}],
+                    }), encoding="utf-8")
+                    overlay = {
+                        "schema_version": 1, "receipt_kind": "component-source-overlay",
+                        "component": "ios-native", "version": "26.09.05.1701",
+                        "base_url": "https://github.com/ZEACENT/klogg",
+                        "source_set_receipt_sha256": sha256(core),
+                        "assets": [
+                            {"kind": "source-offer", "file_name": offer.name, "sha256": sha256(offer)},
+                            {"kind": "replacement-guide", "file_name": guide.name, "sha256": sha256(guide)},
+                        ],
+                        "distribution": {"package_required": True, "release_required": True},
+                    }
+                    if mutation == "wrong-version":
+                        overlay["version"] = "26.08.27"
+                    elif mutation == "wrong-url":
+                        overlay["base_url"] = "https://example.invalid/other"
+                    elif mutation == "wrong-core":
+                        overlay["source_set_receipt_sha256"] = "0" * 64
+                    elif mutation == "wrong-guide":
+                        overlay["assets"][1]["sha256"] = "0" * 64
+                    elif mutation == "wrong-offer":
+                        offer.write_bytes(offer.read_bytes().replace(
+                            b"https://github.com/ZEACENT/klogg", b"https://example.invalid/other"
+                        ))
+                        overlay["assets"][0]["sha256"] = sha256(offer)
+                    elif mutation == "extra-asset":
+                        overlay["assets"].append(overlay["assets"][0].copy())
+                    if mutation != "missing":
+                        (sources / "ios-native-overlay-receipt.json").write_text(
+                            "{invalid json" if mutation == "malformed" else json.dumps(overlay),
+                            encoding="utf-8",
+                        )
+                    result = subprocess.run(
+                        [sys.executable, "-c", code, str(sources), str(output)],
+                        cwd=ROOT / "scripts", capture_output=True, text=True, timeout=10, check=False,
+                    )
+                    if mutation is not None:
+                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertRegex((result.stdout + result.stderr).lower(), r"overlay|offer|guide")
+                        continue
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    published_set = json.loads(result.stdout)
+                    self.assertEqual(
+                        {item["file_name"] for item in published_set["support"]},
+                        {notice.name, offer.name, guide.name},
+                    )
+                    self.assertEqual(
+                        published_set["component"]["overlay_receipt"]["sha256"],
+                        sha256(output / "ios-native-overlay-receipt.json"),
+                    )
+
     def test_publication_preparer_rejects_channel_tag_mismatches(self):
         for channel, tag in (("stable", "continuous"), ("continuous", "v26.08.28.1718")):
             with self.subTest(channel=channel, tag=tag):
@@ -210,7 +389,7 @@ publish_component(
         adb_archive = self.adb["archive_file"]
         retained = [
             asset["file_name"] for asset in self.adb["package_support_assets"]
-        ] + [self.adb["receipt_file"]]
+        ] + [self.adb["receipt_file"], self.adb["overlay_receipt_file"]]
         adb_cmake = required_text(ADB_CMAKE)
         app_cmake = required_text(APP_CMAKE)
 
@@ -494,7 +673,7 @@ publish_component(
             "- name: Download immutable Continuous release assets",
             "- name: Verify Continuous source publication and checkout",
         )
-        self.assertIn("len(records) != 23", download)
+        self.assertIn("len(records) != 25", download)
         self.assertIn("invalid or duplicate Continuous release asset ID", download)
         self.assertIn("invalid or duplicate Continuous release asset name", download)
         self.assertIn("/releases/assets/${asset_id}", download)
@@ -1333,8 +1512,11 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
             "ios-native": "iOS native source-set receipt",
         }
         component_support = {
-            "adb-helper": self.release_contract["top_level_support_assets"][:5],
-            "ios-native": self.release_contract["top_level_support_assets"][5:],
+            "adb-helper": [
+                name for name in self.release_contract["top_level_support_assets"][:5]
+                if name != "ADB-HELPER-SOURCE-OFFER.txt"
+            ],
+            "ios-native": ["NOTICE-ios-native.txt"],
         }
         for component in ("adb-helper", "ios-native"):
             archive_bytes = f"immutable {component} corresponding source\n".encode()
@@ -1343,6 +1525,26 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
                 f"klogg-v{self.VERSION}-{component}-source-{archive_hash[:12]}.tar.gz"
             )
             self.write_asset(archive_name, archive_bytes)
+            if component == "adb-helper":
+                self.write_asset(
+                    "ADB-HELPER-SOURCE-OFFER.txt",
+                    (f"Published archive: {archive_name}\n"
+                     f"SHA-256: {archive_hash}\n"
+                     f"Versioned releases page: {self.BASE_URL}/releases\n"
+                     f"Rolling continuous release page: {self.BASE_URL}/releases/tag/continuous\n").encode(),
+                )
+            if component == "ios-native":
+                self.write_asset(
+                    "ios-native-source-offer.txt",
+                    (f"Published archive: {archive_name}\n"
+                     f"SHA-256: {archive_hash}\n"
+                     f"Versioned releases page: {self.BASE_URL}/releases\n"
+                     f"Rolling continuous release page: {self.BASE_URL}/releases/tag/continuous\n").encode(),
+                )
+                self.write_asset(
+                    "ios-native-lgpl-replacement.txt",
+                    f"Rebuild from {archive_name} and replace matching dylibs.\n".encode(),
+                )
             source_set_name = f"{component}-source-set-receipt.json"
             source_set_document = {
                 "schema_version": 1,
@@ -1373,6 +1575,25 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
                 source_set_name, self.json_bytes(source_set_document)
             )
             source_hashes[component] = sha256(source_set)
+            if component == "adb-helper":
+                overlay_name = self.contract["source_sets"]["adb-helper"]["overlay_receipt_file"]
+                overlay = self.write_asset(
+                    overlay_name,
+                    self.json_bytes({
+                        "schema_version": 1,
+                        "receipt_kind": "component-source-overlay",
+                        "component": "adb-helper",
+                        "version": self.VERSION,
+                        "base_url": self.BASE_URL,
+                        "source_set_receipt_sha256": source_hashes[component],
+                        "assets": [{
+                            "kind": "source-offer",
+                            "file_name": "ADB-HELPER-SOURCE-OFFER.txt",
+                            "sha256": sha256(self.root / "ADB-HELPER-SOURCE-OFFER.txt"),
+                        }],
+                        "distribution": {"package_required": True, "release_required": True},
+                    }),
+                )
             components[component] = {
                 "display_name": source_labels[component],
                 "source_set_receipt": {
@@ -1386,6 +1607,30 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
                     "sha256": archive_hash,
                     "url": f"{self.BASE_URL}/releases/download/{tag}/{archive_name}",
                 },
+            }
+            if component == "ios-native":
+                overlay = self.write_asset(
+                    "ios-native-overlay-receipt.json",
+                    self.json_bytes({
+                        "schema_version": 1,
+                        "receipt_kind": "component-source-overlay",
+                        "component": "ios-native",
+                        "version": self.VERSION,
+                        "base_url": self.BASE_URL,
+                        "source_set_receipt_sha256": source_hashes[component],
+                        "assets": [
+                            {"kind": "source-offer", "file_name": "ios-native-source-offer.txt",
+                             "sha256": sha256(self.root / "ios-native-source-offer.txt")},
+                            {"kind": "replacement-guide", "file_name": "ios-native-lgpl-replacement.txt",
+                             "sha256": sha256(self.root / "ios-native-lgpl-replacement.txt")},
+                        ],
+                        "distribution": {"package_required": True, "release_required": True},
+                    }),
+                )
+            components[component]["overlay_receipt"] = {
+                "display_name": f"{'ADB helper' if component == 'adb-helper' else 'iOS native'} overlay receipt",
+                "file_name": overlay.name,
+                "sha256": sha256(overlay),
             }
 
         package_specs = [
@@ -1752,6 +1997,8 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
             lines.append(link(record["display_name"], record["source_archive"]["file_name"]))
             receipt = record["source_set_receipt"]
             lines.append(link(receipt["display_name"], receipt["file_name"]))
+            overlay = record["overlay_receipt"]
+            lines.append(link(overlay["display_name"], overlay["file_name"]))
         lines.extend(
             link(asset["display_name"], asset["file_name"])
             for asset in document["support_assets"]
@@ -1780,7 +2027,7 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
         ):
             self.make_publication()
 
-    def test_target_publication_has_exact_23_uploaded_and_25_visible_assets(self):
+    def test_target_publication_has_exact_25_uploaded_and_27_visible_assets(self):
         manifest, document = self.make_publication()
         uploaded = sorted(path.name for path in self.root.iterdir())
         package_names = {package["file_name"] for package in document["packages"]}
@@ -1797,15 +2044,16 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
             manifest.name,
             self.release_contract["evidence_archive"]["file_name"],
             self.release_contract["checksums"]["file_name"],
+            *(component["overlay_receipt"]["file_name"] for component in document["components"].values()),
         }
         self.assertEqual(set(uploaded), expected)
-        self.assertEqual(len(uploaded), 23, uploaded)
+        self.assertEqual(len(uploaded), 25, uploaded)
         self.assertEqual(len(package_names), 8)
         self.assertEqual(len(source_archives), 2)
         self.assertEqual(len(source_receipts), 2)
         self.assertEqual(len(support_names), 8)
         self.assertEqual(
-            len(uploaded) + self.release_contract["github_generated_asset_count"], 25
+            len(uploaded) + self.release_contract["github_generated_asset_count"], 27
         )
         checksum_lines = self.checksum_lines()
         self.assertEqual(
@@ -1825,6 +2073,175 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
         manifest, _ = self.make_publication()
         result = self.run_verifier(manifest)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_adb_overlay_must_bind_current_core_version_repository_and_offer(self):
+        mutations = {
+            "missing overlay": lambda doc, overlay: doc["components"]["adb-helper"].pop("overlay_receipt"),
+            "wrong overlay hash": lambda doc, overlay: doc["components"]["adb-helper"]["overlay_receipt"].update(sha256="0" * 64),
+            "wrong kind": lambda doc, overlay: overlay.update(receipt_kind="component-source-set"),
+            "wrong component": lambda doc, overlay: overlay.update(component="ios-native"),
+            "extra field": lambda doc, overlay: overlay.update(unknown=True),
+            "wrong schema": lambda doc, overlay: overlay.update(schema_version=True),
+            "wrong version": lambda doc, overlay: overlay.update(version="26.08.27"),
+            "wrong repository": lambda doc, overlay: overlay.update(base_url="https://example.invalid/other"),
+            "wrong core": lambda doc, overlay: overlay.update(source_set_receipt_sha256="0" * 64),
+            "wrong distribution": lambda doc, overlay: overlay["distribution"].update(package_required=False),
+            "wrong offer kind": lambda doc, overlay: overlay["assets"][0].update(kind="not-an-offer"),
+            "wrong offer filename": lambda doc, overlay: overlay["assets"][0].update(file_name="adb-helper-notices.tar.gz"),
+            "wrong offer hash": lambda doc, overlay: overlay["assets"][0].update(sha256="0" * 64),
+            "extra overlay asset": lambda doc, overlay: overlay["assets"].append(overlay["assets"][0].copy()),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                manifest, document = self.make_publication()
+                path = self.root / "adb-helper-overlay-receipt.json"
+                overlay = json.loads(path.read_text(encoding="utf-8"))
+                mutate(document, overlay)
+                path.write_bytes(self.json_bytes(overlay))
+                if label != "wrong overlay hash" and "overlay_receipt" in document["components"]["adb-helper"]:
+                    document["components"]["adb-helper"]["overlay_receipt"]["sha256"] = sha256(path)
+                self.update_manifest(document)
+                result = self.run_verifier(manifest)
+                self.assertNotEqual(result.returncode, 0, (label, result.stdout, result.stderr))
+                self.assertRegex((result.stdout + result.stderr).lower(), r"overlay|source support")
+                for asset in list(self.root.iterdir()):
+                    if asset.is_file():
+                        asset.unlink()
+
+    def test_ios_overlay_rejects_missing_stale_or_substituted_offer_and_guide(self):
+        mutations = {
+            "missing overlay": lambda doc, overlay: doc["components"]["ios-native"].pop("overlay_receipt"),
+            "wrong overlay hash": lambda doc, overlay: doc["components"]["ios-native"]["overlay_receipt"].update(sha256="0" * 64),
+            "wrong component": lambda doc, overlay: overlay.update(component="adb-helper"),
+            "wrong kind": lambda doc, overlay: overlay.update(receipt_kind="wrong-kind"),
+            "wrong schema": lambda doc, overlay: overlay.update(schema_version=True),
+            "wrong version": lambda doc, overlay: overlay.update(version="26.08.27"),
+            "wrong URL": lambda doc, overlay: overlay.update(base_url="https://example.invalid/other"),
+            "wrong core": lambda doc, overlay: overlay.update(source_set_receipt_sha256="0" * 64),
+            "wrong distribution": lambda doc, overlay: overlay["distribution"].update(release_required=False),
+            "missing guide": lambda doc, overlay: overlay["assets"].pop(),
+            "duplicate guide": lambda doc, overlay: overlay["assets"].append(overlay["assets"][1].copy()),
+            "wrong offer hash": lambda doc, overlay: overlay["assets"][0].update(sha256="0" * 64),
+            "wrong guide filename": lambda doc, overlay: overlay["assets"][1].update(file_name="NOTICE-ios-native.txt"),
+            "extra legal binding": lambda doc, overlay: overlay.update(legal_receipt_sha256="a" * 64),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                manifest, document = self.make_publication()
+                path = self.root / "ios-native-overlay-receipt.json"
+                overlay = json.loads(path.read_text(encoding="utf-8"))
+                mutate(document, overlay)
+                path.write_bytes(self.json_bytes(overlay))
+                if label != "wrong overlay hash" and "overlay_receipt" in document["components"]["ios-native"]:
+                    document["components"]["ios-native"]["overlay_receipt"]["sha256"] = sha256(path)
+                self.update_manifest(document)
+                result = self.run_verifier(manifest)
+                self.assertNotEqual(result.returncode, 0, (label, result.stdout, result.stderr))
+                self.assertRegex((result.stdout + result.stderr).lower(), r"overlay|source support")
+                for asset in list(self.root.iterdir()):
+                    if asset.is_file():
+                        asset.unlink()
+
+    def test_ios_core_receipt_cannot_own_versioned_overlay_assets(self):
+        for name in ("ios-native-source-offer.txt", "ios-native-lgpl-replacement.txt"):
+            with self.subTest(name=name):
+                manifest, document = self.make_publication()
+                core = self.root / "ios-native-source-set-receipt.json"
+                receipt = json.loads(core.read_text(encoding="utf-8"))
+                receipt["package_support_assets"].append({
+                    "kind": "source-offer" if "offer" in name else "replacement-guide",
+                    "file_name": name,
+                    "sha256": sha256(self.root / name),
+                })
+                core.write_bytes(self.json_bytes(receipt))
+                document["components"]["ios-native"]["source_set_receipt"]["sha256"] = sha256(core)
+                overlay_path = self.root / "ios-native-overlay-receipt.json"
+                overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+                overlay["source_set_receipt_sha256"] = sha256(core)
+                overlay_path.write_bytes(self.json_bytes(overlay))
+                document["components"]["ios-native"]["overlay_receipt"]["sha256"] = sha256(overlay_path)
+                for package in document["packages"]:
+                    if "ios-native" in package["source_sets"]:
+                        package["source_sets"]["ios-native"] = sha256(core)
+                self.update_manifest(document)
+                result = self.run_verifier(manifest)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertRegex((result.stdout + result.stderr).lower(), r"overlay.*core")
+                for asset in list(self.root.iterdir()):
+                    if asset.is_file():
+                        asset.unlink()
+
+    def test_ios_offer_and_guide_cannot_be_forged_with_synchronized_hashes(self):
+        for name, replacement in (
+            ("ios-native-source-offer.txt", b"https://example.invalid/other"),
+            ("ios-native-lgpl-replacement.txt", b"wrong-source-archive.tar.gz"),
+        ):
+            with self.subTest(name=name):
+                manifest, document = self.make_publication()
+                path = self.root / name
+                path.write_bytes(path.read_bytes().replace(
+                    self.BASE_URL.encode() if "offer" in name else
+                    document["components"]["ios-native"]["source_archive"]["file_name"].encode(),
+                    replacement,
+                ))
+                overlay_path = self.root / "ios-native-overlay-receipt.json"
+                overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+                for asset in overlay["assets"]:
+                    if asset["file_name"] == name:
+                        asset["sha256"] = sha256(path)
+                overlay_path.write_bytes(self.json_bytes(overlay))
+                document["components"]["ios-native"]["overlay_receipt"]["sha256"] = sha256(overlay_path)
+                next(asset for asset in document["support_assets"] if asset["file_name"] == name)["sha256"] = sha256(path)
+                self.update_manifest(document)
+                result = self.run_verifier(manifest)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertRegex((result.stdout + result.stderr).lower(), r"overlay|offer|guide")
+                for asset in list(self.root.iterdir()):
+                    if asset.is_file():
+                        asset.unlink()
+
+    def test_adb_offer_cannot_be_owned_by_core_or_replaced_by_an_unbound_asset(self):
+        for scenario in ("core-owns-offer", "unbound-offer", "forged-offer-url"):
+            with self.subTest(scenario=scenario):
+                manifest, document = self.make_publication()
+                if scenario == "core-owns-offer":
+                    core = self.root / "adb-helper-source-set-receipt.json"
+                    receipt = json.loads(core.read_text(encoding="utf-8"))
+                    receipt["package_support_assets"].append({
+                        "kind": "source-offer",
+                        "file_name": "ADB-HELPER-SOURCE-OFFER.txt",
+                        "sha256": sha256(self.root / "ADB-HELPER-SOURCE-OFFER.txt"),
+                    })
+                    core.write_bytes(self.json_bytes(receipt))
+                    document["components"]["adb-helper"]["source_set_receipt"]["sha256"] = sha256(core)
+                    overlay_path = self.root / "adb-helper-overlay-receipt.json"
+                    overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+                    overlay["source_set_receipt_sha256"] = sha256(core)
+                    overlay_path.write_bytes(self.json_bytes(overlay))
+                    document["components"]["adb-helper"]["overlay_receipt"]["sha256"] = sha256(overlay_path)
+                    for package in document["packages"]:
+                        package["source_sets"]["adb-helper"] = sha256(core)
+                else:
+                    offer = self.root / "ADB-HELPER-SOURCE-OFFER.txt"
+                    if scenario == "unbound-offer":
+                        offer.write_bytes(b"substituted source offer\n")
+                    else:
+                        offer.write_bytes(offer.read_bytes().replace(
+                            self.BASE_URL.encode(), b"https://example.invalid/replaced"
+                        ))
+                        overlay_path = self.root / "adb-helper-overlay-receipt.json"
+                        overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+                        overlay["assets"][0]["sha256"] = sha256(offer)
+                        overlay_path.write_bytes(self.json_bytes(overlay))
+                        document["components"]["adb-helper"]["overlay_receipt"]["sha256"] = sha256(overlay_path)
+                    document["support_assets"][3]["sha256"] = sha256(offer)
+                self.update_manifest(document)
+                result = self.run_verifier(manifest)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertRegex((result.stdout + result.stderr).lower(), r"overlay|offer|support")
+                for asset in list(self.root.iterdir()):
+                    if asset.is_file():
+                        asset.unlink()
 
     def test_manifest_must_be_the_exact_checksummed_asset_inside_the_publication_root(self):
         manifest, _ = self.make_publication()
@@ -2123,7 +2540,7 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
                 body = output.read_text(encoding="utf-8")
                 self.assertEqual(body, self.expected_body(document, changelog))
                 urls = re.findall(r"\]\(([^)]+)\)", body)
-                self.assertEqual(len(urls), 23 + (channel == "continuous"))
+                self.assertEqual(len(urls), 25 + (channel == "continuous"))
                 for url in urls:
                     parsed = urllib.parse.urlsplit(url)
                     self.assertEqual(parsed.scheme, "https")
@@ -2231,12 +2648,12 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
         self.assertIn(self.release_contract["evidence_archive"]["file_name"], continuous)
         self.assertIn(self.release_contract["checksums"]["file_name"], continuous)
         self.assertIn("write_checksums(staging)", promoter)
-        self.assertIn('test "$asset_count" -eq 23', stable)
+        self.assertIn('test "$asset_count" -eq 25', stable)
         self.assertNotIn("Candidate", section(continuous, "- name: Create continuous candidate draft", "- name: Verify continuous candidate after upload").split("name:", 2)[-1])
         self.assertIn('-f name="Continuous Build ${KLOGG_VERSION}"', continuous)
         self.assertEqual(
             self.release_contract["uploaded_asset_count"],
-            8 + 2 + 2 + 8 + 1 + 1 + 1,
+            8 + 2 + 2 + 8 + 2 + 1 + 1 + 1,
         )
 
     def test_ci_package_artifacts_contain_only_publication_inputs(self):

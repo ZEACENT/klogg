@@ -1689,7 +1689,9 @@ TEST_CASE( "ProcessLiveSourceTransport treats unexpected clean process exit as e
     const auto failedCapturePath = transport.stderrFilePathForTest();
     REQUIRE( QFileInfo::exists( failedCapturePath ) );
 
-    REQUIRE( errorSpy.safeWait( 3000 ) );
+    // On Windows the finite ping process itself takes about three seconds;
+    // this is an outer completion bound, not a latency assertion.
+    REQUIRE( errorSpy.safeWait() );
     REQUIRE_FALSE( transport.lastError().isEmpty() );
     REQUIRE( transport.stderrFilePathForTest() != failedCapturePath );
     REQUIRE( QFileInfo::exists( transport.stderrFilePathForTest() ) );

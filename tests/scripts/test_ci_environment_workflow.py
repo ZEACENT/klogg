@@ -20,8 +20,12 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(QUALITY)
 CI_BUILD = ROOT / ".github/workflows/ci-build.yml"
 PRODUCER = ROOT / ".github/workflows/ci-environments.yml"
-PREFIX = "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}"
-ORDINARY = "(github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off')"
+PREFIX = ("${{ github.event_name == 'workflow_dispatch' && "
+          "(inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') "
+          "&& '[producer-mode skipped] ' || '' }}")
+NATIVE_PREFIX = ("${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' "
+                 "&& '[producer-mode skipped] ' || '' }}")
+ORDINARY = "(github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off'))"
 
 
 def mutate_job(text, job, old, new):
@@ -41,13 +45,19 @@ def python_payload(text, job, name):
     raise AssertionError("missing executable Python payload")
 
 
-def event_expression(expression, event, mode, skipped=False):
+def event_expression(expression, event, environment_mode, dependency_mode="off", skipped=False):
     text = expression[3:] if expression.startswith("${{") else expression
     text = text[:-2] if text.endswith("}}") else text
     text = text.strip()
-    text = text.replace("github.event_name", repr(event)).replace("inputs.environment-mode", repr(mode))
+    text = (text.replace("github.event_name", repr(event))
+            .replace("inputs.environment-mode", repr(environment_mode))
+            .replace("inputs.dependency-mode", repr(dependency_mode)))
     text = text.replace("!contains(github.event.head_commit.message, '[skip ci]')", repr(not skipped))
-    text = text.replace("always()", "True").replace("&&", "and").replace("||", "or")
+    preflight = ("success" if event == "workflow_dispatch" and dependency_mode != "off"
+                 and environment_mode == "off" else "skipped")
+    text = text.replace("needs.DependencyModePreflight.result", repr(preflight))
+    text = text.replace("!cancelled()", "True").replace("always()", "True")
+    text = text.replace("&&", "and").replace("||", "or")
     parsed = ast.parse(text, mode="eval")
     allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare, ast.Eq, ast.NotEq, ast.Constant)
     if not all(isinstance(node, allowed) for node in ast.walk(parsed)):
@@ -59,6 +69,7 @@ class EnvironmentBootstrapTest(unittest.TestCase):
     def test_registered_dispatch_exposes_explicit_environment_mode_and_source_pins(self):
         text = CI_BUILD.read_text()
         self.assertIn("      environment-mode:\n", text)
+        self.assertIn("      dependency-mode:\n", text)
         self.assertIn("      expected-source-sha:\n", text)
         self.assertIn("      analysis-base-sha:\n", text)
         blocks = QUALITY.workflow_job_blocks(text)
@@ -68,53 +79,101 @@ class EnvironmentBootstrapTest(unittest.TestCase):
     def test_skipped_producer_mode_jobs_cannot_emit_ordinary_required_check_names(self):
         blocks = QUALITY.workflow_job_blocks(CI_BUILD.read_text())
         for job in QUALITY.CI_BUILD_REQUIRED_JOBS:
-            if job in ("EnvironmentModePreflight", "EnvironmentProducer"):
-                continue
             with self.subTest(job=job):
                 name = QUALITY.workflow_job_direct_value(blocks[job], "name")
-                self.assertTrue(name.startswith(PREFIX), name)
+                prefix = NATIVE_PREFIX if job in QUALITY.CI_BUILD_NATIVE_JOBS else PREFIX
+                self.assertTrue(name.startswith(prefix), name)
 
     def test_lint_rejects_skipped_normal_gate_name_not_only_gate_execution_condition(self):
         text = CI_BUILD.read_text()
-        if PREFIX in text:
-            mutated = text.replace(PREFIX + "ci-gate", "ci-gate", 1)
-        else:
-            mutated = text.replace("    if: always()\n", "    if: ${{ always() && " + ORDINARY + " }}\n", 1)
+        mutated = mutate_job(text, "ci-gate", PREFIX + "ci-gate", "ci-gate")
         self.assertNotEqual(text, mutated)
         self.assertIn("CI producer mode must distinguish every skipped ordinary check name: ci-gate",
                       QUALITY.ci_build_workflow_issues(mutated))
 
     def test_normal_event_names_and_gate_behavior_are_unchanged_but_producer_names_are_distinct(self):
         blocks = QUALITY.workflow_job_blocks(CI_BUILD.read_text())
-        cases = (("push", "off", True), ("pull_request", "off", True),
-                 ("workflow_dispatch", "off", True), ("workflow_dispatch", "qualify", False),
-                 ("workflow_dispatch", "publish", False), ("push", "publish", True))
-        for event, mode, ordinary in cases:
-            with self.subTest(event=event, mode=mode):
+        cases = (("push", "off", "off", True), ("pull_request", "off", "off", True),
+                 ("workflow_dispatch", "off", "off", True),
+                 ("workflow_dispatch", "qualify", "off", False),
+                 ("workflow_dispatch", "publish", "off", False),
+                 ("workflow_dispatch", "off", "qualify", False),
+                 ("workflow_dispatch", "off", "publish", False),
+                 ("workflow_dispatch", "qualify", "publish", False),
+                 ("push", "publish", "qualify", True))
+        for event, environment_mode, dependency_mode, ordinary in cases:
+            with self.subTest(event=event, environment_mode=environment_mode, dependency_mode=dependency_mode):
                 for job in QUALITY.CI_BUILD_REQUIRED_JOBS:
                     fields = blocks[job]
                     name = QUALITY.workflow_job_direct_value(fields, "name")
-                    self.assertTrue(name.startswith(PREFIX))
-                    actual = event_expression(PREFIX, event, mode) + name[len(PREFIX):]
-                    if ordinary:
-                        self.assertEqual(actual, name[len(PREFIX):])
-                    else:
-                        self.assertTrue(actual.startswith("[environment-mode skipped] "))
-                        self.assertNotEqual(actual, name[len(PREFIX):])
+                    native = job in QUALITY.CI_BUILD_NATIVE_JOBS
+                    prefix = NATIVE_PREFIX if native else PREFIX
+                    self.assertTrue(name.startswith(prefix))
+                    actual = event_expression(prefix, event, environment_mode, dependency_mode) + name[len(prefix):]
+                    should_prefix = event == "workflow_dispatch" and (environment_mode != "off" or
+                                    (dependency_mode != "off" and not native))
+                    self.assertEqual(actual.startswith("[producer-mode skipped] "), should_prefix)
                     if job == "DispatchContinuous":
                         self.assertIn("github.event_name == 'push'", QUALITY.workflow_job_direct_value(fields, "if"))
                         continue
                     condition = QUALITY.workflow_job_direct_value(fields, "if")
-                    self.assertEqual(bool(event_expression(condition, event, mode)), ordinary)
-                    self.assertEqual(bool(event_expression(condition, event, mode, skipped=True)), ordinary and job == "ci-gate")
+                    native_selected = event == "workflow_dispatch" and dependency_mode in {"qualify", "publish"}
+                    selected = ordinary or (native and native_selected and
+                                            (environment_mode == "off" or job not in QUALITY.CI_BUILD_NATIVE_ROOT_JOBS))
+                    self.assertEqual(bool(event_expression(condition, event, environment_mode, dependency_mode)), selected)
+                    self.assertEqual(bool(event_expression(condition, event, environment_mode, dependency_mode, skipped=True)),
+                                     not native and ordinary and job == "ci-gate")
 
     def test_every_ordinary_name_shadow_mutation_is_rejected(self):
         text = CI_BUILD.read_text()
         for job in QUALITY.CI_BUILD_REQUIRED_JOBS:
             with self.subTest(job=job):
-                mutated = mutate_job(text, job, PREFIX, "")
+                prefix = NATIVE_PREFIX if job in QUALITY.CI_BUILD_NATIVE_JOBS else PREFIX
+                mutated = mutate_job(text, job, prefix, "")
                 self.assertIn("CI producer mode must distinguish every skipped ordinary check name: " + job,
                               QUALITY.ci_build_environment_mode_issues(mutated))
+
+    def test_ordinary_guard_cannot_omit_dependency_mode(self):
+        text = CI_BUILD.read_text()
+        old_guard = ORDINARY
+        environment_only = "(github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off')"
+        for job in ("BuildAdbLinuxX64", "ci-gate"):
+            with self.subTest(job=job):
+                mutated = mutate_job(text, job, old_guard, environment_only)
+                self.assertIn("CI job must isolate ordinary and native dependency dispatch: " + job,
+                              QUALITY.ci_build_environment_mode_issues(mutated))
+
+    def test_isolated_producer_projections_exclude_mixed_environment_dependency_modes(self):
+        blocks = QUALITY.workflow_job_blocks(CI_BUILD.read_text())
+        cases = (("push", "off", "off", False, False, False),
+                 ("pull_request", "off", "off", False, False, False),
+                 ("workflow_dispatch", "off", "off", False, False, False),
+                 ("workflow_dispatch", "qualify", "off", False, True, True),
+                 ("workflow_dispatch", "publish", "off", False, True, True),
+                 ("workflow_dispatch", "off", "qualify", True, False, False),
+                 ("workflow_dispatch", "off", "publish", True, False, False),
+                 ("workflow_dispatch", "qualify", "publish", True, False, False),
+                 ("push", "qualify", "publish", False, False, False))
+        for event, environment_mode, dependency_mode, dependency, preflight, producer in cases:
+            with self.subTest(event=event, environment_mode=environment_mode, dependency_mode=dependency_mode):
+                for job, expected in (("DependencyModePreflight", dependency),
+                                      ("EnvironmentModePreflight", preflight),
+                                      ("EnvironmentProducer", producer)):
+                    condition = QUALITY.workflow_job_direct_value(blocks[job], "if")
+                    self.assertEqual(bool(event_expression(condition, event, environment_mode, dependency_mode)), expected,
+                                     job)
+
+    def test_mixed_mode_cannot_launch_environment_producer_or_preflight(self):
+        text = CI_BUILD.read_text()
+        for job, old, new, issue in (
+            ("EnvironmentModePreflight", "inputs.dependency-mode == 'off'", "inputs.dependency-mode != 'off'",
+             "CI environment dispatch preflight must be a read-only producer-only root"),
+            ("EnvironmentProducer", "inputs.dependency-mode == 'off'", "inputs.dependency-mode != 'off'",
+             "CI environment caller must use the exact source-local reusable workflow and narrow permission ceiling"),
+        ):
+            with self.subTest(job=job):
+                mutated = mutate_job(text, job, old, new)
+                self.assertIn(issue, QUALITY.ci_build_environment_mode_issues(mutated))
 
     def test_caller_permissions_secrets_and_wrong_ref_cannot_bypass_reusable_boundary(self):
         text = CI_BUILD.read_text()
@@ -145,6 +204,30 @@ class EnvironmentBootstrapTest(unittest.TestCase):
             with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {**valid, key: value}):
                 with self.assertRaises(SystemExit):
                     exec(compile(payload, "<dispatch preflight>", "exec"), {})
+
+    def test_dependency_preflight_rejects_unwired_qualify_publish_and_unsafe_sources(self):
+        text = CI_BUILD.read_text()
+        payload = python_payload(text, "DependencyModePreflight", "Validate isolated dependency mode and exact source")
+        valid = {"KLOGG_DEPENDENCY_MODE": "qualify", "KLOGG_ENVIRONMENT_MODE": "off",
+                 "KLOGG_QUALIFICATION_MODE": "validation", "KLOGG_EXPECTED_SOURCE_SHA": "1" * 40,
+                 "GITHUB_SHA": "1" * 40, "GITHUB_REPOSITORY": "ZEACENT/klogg", "GITHUB_REF": "refs/heads/feature"}
+        for mode in ("qualify", "publish"):
+            with self.subTest(mode=mode), mock.patch.dict(os.environ, {**valid, "KLOGG_DEPENDENCY_MODE": mode}):
+                exec(compile(payload, "<dependency dispatch preflight>", "exec"), {})
+        for key, value in (("KLOGG_DEPENDENCY_MODE", "off"), ("KLOGG_DEPENDENCY_MODE", "unknown"),
+                           ("KLOGG_ENVIRONMENT_MODE", "qualify"), ("KLOGG_QUALIFICATION_MODE", "release"),
+                           ("KLOGG_EXPECTED_SOURCE_SHA", ""), ("KLOGG_EXPECTED_SOURCE_SHA", "0" * 40),
+                           ("KLOGG_EXPECTED_SOURCE_SHA", "3" * 40), ("GITHUB_REPOSITORY", "fork/klogg"),
+                           ("GITHUB_REF", "refs/tags/release")):
+            with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {**valid, key: value}):
+                with self.assertRaises(SystemExit):
+                    exec(compile(payload, "<dependency dispatch preflight>", "exec"), {})
+        for old, new in (("dependency-mode cannot combine with environment-mode", "mixed modes accepted"),
+                         ("inputs.dependency-mode != 'off'", "inputs.dependency-mode == 'off'")):
+            with self.subTest(mutation=old):
+                mutated = mutate_job(text, "DependencyModePreflight", old, new)
+                self.assertIn("CI dependency dispatch must reject mixed modes, noncanonical or stale source",
+                              QUALITY.ci_build_environment_mode_issues(mutated))
 
 
 class EnvironmentProducerLintTest(unittest.TestCase):

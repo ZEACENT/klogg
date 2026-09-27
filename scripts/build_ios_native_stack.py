@@ -322,6 +322,7 @@ def main() -> int:
         "sdk_version": run(["xcrun", "--show-sdk-version"]).strip(),
         "xcode": run(["xcodebuild", "-version"]).splitlines(),
         "cmake": run(["cmake", "--version"]).splitlines()[0],
+        "ninja": run(["ninja", "--version"]).strip(),
     }
     receipt = {
         "schema_version": 1,

@@ -109,6 +109,8 @@ def render_body(
         lines.append(link(record["display_name"], record["source_archive"]["file_name"]))
         receipt = record["source_set_receipt"]
         lines.append(link(receipt["display_name"], receipt["file_name"]))
+        overlay = record["overlay_receipt"]
+        lines.append(link(overlay["display_name"], overlay["file_name"]))
     for asset in document["support_assets"]:
         lines.append(link(asset["display_name"], asset["file_name"]))
     lines.extend(

@@ -6,6 +6,10 @@ runs:
     - name: configure
       shell: sh
       run: |
+        case " $KLOGG_CMAKE_OPTS " in
+          *" -DCMAKE_EXPORT_COMPILE_COMMANDS=OFF "*|*" -DCMAKE_EXPORT_COMPILE_COMMANDS=0 "*)
+            echo "::error::KLOGG_CMAKE_OPTS conflicts with the required compile database"; exit 1 ;;
+        esac
         attempt=1
         max_attempts=3
         while [ $attempt -le $max_attempts ]; do
@@ -13,7 +17,7 @@ runs:
           mkdir -p "$KLOGG_BUILD_ROOT"
           cd "$KLOGG_BUILD_ROOT"
 
-          if cmake $KLOGG_CMAKE_OPTS -DCPM_SOURCE_CACHE=$KLOGG_WORKSPACE/cpm_cache -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 $KLOGG_WORKSPACE; then
+          if cmake $KLOGG_CMAKE_OPTS -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCPM_SOURCE_CACHE=$KLOGG_WORKSPACE/cpm_cache -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 $KLOGG_WORKSPACE; then
             exit 0
           fi
 
@@ -29,4 +33,14 @@ runs:
     - name: build
       shell: sh
       run: |
-        cmake --build $KLOGG_BUILD_ROOT -t ci_build
+        case "$RUNNER_OS" in
+          Windows) object_cache=disabled ;;
+          macOS) object_cache=measured ;;
+          *) echo "::error::unreviewed native build metrics platform: $RUNNER_OS"; exit 1 ;;
+        esac
+        python3 scripts/ci_build_metrics.py run-build \
+          --repo-root "$KLOGG_WORKSPACE" \
+          --build-root "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT" \
+          --output "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/ci-build-metrics.json" \
+          --object-cache "$object_cache" \
+          -- cmake --build "$KLOGG_BUILD_ROOT" -t ci_build

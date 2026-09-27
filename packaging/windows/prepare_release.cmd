@@ -39,6 +39,7 @@ for %%A in (
     ADB-HELPER-SOURCE-OFFER.txt
     adb-helper-source-manifest.json
     adb-helper-source-set-receipt.json
+    adb-helper-overlay-receipt.json
 ) do (
     if not exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\adb-helper-package-assets\%%A (
         echo ERROR: required ADB package support asset missing: %%A

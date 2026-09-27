@@ -21,11 +21,15 @@ from source_publication_identity import (
 )
 from verify_source_publication_manifest import (
     COMPONENT_DISPLAY_NAMES,
+    OVERLAY_ASSETS,
+    OVERLAY_DISPLAY_NAMES,
     EVIDENCE_LEVELS,
     PublicationError,
     SIGNED_MACOS_PACKAGE_RECEIPTS,
     SUPPORT_DISPLAY_NAMES,
+    overlay_receipt_name,
     supported_package_display,
+    verify_component_overlay,
     verify_manifest,
     verify_package_receipt_evidence,
 )
@@ -123,6 +127,8 @@ def publish_component(
         # license subtrees remain in the corresponding-source archive and installers.
         if len(relative.parts) != 1:
             continue
+        if relative.name in OVERLAY_ASSETS[component].values():
+            raise PublicationError(f"{component} overlay asset cannot be owned by core source set")
         source = root / relative
         if sha256(source) != item.get("sha256"):
             raise PublicationError(
@@ -145,10 +151,36 @@ def publish_component(
         )
 
     receipt_hash = sha256(published_receipt)
+    overlay_name = overlay_receipt_name(component)
+    overlay_source = root / overlay_name
+    overlay_assets = verify_component_overlay(
+        component, read_json(overlay_source, f"{component} overlay receipt"),
+        receipt_hash, version, base_url, archive_hash, root,
+    )
+    for item in overlay_assets:
+        name = item["file_name"]
+        published_asset = copy_regular(
+            root / name, output / name, f"{component} overlay support asset"
+        )
+        support_records.append(
+            {
+                "display_name": SUPPORT_DISPLAY_NAMES[published_asset.name],
+                "file_name": published_asset.name,
+                "sha256": sha256(published_asset),
+            }
+        )
+    published_overlay = copy_regular(
+        overlay_source, output / overlay_name, f"{component} overlay receipt"
+    )
     source_display, receipt_display = COMPONENT_DISPLAY_NAMES[component]
     return (
         {
             "display_name": source_display,
+            "overlay_receipt": {
+                "display_name": OVERLAY_DISPLAY_NAMES[component],
+                "file_name": published_overlay.name,
+                "sha256": sha256(published_overlay),
+            },
             "source_set_receipt": {
                 "display_name": receipt_display,
                 "file_name": published_receipt.name,

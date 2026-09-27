@@ -76,8 +76,8 @@ jobs:
           import sys
 
           records = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          if not isinstance(records, list) or len(records) != 23:
-              raise SystemExit("live Continuous release must contain exactly 23 assets")
+          if not isinstance(records, list) or len(records) != 25:
+              raise SystemExit("live Continuous release must contain exactly 25 assets")
           ids = set()
           names = set()
           normalized = []
@@ -245,7 +245,7 @@ jobs:
             --expected-commit "${KLOGG_SOURCE_COMMIT}" \
             --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
           asset_count="$(find packages-publication -maxdepth 1 -type f | wc -l)"
-          test "$asset_count" -eq 23
+          test "$asset_count" -eq 25
           python3 scripts/render_release_downloads.py \
             --manifest packages-publication/klogg-source-publication-manifest.json \
             --assets-root packages-publication \

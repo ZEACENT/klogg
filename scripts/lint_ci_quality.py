@@ -98,14 +98,41 @@ CI_BUILD_REQUIRED_JOBS = {
 }
 
 CI_BUILD_POST_GATE_JOBS = {"DispatchContinuous"}
-CI_BUILD_ENVIRONMENT_JOBS = {"EnvironmentModePreflight", "EnvironmentProducer"}
-CI_BUILD_ORDINARY_EVENT = "(github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off')"
+CI_BUILD_PRODUCER_JOBS = {"EnvironmentModePreflight", "EnvironmentProducer", "DependencyModePreflight", "DependencyGate"}
+CI_BUILD_NATIVE_ROOT_JOBS = {"SaveVersion", "PrefetchAdbHelperSources", "PrefetchIosNativeSources"}
+CI_BUILD_NATIVE_JOBS = CI_BUILD_NATIVE_ROOT_JOBS | {
+    "BuildAdbHelperLegalAssets", "BuildAdbLinuxX64", "BuildAdbLinuxArm64",
+    "BuildAdbWindowsX64", "BuildAdbMacX64", "BuildAdbMacArm64",
+    "BuildIosNativeX64", "BuildIosNativeArm64",
+}
+CI_BUILD_NATIVE_NAMES = {
+    "SaveVersion": "Resolve build version",
+    "PrefetchAdbHelperSources": "Prefetch locked ADB helper source closure",
+    "PrefetchIosNativeSources": "Prefetch locked iOS native sources",
+    "BuildAdbHelperLegalAssets": "Build ADB helper legal assets",
+    "BuildAdbLinuxX64": "Source-built ADB helper linux-x86_64",
+    "BuildAdbLinuxArm64": "Source-built ADB helper linux-arm64",
+    "BuildAdbWindowsX64": "Source-built ADB helper windows-x86_64",
+    "BuildAdbMacX64": "Source-built ADB helper macos-x86_64",
+    "BuildAdbMacArm64": "Source-built ADB helper macos-arm64",
+    "BuildIosNativeX64": "iOS native stack x86_64",
+    "BuildIosNativeArm64": "iOS native stack arm64",
+}
+CI_BUILD_ORDINARY_EVENT = "(github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off'))"
+CI_BUILD_NATIVE_EVENT = "(github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))"
+CI_BUILD_NATIVE_IF = "${{ (" + CI_BUILD_ORDINARY_EVENT + " || " + CI_BUILD_NATIVE_EVENT + ") && !contains(github.event.head_commit.message, '[skip ci]') }}"
+CI_BUILD_NATIVE_ROOT_IF = "${{ !cancelled() && (" + CI_BUILD_ORDINARY_EVENT + " || (" + CI_BUILD_NATIVE_EVENT[1:-1] + " && needs.DependencyModePreflight.result == 'success')) && !contains(github.event.head_commit.message, '[skip ci]') }}"
 CI_BUILD_ORDINARY_IF = "${{ " + CI_BUILD_ORDINARY_EVENT + " && !contains(github.event.head_commit.message, '[skip ci]') }}"
 CI_BUILD_ORDINARY_GATE_IF = "${{ always() && " + CI_BUILD_ORDINARY_EVENT + " }}"
 CI_BUILD_PRODUCER_NAME_PREFIX = (
-    "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' "
-    "&& '[environment-mode skipped] ' || '' }}"
+    "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') "
+    "&& '[producer-mode skipped] ' || '' }}"
 )
+CI_BUILD_NATIVE_NAME_PREFIX = (
+    "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' "
+    "&& '[producer-mode skipped] ' || '' }}"
+)
+CI_DEPENDENCY_CALL_PERMISSIONS = {"contents": "read", "actions": "read", "attestations": "read"}
 CI_ENVIRONMENT_CALL_PERMISSIONS = {
     "contents": "read", "actions": "read", "packages": "write", "id-token": "write",
     "attestations": "write", "security-events": "write",
@@ -124,14 +151,11 @@ CI_BUILD_PACKAGE_ENABLEMENT = {
 }
 
 CI_BUILD_ROOT_JOBS = {
-    "SaveVersion",
     "PrefetchCpmCache",
     "PrefetchBoost",
     "PrefetchOpenSsl",
     "PrefetchLinuxDeployQt",
     "PrefetchWindowsTools",
-    "PrefetchAdbHelperSources",
-    "PrefetchIosNativeSources",
 }
 
 CI_BUILD_ARTIFACT_PRODUCERS = {
@@ -208,7 +232,7 @@ CI_BUILD_ARTIFACT_CONDITIONS = {
     ("LinuxPackages", "downloads", "linuxdeployqt"):
         "${{ env.klogg_config_os == 'ubuntu_appimage' }}",
     ("BuildAdbHelperLegalAssets", "uploads", "adb-helper-legal-assets"):
-        "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release') }}",
+        "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release') || (github.repository == 'zeacent/klogg' && github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish')))) }}",
     ("LinuxPackages", "downloads", "adb-helper-package-support"):
         "${{ env.klogg_package_enabled == 'true' }}",
     ("MacPackages", "downloads", "adb-helper-package-support"):
@@ -1300,6 +1324,122 @@ def ci_environment_workflow_issues(text: str) -> list[str]:
     return issues
 
 
+def ci_dependency_workflow_issues(text: str) -> list[str]:
+    """Keep the child Gate read-only and publication visibly disabled."""
+    issues: list[str] = []
+    triggers = workflow_trigger_mapping(text)
+    blocks = workflow_job_blocks(text)
+    needs = workflow_job_needs(text)
+    if triggers is None or set(triggers) != {"workflow_call"} or set(blocks) != {"Gate", "Publish"}:
+        issues.append("Native dependency workflow must be reusable-only with exact Gate and disabled Publish jobs")
+    inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
+    if (inputs is None or set(inputs) != {"mode", "expected-source-sha", "needs-json"}
+            or any((fields := workflow_mapping_block(block, key, 6)) is None
+                   or fields.get("type", (None,))[0] != "string"
+                   or fields.get("required", (None,))[0] != "true"
+                   for key, (_, block) in inputs.items())):
+        issues.append("Native Gate inputs must require exact parent mode, SHA and GitHub-controlled needs")
+    call_block = triggers.get("workflow_call", (None, []))[1] if triggers is not None else []
+    outputs = workflow_mapping_block(call_block, "outputs", 4)
+    if (outputs is None or {key: (fields or {}).get("value", (None,))[0]
+                            for key, (_, block) in outputs.items()
+                            for fields in [workflow_mapping_block(block, key, 6)]} != {
+                                key: "${{ jobs.Gate.outputs." + key + " }}"
+                                for key in ("gate-tar-sha256", "gate-tar-size", "gate-artifact-id")
+                            }):
+        issues.append("Native Gate must expose exact archive digest, size and independent upload ID")
+    def mapping(block, key):
+        values = workflow_mapping_block(block, key, 4)
+        return None if values is None else {name: value for name, (value, _) in values.items()}
+
+    root_permissions = workflow_mapping_block(text.splitlines(), "permissions", 0)
+    if (root_permissions is None or {key: value for key, (value, _) in root_permissions.items()} != CI_DEPENDENCY_CALL_PERMISSIONS
+            or mapping(blocks.get("Gate", []), "permissions") != CI_DEPENDENCY_CALL_PERMISSIONS
+            or mapping(blocks.get("Publish", []), "permissions") != {"contents": "read"}
+            or re.search(r"\bsecrets\b", active_script_content(text))):
+        issues.append("Native qualification jobs must not receive package, OIDC, attestation write or inherited secrets")
+    gate = blocks.get("Gate", [])
+    publish = blocks.get("Publish", [])
+    gate_outputs = mapping(gate, "outputs")
+    if (needs.get("Gate") != set() or workflow_job_direct_value(gate, "runs-on") != "ubuntu-24.04"
+            or workflow_job_direct_value(gate, "if") is not None
+            or gate_outputs != {
+                "gate-tar-sha256": "${{ steps.archive.outputs.sha256 }}",
+                "gate-tar-size": "${{ steps.archive.outputs.size }}",
+                "gate-artifact-id": "${{ steps.upload_gate.outputs.artifact-id }}",
+            }):
+        issues.append("Native Gate must expose only reviewed same-run artifact identities")
+    if (needs.get("Publish") != {"Gate"} or workflow_job_direct_value(publish, "runs-on") != "ubuntu-24.04"
+            or workflow_job_direct_value(publish, "if") != "${{ inputs.mode == 'publish' }}"):
+        issues.append("Native Publisher must require successful Gate and publish mode")
+    try:
+        gate_steps = [workflow_step_fields(step) for step in workflow_step_blocks(gate)]
+        publish_steps = [workflow_step_fields(step) for step in workflow_step_blocks(publish)]
+    except ValueError as error:
+        return issues + [str(error)]
+    if (any(fields.get("if") is not None or fields.get("continue-on-error") not in (None, "false")
+            for fields, _ in gate_steps + publish_steps)
+            or any(workflow_job_direct_value(block, "continue-on-error") not in (None, "false")
+                   for block in (gate, publish))):
+        issues.append("Native Gate and Publisher steps must not skip work or ignore failures")
+    if (len(gate_steps) != 5 or len(publish_steps) != 1
+            or gate_steps[0][0].get("uses") != "actions/checkout@" + REVIEWED_ACTION_REVISIONS["actions/checkout"]
+            or gate_steps[0][1].get("with") != {"ref": "${{ inputs.expected-source-sha }}", "persist-credentials": "false"}
+            or [fields.get("name") for fields, _ in gate_steps[1:]] != [
+                "Validate and filter parent needs",
+                "Verify independent full builds and qualify exact candidate bytes",
+                "Archive exact eight Gate publisher inputs",
+                "Upload immutable same-run Gate evidence",
+            ]):
+        issues.append("Native Gate must check out exact source and execute only the reviewed qualification steps")
+    else:
+        filtered, verify, archive, upload = gate_steps[1:]
+        filter_lines = filtered[0].get("run", "").splitlines()
+        if (filtered[0].get("shell") != "bash"
+                or filtered[1].get("env") != {
+                    "KLOGG_DEPENDENCY_MODE": "${{ inputs.mode }}",
+                    "KLOGG_EXPECTED_SOURCE_SHA": "${{ inputs.expected-source-sha }}",
+                    "KLOGG_PARENT_NEEDS_JSON": "${{ inputs.needs-json }}",
+                }
+                or not all(line in filter_lines for line in (
+                    'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
+                    'test "$KLOGG_EXPECTED_SOURCE_SHA" = "$GITHUB_SHA"',
+                    "if not isinstance(needs, dict) or set(needs) != expected:",
+                    "if not isinstance(job, dict) or job.get('result') != 'success' or not isinstance(job.get('outputs'), dict):",
+                    "del needs['DependencyModePreflight']",
+                    "destination.write_text(json.dumps(needs, sort_keys=True, separators=(',', ':')) + '\\n', encoding='utf-8')",
+                ))):
+            issues.append("Native Gate must authenticate and filter exactly nine successful parent needs")
+        if (verify[0].get("shell") != "bash"
+                or verify[1].get("env") != {"GH_TOKEN": "${{ github.token }}", "KLOGG_DEPENDENCY_MODE": "${{ inputs.mode }}"}
+                or verify[0].get("run") != '''set -euo pipefail
+python3 scripts/ci_dependency_gate.py \\
+--mode "$KLOGG_DEPENDENCY_MODE" \\
+--repo-root "$GITHUB_WORKSPACE" \\
+--needs-json "$RUNNER_TEMP/native-gate-needs.json" \\
+--output-dir "$RUNNER_TEMP/native-gate-output"'''):
+            issues.append("Native Gate must independently verify full signed builds before archiving")
+        if (archive[0].get("id") != "archive" or archive[0].get("shell") != "bash"
+                or "identity = write_gate_archive(temp / 'native-gate-output', temp / 'native-gate.tar.gz')" not in archive[0].get("run", "")
+                or "output.write('sha256=' + identity['sha256'] + '\\n')" not in archive[0].get("run", "")
+                or "output.write('size=' + str(identity['size']) + '\\n')" not in archive[0].get("run", "")):
+            issues.append("Native Gate must upload exactly the computed archive digest and size")
+        if (upload[0].get("id") != "upload_gate"
+                or upload[0].get("uses") != "actions/upload-artifact@" + REVIEWED_ACTION_REVISIONS["actions/upload-artifact"]
+                or upload[1].get("with") != {
+                    "name": "native-gate-${{ github.run_id }}-${{ github.run_attempt }}",
+                    "path": "${{ runner.temp }}/native-gate.tar.gz",
+                    "if-no-files-found": "error", "compression-level": "0", "retention-days": "7",
+                }):
+            issues.append("Native Gate must upload exactly one bounded same-run archive")
+    if (len(publish_steps) != 1 or publish_steps[0][0].get("shell") != "bash"
+            or publish_steps[0][0].get("run") != (
+                "echo '::error::Native dependency publication is not implemented; "
+                "no registry or release writes are permitted'\nexit 1")):
+        issues.append("Native Publisher must fail explicitly without write privileges")
+    return issues
+
+
 def ci_build_environment_mode_issues(text: str) -> list[str]:
     """Model the producer branch without letting skipped jobs satisfy app checks."""
     issues: list[str] = []
@@ -1307,18 +1447,26 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
     needs = workflow_job_needs(text)
     for job in sorted(CI_BUILD_REQUIRED_JOBS & set(blocks)):
         name = workflow_job_direct_value(blocks[job], "name") or ""
-        if not name.startswith(CI_BUILD_PRODUCER_NAME_PREFIX):
+        expected_name = (CI_BUILD_NATIVE_NAME_PREFIX + CI_BUILD_NATIVE_NAMES[job]
+                         if job in CI_BUILD_NATIVE_JOBS else CI_BUILD_PRODUCER_NAME_PREFIX)
+        if name != expected_name and not (job not in CI_BUILD_NATIVE_JOBS
+                                           and name.startswith(expected_name)):
             issues.append("CI producer mode must distinguish every skipped ordinary check name: " + job)
         if job == "ci-gate" and name != CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate":
             issues.append("CI ordinary required gate name must remain exactly ci-gate")
-        expected = CI_BUILD_ORDINARY_GATE_IF if job == "ci-gate" else CI_BUILD_ORDINARY_IF
+        expected = (CI_BUILD_ORDINARY_GATE_IF if job == "ci-gate" else
+                    CI_BUILD_NATIVE_ROOT_IF if job in CI_BUILD_NATIVE_ROOT_JOBS else
+                    CI_BUILD_NATIVE_IF if job in CI_BUILD_NATIVE_JOBS else CI_BUILD_ORDINARY_IF)
         if job != "DispatchContinuous" and workflow_job_direct_value(blocks[job], "if") != expected:
-            issues.append("CI ordinary job must exclude only the explicit producer event branch: " + job)
-        if needs.get(job, set()) & CI_BUILD_ENVIRONMENT_JOBS:
+            issues.append("CI job must isolate ordinary and native dependency dispatch: " + job)
+        allowed_producers = {"DependencyModePreflight"} if job in CI_BUILD_NATIVE_ROOT_JOBS else set()
+        if needs.get(job, set()) & (CI_BUILD_PRODUCER_JOBS - allowed_producers):
             issues.append("CI ordinary jobs must not depend on the environment producer: " + job)
+        if job in CI_BUILD_NATIVE_ROOT_JOBS and needs.get(job) != {"DependencyModePreflight"}:
+            issues.append("CI native prerequisites must directly require dispatch preflight: " + job)
 
     dispatch_inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
-    expected_input_names = {"qualification-mode", "environment-mode", "expected-source-sha", "analysis-base-sha"}
+    expected_input_names = {"qualification-mode", "environment-mode", "dependency-mode", "expected-source-sha", "analysis-base-sha"}
     if dispatch_inputs is None or set(dispatch_inputs) != expected_input_names:
         issues.append("CI environment dispatch requires exact mode and source/base inputs")
     else:
@@ -1330,6 +1478,14 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
                 or mode.get("required", (None,))[0] != "true"
                 or options != ["off", "qualify", "publish"]):
             issues.append("CI environment mode must default off with exact off/qualify/publish choices")
+        dependency_block = dispatch_inputs["dependency-mode"][1]
+        dependency_fields = workflow_mapping_block(dependency_block, "dependency-mode", 6)
+        dependency_options = [scalar(line.strip()[2:]) for line in dependency_block if line.startswith("          - ")]
+        if (dependency_fields is None or dependency_fields.get("type", (None,))[0] != "choice"
+                or dependency_fields.get("default", (None,))[0] != "off"
+                or dependency_fields.get("required", (None,))[0] != "true"
+                or dependency_options != ["off", "qualify", "publish"]):
+            issues.append("CI dependency mode must default off with exact off/qualify/publish choices")
         for pin in ("expected-source-sha", "analysis-base-sha"):
             pin_fields = workflow_mapping_block(dispatch_inputs[pin][1], pin, 6)
             if (pin_fields is None or pin_fields.get("type", (None,))[0] != "string"
@@ -1342,7 +1498,7 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
     call_permissions = workflow_mapping_block(call, "permissions", 4)
     call_inputs = workflow_mapping_block(call, "with", 4)
     if (workflow_job_direct_value(call, "uses") != "./.github/workflows/ci-environments.yml"
-            or workflow_job_direct_value(call, "if") != "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode == 'qualify' || inputs.environment-mode == 'publish') }}"
+            or workflow_job_direct_value(call, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode == 'off' && (inputs.environment-mode == 'qualify' || inputs.environment-mode == 'publish') }}"
             or needs.get("EnvironmentProducer") != {"EnvironmentModePreflight"}
             or any(workflow_job_direct_value(call, field) is not None for field in ("secrets", "runs-on", "steps", "environment", "continue-on-error"))
             or call_permissions is None
@@ -1353,7 +1509,7 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
                 "analysis-base-sha": "${{ inputs.analysis-base-sha }}"}):
         issues.append("CI environment caller must use the exact source-local reusable workflow and narrow permission ceiling")
     permissions = workflow_mapping_block(preflight, "permissions", 4)
-    if (workflow_job_direct_value(preflight, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' }}"
+    if (workflow_job_direct_value(preflight, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && inputs.dependency-mode == 'off' }}"
             or needs.get("EnvironmentModePreflight") != set()
             or permissions is None or {key: value for key, (value, _) in permissions.items()} != {"contents": "read"}):
         issues.append("CI environment dispatch preflight must be a read-only producer-only root")
@@ -1367,6 +1523,85 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
     )
     if len(validation) != 1 or any(marker not in validation[0] for marker in required_validation):
         issues.append("CI environment dispatch must reject release mixing and stale/non-ancestor source pins")
+
+    # The read-only gate requires the exact preflight and producer ancestry;
+    # publication remains explicitly disabled in the called workflow.
+    dependency = blocks.get("DependencyModePreflight", [])
+    dependency_permissions = workflow_mapping_block(dependency, "permissions", 4)
+    dependency_steps = [workflow_step_fields(step) for step in workflow_step_blocks(dependency)]
+    dependency_scripts = [fields.get("run", "") for fields, _ in dependency_steps
+                          if fields.get("name") == "Validate isolated dependency mode and exact source"
+                          and fields.get("shell") == "bash"]
+    dependency_env = [workflow_mapping_block(step, "env", 8) for step in workflow_step_blocks(dependency)
+                      if workflow_step_fields(step)[0].get("name") == "Validate isolated dependency mode and exact source"]
+    required_script = (
+        "os.environ['KLOGG_DEPENDENCY_MODE'] not in ('qualify', 'publish')",
+        "os.environ['KLOGG_ENVIRONMENT_MODE'] != 'off'",
+        "dependency-mode cannot combine with environment-mode",
+        "os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation'",
+        "dependency-mode cannot combine with release qualification",
+        "os.environ['GITHUB_REPOSITORY'] != 'ZEACENT/klogg'",
+        "os.environ['GITHUB_REF'].startswith('refs/heads/')",
+        "dependency production requires a canonical repository branch",
+        "re.fullmatch('[0-9a-f]{40}', source)",
+        "source == '0' * 40",
+        "source != os.environ['GITHUB_SHA']",
+        "dispatched source does not match expected-source-sha",
+        "git rev-parse HEAD",
+    )
+    required_branches = (
+        "if os.environ['KLOGG_ENVIRONMENT_MODE'] != 'off':\nraise SystemExit('dependency-mode cannot combine with environment-mode')",
+        "if os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation':\nraise SystemExit('dependency-mode cannot combine with release qualification')",
+        "if os.environ['GITHUB_REPOSITORY'] != 'ZEACENT/klogg' or not os.environ['GITHUB_REF'].startswith('refs/heads/'):\nraise SystemExit('dependency production requires a canonical repository branch')",
+        "if not re.fullmatch('[0-9a-f]{40}', source) or source == '0' * 40:\nraise SystemExit('expected-source-sha must be an explicit nonzero full commit SHA')",
+        "if source != os.environ['GITHUB_SHA']:\nraise SystemExit('dispatched source does not match expected-source-sha')",
+        "test \"$(git rev-parse HEAD)\" = \"$KLOGG_EXPECTED_SOURCE_SHA\"",
+    )
+    dependency_lines = active_script_content(dependency_scripts[0]).splitlines() if len(dependency_scripts) == 1 else []
+    def contains_active_lines(pattern: str) -> bool:
+        lines = pattern.splitlines()
+        return any(dependency_lines[index:index + len(lines)] == lines
+                   for index in range(len(dependency_lines) - len(lines) + 1))
+
+    if (workflow_job_direct_value(dependency, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}"
+            or needs.get("DependencyModePreflight") != set()
+            or workflow_job_direct_value(dependency, "runs-on") != "ubuntu-24.04"
+            or dependency_permissions is None
+            or {key: value for key, (value, _) in dependency_permissions.items()} != {"contents": "read"}
+            or len(dependency_scripts) != 1 or len(dependency_env) != 1
+            or dependency_env[0] is None
+            or {key: value for key, (value, _) in dependency_env[0].items()} != {
+                "KLOGG_DEPENDENCY_MODE": "${{ inputs.dependency-mode }}",
+                "KLOGG_ENVIRONMENT_MODE": "${{ inputs.environment-mode }}",
+                "KLOGG_QUALIFICATION_MODE": "${{ inputs.qualification-mode }}",
+                "KLOGG_EXPECTED_SOURCE_SHA": "${{ inputs.expected-source-sha }}",
+            }
+            or any(marker not in active_script_content(dependency_scripts[0]) for marker in required_script)
+            or "exit 1" in active_script_content(dependency_scripts[0])
+            or not all(contains_active_lines(branch) for branch in required_branches)
+            or len([1 for fields, _ in dependency_steps if fields.get("uses", "").startswith("actions/checkout@")]) != 1
+            or not any(fields.get("uses") == "actions/checkout@" + REVIEWED_ACTION_REVISIONS["actions/checkout"]
+                       and children.get("with") == {"ref": "${{ github.sha }}", "persist-credentials": "false"}
+                       for fields, children in dependency_steps)):
+        issues.append("CI dependency dispatch must reject mixed modes, noncanonical or stale source")
+
+    gate = blocks.get("DependencyGate", [])
+    gate_permissions = workflow_mapping_block(gate, "permissions", 4)
+    gate_inputs = workflow_mapping_block(gate, "with", 4)
+    if (workflow_job_direct_value(gate, "uses") != "./.github/workflows/ci-dependencies.yml"
+            or workflow_job_direct_value(gate, "if") != "${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}"
+            or needs.get("DependencyGate") != ({"DependencyModePreflight"} | (CI_BUILD_NATIVE_JOBS - CI_BUILD_NATIVE_ROOT_JOBS))
+            or gate_permissions is None
+            or {key: value for key, (value, _) in gate_permissions.items()} != CI_DEPENDENCY_CALL_PERMISSIONS
+            or gate_inputs is None
+            or {key: value for key, (value, _) in gate_inputs.items()} != {
+                "mode": "${{ inputs.dependency-mode }}",
+                "expected-source-sha": "${{ inputs.expected-source-sha }}",
+                "needs-json": "${{ toJSON(needs) }}",
+            }
+            or any(workflow_job_direct_value(gate, field) is not None
+                   for field in ("secrets", "runs-on", "steps", "environment", "continue-on-error"))):
+        issues.append("CI dependency caller must require exact nine producer results and read-only local Gate")
     return issues
 
 
@@ -1388,7 +1623,7 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     if re.search(r"(?m)^\s*push:\s*\{[^}]*paths-ignore", trigger_prefix):
         issues.append("master pushes must not skip CI Build by path")
     needs = workflow_job_needs(text)
-    expected_jobs = CI_BUILD_REQUIRED_JOBS | CI_BUILD_ENVIRONMENT_JOBS
+    expected_jobs = CI_BUILD_REQUIRED_JOBS | CI_BUILD_PRODUCER_JOBS
     missing_jobs = expected_jobs - set(needs)
     unexpected_jobs = set(needs) - expected_jobs
     for job in sorted(missing_jobs):
@@ -1451,7 +1686,7 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             for other in direct_dependencies - {dependency}:
                 other_ancestors.add(other)
                 other_ancestors.update(ancestors.get(other, set()))
-            if dependency in other_ancestors:
+            if dependency in other_ancestors and job != "DependencyGate":
                 issues.append(
                     f"CI build job {job} directly needs transitive ancestor {dependency}"
                 )
@@ -1459,7 +1694,7 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     gate = "ci-gate"
     # The producer is an explicitly modeled alternate event branch, never an
     # ordinary validation ancestor or a replacement for its required gate.
-    validation_jobs = set(needs) - {gate} - CI_BUILD_POST_GATE_JOBS - CI_BUILD_ENVIRONMENT_JOBS
+    validation_jobs = set(needs) - {gate} - CI_BUILD_POST_GATE_JOBS - CI_BUILD_PRODUCER_JOBS
     if gate in needs:
         consumed_before_gate = {
             dependency
@@ -3604,7 +3839,7 @@ RELEASE_BODY_MESSAGE = (
     "release body must be rendered from the verified publication manifest"
 )
 RELEASE_INVENTORY_MESSAGE = (
-    "release publication must upload exactly 23 consolidated assets"
+    "release publication must upload exactly 25 consolidated assets"
 )
 RELEASE_CANDIDATE_MESSAGE = "public promoted release name must not contain Candidate"
 CONTINUOUS_CRITICAL_MESSAGE = (
@@ -3700,7 +3935,7 @@ def stable_release_run_projection_issues(text: str) -> list[str]:
     required_download = (
         '/releases/${KLOGG_SOURCE_RELEASE_ID}/assets?per_page=100',
         "/releases/assets/${asset_id}",
-        "len(records) != 23",
+        "len(records) != 25",
         '"metadata_kind": "klogg-continuous-publication-source"',
         '"source_release_id": release_id',
         '"source_tag_sha": tag_sha',
@@ -3817,7 +4052,7 @@ def release_download_workflow_issues(
                 or public_name != "Continuous Build ${{ env.KLOGG_VERSION }}"
             ):
                 issues.append(RELEASE_CANDIDATE_MESSAGE)
-    if len(renderer_matches) != 1 or 'test "$asset_count" -eq 23' not in (
+    if len(renderer_matches) != 1 or 'test "$asset_count" -eq 25' not in (
         renderer_matches[0][2] if renderer_matches else ""
     ):
         if RELEASE_INVENTORY_MESSAGE not in issues:
@@ -4236,7 +4471,7 @@ def platform_fragile_preflight_issues(
 
     if ci_build:
         protected_jobs = CI_PLATFORM_PREFLIGHT_APPLICATION_JOBS
-        if roots != {preflight, "EnvironmentModePreflight"} | CI_PLATFORM_PARALLEL_ROOTS:
+        if roots != ({preflight, "EnvironmentModePreflight", "DependencyModePreflight"} | CI_PLATFORM_PARALLEL_ROOTS):
             return [message]
         if any(
             preflight not in ancestors.get(job, set()) for job in protected_jobs
@@ -4552,6 +4787,13 @@ def check_repo(root: Path) -> list[str]:
     else:
         issues.extend(f".github/workflows/ci-environments.yml: {issue}"
                       for issue in ci_environment_workflow_issues(producer_path.read_text()))
+
+    dependency_path = workflows / "ci-dependencies.yml"
+    if not dependency_path.is_file():
+        issues.append(".github/workflows/ci-dependencies.yml: read-only native qualification workflow is missing")
+    else:
+        issues.extend(f".github/workflows/ci-dependencies.yml: {issue}"
+                      for issue in ci_dependency_workflow_issues(dependency_path.read_text()))
 
     ci_text = (workflows / "ci-build.yml").read_text()
     issues.extend(

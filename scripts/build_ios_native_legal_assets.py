@@ -24,6 +24,7 @@ class LegalAssetError(RuntimeError):
 
 
 SOURCE_SET_RECEIPT = "ios-native-source-set-receipt.json"
+OVERLAY_RECEIPT = "ios-native-overlay-receipt.json"
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -368,16 +369,6 @@ def main() -> int:
         },
         "patch_chain_sha256": canonical_sha256(patch_identity),
         "package_support_assets": [
-            {
-                "kind": "source-offer",
-                "file_name": "ios-native-source-offer.txt",
-                "sha256": sha256(args.output / "ios-native-source-offer.txt"),
-            },
-            {
-                "kind": "replacement-guide",
-                "file_name": replacement_guide.name,
-                "sha256": sha256(replacement_guide),
-            },
             {"kind": "notices", "file_name": notice.name, "sha256": sha256(notice)},
             *[
                 {
@@ -397,25 +388,37 @@ def main() -> int:
     # Preserve the historical thin-artifact filename while consumers migrate to
     # the architecture-independent component source-set receipt.
     write_json(args.output / "ios-native-source-receipt.json", source_set_receipt)
-    build_receipt["source_set_receipt_sha256"] = sha256(source_set_path)
-    write_json(args.stack_root / lock["receipts"]["build"], build_receipt)
-
     legal_receipt = {
         "schema_version": 1,
         "receipt_kind": "legal",
         "lock_sha256": sha256(args.lock),
         "architecture": build_receipt["architecture"],
         "deployment_target": build_receipt["deployment_target"],
+        "build_receipt_sha256": sha256(args.stack_root / lock["receipts"]["build"]),
+        "source_set_receipt_sha256": sha256(source_set_path),
         "license_files": legal_files,
         "notice": {"path": notice.name, "sha256": sha256(notice)},
-        "replacement_guide": {
-            "path": replacement_guide.name,
-            "sha256": sha256(replacement_guide),
-        },
         "sbom": {"path": sbom_path.name, "sha256": sha256(sbom_path)},
         "package": "app-bundled dynamic dylib closure",
     }
-    write_json(args.output / lock["receipts"]["legal"], legal_receipt)
+    legal_path = args.output / lock["receipts"]["legal"]
+    write_json(legal_path, legal_receipt)
+    overlay_receipt = {
+        "schema_version": 1,
+        "receipt_kind": "component-source-overlay",
+        "component": "ios-native",
+        "version": version,
+        "base_url": base_url,
+        "source_set_receipt_sha256": sha256(source_set_path),
+        "assets": [
+            {"kind": "source-offer", "file_name": "ios-native-source-offer.txt",
+             "sha256": sha256(args.output / "ios-native-source-offer.txt")},
+            {"kind": "replacement-guide", "file_name": replacement_guide.name,
+             "sha256": sha256(replacement_guide)},
+        ],
+        "distribution": {"package_required": True, "release_required": True},
+    }
+    write_json(args.output / OVERLAY_RECEIPT, overlay_receipt)
     return 0
 
 

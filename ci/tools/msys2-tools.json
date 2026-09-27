@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "repository": "https://repo.msys2.org/mingw/mingw64/",
+  "redistribution": "CI build-tool artifact only. Embed the exact Ragel and GCC corresponding source archives alongside the executables and retain original package notices. GCC source includes the upstream source, MSYS2 PKGBUILD and build patches; no compiler binary, MSVC, Xcode, or SDK is bundled. Publish source and notices with any redistributed binary artifact; the LGPL libquadmath DLL remains replaceable by recipients.",
+  "corresponding_sources": [
+    {
+      "name": "ragel",
+      "archive_file": "mingw-w64-ragel-6.10-3.src.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/sources/mingw-w64-ragel-6.10-3.src.tar.zst",
+      "archive_sha256": "af0cb703bb7ccd77b3cf75dd91d4dce0452c0b96ae6b3d678ae40386184ec4b6",
+      "license_obligation": "GPL-2.0-or-later Ragel executable: corresponding upstream source and MSYS2 build recipe must accompany redistribution"
+    },
+    {
+      "name": "gcc",
+      "archive_file": "mingw-w64-gcc-16.2.0-4.src.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/sources/mingw-w64-gcc-16.2.0-4.src.tar.zst",
+      "archive_sha256": "a1792a44764405bc365746e0e60f0daa122076cec0dddd35a781d141f94273cf",
+      "license_obligation": "GCC runtime DLLs and LGPL libquadmath: preserve GCC runtime exception, LGPL notices and corresponding upstream source plus MSYS2 patches and build recipe; do not redistribute the compiler executable"
+    }
+  ],
+  "packages": [
+    {
+      "name": "ragel",
+      "version": "6.10-3",
+      "archive_file": "mingw-w64-x86_64-ragel-6.10-3-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-ragel-6.10-3-any.pkg.tar.zst",
+      "archive_sha256": "8b12c4c999ccfa7082d6b0cd7ef167d6ac98708923c8c0eff917dbb7070e8773",
+      "depends": ["cc-libs"],
+      "license": "GPL-2.0-or-later; preserve copyright and license text and provide corresponding source when redistributing",
+      "runtime_files": ["mingw64/bin/ragel.exe", "mingw64/share/doc/ragel/CREDITS"]
+    },
+    {
+      "name": "pkgconf",
+      "version": "1~3.0.7-1",
+      "archive_file": "mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst",
+      "archive_sha256": "37b97f372409fa7cf54d709bab892f34e9c62d2658230a09f783a89a55ae590e",
+      "depends": [],
+      "license": "ISC; retain COPYING attribution in share/doc/pkgconf/COPYING",
+      "runtime_files": ["mingw64/bin/pkg-config.exe", "mingw64/bin/pkgconf.exe", "mingw64/bin/libpkgconf-8.dll", "mingw64/share/doc/pkgconf/COPYING"]
+    },
+    {
+      "name": "cc-libs",
+      "version": "16.2.0-4",
+      "archive_file": "mingw-w64-x86_64-cc-libs-16.2.0-4-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-cc-libs-16.2.0-4-any.pkg.tar.zst",
+      "archive_sha256": "691c243e8df80ab075cabf79236b9e2281907fb1f3ac7206fe3a2d71269e4fa2",
+      "depends": ["libatomic", "libgcc", "libquadmath", "libstdc++"],
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1 AND GFDL-1.3-or-later; retain GCC runtime exception and notices",
+      "runtime_files": []
+    },
+    {
+      "name": "libatomic",
+      "version": "16.2.0-4",
+      "archive_file": "mingw-w64-x86_64-libatomic-16.2.0-4-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-libatomic-16.2.0-4-any.pkg.tar.zst",
+      "archive_sha256": "c71710695b1a49a089e82c4fc4e2247003bfb7ac8ef3327291880eaa59dcebdc",
+      "depends": ["libwinpthread"],
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1 AND GFDL-1.3-or-later; retain GCC runtime exception and notices",
+      "runtime_files": ["mingw64/bin/libatomic-1.dll"]
+    },
+    {
+      "name": "libgcc",
+      "version": "16.2.0-4",
+      "archive_file": "mingw-w64-x86_64-libgcc-16.2.0-4-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-libgcc-16.2.0-4-any.pkg.tar.zst",
+      "archive_sha256": "d615f6a8536ca16b1f049daea1fa440a3b7a405449ec0e93ad6106db43682d54",
+      "depends": ["libwinpthread"],
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1 AND GFDL-1.3-or-later; retain GCC runtime exception and notices",
+      "runtime_files": ["mingw64/bin/libgcc_s_seh-1.dll"]
+    },
+    {
+      "name": "libquadmath",
+      "version": "16.2.0-4",
+      "archive_file": "mingw-w64-x86_64-libquadmath-16.2.0-4-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-libquadmath-16.2.0-4-any.pkg.tar.zst",
+      "archive_sha256": "70317ed08299f8e40af8354e124db33fcf47840ec8cefbea5d7134c6d136d13e",
+      "depends": ["libgcc"],
+      "license": "LGPL-2.1-or-later AND GFDL-1.2-or-later; retain license and corresponding-source obligations",
+      "runtime_files": ["mingw64/bin/libquadmath-0.dll"]
+    },
+    {
+      "name": "libstdc++",
+      "version": "16.2.0-4",
+      "archive_file": "mingw-w64-x86_64-libstdc++-16.2.0-4-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-libstdc%2B%2B-16.2.0-4-any.pkg.tar.zst",
+      "archive_sha256": "3d4c3faf4c2c5c7a851ff12214ddcbf8c0d6df0964fc1d3ebd8c38f227183034",
+      "depends": ["libgcc", "libwinpthread", "tzdata"],
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1 AND GFDL-1.3-or-later; retain GCC runtime exception and notices",
+      "runtime_files": ["mingw64/bin/libstdc++-6.dll"]
+    },
+    {
+      "name": "libwinpthread",
+      "version": "14.0.0.r426.g4564ee4b5-1",
+      "archive_file": "mingw-w64-x86_64-libwinpthread-14.0.0.r426.g4564ee4b5-1-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-libwinpthread-14.0.0.r426.g4564ee4b5-1-any.pkg.tar.zst",
+      "archive_sha256": "543017ce2731292b215bf1d36fd70a86d8a8d5ed0afba9d3db9fff89804cda71",
+      "depends": [],
+      "license": "MIT AND BSD-3-Clause-Clear; retain copyright/license notices",
+      "runtime_files": ["mingw64/bin/libwinpthread-1.dll"]
+    },
+    {
+      "name": "tzdata",
+      "version": "2026d-1",
+      "archive_file": "mingw-w64-x86_64-tzdata-2026d-1-any.pkg.tar.zst",
+      "archive_url": "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-tzdata-2026d-1-any.pkg.tar.zst",
+      "archive_sha256": "aa05089a14869bc05f841ce1caa61bb4ebbc392780f9daec4f3eaf01937e5091",
+      "depends": [],
+      "license": "Public domain/custom; preserve share/licenses/tzdata/LICENSE",
+      "runtime_files": ["mingw64/share/licenses/tzdata/LICENSE"],
+      "runtime_prefixes": ["mingw64/share/zoneinfo/"]
+    }
+  ]
+}

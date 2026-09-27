@@ -464,6 +464,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             ("source-offer", "ADB-HELPER-SOURCE-OFFER.txt"),
             ("source-manifest", "adb-helper-source-manifest.json"),
             ("source-set-receipt", "adb-helper-source-set-receipt.json"),
+            ("overlay-receipt", "adb-helper-overlay-receipt.json"),
         ]
         lock = {
             "schema_version": 1,
@@ -493,6 +494,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
                 {
                     "kind": kind,
                     "required": True,
+                    "ownership": "overlay" if kind in ("source-offer", "overlay-receipt") else "core",
                     "distribution": {
                         "package_required": kind != "source-archive",
                         "release_required": True,
@@ -509,7 +511,8 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         return repository, archive_root, lock_path, lock
 
     def build_legal_assets(
-        self, repository, archive_root, lock, output, package_support_output=None
+        self, repository, archive_root, lock, output, package_support_output=None,
+        version="26.08.27",
     ):
         command = [
             sys.executable,
@@ -521,7 +524,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "--repository-root",
             str(repository),
             "--version",
-            "26.08.27",
+            version,
             "--base-url",
             "https://github.com/ZEACENT/klogg",
             "--output",
@@ -582,6 +585,147 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/smoke_adb_helper.py",
         }
         self.assertEqual(required_build_material - members, set())
+
+    def test_core_legal_assets_are_version_independent(self):
+        # Immutable-core reuse requires the binary build contract to survive an
+        # application version bump: only the versioned source offer (the
+        # overlay) may change; the source-set receipt anchors the core identity
+        # and must not embed overlay bytes.
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        first = self.root / "release-version-one"
+        second = self.root / "release-version-two"
+        for output, version in ((first, "26.08.27"), (second, "99.01.01")):
+            result = self.build_legal_assets(
+                repository, archive_root, lock_path, output, version=version
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        versioned = set()
+        for asset in lock["release_assets"]:
+            name = asset["file_name"]
+            if archive_sha256(first / name) != archive_sha256(second / name):
+                versioned.add(asset["kind"])
+        self.assertEqual(versioned, {"source-offer", "overlay-receipt"})
+
+        receipt = json.loads(
+            (first / "adb-helper-source-set-receipt.json").read_text(encoding="utf-8")
+        )
+        embedded = {asset["kind"] for asset in receipt["package_support_assets"]}
+        self.assertNotIn("source-offer", embedded)
+
+        # The binary builder also records only core support hashes; the
+        # source-set receipt is identical across these application versions.
+        build = load_build_module()
+        first_support = build.package_support_receipt_assets(lock, first)
+        second_support = build.package_support_receipt_assets(lock, second)
+        self.assertEqual(first_support, second_support)
+        self.assertTrue(first_support)
+        self.assertTrue(all(asset["kind"] not in ("source-offer", "overlay-receipt")
+                            for asset in first_support))
+
+    def test_version_overlay_materializes_from_verified_core_without_sources(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        core = self.root / "immutable-core"
+        core_build = subprocess.run(
+            [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
+             "--archive-root", str(archive_root), "--repository-root", str(repository),
+             "--output", str(core)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(core_build.returncode, 0, core_build.stdout + core_build.stderr)
+        self.assertFalse((core / "ADB-HELPER-SOURCE-OFFER.txt").exists())
+        self.assertFalse((core / "adb-helper-overlay-receipt.json").exists())
+        self.assertTrue((core / "adb-helper-source-set-receipt.json").is_file())
+
+        # The native helper core is already built. An application release
+        # regenerates ONLY its versioned overlay, without access to the source
+        # archives or the original generator checkout.
+        archive_root.rename(self.root / "unavailable-archives")
+        output = self.root / "versioned-assembly"
+        support = self.root / "versioned-package-support"
+        overlay_build = subprocess.run(
+            [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(lock_path),
+             "--core-root", str(core), "--version", "99.01.01",
+             "--base-url", "https://github.com/ZEACENT/klogg",
+             "--output", str(output), "--package-support-output", str(support)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(overlay_build.returncode, 0, overlay_build.stdout + overlay_build.stderr)
+        self.assertEqual(
+            (core / "adb-helper-source-set-receipt.json").read_bytes(),
+            (output / "adb-helper-source-set-receipt.json").read_bytes(),
+        )
+        self.assertIn("klogg-v99.01.01-adb-helper-source-",
+                      (output / "ADB-HELPER-SOURCE-OFFER.txt").read_text())
+        self.assertTrue((support / "adb-helper-overlay-receipt.json").is_file())
+        self.assertFalse((support / "adb-helper-source-archive.tar.gz").exists())
+
+        # Both paths must assemble identical package and release bytes; no
+        # receipt may silently change its identity during the cutover.
+        (self.root / "unavailable-archives").rename(archive_root)
+        direct = self.root / "direct-full-build"
+        result = self.build_legal_assets(
+            repository, archive_root, lock_path, direct, version="99.01.01"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            {path.name: archive_sha256(path) for path in direct.iterdir()},
+            {path.name: archive_sha256(path) for path in output.iterdir()},
+        )
+
+    def test_core_only_refuses_stale_overlay_in_its_output(self):
+        repository, archive_root, lock_path, _ = self.make_legal_fixture()
+        output = self.root / "stale-core"
+        output.mkdir()
+        (output / "ADB-HELPER-SOURCE-OFFER.txt").write_text("old release offer\n")
+        result = subprocess.run(
+            [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
+             "--archive-root", str(archive_root), "--repository-root", str(repository),
+             "--output", str(output)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("empty", (result.stdout + result.stderr).lower())
+
+    def test_overlay_only_rejects_core_bytes_even_with_forged_sidecar(self):
+        repository, archive_root, lock_path, _ = self.make_legal_fixture()
+        core = self.root / "immutable-core"
+        build = subprocess.run(
+            [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
+             "--archive-root", str(archive_root), "--repository-root", str(repository),
+             "--output", str(core)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+        asset = core / "adb-helper-licenses.tar.gz"
+        asset.write_bytes(b"forged licenses\n")
+        asset.with_name(asset.name + ".sha256").write_text(
+            f"{archive_sha256(asset)}  {asset.name}\n", encoding="utf-8"
+        )
+        result = subprocess.run(
+            [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(lock_path),
+             "--core-root", str(core), "--version", "99.01.01",
+             "--base-url", "https://github.com/ZEACENT/klogg",
+             "--output", str(self.root / "staged")],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sha256", (result.stdout + result.stderr).lower())
+
+    def test_legal_assets_reject_core_overlay_ownership_swaps(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        for kind in ("source-offer", "licenses"):
+            with self.subTest(kind=kind):
+                record = next(asset for asset in lock["release_assets"] if asset["kind"] == kind)
+                original = record["ownership"]
+                record["ownership"] = "core" if kind == "source-offer" else "overlay"
+                lock_path.write_text(json.dumps(lock), encoding="utf-8")
+                result = self.build_legal_assets(
+                    repository, archive_root, lock_path, self.root / f"invalid-{kind}"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ownership", (result.stdout + result.stderr).lower())
+                record["ownership"] = original
 
     def test_legal_assets_materialize_only_locked_package_support_projection(self):
         repository, archive_root, lock_path, lock = self.make_legal_fixture()

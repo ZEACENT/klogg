@@ -90,6 +90,8 @@ Section "klogg" klogg
     File release\adb-helper-assets\adb-helper-source-manifest.json.sha256
     File release\adb-helper-assets\adb-helper-source-set-receipt.json
     File release\adb-helper-assets\adb-helper-source-set-receipt.json.sha256
+    File release\adb-helper-assets\adb-helper-overlay-receipt.json
+    File release\adb-helper-assets\adb-helper-overlay-receipt.json.sha256
     SetOutPath $INSTDIR
 !if ${PLATFORM} == "x64"
     File release\klogg_crashpad_handler.exe

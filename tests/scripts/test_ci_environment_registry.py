@@ -101,6 +101,39 @@ class RegistryImageTest(unittest.TestCase):
         self.assertIsNone(token_request.get_header("Authorization"))
         self.assertEqual(transport.requests[2][0].get_header("Authorization"), "Bearer anonymous-token")
 
+    def test_dependency_package_has_its_own_anonymous_pull_scope(self):
+        dependency = "ghcr.io/zeacent/klogg-ci-deps"
+        manifest = b'{}'
+        challenge = urllib.error.HTTPError(
+            "https://ghcr.io/v2/zeacent/klogg-ci-deps/manifests/sha256:" + "a" * 64,
+            401, "Unauthorized", {"WWW-Authenticate": (
+                'Bearer realm="https://ghcr.io/token",service="ghcr.io",'
+                'scope="repository:zeacent/klogg-ci-deps:pull"'
+            )}, None,
+        )
+        transport = Transport([challenge, encode({"token": "anonymous-token"}), manifest])
+        client = registry.RegistryClient(transport, package=dependency)
+        self.assertEqual(client._read("https://ghcr.io/v2/zeacent/klogg-ci-deps/manifests/tag"), manifest)
+        self.assertIn("repository%3Azeacent%2Fklogg-ci-deps%3Apull", transport.requests[1][0].full_url)
+        with self.assertRaises(registry.RegistryError):
+            client.read_image(digest(manifest))
+        with self.assertRaises(registry.RegistryError):
+            registry.RegistryClient(Transport([]), package="ghcr.io/attacker/pkg")
+
+    def test_dependency_package_rejects_environment_pull_scope_challenge(self):
+        challenge = urllib.error.HTTPError(
+            "https://ghcr.io/v2/zeacent/klogg-ci-deps/manifests/tag",
+            401, "Unauthorized", {"WWW-Authenticate": (
+                'Bearer realm="https://ghcr.io/token",service="ghcr.io",'
+                'scope="repository:zeacent/klogg-ci-env:pull"'
+            )}, None,
+        )
+        client = registry.RegistryClient(
+            Transport([challenge]), package=registry.DEPENDENCY_REGISTRY
+        )
+        with self.assertRaises(registry.RegistryError):
+            client._read("https://ghcr.io/v2/zeacent/klogg-ci-deps/manifests/tag")
+
     def test_transient_registry_failures_retry_only_bounded_transport(self):
         manifest, config = image_fixture()
         failures = [urllib.error.HTTPError("https://ghcr.io/", code, "temporary", {}, None)

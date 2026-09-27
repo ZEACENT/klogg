@@ -139,15 +139,26 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         )
         assets = []
         package_support_assets = []
+        archive_sha = hashlib.sha256(b"source-archive\n").hexdigest()
         for kind, name, package_required in asset_specs:
-            asset = self.write_file(f"release/{name}", f"{kind}\n".encode())
+            contents = f"{kind}\n"
+            if kind == "source-offer":
+                contents = (
+                    "Published archive: klogg-v26.08.27-adb-helper-source-"
+                    f"{archive_sha[:12]}.tar.gz\n"
+                    f"SHA-256: {archive_sha}\n"
+                    "Versioned releases page: https://github.com/ZEACENT/klogg/releases\n"
+                    "Rolling continuous release page: "
+                    "https://github.com/ZEACENT/klogg/releases/tag/continuous\n"
+                )
+            asset = self.write_file(f"release/{name}", contents.encode())
             asset_hash = hashlib.sha256(asset.read_bytes()).hexdigest()
             self.write_file(
                 f"release/{asset.name}.sha256",
                 f"{asset_hash}  {asset.name}\n".encode(),
             )
             assets.append({"kind": kind, "path": asset.name, "sha256": asset_hash})
-            if package_required:
+            if package_required and kind != "source-offer":
                 package_support_assets.append(
                     {"kind": kind, "file_name": asset.name, "sha256": asset_hash}
                 )
@@ -220,6 +231,7 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
                 {
                     "kind": kind,
                     "required": True,
+                    "ownership": "overlay" if kind in ("source-offer", "overlay-receipt") else "core",
                     "file_name": name,
                     "sha256_file": name + ".sha256",
                     "distribution": {
@@ -230,6 +242,7 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
                 for kind, name, package_required in (
                     *asset_specs,
                     ("source-set-receipt", source_set.name, True),
+                    ("overlay-receipt", "adb-helper-overlay-receipt.json", True),
                 )
             ],
         }
@@ -244,6 +257,28 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         next(asset for asset in assets if asset["kind"] == "source-set-receipt")[
             "sha256"
         ] = source_set_hash
+
+        source_offer = next(asset for asset in assets if asset["kind"] == "source-offer")
+        overlay_document = {
+            "schema_version": 1,
+            "receipt_kind": "component-source-overlay",
+            "component": "adb-helper",
+            "version": "26.08.27",
+            "base_url": "https://github.com/ZEACENT/klogg",
+            "source_set_receipt_sha256": source_set_hash,
+            "assets": [{"kind": "source-offer", "file_name": source_offer["path"],
+                        "sha256": source_offer["sha256"]}],
+            "distribution": {"package_required": True, "release_required": True},
+        }
+        overlay_path = self.write_file(
+            "release/adb-helper-overlay-receipt.json",
+            (json.dumps(overlay_document, sort_keys=True) + "\n").encode(),
+        )
+        overlay_hash = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
+        self.write_file(
+            f"release/{overlay_path.name}.sha256",
+            f"{overlay_hash}  {overlay_path.name}\n".encode(),
+        )
 
         imports_by_binary = {pathlib.PurePosixPath(helper_relative).name: imports}
         runtime_loads = []
@@ -304,7 +339,9 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
                 "version_probe": "passed",
                 "complete_client_probe": "passed",
             },
-            "release_assets": assets,
+            "release_assets": [
+                asset for asset in assets if asset["kind"] != "source-offer"
+            ],
         }
         receipt_path = self.root / "receipt.json"
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
@@ -407,6 +444,52 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         lock, receipt, package_root, release_root, _ = self.make_release_fixture()
         result = self.run_verifier(lock, receipt, package_root, release_root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_verifier_rejects_an_overlay_receipt_with_wrong_version_or_url(self):
+        for field, value in (("version", "99.01.01"),
+                             ("base_url", "https://example.invalid/klogg")):
+            with self.subTest(field=field):
+                lock, receipt, package_root, release_root, _ = self.make_release_fixture()
+                overlay_path = release_root / "adb-helper-overlay-receipt.json"
+                overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+                overlay[field] = value
+                overlay_path.write_text(json.dumps(overlay), encoding="utf-8")
+                overlay_hash = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
+                overlay_path.with_name(overlay_path.name + ".sha256").write_text(
+                    f"{overlay_hash}  {overlay_path.name}\n", encoding="utf-8"
+                )
+                result = self.run_verifier(lock, receipt, package_root, release_root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("overlay", (result.stdout + result.stderr).lower())
+
+    def test_verifier_rejects_missing_or_wrong_core_overlay_evidence(self):
+        for mutation in ("missing receipt", "wrong core", "tampered offer", "bad distribution"):
+            with self.subTest(mutation=mutation):
+                lock, receipt, package_root, release_root, _ = self.make_release_fixture()
+                overlay_path = release_root / "adb-helper-overlay-receipt.json"
+                if mutation == "missing receipt":
+                    overlay_path.unlink()
+                elif mutation in ("wrong core", "bad distribution"):
+                    document = json.loads(overlay_path.read_text(encoding="utf-8"))
+                    if mutation == "wrong core":
+                        document["source_set_receipt_sha256"] = "0" * 64
+                    else:
+                        document["distribution"]["package_required"] = False
+                    overlay_path.write_text(json.dumps(document), encoding="utf-8")
+                    digest = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
+                    overlay_path.with_name(overlay_path.name + ".sha256").write_text(
+                        f"{digest}  {overlay_path.name}\n", encoding="utf-8"
+                    )
+                else:
+                    offer = release_root / "ADB-HELPER-SOURCE-OFFER.txt"
+                    offer.write_text("substituted offer\n", encoding="utf-8")
+                    digest = hashlib.sha256(offer.read_bytes()).hexdigest()
+                    offer.with_name(offer.name + ".sha256").write_text(
+                        f"{digest}  {offer.name}\n", encoding="utf-8"
+                    )
+                result = self.run_verifier(lock, receipt, package_root, release_root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertRegex((result.stdout + result.stderr).lower(), r"overlay|missing")
 
     def test_verifier_accepts_exact_structured_production_server_invocation_probe(self):
         lock, receipt, package_root, release_root, document = self.make_release_fixture()

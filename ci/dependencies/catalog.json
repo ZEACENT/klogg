@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "kind": "native-dependency-targets",
+  "registry": "ghcr.io/zeacent/klogg-ci-deps",
+  "producer_workflow": ".github/workflows/ci-dependencies.yml",
+  "targets": {
+    "adb-linux-x86_64": {
+      "component": "adb-helper",
+      "target": "linux-x86_64",
+      "runner": "ubuntu-24.04",
+      "archive_name": "adb-helper-linux-x86_64.tar.gz"
+    },
+    "adb-linux-arm64": {
+      "component": "adb-helper",
+      "target": "linux-arm64",
+      "runner": "ubuntu-24.04-arm",
+      "archive_name": "adb-helper-linux-arm64.tar.gz"
+    },
+    "adb-windows-x86_64": {
+      "component": "adb-helper",
+      "target": "windows-x86_64",
+      "runner": "windows-2022",
+      "archive_name": "adb-helper-windows-x86_64.tar.gz"
+    },
+    "adb-macos-x86_64": {
+      "component": "adb-helper",
+      "target": "macos-x86_64",
+      "runner": "macos-15-intel",
+      "archive_name": "adb-helper-macos-x86_64.tar.gz"
+    },
+    "adb-macos-arm64": {
+      "component": "adb-helper",
+      "target": "macos-arm64",
+      "runner": "macos-15",
+      "archive_name": "adb-helper-macos-arm64.tar.gz"
+    },
+    "ios-x86_64": {
+      "component": "ios-native",
+      "target": "x86_64",
+      "runner": "macos-15-intel",
+      "archive_name": "ios-native-x86_64.tar.gz",
+      "toolchain": {
+        "xcode": ["Xcode 16.4", "Build version 16F6"],
+        "sdk_version": "15.5",
+        "sdk_path": "/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+        "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+        "cmake": "cmake version 3.31.6",
+        "ninja": "1.12.1"
+      }
+    },
+    "ios-arm64": {
+      "component": "ios-native",
+      "target": "arm64",
+      "runner": "macos-15",
+      "archive_name": "ios-native-arm64.tar.gz",
+      "toolchain": {
+        "xcode": ["Xcode 16.4", "Build version 16F6"],
+        "sdk_version": "15.5",
+        "sdk_path": "/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+        "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+        "cmake": "cmake version 3.31.6",
+        "ninja": "1.12.1"
+      }
+    }
+  }
+}

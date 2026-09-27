@@ -1265,8 +1265,9 @@ class SanitizerConfigurationTest(unittest.TestCase):
         display_name = CI_MODULE.workflow_job_direct_value(block, "name")
         self.assertIsNotNone(display_name)
         producer_prefix = (
-            "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' "
-            "&& '[environment-mode skipped] ' || '' }}"
+            "${{ github.event_name == 'workflow_dispatch' && "
+            "(inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') "
+            "&& '[producer-mode skipped] ' || '' }}"
         )
         self.assertEqual(display_name, producer_prefix + "Windows x64-qt6 ASan [asan]")
         ordinary_name = display_name[len(producer_prefix):]

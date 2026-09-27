@@ -122,7 +122,7 @@ jobs:
             with self.subTest(workflow=path.name):
                 self.assertEqual(MODULE.workflow_schedule_issues(text), [])
                 expected = {"workflow_dispatch"}
-                if path.name == "ci-environments.yml":
+                if path.name in ("ci-environments.yml", "ci-dependencies.yml"):
                     expected = {"workflow_call"}
                 elif path.name not in ("ci-release.yml", "ci-continuous.yml"):
                     expected |= {"push", "pull_request"}
@@ -749,16 +749,20 @@ jobs:
         )
 
         expected_needs = {
+            "DependencyModePreflight": set(),
             "EnvironmentModePreflight": set(),
             "EnvironmentProducer": {"EnvironmentModePreflight"},
+            "DependencyGate": {"DependencyModePreflight", "BuildAdbHelperLegalAssets", "BuildAdbLinuxX64",
+                               "BuildAdbLinuxArm64", "BuildAdbWindowsX64", "BuildAdbMacX64",
+                               "BuildAdbMacArm64", "BuildIosNativeX64", "BuildIosNativeArm64"},
             "ReleaseQualificationPreflight": set(),
-            "SaveVersion": set(),
+            "SaveVersion": {"DependencyModePreflight"},
             "PrefetchCpmCache": set(),
             "PrefetchBoost": set(),
             "PrefetchOpenSsl": set(),
             "PrefetchLinuxDeployQt": set(),
             "PrefetchWindowsTools": set(),
-            "PrefetchAdbHelperSources": set(),
+            "PrefetchAdbHelperSources": {"DependencyModePreflight"},
             "BuildAdbHelperLegalAssets": {"SaveVersion", "PrefetchAdbHelperSources"},
             "BuildAdbLinuxX64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbLinuxArm64": {"BuildAdbHelperLegalAssets"},
@@ -768,7 +772,7 @@ jobs:
             "LinuxPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchLinuxDeployQt", "BuildAdbLinuxX64", "ReleaseQualificationPreflight"},
             "LinuxSanitizers": {"SaveVersion", "PrefetchCpmCache", "ReleaseQualificationPreflight"},
             "LinuxTsan": {"SaveVersion", "PrefetchCpmCache", "ReleaseQualificationPreflight"},
-            "PrefetchIosNativeSources": set(),
+            "PrefetchIosNativeSources": {"DependencyModePreflight"},
             "BuildIosNativeX64": {"SaveVersion", "PrefetchIosNativeSources"},
             "BuildIosNativeArm64": {"SaveVersion", "PrefetchIosNativeSources"},
             "MacPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacX64", "BuildIosNativeX64", "ReleaseQualificationPreflight"},
@@ -878,16 +882,7 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
         "CodeQL, Coverage, and Static analysis expensive jobs must run inside the "
         "verified locked analysis environment image"
     )
-    CI_PARALLEL_ROOTS = {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchBoost",
-        "PrefetchOpenSsl",
-        "PrefetchLinuxDeployQt",
-        "PrefetchWindowsTools",
-        "PrefetchAdbHelperSources",
-        "PrefetchIosNativeSources",
-    }
+    CI_PARALLEL_ROOTS = MODULE.CI_BUILD_ROOT_JOBS
     CI_APPLICATION_JOBS = {
         "LinuxPackages",
         "LinuxSanitizers",
@@ -953,7 +948,7 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                 protected_jobs = set(needs) - {preflight}
                 if name == "ci-build.yml":
                     expected_roots.update(self.CI_PARALLEL_ROOTS)
-                    expected_roots.add("EnvironmentModePreflight")
+                    expected_roots.update({"EnvironmentModePreflight", "DependencyModePreflight"})
                     protected_jobs = self.CI_APPLICATION_JOBS
                 else:
                     # The resolver is a root: it verifies the locked image
@@ -1615,6 +1610,123 @@ jobs:
             MODULE.ci_build_workflow_issues(flow_mutated),
         )
 
+    def test_dependency_dispatch_isolated_from_ordinary_ci_on_all_events(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        blocks = MODULE.workflow_job_blocks(workflow)
+        # Native dispatch retains only its prerequisite and builder jobs, not the ordinary gate.
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
+        self.assertIn("DependencyModePreflight", blocks)
+        self.assertEqual(MODULE.workflow_job_needs(workflow)["DependencyModePreflight"], set())
+        for event, environment, dependency, qualification, expected in (
+            ("pull_request", "off", "off", "validation", MODULE.CI_BUILD_REQUIRED_JOBS - {"DispatchContinuous"}),
+            ("push", "off", "off", "validation", MODULE.CI_BUILD_REQUIRED_JOBS),
+            ("workflow_dispatch", "off", "off", "validation", MODULE.CI_BUILD_REQUIRED_JOBS - {"DispatchContinuous"}),
+            ("workflow_dispatch", "off", "off", "release", MODULE.CI_BUILD_REQUIRED_JOBS - {"DispatchContinuous"}),
+            ("workflow_dispatch", "qualify", "off", "validation", set()),
+            ("workflow_dispatch", "off", "qualify", "validation", MODULE.CI_BUILD_NATIVE_JOBS),
+            ("workflow_dispatch", "off", "publish", "validation", MODULE.CI_BUILD_NATIVE_JOBS),
+        ):
+            with self.subTest(event=event, environment=environment, dependency=dependency):
+                available = set()
+                for job in MODULE.CI_BUILD_REQUIRED_JOBS - {"DispatchContinuous"}:
+                    condition = MODULE.workflow_job_direct_value(blocks[job], "if")
+                    if condition is None:
+                        continue
+                    self.assertTrue(condition.startswith("${{ ") and condition.endswith(" }}"))
+                    expression = condition[4:-3]
+                    expression = expression.replace("github.event_name", repr(event))
+                    expression = expression.replace("inputs.environment-mode", repr(environment))
+                    expression = expression.replace("inputs.dependency-mode", repr(dependency))
+                    expression = expression.replace("github.event.head_commit.message", repr("ordinary commit"))
+                    preflight = "success" if event == "workflow_dispatch" and dependency != "off" and environment == "off" else "skipped"
+                    expression = expression.replace("needs.DependencyModePreflight.result", repr(preflight))
+                    expression = expression.replace("always()", "True").replace("!cancelled()", "True")
+                    expression = expression.replace("!contains('ordinary commit', '[skip ci]')", "True")
+                    expression = expression.replace("&&", " and ").replace("||", " or ")
+                    self.assertRegex(expression, r"^[\s\w'()=!]+$")
+                    if eval(expression, {"__builtins__": {}}, {}):
+                        available.add(job)
+                if event == "push" and environment == dependency == "off":
+                    available.add("DispatchContinuous")
+                self.assertEqual(available, expected)
+                self.assertEqual(
+                    event == "workflow_dispatch" and dependency in {"qualify", "publish"},
+                    event == "workflow_dispatch" and dependency != "off",
+                )
+
+    def test_dependency_child_requires_read_only_gate_and_disabled_publisher(self):
+        child = (ROOT / ".github/workflows/ci-dependencies.yml").read_text()
+        self.assertEqual(MODULE.ci_dependency_workflow_issues(child), [])
+        mutations = (
+            ("schedule", "  workflow_call:\n", "  workflow_call:\n  schedule:\n    - cron: '7 9 * * *'\n"),
+            ("token write", "      attestations: read\n", "      attestations: write\n"),
+            ("skipped verification", "          python3 scripts/ci_dependency_gate.py \\\n", "          true # python3 scripts/ci_dependency_gate.py \\\n"),
+            ("unfiltered needs", "          del needs['DependencyModePreflight']\n", "          pass # del needs['DependencyModePreflight']\n"),
+            ("publish succeeds", "          exit 1\n", "          exit 0\n"),
+            ("publish ignored failure", "      - name: Refuse publication until protected publisher is reviewed\n",
+             "      - name: Refuse publication until protected publisher is reviewed\n        continue-on-error: true\n"),
+            ("publish skipped", "      - name: Refuse publication until protected publisher is reviewed\n",
+             "      - name: Refuse publication until protected publisher is reviewed\n        if: ${{ false }}\n"),
+            ("gate upload skipped", "        id: upload_gate\n", "        id: upload_gate\n        if: ${{ false }}\n"),
+        )
+        for label, old, new in mutations:
+            with self.subTest(label=label):
+                modified = child.replace(old, new, 1)
+                self.assertNotEqual(modified, child)
+                self.assertTrue(MODULE.ci_dependency_workflow_issues(modified))
+
+    def test_dependency_mode_contract_rejects_mutations_and_spoofs(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        changed = (
+            ("missing mode", workflow.replace("      dependency-mode:\n", "      # dependency-mode:\n", 1), "dispatch requires exact mode"),
+            ("wrong default", workflow.replace("      dependency-mode:\n", "      dependency-mode:\n        default: qualify\n", 1), "dependency mode"),
+            ("unguarded app", workflow.replace("  LinuxPackages:\n", "  LinuxPackages:\n    # dependency-mode is off\n    if: ${{ always() }}\n", 1), "job must isolate ordinary and native"),
+            ("missing preflight", workflow.replace("  DependencyModePreflight:\n", "  # DependencyModePreflight:\n", 1), "dependency"),
+            ("mutual exclusion", workflow.replace("dependency-mode cannot combine with environment-mode", "dependency-mode can combine with environment-mode", 1), "dependency"),
+            ("source pin", workflow.replace("dispatched source does not match expected-source-sha", "source checked later", 1), "dependency"),
+            ("checkout source", workflow.replace("          ref: ${{ github.sha }}", "          ref: master", 1), "dependency"),
+            ("comment spoof", workflow.replace("          if source != os.environ['GITHUB_SHA']:\n", "          # if source != os.environ['GITHUB_SHA']:\n", 1), "dependency"),
+            ("string spoof", workflow.replace("          if source != os.environ['GITHUB_SHA']:\n", "          print(\"if source != os.environ['GITHUB_SHA']:\")\n", 1), "dependency"),
+            ("canonical branch", workflow.replace("dependency production requires a canonical repository branch", "repository branch", 1), "dependency"),
+            ("disable qualification", workflow.replace('test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"', 'test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"\n          exit 1', 1), "dependency"),
+        )
+        for name, mutated, marker in changed:
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, workflow)
+                self.assertIn(marker, "\n".join(MODULE.ci_build_workflow_issues(mutated)))
+
+    def test_dependency_preflight_accepts_isolated_modes_and_rejects_unsafe_sources(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        steps = MODULE.workflow_step_blocks(MODULE.workflow_job_blocks(workflow)["DependencyModePreflight"])
+        scripts = [textwrap.dedent("\n".join(step[next(index for index, line in enumerate(step) if line.strip() == "run: |") + 1:]))
+                   for step in steps if MODULE.workflow_step_fields(step)[0].get("name") == "Validate isolated dependency mode and exact source"]
+        self.assertEqual(len(scripts), 1)
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        defaults = {"KLOGG_ENVIRONMENT_MODE": "off", "KLOGG_QUALIFICATION_MODE": "validation",
+                    "KLOGG_EXPECTED_SOURCE_SHA": sha, "GITHUB_REPOSITORY": "ZEACENT/klogg",
+                    "GITHUB_REF": "refs/heads/master", "GITHUB_SHA": sha}
+        for mode in ("qualify", "publish"):
+            with self.subTest(mode=mode):
+                env = {**os.environ, **defaults, "KLOGG_DEPENDENCY_MODE": mode}
+                result = subprocess.run(["bash", "-c", scripts[0]], cwd=ROOT, env=env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for mode, overrides, expected in (
+            ("qualify", {"KLOGG_ENVIRONMENT_MODE": "publish"}, "cannot combine with environment-mode"),
+            ("publish", {"KLOGG_QUALIFICATION_MODE": "release"}, "cannot combine with release qualification"),
+            ("qualify", {"GITHUB_REPOSITORY": "fork/klogg"}, "canonical repository branch"),
+            ("qualify", {"GITHUB_REF": "refs/tags/v1"}, "canonical repository branch"),
+            ("qualify", {"KLOGG_EXPECTED_SOURCE_SHA": ""}, "explicit nonzero full commit SHA"),
+            ("publish", {"KLOGG_EXPECTED_SOURCE_SHA": "0" * 40}, "explicit nonzero full commit SHA"),
+            ("publish", {"KLOGG_EXPECTED_SOURCE_SHA": "a" * 40}, "does not match expected-source-sha"),
+        ):
+            with self.subTest(mode=mode, overrides=overrides):
+                env = {**os.environ, **defaults, **overrides, "KLOGG_DEPENDENCY_MODE": mode}
+                result = subprocess.run(["bash", "-c", scripts[0]], cwd=ROOT, env=env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stdout + result.stderr)
+
     def test_ci_build_uses_the_optimized_prefetch_and_native_build_dag(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
@@ -1979,11 +2091,10 @@ jobs:
                     1,
                 )
                 self.assertNotEqual(mutated, workflow)
-                self.assertIn(
-                    f"CI early fan-out job {job} must remain a root parallel to "
-                    "ReleaseQualificationPreflight",
-                    MODULE.ci_build_workflow_issues(mutated),
-                )
+                expected = (f"CI native prerequisites must directly require dispatch preflight: {job}"
+                            if job in MODULE.CI_BUILD_NATIVE_ROOT_JOBS else
+                            f"CI early fan-out job {job} must remain a root parallel to ReleaseQualificationPreflight")
+                self.assertIn(expected, MODULE.ci_build_workflow_issues(mutated))
 
     def test_ci_build_output_references_require_direct_needs(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
@@ -2036,20 +2147,26 @@ jobs:
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         trusted = (
             "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
-            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
-            "inputs.qualification-mode == 'release') }}"
+            "(github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') || (github.repository == 'ZEACENT/klogg' && "
+            "github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && "
+            "inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || "
+            "inputs.dependency-mode == 'publish')))) }}"
         )
-        mutated = workflow.replace(
-            f"        if: {trusted}\n",
-            "        if: ${{ github.event_name != 'pull_request' }}\n",
-            1,
-        )
-        self.assertNotEqual(mutated, workflow)
-        self.assertIn(
-            "CI artifact step BuildAdbHelperLegalAssets uploads adb-helper-legal-assets "
-            "must use condition",
-            "\n".join(MODULE.ci_build_workflow_issues(mutated)),
-        )
+        for replacement in (
+            "${{ github.event_name != 'pull_request' }}",
+            trusted.replace("github.repository == 'ZEACENT/klogg' && ", ""),
+            trusted.replace("github.ref_type == 'branch' && ", ""),
+            trusted.replace("inputs.environment-mode == 'off' && ", ""),
+        ):
+            with self.subTest(replacement=replacement):
+                mutated = workflow.replace(f"        if: {trusted}\n", f"        if: {replacement}\n", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertIn(
+                    "CI artifact step BuildAdbHelperLegalAssets uploads adb-helper-legal-assets "
+                    "must use condition",
+                    "\n".join(MODULE.ci_build_workflow_issues(mutated)),
+                )
 
     def test_ci_build_rejects_a_missing_direct_artifact_dependency(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
@@ -4032,7 +4149,7 @@ class ReleaseDownloadPublicationLintTest(unittest.TestCase):
         "release body must be rendered from the verified publication manifest"
     )
     INVENTORY_MESSAGE = (
-        "release publication must upload exactly 23 consolidated assets"
+        "release publication must upload exactly 25 consolidated assets"
     )
     CANDIDATE_MESSAGE = "public promoted release name must not contain Candidate"
     CRITICAL_MESSAGE = (
@@ -4083,7 +4200,7 @@ ${{ env.CHANGELOG }}
                 f"{indent}    set -euo pipefail\n"
                 f"{indent}    python3 scripts/verify_source_publication_manifest.py --manifest packages-publication/klogg-source-publication-manifest.json --assets-root packages-publication\n"
                 f"{indent}    asset_count=\"$(find packages-publication -maxdepth 1 -type f | wc -l)\"\n"
-                f"{indent}    test \"$asset_count\" -eq 23\n"
+                f"{indent}    test \"$asset_count\" -eq 25\n"
                 f"{indent}    python3 scripts/render_release_downloads.py --manifest packages-publication/klogg-source-publication-manifest.json --assets-root packages-publication --changelog-file release-changelog.txt --output release-body.md\n\n"
             )
             workflow = workflow[:create] + render + workflow[create:]
@@ -4362,8 +4479,8 @@ jobs:
                     self.BODY_MESSAGE, self.issues(channel, without_renderer)
                 )
                 without_exact_count = projected.replace(
-                    '    test "$asset_count" -eq 23',
-                    '    test "$asset_count" -ge 23',
+                    '    test "$asset_count" -eq 25',
+                    '    test "$asset_count" -ge 25',
                     1,
                 )
                 self.assertIn(

@@ -89,6 +89,7 @@ REQUIRED_RELEASE_ASSET_KINDS = {
     "source-offer",
     "source-manifest",
     "source-set-receipt",
+    "overlay-receipt",
 }
 
 
@@ -403,6 +404,13 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         for kind, asset in by_kind.items():
             with self.subTest(kind=kind):
                 self.assertIs(asset.get("required"), True)
+                # The versioned source offer and its overlay receipt are the
+                # only assets allowed to change with the application version.
+                self.assertEqual(
+                    asset.get("ownership"),
+                    "overlay" if kind in ("source-offer", "overlay-receipt") else "core",
+                    f"unexpected ownership for {kind}",
+                )
                 distribution = asset.get("distribution")
                 self.assertIsInstance(
                     distribution, dict, f"{kind} must declare package/release distribution"
@@ -605,6 +613,30 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIn("source-built ADB helper leaked to portable archive root", package_action)
         self.assertIn("smoke_adb_helper.py", package_action)
 
+    def test_dependency_producer_binds_both_adb_legal_artifacts_by_id(self):
+        workflow = self.required_text(CI_BUILD)
+        legal = CI_MODULE.workflow_job_blocks(workflow)["BuildAdbHelperLegalAssets"]
+        outputs = CI_MODULE.workflow_mapping_block(legal, "outputs", 4)
+        self.assertIsNotNone(outputs)
+        self.assertEqual({key: value for key, (value, _) in outputs.items()}, {
+            "support_artifact_id": "${{ steps.upload_adb_support.outputs.artifact-id }}",
+            "full_release_artifact_id": "${{ steps.upload_adb_release.outputs.artifact-id }}",
+        })
+        steps = [CI_MODULE.workflow_step_fields(step) for step in
+                 CI_MODULE.workflow_job_steps(workflow)["BuildAdbHelperLegalAssets"]]
+        uploads = {fields.get("id"): (fields, children.get("with", {}))
+                   for fields, children in steps if fields.get("id", "").startswith("upload_adb_")}
+        self.assertEqual(set(uploads), {"upload_adb_support", "upload_adb_release"})
+        self.assertEqual(uploads["upload_adb_support"][1]["name"], "adb-helper-package-support")
+        self.assertEqual(uploads["upload_adb_release"][1]["name"], "adb-helper-legal-assets")
+        condition = uploads["upload_adb_release"][0].get("if", "")
+        for marker in ("inputs.dependency-mode == 'qualify'",
+                       "inputs.dependency-mode == 'publish'",
+                       "github.repository == 'ZEACENT/klogg'", "github.ref_type == 'branch'",
+                       "inputs.environment-mode == 'off'",
+                       "inputs.qualification-mode == 'validation'"):
+            self.assertIn(marker, condition)
+
     def test_adb_package_support_and_full_release_artifacts_have_distinct_ownership(self):
         workflow = self.required_text(CI_BUILD)
         records = CI_MODULE.workflow_artifact_records(workflow)
@@ -612,9 +644,12 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         full_release = "adb-helper-legal-assets"
         full_release_condition = (
             "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
-            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
-            "inputs.qualification-mode == 'release') }}"
-        )
+            "(github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') || (github.repository == 'ZEACENT/klogg' && "
+            "github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && "
+            "inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || "
+            "inputs.dependency-mode == 'publish')))) }}"
+        ).lower()
 
         legal_records = records.get("BuildAdbHelperLegalAssets", [])
         self.assertCountEqual(
@@ -631,11 +666,14 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
 
         blocks = CI_MODULE.workflow_job_blocks(workflow)
         legal_block = blocks["BuildAdbHelperLegalAssets"]
-        # Ordinary jobs now additionally skip producer-mode dispatches under a
-        # distinct check name; normal events still run unconditionally.
+        # Dependency dispatch needs the same legal support as ordinary jobs;
+        # environment production must continue to skip this independent lane.
         self.assertEqual(
             CI_MODULE.workflow_job_direct_value(legal_block, "if"),
-            "${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') "
+            "${{ ((github.event_name != 'workflow_dispatch' || "
+            "(inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || "
+            "(github.event_name == 'workflow_dispatch' && "
+            "(inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) "
             "&& !contains(github.event.head_commit.message, '[skip ci]') }}",
             "the unconditional package-support upload is useless if its job is event-gated",
         )
@@ -750,32 +788,37 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIsNone(producers[package_support])
         full_release_condition = (
             "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
-            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
-            "inputs.qualification-mode == 'release') }}"
-        )
+            "(github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') || (github.repository == 'ZEACENT/klogg' && "
+            "github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && "
+            "inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || "
+            "inputs.dependency-mode == 'publish')))) }}"
+        ).lower()
         self.assertEqual(producers.get(full_release), full_release_condition)
 
-        for event, ref, qualification_mode, full_release_expected in (
-            ("pull_request", "refs/pull/1/merge", "validation", False),
-            ("push", "refs/heads/master", "validation", True),
-            ("push", "refs/heads/topic", "validation", False),
-            ("workflow_dispatch", "refs/heads/master", "validation", False),
-            ("workflow_dispatch", "refs/heads/master", "release", True),
-            ("workflow_dispatch", "refs/heads/topic", "release", False),
+        for event, ref, qualification_mode, environment_mode, dependency_mode, repository, full_release_expected in (
+            ("pull_request", "refs/pull/1/merge", "validation", "off", "off", "ZEACENT/klogg", False),
+            ("push", "refs/heads/master", "validation", "off", "off", "ZEACENT/klogg", True),
+            ("push", "refs/heads/topic", "validation", "off", "off", "ZEACENT/klogg", False),
+            ("workflow_dispatch", "refs/heads/master", "validation", "off", "off", "ZEACENT/klogg", False),
+            ("workflow_dispatch", "refs/heads/master", "release", "off", "off", "ZEACENT/klogg", True),
+            ("workflow_dispatch", "refs/heads/topic", "release", "off", "off", "ZEACENT/klogg", False),
+            ("workflow_dispatch", "refs/heads/topic", "validation", "off", "qualify", "ZEACENT/klogg", True),
+            ("workflow_dispatch", "refs/heads/topic", "validation", "off", "publish", "ZEACENT/klogg", True),
+            ("workflow_dispatch", "refs/heads/topic", "validation", "qualify", "publish", "ZEACENT/klogg", False),
+            ("workflow_dispatch", "refs/heads/topic", "validation", "off", "publish", "fork/klogg", False),
+            ("workflow_dispatch", "refs/tags/v1", "validation", "off", "publish", "ZEACENT/klogg", False),
         ):
-            with self.subTest(
-                event=event, ref=ref, qualification_mode=qualification_mode
-            ):
-                self.assertTrue(
-                    producers.get(package_support) is None,
-                    "package-support assets must remain available to package validation",
-                )
+            with self.subTest(event=event, ref=ref, dependency_mode=dependency_mode):
+                self.assertIsNone(producers.get(package_support))
                 full_release_runs = (
                     event == "push" and ref == "refs/heads/master"
                 ) or (
                     event == "workflow_dispatch"
-                    and ref == "refs/heads/master"
-                    and qualification_mode == "release"
+                    and ((ref == "refs/heads/master" and qualification_mode == "release")
+                         or (repository == "ZEACENT/klogg" and ref.startswith("refs/heads/")
+                             and qualification_mode == "validation" and environment_mode == "off"
+                             and dependency_mode in {"qualify", "publish"}))
                 )
                 self.assertEqual(full_release_runs, full_release_expected)
 

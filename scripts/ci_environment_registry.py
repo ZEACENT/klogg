@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 
 REGISTRY = "ghcr.io/zeacent/klogg-ci-env"
+DEPENDENCY_REGISTRY = "ghcr.io/zeacent/klogg-ci-deps"
 REPOSITORY = "ZEACENT/klogg"
 PRODUCER_WORKFLOW = ".github/workflows/ci-environments.yml"
 MANIFEST_TYPE = "application/vnd.oci.image.manifest.v1+json"
@@ -102,9 +103,14 @@ def _close_error(error):
 
 
 class RegistryClient:
-    """Fetch only public metadata from the project's one environment package."""
+    """Fetch public metadata from one explicitly selected project package."""
 
-    def __init__(self, opener=None, sleeper=None):
+    def __init__(self, opener=None, sleeper=None, *, package=REGISTRY):
+        if package not in (REGISTRY, DEPENDENCY_REGISTRY):
+            raise RegistryError("untrusted registry package")
+        self.package = package
+        self.repository_path = package.partition("/")[2]
+        self.pull_scope = "repository:" + self.repository_path + ":pull"
         self.opener = opener or urllib.request.build_opener(_NoRedirect())
         self.sleeper = sleeper or time.sleep
         self.token = None
@@ -131,6 +137,22 @@ class RegistryClient:
             self.sleeper(2 ** attempt)
         raise RegistryError("registry transport exhausted its bounded attempts")
 
+    def _authorize(self, challenge):
+        realm = re.search(r'\brealm="([^"]+)"', challenge)
+        service = re.search(r'\bservice="([^"]+)"', challenge)
+        scope = re.search(r'\bscope="([^"]+)"', challenge)
+        if (not challenge.lower().startswith("bearer ") or not realm or not service
+                or realm.group(1) != "https://ghcr.io/token"
+                or service.group(1) != "ghcr.io"
+                or (scope and scope.group(1) != self.pull_scope)):
+            raise RegistryError("unexpected registry authentication challenge")
+        query = urllib.parse.urlencode({"service": "ghcr.io", "scope": self.pull_scope})
+        document = _json(self._read("https://ghcr.io/token?" + query, token_request=True))
+        token = document.get("token") if isinstance(document, dict) else None
+        if not isinstance(token, str) or not token or len(token) > 16384 or any(c.isspace() for c in token):
+            raise RegistryError("invalid anonymous registry token")
+        self.token = token
+
     def _read(self, url, *, token_request=False, redirects=0):
         parsed = urllib.parse.urlsplit(url)
         if (parsed.scheme != "https" or parsed.username or parsed.password
@@ -155,23 +177,7 @@ class RegistryClient:
                     return self._read(destination, redirects=redirects + 1)
                 if (error.code == 401 and parsed.hostname == "ghcr.io"
                         and not self.token and not token_request):
-                    challenge = error.headers.get("WWW-Authenticate", "")
-                    realm = re.search(r'\brealm="([^"]+)"', challenge)
-                    service = re.search(r'\bservice="([^"]+)"', challenge)
-                    scope = re.search(r'\bscope="([^"]+)"', challenge)
-                    if (not challenge.lower().startswith("bearer ") or not realm or not service
-                            or realm.group(1) != "https://ghcr.io/token"
-                            or service.group(1) != "ghcr.io"
-                            or (scope and scope.group(1) != "repository:zeacent/klogg-ci-env:pull")):
-                        raise RegistryError("unexpected registry authentication challenge") from error
-                    query = urllib.parse.urlencode({
-                        "service": "ghcr.io", "scope": "repository:zeacent/klogg-ci-env:pull",
-                    })
-                    document = _json(self._read("https://ghcr.io/token?" + query, token_request=True))
-                    token = document.get("token") if isinstance(document, dict) else None
-                    if not isinstance(token, str) or not token or len(token) > 16384 or any(c.isspace() for c in token):
-                        raise RegistryError("invalid anonymous registry token")
-                    self.token = token
+                    self._authorize(error.headers.get("WWW-Authenticate", ""))
                     return self._read(url, redirects=redirects)
                 raise RegistryError("public registry request failed (HTTP {})".format(error.code)) from error
             finally:
@@ -180,6 +186,8 @@ class RegistryClient:
             raise RegistryError("public registry request failed") from error
 
     def read_image(self, digest):
+        if self.package != REGISTRY:
+            raise RegistryError("native dependency artifacts are not Linux images")
         _require_digest(digest)
         base = "https://ghcr.io/v2/zeacent/klogg-ci-env/"
         manifest_bytes = self._read(base + "manifests/" + digest)
@@ -219,14 +227,15 @@ class RegistryClient:
         }
 
 
-def verify_attestation(subject, bundle, source, expected_name, runner=None):
+def _verify_attestation(subject, bundle, source, expected_name, runner,
+                        *, producer_workflow, allowed_subjects):
     """Verify cryptography/issuer through gh, then enforce the signed subject.
 
     These flags bind the certificate-backed signer/source identity. They must
     not be replaced with comparisons against self-reported receipt fields.
     """
     if (not isinstance(source, dict) or source.get("repository") != REPOSITORY
-            or source.get("workflow") != PRODUCER_WORKFLOW):
+            or source.get("workflow") != producer_workflow):
         raise RegistryError("untrusted environment producer identity")
     sha, ref = source.get("sha"), source.get("ref")
     if not isinstance(sha, str) or not COMMIT_RE.fullmatch(sha) or sha == "0" * 40:
@@ -234,7 +243,7 @@ def verify_attestation(subject, bundle, source, expected_name, runner=None):
     if (not isinstance(ref, str) or not REF_RE.fullmatch(ref) or ".." in ref
             or "//" in ref or ref.endswith(("/", "."))):
         raise RegistryError("producer provenance must name a trusted branch revision")
-    if expected_name not in (REGISTRY, "verification.json"):
+    if expected_name not in allowed_subjects:
         raise RegistryError("unexpected attestation subject policy")
     subject, bundle = pathlib.Path(subject), pathlib.Path(bundle)
     for path, limit in ((subject, METADATA_LIMIT), (bundle, BUNDLE_LIMIT)):
@@ -243,7 +252,7 @@ def verify_attestation(subject, bundle, source, expected_name, runner=None):
     subject_digest = _digest(subject.read_bytes())[7:]
     command = [
         "gh", "attestation", "verify", str(subject), "--bundle", str(bundle),
-        "--repo", REPOSITORY, "--signer-workflow", REPOSITORY + "/" + PRODUCER_WORKFLOW,
+        "--repo", REPOSITORY, "--signer-workflow", REPOSITORY + "/" + producer_workflow,
         "--signer-digest", sha, "--source-digest", sha, "--source-ref", ref,
         "--deny-self-hosted-runners", "--format", "json",
     ]
@@ -270,3 +279,12 @@ def verify_attestation(subject, bundle, source, expected_name, runner=None):
                and item.get("digest") == {"sha256": subject_digest} for item in subjects):
             return True
     raise RegistryError("verified attestation does not bind the exact expected subject")
+
+
+def verify_attestation(subject, bundle, source, expected_name, runner=None):
+    """Verify only an environment image or its detached qualification receipt."""
+    return _verify_attestation(
+        subject, bundle, source, expected_name, runner,
+        producer_workflow=PRODUCER_WORKFLOW,
+        allowed_subjects=(REGISTRY, "verification.json"),
+    )

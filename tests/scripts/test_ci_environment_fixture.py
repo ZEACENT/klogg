@@ -62,14 +62,26 @@ class EnvironmentFixtureTest(unittest.TestCase):
         self.image = "example.invalid/manylinux@sha256:" + "b" * 64
         offer = release / "ADB-HELPER-SOURCE-OFFER.txt"
         source_archive = release / "adb-helper-source-archive.tar.gz"
-        offer.write_text("Published archive: " + published_source_name(VERSION, "adb-helper", pipeline.sha256(source_archive))
-                         + "\nSHA-256: " + pipeline.sha256(source_archive) + "\n")
+        offer.write_text(
+            "Published archive: "
+            + published_source_name(VERSION, "adb-helper", pipeline.sha256(source_archive))
+            + "\nSHA-256: " + pipeline.sha256(source_archive)
+            + "\nVersioned releases page: https://github.com/ZEACENT/klogg/releases"
+            + "\nRolling continuous release page: "
+            + "https://github.com/ZEACENT/klogg/releases/tag/continuous\n"
+        )
         source_set_path = release / "adb-helper-source-set-receipt.json"
         source_set = core.load_json(source_set_path)
         source_set["lock_sha256"] = pipeline.sha256(self.lock)
         for entry in source_set["package_support_assets"]:
             entry["sha256"] = pipeline.sha256(release / entry["file_name"])
         source_set_path.write_text(json.dumps(source_set))
+        overlay_path = release / "adb-helper-overlay-receipt.json"
+        overlay = core.load_json(overlay_path)
+        overlay["version"] = VERSION
+        overlay["source_set_receipt_sha256"] = pipeline.sha256(source_set_path)
+        overlay["assets"][0]["sha256"] = pipeline.sha256(offer)
+        overlay_path.write_text(json.dumps(overlay))
         receipt["receipt_kind"] = "binary-build"
         receipt["lock_sha256"] = pipeline.sha256(self.lock)
         receipt["source_set_receipt_sha256"] = pipeline.sha256(source_set_path)
