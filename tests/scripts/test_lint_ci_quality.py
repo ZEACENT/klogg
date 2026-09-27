@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import pathlib
 import re
@@ -45,7 +46,12 @@ jobs:
       CODEQL_ACTION_OVERLAY_ANALYSIS_CODE_SCANNING_CPP: "false"
     timeout-minutes: 30
     steps:
-      - uses: ./.github/actions/agent-setup
+      - name: Restore CPM cache
+        uses: actions/cache@{CACHE_PINNED}
+      - uses: ./.github/actions/prefetch-cpm-cache
+      - name: Fetch the pinned official CodeQL bundle
+        id: codeql-bundle
+        run: python3 scripts/fetch_codeql_bundle.py --repo-root "$GITHUB_WORKSPACE" --output-dir "$RUNNER_TEMP/klogg-codeql" --github-output "$GITHUB_OUTPUT"
       - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - run: cmake --build build -t klogg_codeql_thirdparty
       - run: cmake --build build -t klogg -- -n > /tmp/codeql-traced-plan.txt && ! grep -E 'cpm_cache|_deps|3rdparty/CMakeFiles' /tmp/codeql-traced-plan.txt
@@ -53,6 +59,7 @@ jobs:
         with:
           languages: c-cpp
           build-mode: manual
+          tools: ${{{{ steps.codeql-bundle.outputs.bundle }}}}
       - run: cmake --build build -t klogg
       - uses: github/codeql-action/analyze@{CODEQL_PINNED} # v4.37.9
 """
@@ -234,7 +241,7 @@ jobs:
 
     def test_static_analysis_event_modes_remain_strict_except_manual_full_report(self):
         workflow = (ROOT / ".github/workflows/static-analysis.yml").read_text()
-        section = workflow.split("      - name: Resolve authoritative analysis base", 1)[1].split("      - name: Install gcc-13", 1)[0]
+        section = workflow.split("      - name: Resolve authoritative analysis base", 1)[1].split("      - name: Locate clang-tidy-diff", 1)[0]
         script = textwrap.dedent(section.split("        run: |\n", 1)[1])
         for event, manual, expected in (
             ("pull_request", "full-report", "changed-strict"),
@@ -750,7 +757,6 @@ jobs:
             "PrefetchBoost": set(),
             "PrefetchOpenSsl": set(),
             "PrefetchLinuxDeployQt": set(),
-            "PrefetchCmakeInstaller": set(),
             "PrefetchWindowsTools": set(),
             "PrefetchAdbHelperSources": set(),
             "BuildAdbHelperLegalAssets": {"SaveVersion", "PrefetchAdbHelperSources"},
@@ -759,8 +765,8 @@ jobs:
             "BuildAdbWindowsX64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbMacX64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbMacArm64": {"BuildAdbHelperLegalAssets"},
-            "LinuxPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchLinuxDeployQt", "PrefetchCmakeInstaller", "BuildAdbLinuxX64", "ReleaseQualificationPreflight"},
-            "LinuxSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchCmakeInstaller", "ReleaseQualificationPreflight"},
+            "LinuxPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchLinuxDeployQt", "BuildAdbLinuxX64", "ReleaseQualificationPreflight"},
+            "LinuxSanitizers": {"SaveVersion", "PrefetchCpmCache", "ReleaseQualificationPreflight"},
             "LinuxTsan": {"SaveVersion", "PrefetchCpmCache", "ReleaseQualificationPreflight"},
             "PrefetchIosNativeSources": set(),
             "BuildIosNativeX64": {"SaveVersion", "PrefetchIosNativeSources"},
@@ -859,13 +865,18 @@ jobs:
 class PlatformFragilePreflightPolicyTest(unittest.TestCase):
     CI_PREFLIGHT_JOB = "ReleaseQualificationPreflight"
     EXPENSIVE_PREFLIGHT_JOB = "PlatformFragilePreflight"
+    RESOLVER_JOB = "ResolveLinuxEnvironment"
     CI_PREFLIGHT_MESSAGE = (
         "CI Build platform-fragile preflight must run in parallel with "
         "version/prefetch roots and precede every first-party application job"
     )
     EXPENSIVE_PREFLIGHT_MESSAGE = (
         "CodeQL, Coverage, and Static analysis expensive jobs must depend on "
-        "an exact scoped platform-fragile preflight"
+        "an exact scoped platform-fragile preflight and the locked environment resolver"
+    )
+    LOCKED_ENVIRONMENT_MESSAGE = (
+        "CodeQL, Coverage, and Static analysis expensive jobs must run inside the "
+        "verified locked analysis environment image"
     )
     CI_PARALLEL_ROOTS = {
         "SaveVersion",
@@ -873,7 +884,6 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
         "PrefetchBoost",
         "PrefetchOpenSsl",
         "PrefetchLinuxDeployQt",
-        "PrefetchCmakeInstaller",
         "PrefetchWindowsTools",
         "PrefetchAdbHelperSources",
         "PrefetchIosNativeSources",
@@ -945,6 +955,11 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     expected_roots.update(self.CI_PARALLEL_ROOTS)
                     expected_roots.add("EnvironmentModePreflight")
                     protected_jobs = self.CI_APPLICATION_JOBS
+                else:
+                    # The resolver is a root: it verifies the locked image
+                    # before the expensive job starts, not after the lint.
+                    expected_roots.add(self.RESOLVER_JOB)
+                    protected_jobs.discard(self.RESOLVER_JOB)
                 self.assertEqual(
                     {job for job, dependencies in needs.items() if not dependencies},
                     expected_roots,
@@ -996,9 +1011,9 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
             "    needs: [BuildAdbHelperLegalAssets, ReleaseQualificationPreflight]\n",
             1,
         ).replace(
-            "PrefetchCmakeInstaller, BuildAdbLinuxX64, "
+            "PrefetchLinuxDeployQt, BuildAdbLinuxX64, "
             "ReleaseQualificationPreflight]",
-            "PrefetchCmakeInstaller, BuildAdbLinuxX64]",
+            "PrefetchLinuxDeployQt, BuildAdbLinuxX64]",
             1,
         )
         self.assertNotEqual(transitive, ci_build)
@@ -1023,8 +1038,8 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                 1,
             ),
             "application job bypass": ci_build.replace(
-                "PrefetchCmakeInstaller, ReleaseQualificationPreflight]",
-                "PrefetchCmakeInstaller]",
+                "PrefetchCpmCache, ReleaseQualificationPreflight]",
+                "PrefetchCpmCache]",
                 1,
             ),
             "conditional event bypass": ci_build.replace(
@@ -1131,10 +1146,12 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
 
         for name, expensive_job in self.WORKFLOW_JOBS.items():
             workflow = workflows[name]
+            needs_line = (
+                f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}, {self.RESOLVER_JOB}]\n"
+            )
             mutations = {
                 "missing dependency": workflow.replace(
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    f"  {expensive_job}:\n" + needs_line,
                     f"  {expensive_job}:\n",
                     1,
                 ),
@@ -1145,9 +1162,8 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     1,
                 ),
                 "duplicate dependency key": workflow.replace(
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
-                    "    needs: []\n",
+                    needs_line,
+                    needs_line + "    needs: []\n",
                     1,
                 ),
                 "full quality runner instead of scoped lint": workflow.replace(
@@ -1178,19 +1194,15 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     1,
                 ),
                 "escaped failed-needs condition key": workflow.replace(
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
-                    "    \"\\u0069f\": ${{ always() }}\n",
+                    f"  {expensive_job}:\n" + needs_line,
+                    f"  {expensive_job}:\n" + needs_line
+                    + "    \"\\u0069f\": ${{ always() }}\n",
                     1,
                 ),
                 "expensive job runs after failed preflight": workflow.replace(
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
-                    "    if: ${{ always() }}\n",
+                    f"  {expensive_job}:\n" + needs_line,
+                    f"  {expensive_job}:\n" + needs_line
+                    + "    if: ${{ always() }}\n",
                     1,
                 ),
                 "broadened to full platform-fragile lint": workflow.replace(
@@ -1222,9 +1234,8 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     1,
                 ),
                 "duplicate needs key": workflow.replace(
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
-                    "    needs: [MissingSpoof]\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    needs_line,
+                    "    needs: [MissingSpoof]\n" + needs_line,
                     1,
                 ),
                 "duplicate command key": workflow.replace(
@@ -1243,6 +1254,75 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                         self.EXPENSIVE_PREFLIGHT_MESSAGE,
                         self.repository_issues(candidate),
                     )
+
+    def test_expensive_jobs_run_inside_the_locked_analysis_environment(self):
+        workflows = self.repository_workflows()
+        analysis = {
+            name: workflows[name] for name in self.WORKFLOW_JOBS
+        }
+        self.assert_policy_clean(
+            self.LOCKED_ENVIRONMENT_MESSAGE,
+            self.repository_issues(dict(workflows)),
+        )
+        for name, expensive_job in self.WORKFLOW_JOBS.items():
+            workflow = analysis[name]
+            resolver_start = workflow.index(f"  {self.RESOLVER_JOB}:\n")
+            resolver_end = workflow.index(f"  {expensive_job}:\n")
+            mutations = {
+                "floating container tag": workflow.replace(
+                    "image: ${{ needs.ResolveLinuxEnvironment.outputs.image }}",
+                    "image: ghcr.io/zeacent/klogg-ci-env:latest",
+                    1,
+                ),
+                "resolver pulls instead of only resolving": workflow.replace(
+                    'pull: "false"',
+                    'pull: "true"',
+                    1,
+                ),
+                "host provisioning returns": workflow.replace(
+                    "      - name: Restore CPM cache\n",
+                    "      - run: sudo apt-get update && sudo apt-get install -y clang-tidy\n"
+                    "      - name: Restore CPM cache\n",
+                    1,
+                ),
+                "host tool installation returns": workflow.replace(
+                    "      - name: Restore CPM cache\n",
+                    "      - uses: ./.github/actions/agent-setup\n"
+                    "      - name: Restore CPM cache\n",
+                    1,
+                ),
+                "missing resolver job": workflow[:resolver_start]
+                + workflow[resolver_end:],
+                "missing CPM restore": workflow.replace(
+                    "      - name: Restore CPM cache\n", "", 1
+                ),
+            }
+            for label, mutated in mutations.items():
+                with self.subTest(workflow=name, mutation=label):
+                    self.assertNotEqual(mutated, workflow)
+                    candidate = dict(workflows)
+                    candidate[name] = mutated
+                    self.assert_policy_issue(
+                        self.LOCKED_ENVIRONMENT_MESSAGE,
+                        self.repository_issues(candidate),
+                    )
+
+            with self.subTest(workflow=name, mutation="resolver missing from needs"):
+                needs_line = (
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}, {self.RESOLVER_JOB}]\n"
+                )
+                mutated = workflow.replace(
+                    needs_line,
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    1,
+                )
+                self.assertNotEqual(mutated, workflow)
+                candidate = dict(workflows)
+                candidate[name] = mutated
+                self.assert_policy_issue(
+                    self.EXPENSIVE_PREFLIGHT_MESSAGE,
+                    self.repository_issues(candidate),
+                )
 
     def test_expensive_preflight_cannot_be_limited_to_one_event_projection(self):
         workflows = self.repository_workflows()
@@ -1547,7 +1627,6 @@ jobs:
             "LinuxSanitizers": {
                 "SaveVersion",
                 "PrefetchCpmCache",
-                "PrefetchCmakeInstaller",
                 "ReleaseQualificationPreflight",
             },
             "LinuxTsan": {
@@ -1598,7 +1677,6 @@ jobs:
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchLinuxDeployQt",
-                "PrefetchCmakeInstaller",
                 "BuildAdbLinuxX64",
                 "ReleaseQualificationPreflight",
             },
@@ -1912,8 +1990,8 @@ jobs:
     def test_ci_build_rejects_missing_dynamic_native_artifact_ancestry(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
-            "PrefetchCmakeInstaller, BuildAdbLinuxX64",
-            "PrefetchCmakeInstaller, BuildAdbHelperLegalAssets",
+            "PrefetchLinuxDeployQt, BuildAdbLinuxX64",
+            "PrefetchLinuxDeployQt, BuildAdbHelperLegalAssets",
             1,
         )
         self.assertNotEqual(mutated, workflow)
@@ -2683,16 +2761,12 @@ jobs:
         )
         self.assertIn(message, MODULE.ci_build_workflow_issues(comment_spoof))
 
-    def test_ci_build_requires_at_least_one_buildkit_cache_exporter(self):
+    def test_ci_build_has_no_buildkit_cache_exports_after_locked_environment_consumption(self):
+        # Ordinary CI consumes locked GHCR environments; the per-leg BuildKit
+        # layer caches and their push-only export guard are gone for good.
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
-        mutated = "\n".join(
-            line for line in workflow.splitlines() if "cache-to:" not in line
-        )
-        self.assertNotEqual(mutated, workflow)
-        self.assertIn(
-            "BuildKit cache exports must run only on default-branch pushes",
-            MODULE.ci_build_workflow_issues(mutated),
-        )
+        self.assertNotIn("cache-to:", workflow)
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
 
     def test_buildkit_cache_export_condition_cannot_admit_pull_requests(self):
         message = "BuildKit cache exports must run only on default-branch pushes"
@@ -3081,7 +3155,7 @@ jobs:
         good = secure_codeql_workflow()
         mutations = (
             (
-                "      - uses: ./.github/actions/agent-setup\n",
+                "      - uses: ./.github/actions/prefetch-cpm-cache\n",
                 "CodeQL manual build must restore the shared dependency closure",
             ),
             (
@@ -3491,9 +3565,21 @@ steps:
         )
 
     def test_static_analysis_installs_optional_dependency_build_tools(self):
+        # The locked noble-qt693-analysis environment carries the optional
+        # dependency build tools; the consumer workflow must not reinstall
+        # them from floating host package sources.
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
-        self.assertIn("libcurl4-openssl-dev", workflow)
-        self.assertIn("ragel", workflow)
+        self.assertNotIn("apt-get", workflow)
+        inputs = json.loads(
+            (ROOT / "ci" / "environments" / "inputs" / "noble-qt693-analysis.json").read_text()
+        )
+        packages = {
+            package["package"]
+            for bundle in inputs["apt_bundles"]
+            for package in bundle["manifest"]["packages"]
+        }
+        self.assertIn("libcurl4-openssl-dev", packages)
+        self.assertIn("ragel", packages)
 
     def test_static_analysis_full_audit_and_changed_events_do_not_cancel_each_other(self):
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()

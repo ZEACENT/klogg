@@ -26,6 +26,8 @@ runs:
         KLOGG_ENV_FAMILY: ${{ inputs.family }}
         KLOGG_ENV_PULL: ${{ inputs.pull }}
         KLOGG_ENV_RETAG: ${{ inputs.retag }}
+        # gh attestation verify needs a token even for public attestations.
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         for value in "$KLOGG_ENV_PULL" "$KLOGG_ENV_RETAG"; do

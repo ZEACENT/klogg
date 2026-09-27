@@ -1099,15 +1099,23 @@ class SanitizerConfigurationTest(unittest.TestCase):
         self.assertIn("failed to enumerate runtime artifacts", result.stderr)
         self.assertIn("synthetic find failure", result.stderr)
 
-    def test_cmake_installer_is_hash_verified_before_root_execution(self):
+    def test_cmake_installer_is_hash_pinned_only_in_the_producer_recipe(self):
         digest = "ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d"
         workflow = CI_BUILD.read_text()
         dockerfile = UBUNTU_22_TSAN_DOCKERFILE.read_text()
-        self.assertIn(digest, workflow)
-        self.assertIn("sha256sum --check --strict", workflow)
+        materials = (ROOT / "ci" / "environments" / "materials.json").read_text()
+        # Ordinary CI consumes the locked environment image; it must not
+        # download or execute the CMake installer on the runner.
+        self.assertNotIn(digest, workflow)
+        self.assertNotIn("CMAKE_INSTALLER_URL", workflow)
+        self.assertNotIn("sha256sum --check --strict", workflow)
+        # The producer recipe keeps the installer hash-verified inside the
+        # image build, and the lock material closure records the same pin.
         self.assertIn(digest, dockerfile)
         self.assertIn("CMAKE_INSTALLER_URL", dockerfile)
+        self.assertIn("sha256sum --check --strict", dockerfile)
         self.assertNotIn("COPY cmake-3.20.2-linux-x86_64.sh", dockerfile)
+        self.assertIn(digest, materials)
 
     def test_tsan_qt_verifier_accepts_only_the_pinned_instrumented_runtime(self):
         result = self.configure_tsan_qt_consumer()
@@ -1188,21 +1196,20 @@ class SanitizerConfigurationTest(unittest.TestCase):
         self.assertIn("libQt5Gui.so.5", result.stderr)
         self.assertIn("not compiler-instrumented", result.stderr)
 
-    def test_linux_tsan_uses_buildkit_cache_for_the_qt_builder(self):
+    def test_linux_tsan_consumes_the_locked_environment_instead_of_rebuilding_qt(self):
         workflow = CI_BUILD.read_text()
-        self.assertIn(
-            "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
-            workflow,
-        )
-        self.assertIn(
-            "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
-            workflow,
-        )
-        self.assertIn("cache-from: type=gha,scope=klogg-qt5-tsan", workflow)
-        self.assertIn(
-            "cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && 'type=gha,mode=max,scope=klogg-qt5-tsan' || '' }}",
-            workflow,
-        )
+        producer = (ROOT / ".github" / "workflows" / "ci-environments.yml").read_text()
+        # Ordinary CI never rebuilds the instrumented Qt builder: no image
+        # build actions or BuildKit cache wiring remain in the consumer
+        # workflow. The locked jammy-qt5-tsan image replaces them.
+        self.assertNotIn("docker/setup-buildx-action", workflow)
+        self.assertNotIn("docker/build-push-action", workflow)
+        self.assertNotIn("cache-from: type=gha,scope=klogg-qt5-tsan", workflow)
+        self.assertNotIn("cache-to:", workflow)
+        self.assertIn("KLOGG_ENV_FAMILY: jammy-qt5-tsan", workflow)
+        # The producer workflow keeps the single authoritative BuildKit
+        # candidate build for environment images.
+        self.assertIn("docker/setup-buildx-action@", producer)
 
     def test_linux_lsan_uses_complete_stacks_for_narrow_suppressions(self):
         workflow = CI_BUILD.read_text()

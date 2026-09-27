@@ -380,56 +380,6 @@ jobs:
           path: prefetch_artifacts/linuxdeployqt-continuous-x86_64.AppImage
           if-no-files-found: error
 
-  PrefetchCmakeInstaller:
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
-    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch Linux CMake installer"
-    runs-on: ubuntu-22.04
-    env:
-      KLOGG_WORKSPACE: ${{ github.workspace }}
-      CMAKE_INSTALLER_URL: https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
-    steps:
-      - name: Prefetch CMake installer
-        shell: sh
-        run: |
-          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
-          CMAKE_INSTALLER="$PREFETCH_ROOT/cmake-3.20.2-linux-x86_64.sh"
-
-          mkdir -p "$PREFETCH_ROOT"
-
-          attempt=1
-          max_attempts=3
-          while [ $attempt -le $max_attempts ]; do
-            rm -f "$CMAKE_INSTALLER"
-
-            if curl --fail --retry 3 --retry-delay 10 --progress-bar --location \
-              --output "$CMAKE_INSTALLER" "$CMAKE_INSTALLER_URL"; then
-              if printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$CMAKE_INSTALLER" \
-                | sha256sum --check --strict \
-                && head -1 "$CMAKE_INSTALLER" | grep -q '#!/'; then
-                chmod +x "$CMAKE_INSTALLER"
-                exit 0
-              fi
-              echo "Downloaded CMake installer failed integrity validation, retrying..."
-              rm -f "$CMAKE_INSTALLER"
-            fi
-
-            if [ $attempt -eq $max_attempts ]; then
-              echo "::error::Failed to download CMake installer after $max_attempts attempts"
-              exit 1
-            fi
-
-            echo "CMake installer prefetch attempt $attempt failed, retrying after backoff..."
-            attempt=$((attempt + 1))
-            sleep $((attempt * 10))
-          done
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cmake-installer
-          path: prefetch_artifacts/cmake-3.20.2-linux-x86_64.sh
-          if-no-files-found: error
-
   PrefetchWindowsTools:
     if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Prefetch Windows MSYS2 tools"
@@ -845,7 +795,7 @@ jobs:
     steps: *adb_helper_steps
 
   LinuxPackages:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, PrefetchCmakeInstaller, BuildAdbLinuxX64, ReleaseQualificationPreflight]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, BuildAdbLinuxX64, ReleaseQualificationPreflight]
     permissions: &artifact_verification_permissions
       contents: read
       attestations: read
@@ -853,12 +803,12 @@ jobs:
     name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
       KLOGG_CONFIG_ARCH: ${{ matrix.config.arch }}
       KLOGG_CONFIG_PACKAGE_TAG: ${{ matrix.config.package_tag }}
       KLOGG_CONFIG_CMAKE_OPTS: ${{ matrix.config.cmake_opts }}
       KLOGG_CONTAINER_SUFFIX: ${{ matrix.config.container_suffix }}
       KLOGG_CONTAINER_ROOT: ${{ matrix.config.container_root }}
+      KLOGG_ENV_FAMILY: ${{ matrix.config.family }}
       KLOGG_PACKAGE_ENABLED: true
       KLOGG_CPACK_GEN: ${{ matrix.config.cpack_gen }}
       KLOGG_PACKAGE_SUFFIX: ${{ matrix.config.package_suffix }}
@@ -878,6 +828,7 @@ jobs:
             os_version: 22.04
             arch: x64
             label: ubuntu-22.04-deb
+            family: jammy-qt5
             cache_write: true
             cache_scope: klogg-linux-ubuntu22.04
             package_tag: vs-gen
@@ -895,6 +846,7 @@ jobs:
             os_version: 24.04
             arch: x64
             label: ubuntu-24.04-deb
+            family: noble-qt6
             cache_write: true
             cache_scope: klogg-linux-ubuntu24.04
             package_tag: vs-gen
@@ -912,6 +864,7 @@ jobs:
             os_version: 26.04
             arch: x64
             label: ubuntu-26.04-deb
+            family: resolute-qt6
             cache_write: true
             cache_scope: klogg-linux-ubuntu26.04
             package_tag: vs-gen
@@ -933,6 +886,7 @@ jobs:
             os_version: 20.04
             arch: x64
             label: ubuntu-20.04-appimage
+            family: focal-qt5-gcc13
             cache_write: true
             cache_scope: klogg-linux-ubuntu20.04
             package_tag: vs-gen
@@ -1009,66 +963,10 @@ jobs:
           name: linuxdeployqt
           path: ${{ github.workspace }}/tools
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
+      - name: Verify and prepare the locked Linux environment
+        uses: ./.github/actions/prepare-linux-environment
         with:
-          name: cmake-installer
-          path: ${{ github.workspace }}/tools
-
-      - name: Verify and copy CMake installer to Docker context
-        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
-        shell: sh
-        run: |
-          installer="${{ github.workspace }}/tools/cmake-3.20.2-linux-x86_64.sh"
-          printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$installer" \
-            | sha256sum --check --strict
-          cp "$installer" "${{ env.KLOGG_CONTAINER_ROOT }}/"
-
-      - name: Set up Buildx for the TSan Qt image
-        if: ${{ env.KLOGG_SANITIZER == 'thread' }}
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      # DOCKER_BUILD_SUMMARY=0 (env on both build-push steps below) stops
-      # docker/build-push-action from uploading the per-leg
-      # "<owner>~<repo>~<id>.dockerbuild" build-record/provenance artifact.
-      # Those records are never consumed here, and because they are not zips
-      # they broke the unfiltered cross-run download in ci-release (run
-      # 31241902650, "No END header found"). The ci-release download is now
-      # name-filtered as well; this removes the useless artifact at the source.
-      - name: Build cached TSan Qt container
-        if: ${{ env.KLOGG_SANITIZER == 'thread' }}
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        env:
-          DOCKER_BUILD_SUMMARY: "0"
-        with:
-          context: ${{ env.KLOGG_CONTAINER_ROOT }}
-          load: true
-          tags: ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}
-          cache-from: type=gha,scope=klogg-qt5-tsan
-          cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && 'type=gha,mode=max,scope=klogg-qt5-tsan' || '' }}
-
-      - name: Set up Buildx for the Linux build images
-        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Build cached Linux container
-        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        env:
-          DOCKER_BUILD_SUMMARY: "0"
-        with:
-          context: ${{ env.KLOGG_CONTAINER_ROOT }}
-          load: true
-          tags: ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}
-          # Same type=gha layer cache pattern as the TSan image. The scope is
-          # the container image name, so legs sharing an image (e.g. the deb
-          # and asan legs both build the _ubuntu22.04 image) share one cache.
-          # mode=min (final image only) instead of mode=max: these are
-          # single-stage images, so no intermediate stages are lost, and the
-          # smaller footprint keeps the shared 10GB repo cache budget from
-          # evicting the per-leg ccache entries that the restore step relies on.
-          cache-from: type=gha,scope=${{ env.KLOGG_CACHE_SCOPE }}
-          cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && format('type=gha,mode=min,scope={0}', env.KLOGG_CACHE_SCOPE) || '' }}
+          family: ${{ env.KLOGG_ENV_FAMILY }}
 
       - name: Compute bounded ccache generation
         id: ccache-generation
@@ -1145,7 +1043,7 @@ jobs:
             echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
           fi
           if [ "${{ env.KLOGG_SANITIZER }}" = "thread" ]; then
-            docker run --rm "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" /bin/bash -c '
+            docker run --pull=never --rm "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" /bin/bash -c '
               test -x /usr/bin/llvm-symbolizer-14 &&
               test -f /opt/qt5-tsan/plugins/platforms/libqoffscreen.so &&
               llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep -q __tsan_acquire &&
@@ -1164,7 +1062,7 @@ jobs:
         run: |
           # Exposes the hit/miss ratio so a warm-cache regression is visible in
           # the job log instead of silently costing a full rebuild every run.
-          docker run --rm -v "$KLOGG_WORKSPACE":/usr/local \
+          docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
             /bin/bash -c 'ccache -s 2>&1 || echo "ccache stats unavailable"'
 
@@ -1172,7 +1070,7 @@ jobs:
         if: ${{ env.KLOGG_SANITIZER == 'address' }}
         shell: bash
         run: |
-          docker run --rm \
+          docker run --pull=never --rm \
             --env KLOGG_BUILD_ROOT \
             -v "$KLOGG_WORKSPACE:/usr/local" \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
@@ -1195,7 +1093,7 @@ jobs:
         if: ${{ env.KLOGG_SANITIZER == 'undefined' }}
         shell: bash
         run: |
-          docker run --rm \
+          docker run --pull=never --rm \
             --env KLOGG_BUILD_ROOT \
             -v "$KLOGG_WORKSPACE:/usr/local" \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
@@ -1218,7 +1116,7 @@ jobs:
         if: ${{ env.KLOGG_SANITIZER == 'thread' }}
         shell: bash
         run: |
-          docker run --rm \
+          docker run --pull=never --rm \
             --env TSAN_OPTIONS \
             -v "$KLOGG_WORKSPACE:/usr/local" \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
@@ -1266,7 +1164,7 @@ jobs:
         if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}
         shell: bash
         run: |
-          docker run --rm -v "$KLOGG_WORKSPACE":/usr/local \
+          docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
             /bin/bash -c 'ccache --set-config=compression=true && ccache --set-config=compression_level=6 && ccache --max-size=250M && ccache --cleanup'
 
@@ -1282,17 +1180,17 @@ jobs:
           key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
 
   LinuxSanitizers:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchCmakeInstaller, ReleaseQualificationPreflight]
+    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]
     if: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment-mode == 'off') && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[environment-mode skipped] ' || '' }}Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
       KLOGG_CONFIG_ARCH: ${{ matrix.config.arch }}
       KLOGG_CONFIG_PACKAGE_TAG: ${{ matrix.config.package_tag }}
       KLOGG_CONFIG_CMAKE_OPTS: ${{ matrix.config.cmake_opts }}
       KLOGG_CONTAINER_SUFFIX: ${{ matrix.config.container_suffix }}
       KLOGG_CONTAINER_ROOT: ${{ matrix.config.container_root }}
+      KLOGG_ENV_FAMILY: ${{ matrix.config.family }}
       KLOGG_PACKAGE_ENABLED: false
       KLOGG_CONFIG_OS: ${{ matrix.config.os }}
       KLOGG_SANITIZER: ${{ matrix.config.sanitizer }}
@@ -1308,6 +1206,7 @@ jobs:
             os_version: 22.04
             arch: x64
             label: ubuntu-22.04-asan-lsan
+            family: jammy-qt5
             cache_write: false
             cache_scope: klogg-linux-ubuntu22.04
             package_tag: asan
@@ -1328,6 +1227,7 @@ jobs:
             os_version: 22.04
             arch: x64
             label: ubuntu-22.04-ubsan
+            family: jammy-qt5
             cache_write: false
             cache_scope: klogg-linux-ubuntu22.04
             package_tag: ubsan
@@ -1357,13 +1257,13 @@ jobs:
       KLOGG_CONFIG_CMAKE_OPTS: -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 -DCMAKE_PREFIX_PATH=/opt/qt5-tsan -DQt5_DIR=/opt/qt5-tsan/lib/cmake/Qt5 -DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan -DKLOGG_TSAN_QT_VERSION=5.15.19 -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
       KLOGG_CONTAINER_SUFFIX: _ubuntu22.04-tsan
       KLOGG_CONTAINER_ROOT: docker/ubuntu22.04-tsan
+      KLOGG_ENV_FAMILY: jammy-qt5-tsan
       KLOGG_PACKAGE_ENABLED: false
       KLOGG_CONFIG_OS: ubuntu_jammy
       KLOGG_SANITIZER: thread
       KLOGG_CACHE_WRITE: true
       KLOGG_CACHE_SCOPE: klogg-qt5-tsan
       KLOGG_LABEL: ubuntu-22.04-tsan
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps: *linux_steps

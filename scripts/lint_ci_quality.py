@@ -73,7 +73,6 @@ CI_BUILD_REQUIRED_JOBS = {
     "PrefetchBoost",
     "PrefetchOpenSsl",
     "PrefetchLinuxDeployQt",
-    "PrefetchCmakeInstaller",
     "PrefetchWindowsTools",
     "PrefetchAdbHelperSources",
     "PrefetchIosNativeSources",
@@ -130,7 +129,6 @@ CI_BUILD_ROOT_JOBS = {
     "PrefetchBoost",
     "PrefetchOpenSsl",
     "PrefetchLinuxDeployQt",
-    "PrefetchCmakeInstaller",
     "PrefetchWindowsTools",
     "PrefetchAdbHelperSources",
     "PrefetchIosNativeSources",
@@ -142,7 +140,6 @@ CI_BUILD_ARTIFACT_PRODUCERS = {
     "boost-root": "PrefetchBoost",
     "openssl-archive": "PrefetchOpenSsl",
     "linuxdeployqt": "PrefetchLinuxDeployQt",
-    "cmake-installer": "PrefetchCmakeInstaller",
     "msys2-tools": "PrefetchWindowsTools",
     "adb-helper-source-cache": "PrefetchAdbHelperSources",
     "adb-helper-package-support": "BuildAdbHelperLegalAssets",
@@ -173,7 +170,6 @@ CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS = {
     },
     "openssl-archive": {"WindowsX86"},
     "linuxdeployqt": {"LinuxPackages"},
-    "cmake-installer": {"LinuxPackages", "LinuxSanitizers"},
     "msys2-tools": {"WindowsPackages", "WindowsX86", "WindowsAsan"},
     "adb-helper-source-cache": {
         "BuildAdbHelperLegalAssets",
@@ -211,10 +207,6 @@ CI_BUILD_ARTIFACT_CONDITIONS = {
         "${{ env.klogg_ios_architecture == 'arm64' }}",
     ("LinuxPackages", "downloads", "linuxdeployqt"):
         "${{ env.klogg_config_os == 'ubuntu_appimage' }}",
-    ("LinuxPackages", "downloads", "cmake-installer"):
-        "${{ env.klogg_sanitizer != 'thread' }}",
-    ("LinuxSanitizers", "downloads", "cmake-installer"):
-        "${{ env.klogg_sanitizer != 'thread' }}",
     ("BuildAdbHelperLegalAssets", "uploads", "adb-helper-legal-assets"):
         "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release') }}",
     ("LinuxPackages", "downloads", "adb-helper-package-support"):
@@ -1710,9 +1702,9 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         if (entry := KEY_VALUE_RE.match(line)) is not None
         and entry.group("key") == "cache-to"
     ]
-    if not cache_to_values:
-        issues.append("BuildKit cache exports must run only on default-branch pushes")
-    elif any(
+    # Ordinary CI consumes locked GHCR environments instead of building images,
+    # so no BuildKit cache exports remain; any that reappear must be push-only.
+    if any(
         re.match(
             r"^\$\{\{ github\.event_name == 'push' && "
             r"(?:env\.KLOGG_CACHE_WRITE == 'true'|matrix\.config\.cache_write) && ",
@@ -2899,8 +2891,32 @@ def codeql_workflow_issues(text: str) -> list[str]:
             )
             break
 
-    if "uses: ./.github/actions/agent-setup" not in job_active:
+    if (
+        "name: Restore CPM cache" not in job_active
+        or "uses: ./.github/actions/prefetch-cpm-cache" not in job_active
+    ):
         issues.append("CodeQL manual build must restore the shared dependency closure")
+
+    # The CodeQL CLI license forbids redistribution, so the locked environment
+    # image cannot carry it. The job must instead feed init the official
+    # bundle verified against the reviewed ci/environments/role-materials.json
+    # pin; a default (floating) tool download is not acceptable.
+    if "python3 scripts/fetch_codeql_bundle.py" not in job_active:
+        issues.append("CodeQL init must consume the verified pinned official bundle")
+
+    init_tools: list[str] = []
+    if len(init_steps) == 1:
+        init_step, with_indent = init_steps[0]
+        for line in init_step:
+            entry = KEY_VALUE_RE.match(line)
+            if (
+                entry is not None
+                and entry.group("key") == "tools"
+                and len(entry.group("indent")) == with_indent + 2
+            ):
+                init_tools.append(scalar(entry.group("value")))
+    if init_tools != ["${{ steps.codeql-bundle.outputs.bundle }}"]:
+        issues.append("CodeQL init must consume the verified pinned official bundle")
 
     cmake_configures = []
     has_application_build = False
@@ -4003,6 +4019,8 @@ PLATFORM_FRAGILE_COMMAND = "python3 scripts/lint_platform_fragile.py"
 SCOPED_PLATFORM_FRAGILE_COMMAND = "python3 scripts/lint_platform_fragile.py --paths src tests"
 PLATFORM_FRAGILE_EVENTS = {"pull_request", "push", "workflow_dispatch"}
 PLATFORM_FRAGILE_PREFLIGHT = "PlatformFragilePreflight"
+RESOLVE_LINUX_ENVIRONMENT = "ResolveLinuxEnvironment"
+ANALYSIS_ENVIRONMENT_FAMILY = "noble-qt693-analysis"
 RELEASE_QUALIFICATION_PREFLIGHT = "ReleaseQualificationPreflight"
 CI_PLATFORM_PREFLIGHT_MESSAGE = (
     "CI Build platform-fragile preflight must run in parallel with "
@@ -4010,7 +4028,11 @@ CI_PLATFORM_PREFLIGHT_MESSAGE = (
 )
 EXPENSIVE_PLATFORM_PREFLIGHT_MESSAGE = (
     "CodeQL, Coverage, and Static analysis expensive jobs must depend on "
-    "an exact scoped platform-fragile preflight"
+    "an exact scoped platform-fragile preflight and the locked environment resolver"
+)
+LOCKED_ANALYSIS_ENVIRONMENT_MESSAGE = (
+    "CodeQL, Coverage, and Static analysis expensive jobs must run inside the "
+    "verified locked analysis environment image"
 )
 CI_PLATFORM_PARALLEL_ROOTS = CI_BUILD_ROOT_JOBS
 CI_PLATFORM_PREFLIGHT_APPLICATION_JOBS = set(CI_BUILD_PACKAGE_ENABLEMENT)
@@ -4221,7 +4243,11 @@ def platform_fragile_preflight_issues(
         ):
             return [message]
     else:
-        protected_jobs = {expensive_job} if expensive_job is not None else set()
+        protected_jobs = (
+            {expensive_job, RESOLVE_LINUX_ENVIRONMENT}
+            if expensive_job is not None
+            else set()
+        )
 
     if any(
         (condition := workflow_job_direct_value(blocks[job], "if")) is not None
@@ -4233,10 +4259,123 @@ def platform_fragile_preflight_issues(
 
     if not ci_build and (
         expensive_job is None
-        or set(needs) != {preflight, expensive_job}
-        or roots != {preflight}
-        or needs.get(expensive_job) != {preflight}
+        or set(needs) != {preflight, RESOLVE_LINUX_ENVIRONMENT, expensive_job}
+        or roots != {preflight, RESOLVE_LINUX_ENVIRONMENT}
+        or needs.get(expensive_job) != {preflight, RESOLVE_LINUX_ENVIRONMENT}
         or preflight not in ancestors[expensive_job]
+    ):
+        return [message]
+
+    return []
+
+
+def locked_analysis_environment_issues(text: str, *, expensive_job: str) -> list[str]:
+    """Require analysis jobs to run inside the verified locked image.
+
+    The resolver job verifies the reviewed lock, signed provenance and public
+    registry identity before the expensive job starts; the expensive job then
+    runs as a whole-job container on exactly that digest. Host provisioning
+    (apt, agent-setup, floating tool downloads) must not reappear inside it.
+    """
+    message = LOCKED_ANALYSIS_ENVIRONMENT_MESSAGE
+    blocks = workflow_job_blocks(text)
+    resolver = blocks.get(RESOLVE_LINUX_ENVIRONMENT)
+    job_block = blocks.get(expensive_job)
+    if resolver is None or job_block is None:
+        return [message]
+
+    header = KEY_VALUE_RE.match(resolver[0])
+    if header is None:
+        return [message]
+    resolver_indent = len(header.group("indent"))
+    if (
+        workflow_job_direct_value(resolver, "name") != "Resolve locked analysis environment"
+        or workflow_job_direct_value(resolver, "runs-on") != "ubuntu-24.04"
+        or workflow_job_direct_value(resolver, "if") is not None
+    ):
+        return [message]
+
+    resolver_fields = {
+        entry.group("key")
+        for line in resolver[1:]
+        if (entry := KEY_VALUE_RE.match(line)) is not None
+        and len(entry.group("indent")) == resolver_indent + 2
+    }
+    if resolver_fields != {"name", "runs-on", "outputs", "steps"}:
+        return [message]
+
+    resolver_active = "\n".join(
+        active for line in resolver if (active := strip_yaml_comment(line))
+    )
+    if (
+        "outputs:" not in resolver_active
+        or "image: ${{ steps.prepare.outputs.image }}" not in resolver_active
+    ):
+        return [message]
+
+    steps = list(workflow_step_blocks(resolver))
+    if len(steps) != 2:
+        return [message]
+    checkout_fields, checkout_with = workflow_step_fields(steps[0])
+    if (
+        checkout_fields.get("uses")
+        != f"actions/checkout@{REVIEWED_ACTION_REVISIONS['actions/checkout']}"
+        or checkout_with.get("with", {}).get("persist-credentials") != "false"
+    ):
+        return [message]
+    prepare_fields, prepare_with = workflow_step_fields(steps[1])
+    prepare_inputs = prepare_with.get("with", {})
+    if (
+        prepare_fields.get("id") != "prepare"
+        or prepare_fields.get("uses") != "./.github/actions/prepare-linux-environment"
+        or prepare_inputs.get("family") != ANALYSIS_ENVIRONMENT_FAMILY
+        or prepare_inputs.get("pull") != "false"
+        or prepare_inputs.get("retag") != "false"
+    ):
+        return [message]
+
+    job_header = KEY_VALUE_RE.match(job_block[0])
+    if job_header is None:
+        return [message]
+    job_indent = len(job_header.group("indent"))
+    container_image = None
+    for index, line in enumerate(job_block[1:]):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == "container"
+            and len(entry.group("indent")) == job_indent + 2
+        ):
+            for child in job_block[index + 2 :]:
+                active = strip_yaml_comment(child)
+                if not active:
+                    continue
+                child_indent = len(child) - len(child.lstrip())
+                if child_indent <= job_indent + 2:
+                    break
+                child_entry = KEY_VALUE_RE.match(child)
+                if (
+                    child_entry is not None
+                    and child_entry.group("key") == "image"
+                    and child_indent == job_indent + 4
+                ):
+                    container_image = scalar(child_entry.group("value"))
+            break
+    if container_image != "${{ needs.ResolveLinuxEnvironment.outputs.image }}":
+        return [message]
+
+    job_active = "\n".join(
+        active for line in job_block if (active := strip_yaml_comment(line))
+    )
+    if (
+        "apt-get" in job_active
+        or "agent-setup" in job_active
+        or "install-qt" in job_active
+    ):
+        return [message]
+    if (
+        "name: Restore CPM cache" not in job_active
+        or "uses: ./.github/actions/prefetch-cpm-cache" not in job_active
     ):
         return [message]
 
@@ -4285,6 +4424,12 @@ def check_repo(root: Path) -> list[str]:
             coverage_text, ci_build=False, expensive_job="coverage"
         )
     )
+    issues.extend(
+        f".github/workflows/coverage.yml: {issue}"
+        for issue in locked_analysis_environment_issues(
+            coverage_text, expensive_job="coverage"
+        )
+    )
     if "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" not in coverage_text:
         issues.append(
             ".github/workflows/coverage.yml: coverage artifact upload must use a reviewed commit SHA"
@@ -4299,6 +4444,12 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/codeql-analysis.yml: {issue}"
         for issue in platform_fragile_preflight_issues(
             codeql_text, ci_build=False, expensive_job="analyze"
+        )
+    )
+    issues.extend(
+        f".github/workflows/codeql-analysis.yml: {issue}"
+        for issue in locked_analysis_environment_issues(
+            codeql_text, expensive_job="analyze"
         )
     )
     thirdparty_text = (root / "3rdparty" / "CMakeLists.txt").read_text()
@@ -4330,6 +4481,12 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/static-analysis.yml: {issue}"
         for issue in platform_fragile_preflight_issues(
             static_text, ci_build=False, expensive_job="static-analysis"
+        )
+    )
+    issues.extend(
+        f".github/workflows/static-analysis.yml: {issue}"
+        for issue in locked_analysis_environment_issues(
+            static_text, expensive_job="static-analysis"
         )
     )
     if (

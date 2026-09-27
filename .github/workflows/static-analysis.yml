@@ -9,8 +9,9 @@ name: "Static analysis"
 #   * cppcheck --enable=warning,style --error-exitcode=1 over the first-party
 #     src/ compile units.
 # cppcheck returning non-zero, or a clang-tidy-diff finding on a changed
-# PR/push/manual line, fails the job. Setup mirrors Coverage (gcc-13 leg +
-# agent-setup for Qt/Boost/CPM cache).
+# PR/push/manual line, fails the job. The job runs inside the locked
+# noble-qt693-analysis environment (gcc-13, clang-tidy, cppcheck, Qt 6.9.3);
+# only the CPM source cache is restored on top of the verified image.
 
 on:
   push:
@@ -65,21 +66,35 @@ jobs:
       - name: Run narrow platform-fragile lint
         run: python3 scripts/lint_platform_fragile.py --paths src tests
 
+  ResolveLinuxEnvironment:
+    name: "Resolve locked analysis environment"
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.prepare.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare-linux-environment
+        with:
+          family: noble-qt693-analysis
+          pull: "false"
+          retag: "false"
+
   static-analysis:
-    needs: [PlatformFragilePreflight]
+    needs: [PlatformFragilePreflight, ResolveLinuxEnvironment]
     name: "clang-tidy + cppcheck"
     runs-on: ubuntu-24.04
     # Strict changed-scope runs normally finish well below this bound. The
     # manual full report-only audit gets enough cold-cache headroom without
     # forcing master pushes through the same whole-tree workload.
     timeout-minutes: 90
+    container:
+      image: ${{ needs.ResolveLinuxEnvironment.outputs.image }}
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
       KLOGG_BUILD_ROOT: build_root
-      KLOGG_QT_VERSION: 6.9.3
-      KLOGG_QT_ARCH: linux_gcc_64
-      KLOGG_QT_MODULES: qt5compat
-      KLOGG_QT_ARCHIVES: qtbase icu qtsvg qttools qttranslations
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,12 +140,9 @@ jobs:
           echo "KLOGG_ANALYSIS_BASE=$base_sha" >> "$GITHUB_ENV"
           echo "KLOGG_ANALYSIS_MODE=changed-strict" >> "$GITHUB_ENV"
 
-      - name: Install gcc-13, clang-tidy and cppcheck
+      - name: Locate clang-tidy-diff in the locked environment
         run: |
-          # Explicit timeouts/retries: apt's default can hold a dead mirror
-          # TCP connection open for tens of minutes (seen 2026-08-19).
-          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y gcc-13 g++-13 clang-tidy cppcheck ragel libcurl4-openssl-dev libxkbcommon-dev libxkbcommon-x11-dev
+          set -euo pipefail
           tidy_diff=$(command -v clang-tidy-diff || true)
           if [ -z "$tidy_diff" ]; then
             tidy_diff=$(command -v clang-tidy-diff-18.py || true)
@@ -139,22 +151,21 @@ jobs:
             tidy_diff=$(find /usr/lib/llvm-*/share/clang -name clang-tidy-diff.py -print -quit 2>/dev/null || true)
           fi
           if [ -z "$tidy_diff" ]; then
-            echo "::error::clang-tidy-diff was not installed with clang-tidy"
+            echo "::error::clang-tidy-diff is missing from the locked analysis environment"
             exit 1
           fi
           echo "CLANG_TIDY_DIFF=$tidy_diff" >> "$GITHUB_ENV"
 
-      - name: Prepare compiler env
-        run: |
-          echo "CC=gcc-13" >> $GITHUB_ENV
-          echo "CXX=g++-13" >> $GITHUB_ENV
-
-      - uses: ./.github/actions/agent-setup
+      - name: Restore CPM cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          qt-version: ${{ env.KLOGG_QT_VERSION }}
-          qt-arch: ${{ env.KLOGG_QT_ARCH }}
-          qt-modules: ${{ env.KLOGG_QT_MODULES }}
-          qt-archives: ${{ env.KLOGG_QT_ARCHIVES }}
+          path: ${{ github.workspace }}/cpm_cache
+          key: CPM-${{ hashFiles('3rdparty/CMakeLists.txt', 'cmake/CPM.cmake', '3rdparty/patches/**', 'cmake/prefetch_cpm/CMakeLists.txt') }}
+
+      - name: Populate CPM source cache
+        uses: ./.github/actions/prefetch-cpm-cache
+        env:
+          KLOGG_WORKSPACE: ${{ github.workspace }}
 
       - name: Configure (generate compile_commands.json)
         shell: bash
