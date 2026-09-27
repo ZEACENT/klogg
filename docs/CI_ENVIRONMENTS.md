@@ -153,6 +153,38 @@ Producer-only skipped ordinary jobs have distinct display names. In particular,
 a producer dispatch must not shadow a real application `ci-gate` with a skipped
 check of the same name. Normal PR, push, and ordinary dispatch gates remain strict.
 
+## Consuming locked environments
+
+Ordinary CI never builds an environment image. Two consumption shapes exist:
+
+- `ci-build.yml` Linux legs run on the host and use
+  `.github/actions/prepare-linux-environment`, which verifies the reviewed lock,
+  signed provenance, and public registry identity, then pulls the exact digest
+  and assigns the fixed local tag the existing build/test/package actions expect.
+  All Docker invocations in these legs use `--pull=never`; a missing local image
+  is a consumption failure, not a reason to rebuild. The clean-distro DEB
+  installation smoke checks remain a narrow, deliberate exception because their
+  package-manager use is the behavior under test.
+- The CodeQL, Coverage, and Static analysis workflows resolve the locked
+  `noble-qt693-analysis` digest in an upstream `ResolveLinuxEnvironment` job
+  (verification only, no pull) and run the expensive job as a whole-job
+  container on exactly that digest. Whole-job containers execute as root while
+  the mounted workspace stays owned by the runner user, so the first step after
+  checkout grants git a `safe.directory` exception; raw git commands fail
+  closed without it. Host provisioning (apt installs, agent-setup) must not
+  reappear in these jobs; the image already carries the compilers, analysis
+  tools, Qt, and Boost, and only the shared CPM source cache is restored on top.
+
+The CodeQL job additionally fetches the official CLI bundle pinned in
+`ci/environments/role-materials.json` via `scripts/fetch_codeql_bundle.py`,
+verifies its SHA-256, and passes the tarball to the pinned init action through
+its `tools` input. The bundle stays in the job's private directory and is never
+republished (the CodeQL CLI license prohibits redistribution).
+
+A pull, identity, provenance, or receipt failure stops the job before the
+expensive application build. There is no digest override, floating tag, or
+silent rebuild fallback on the consumer side.
+
 A public repository does not make a newly created GHCR package public. The owner
 may need to change package visibility in GitHub's settings. Public visibility is
 irreversible. If anonymous verification fails, keep the qualified publication

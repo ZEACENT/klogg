@@ -1296,6 +1296,11 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                 "missing CPM restore": workflow.replace(
                     "      - name: Restore CPM cache\n", "", 1
                 ),
+                "missing container Git trust": workflow.replace(
+                    'git config --global --add safe.directory "$GITHUB_WORKSPACE"',
+                    "git --version",
+                    1,
+                ),
             }
             for label, mutated in mutations.items():
                 with self.subTest(workflow=name, mutation=label):

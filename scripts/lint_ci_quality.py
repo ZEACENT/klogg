@@ -4378,6 +4378,11 @@ def locked_analysis_environment_issues(text: str, *, expensive_job: str) -> list
         or "uses: ./.github/actions/prefetch-cpm-cache" not in job_active
     ):
         return [message]
+    # Whole-job containers run as root while the mounted workspace stays owned
+    # by the runner user; raw git commands fail closed (exit 128) without the
+    # explicit safe.directory exception.
+    if 'git config --global --add safe.directory "$GITHUB_WORKSPACE"' not in job_active:
+        return [message]
 
     return []
 

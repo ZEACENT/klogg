@@ -103,6 +103,11 @@ jobs:
           # against its exact base SHA (changed-LINES-ONLY policy).
           fetch-depth: 0
 
+      # The container runs as root while the mounted workspace stays owned by
+      # the runner user; raw git commands fail closed without this exception.
+      - name: Trust the workspace for Git inside the container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Resolve authoritative analysis base
         shell: bash
         env:
