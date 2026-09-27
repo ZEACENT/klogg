@@ -3,11 +3,13 @@
 import hashlib
 import io
 import json
+import os
 import pathlib
 import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -138,6 +140,124 @@ class DependencyCoreTest(unittest.TestCase):
             self.assertEqual(archive.getmember("helpers/adb.exe").mode, 0o755)
             for name in ADB_SIDECARS["windows-x86_64"]:
                 self.assertEqual(archive.getmember("helpers/" + name).mode, 0o644)
+
+    def test_verified_binary_core_stages_only_allowlisted_files_in_private_destination(self):
+        identity = self.package()
+        parent = self.root / "private"
+        parent.mkdir(mode=0o700)
+        destination = parent / "core"
+        staged = core.stage_core(self.archive, destination, component="adb-helper",
+                                 target="linux-x86_64", core_identity=KEY,
+                                 expected_sha256=identity["sha256"], expected_size=identity["size"])
+        self.assertEqual(staged["sha256"], identity["sha256"])
+        self.assertEqual((destination / "helpers/adb").read_bytes(), b"binary adb")
+        self.assertEqual((destination / "helpers/libusb-1.0.so.0").read_bytes(),
+                         b"private runtime closure")
+        self.assertEqual({path.relative_to(destination).as_posix() for path in destination.rglob("*")},
+                         {"helpers", "helpers/adb", "helpers/libusb-1.0.so.0"})
+        with self.assertRaises(core.CoreError):
+            core.stage_core(self.archive, destination, component="adb-helper",
+                            target="linux-x86_64", core_identity=KEY,
+                            expected_sha256=identity["sha256"], expected_size=identity["size"])
+        self.assertEqual((destination / "helpers/adb").read_bytes(), b"binary adb")
+
+    def test_verified_ios_core_stages_only_direct_internal_dylib_alias(self):
+        self.stage_ios()
+        identity = self.package(component="ios-native", target="arm64")
+        parent = self.root / "private"
+        parent.mkdir(mode=0o700)
+        destination = parent / "core"
+        core.stage_core(self.archive, destination, component="ios-native", target="arm64",
+                        core_identity=KEY, expected_sha256=identity["sha256"],
+                        expected_size=identity["size"])
+        self.assertEqual((destination / "lib/libfoo.1.dylib").read_bytes(), b"dylib binary")
+        alias = destination / "lib/libfoo.dylib"
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(os.readlink(alias), "libfoo.1.dylib")
+        self.assertFalse((destination / core.MANIFEST).exists())
+
+    def test_staging_rejects_untrusted_bytes_or_writable_destination_parent(self):
+        identity = self.package()
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        destination = private / "core"
+        with self.assertRaises(core.CoreError):
+            core.stage_core(self.archive, destination, component="adb-helper",
+                            target="linux-x86_64", core_identity=KEY,
+                            expected_sha256="b" * 64, expected_size=identity["size"])
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(private.iterdir()), [])
+        public = self.root / "public"
+        public.mkdir(mode=0o755)
+        with self.assertRaises(core.CoreError):
+            core.stage_core(self.archive, public / "core", component="adb-helper",
+                            target="linux-x86_64", core_identity=KEY,
+                            expected_sha256=identity["sha256"], expected_size=identity["size"])
+        self.assertFalse((public / "core").exists())
+
+    def test_atomic_core_publish_cannot_replace_racing_empty_directory(self):
+        parent = self.root / "private"
+        parent.mkdir(mode=0o700)
+        source = parent / "pending"
+        destination = parent / "core"
+        source.mkdir()
+        destination.mkdir()
+        inode = destination.stat().st_ino
+        with self.assertRaises((OSError, core.CoreError)):
+            core._publish_no_replace(source, destination)
+        self.assertEqual(destination.stat().st_ino, inode)
+        self.assertTrue(source.is_dir())
+
+    def test_staging_rejects_unverified_windows_acl_or_foreign_parent_owner(self):
+        parent = self.root / "private"
+        parent.mkdir(mode=0o700)
+        with self.assertRaises(core.CoreError):
+            core._require_private_parent(parent, platform="nt")
+        with mock.patch.object(core.os, "geteuid", return_value=os.geteuid() + 1), \
+                self.assertRaises(core.CoreError):
+            core._require_private_parent(parent, platform="posix")
+
+    def test_staging_race_cannot_replace_newly_created_destination(self):
+        identity = self.package()
+        parent = self.root / "private"
+        parent.mkdir(mode=0o700)
+        destination = parent / "core"
+        publish = core._publish_no_replace
+        raced_inode = []
+
+        def race(source, target):
+            target.mkdir()
+            raced_inode.append(target.stat().st_ino)
+            publish(source, target)
+
+        with mock.patch.object(core, "_publish_no_replace", side_effect=race), \
+                self.assertRaises(core.CoreError):
+            core.stage_core(self.archive, destination, component="adb-helper",
+                            target="linux-x86_64", core_identity=KEY,
+                            expected_sha256=identity["sha256"], expected_size=identity["size"])
+        self.assertEqual(destination.stat().st_ino, raced_inode[0])
+        self.assertEqual(list(destination.iterdir()), [])
+        self.assertEqual(list(parent.iterdir()), [destination])
+
+    def test_staging_rechecks_private_snapshot_before_publishing(self):
+        identity = self.package()
+        parent = self.root / "private"
+        parent.mkdir(mode=0o700)
+        destination = parent / "core"
+        extract = core.safe_extract
+
+        def changed_after_extraction(snapshot, stage):
+            extract(snapshot, stage)
+            with snapshot.open("ab") as output:
+                output.write(b"changed after verification")
+
+        with mock.patch.object(core, "safe_extract", side_effect=changed_after_extraction), \
+                self.assertRaises(core.CoreError):
+            core.stage_core(self.archive, destination, component="adb-helper",
+                            target="linux-x86_64", core_identity=KEY,
+                            expected_sha256=identity["sha256"], expected_size=identity["size"])
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(parent.iterdir()), [])
 
     def test_wrong_target_and_core_identity_are_rejected(self):
         identity = self.package()
