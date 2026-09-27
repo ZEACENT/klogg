@@ -4383,6 +4383,12 @@ def locked_analysis_environment_issues(text: str, *, expensive_job: str) -> list
     # explicit safe.directory exception.
     if 'git config --global --add safe.directory "$GITHUB_WORKSPACE"' not in job_active:
         return [message]
+    # Run steps without an explicit shell resolve to sh (not bash) in
+    # whole-job containers, so bash-only scripts must declare shell: bash.
+    for step in workflow_step_blocks(job_block):
+        fields, _ = workflow_step_fields(step)
+        if "run" in fields and fields.get("shell") != "bash":
+            return [message]
 
     return []
 

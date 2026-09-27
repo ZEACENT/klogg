@@ -71,6 +71,7 @@ jobs:
       # The container runs as root while the mounted workspace stays owned by
       # the runner user; raw git commands fail closed without this exception.
       - name: Trust the workspace for Git inside the container
+        shell: bash
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Restore CPM cache

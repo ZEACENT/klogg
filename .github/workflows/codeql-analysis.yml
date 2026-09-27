@@ -63,6 +63,7 @@ jobs:
       # The container runs as root while the mounted workspace stays owned by
       # the runner user; raw git commands fail closed without this exception.
       - name: Trust the workspace for Git inside the container
+        shell: bash
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Restore CPM cache
@@ -86,6 +87,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Configure traced build
+        shell: bash
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -98,9 +100,11 @@ jobs:
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Prebuild vendored dependencies outside CodeQL tracing
+        shell: bash
         run: cmake --build build -t klogg_codeql_thirdparty
 
       - name: Verify traced build contains only first-party work
+        shell: bash
         run: |
           cmake --build build -t klogg -- -n > /tmp/codeql-traced-plan.txt
           if grep -E 'cpm_cache|_deps|3rdparty/CMakeFiles' /tmp/codeql-traced-plan.txt; then
@@ -116,6 +120,7 @@ jobs:
           tools: ${{ steps.codeql-bundle.outputs.bundle }}
 
       - name: Build traced application
+        shell: bash
         run: cmake --build build -t klogg
 
       - name: Perform CodeQL Analysis

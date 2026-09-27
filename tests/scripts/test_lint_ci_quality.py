@@ -1301,6 +1301,12 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     "git --version",
                     1,
                 ),
+                "run step without explicit bash shell": workflow.replace(
+                    "      - name: Trust the workspace for Git inside the container\n"
+                    "        shell: bash\n",
+                    "      - name: Trust the workspace for Git inside the container\n",
+                    1,
+                ),
             }
             for label, mutated in mutations.items():
                 with self.subTest(workflow=name, mutation=label):

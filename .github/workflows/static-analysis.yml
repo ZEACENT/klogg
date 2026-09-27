@@ -106,6 +106,7 @@ jobs:
       # The container runs as root while the mounted workspace stays owned by
       # the runner user; raw git commands fail closed without this exception.
       - name: Trust the workspace for Git inside the container
+        shell: bash
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Resolve authoritative analysis base
@@ -146,6 +147,7 @@ jobs:
           echo "KLOGG_ANALYSIS_MODE=changed-strict" >> "$GITHUB_ENV"
 
       - name: Locate clang-tidy-diff in the locked environment
+        shell: bash
         run: |
           set -euo pipefail
           tidy_diff=$(command -v clang-tidy-diff || true)
