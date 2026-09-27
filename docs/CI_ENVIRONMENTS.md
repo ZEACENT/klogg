@@ -2,16 +2,29 @@
 
 [Documentation](README.md) · [Build guide](BUILD.md) · [Dependencies](DEPENDENCIES.md)
 
-## Bootstrap status
+## Current status
 
-The producer and verification tooling is being introduced before the first
-qualified environment lock. Ordinary application CI still uses its existing
-preparation paths until all six families have real qualification, publication,
-public-access verification, and reviewed digest pins. The presence of a recipe
-or passing script tests does **not** mean an environment has been published.
+All six Linux environment families have reviewed digest pins and detached
+evidence in `ci/environments/lock.json` and `ci/environments/evidence/`.
+Ordinary Linux application CI is wired to consume locked environments rather
+than rebuild them on a cold BuildKit cache. On this checkout, however, the ADB
+lock/verifier changes alter the current policy identity for four packaging
+families. Their old signed receipts no longer match, so those lanes fail closed
+**before image pull** until they are requalified and their pins are reviewed.
+A signed lock from an earlier revision is not current-head validation.
 
-Do not create placeholder locks, substitute a mutable tag, or fall back to
-building an environment when verified consumption fails.
+Native dependency cores are a separate, unfinished migration. The seven-target
+`ci/dependencies/catalog.json` defines five ADB and two iOS cores, but there is
+**no** `ci/dependencies/lock.json`, no published production core digest, and no
+cross-version package consumer. `dependency-mode=qualify` starts isolated
+builders, but the iOS host probe records selected tools and fails before iOS
+source compilation because the Autotools/pkgconf, Perl, and m4 inputs have not
+been reviewed and pinned. The seven-way Gate therefore cannot issue a receipt.
+`dependency-mode=publish` has no registry write permission and deliberately
+fails; a passing local contract suite cannot authorize it.
+
+Do not create placeholder locks, substitute mutable tags, or fall back to
+building an environment or native core when verified consumption fails.
 
 ## Ownership
 
@@ -24,9 +37,10 @@ lifecycles:
 3. **Application outputs:** current-source executables, tests, packages, and
    version-specific source-publication overlays.
 
-This producer initially covers compiler environments. ADB/iOS immutable-core
-reuse is a separate migration; the Linux package qualification fixture is not a
-claim that those cores have already migrated.
+The production lock and ordinary consumer currently cover compiler
+environments. ADB/iOS binary cores have candidate and read-only qualification
+machinery only; the Linux package qualification fixture does not imply that
+those cores have been published or reused.
 
 `ghcr.io/zeacent/klogg-ci-env` is the intended durable environment authority.
 BuildKit, compiler, and download caches are optional accelerators, not the source
@@ -127,12 +141,12 @@ source builds during bootstrap. The producer catalog fixes the locked path and
 uses `--network=none`; an absent locked input is an error, not a reason to select
 the online path.
 
-## Producing and publishing
+## Producing and publishing environments
 
-Initial bootstrap uses the already registered `CI Build` workflow at the trusted
-feature ref. Its `environment-mode` input is `off`, `qualify`, or `publish`.
-Producer mode also requires the exact source SHA and an ancestor analysis base
-SHA, and cannot be combined with signed-release qualification.
+Environment refresh uses the registered `CI Build` workflow at a reviewed ref.
+Its `environment-mode` input is `off`, `qualify`, or `publish`. Producer mode
+requires the exact source SHA and an ancestor analysis base SHA, and cannot be
+combined with dependency production or signed-release qualification.
 
 1. Run local quality checks and review the complete producer changes.
 2. Ensure `ci-environment-publish` is a separately protected GitHub environment
@@ -152,6 +166,41 @@ SHA, and cannot be combined with signed-release qualification.
 Producer-only skipped ordinary jobs have distinct display names. In particular,
 a producer dispatch must not shadow a real application `ci-gate` with a skipped
 check of the same name. Normal PR, push, and ordinary dispatch gates remain strict.
+
+## Native dependency boundary
+
+`ci/dependencies/catalog.json` enumerates five ADB and two iOS targets. Candidate
+archives contain only the helper and its target runtime files, or the iOS dylibs
+and direct aliases; source, license, smoke, and application-version receipts stay
+outside the immutable binary core. The parent `ci-build.yml` dispatch checks an
+exact source SHA and carries seven builder results plus the independent ADB legal
+job to the read-only `ci-dependencies.yml` Gate. The Gate checks immutable Actions
+artifact IDs, the parent run/attempt, hosted runner labels and reviewed workflow
+runners, signed **full tar bytes**, candidate/full binary equality, and current
+legal/source material before it can create its eight-file qualification archive.
+A candidate-only receipt is not a signed production lock.
+
+The pinned Xcode, SDK path/version, clang, CMake, and Ninja observations are
+necessary but not sufficient for iOS reuse. The dependency-only probe records
+the selected Autotools/pkgconf, Perl, and m4 executable paths, versions, hashes,
+and installed Brew versions, then intentionally fails before source compilation.
+Historical successful runner logs are not current bottle identities or a
+qualification. Review and pin the real input closure for **both** macOS runner
+architectures before allowing the Gate to succeed. Normal PR/push iOS source
+builds do not run this dependency-only probe.
+
+Native publication remains disabled: the child Publisher has no package or OIDC
+write scopes and exits with an error. The `publish_ci_dependency.py` library has
+no connected independently authenticated Gate callback, detached signing step,
+or production lock writer. Its anonymous manifest/blob check has not been run
+against a real publication. Do not dispatch publication or invent seven registry
+digests. A future consumer must verify the reviewed lock, both detached
+Sigstore subjects, current core/policy keys, and exact OCI manifest/blob bytes
+**before** using a core. `stage_core()` currently offers
+POSIX private, no-replace binary staging from an externally authenticated digest;
+it is not a signed consumer, and Windows staging remains blocked until private
+ACL acquisition is audited. Existing ADB/iOS schema-1 build receipts bind the
+full source lock and cannot be reinterpreted as cross-version core receipts.
 
 ## Consuming locked environments
 
@@ -207,7 +256,12 @@ packs, and performs fresh uncached tracing. The database census must account for
 current first-party and generated MOC/RCC units. Only permissible evidence and
 SARIF leave that role; SARIF upload occurs in a separate narrow-permission job.
 
-Never package runner-owned Xcode or Visual Studio into this artifact layer.
+Windows Ragel/pkgconf tools are selected from SHA-locked MSYS2 packages in
+`ci/tools/msys2-tools.json`. The materialized ZIP contains the necessary tools,
+runtime files, notices, and corresponding Ragel/GCC source archives, not a
+MinGW compiler substituted for MSVC. Boost transport is pinned and verified
+before reuse. Never package runner-owned Xcode, Visual Studio, or CodeQL into
+this artifact layer.
 
 ## Refresh, failures, and rollback
 
@@ -236,8 +290,9 @@ and assume locked consumers changed, or discard source/provenance evidence.
 ```sh
 python3 scripts/run_ci_quality.py --json
 python3 scripts/lint_ci_quality.py
-python3 -m unittest discover -s tests/scripts -p 'test_ci_environment*.py'
 python3 -m unittest discover -s tests/scripts -p 'test_*ci_environment*.py'
+python3 -m unittest discover -s tests/scripts -p 'test_ci_dependency*.py'
+actionlint -shellcheck= .github/workflows/ci-build.yml .github/workflows/ci-dependencies.yml
 ```
 
 Unit and workflow-contract tests cover malformed input, substitution, incomplete
@@ -245,10 +300,13 @@ qualification, privilege boundaries, and event projections. They do not replace
 real image builds, full sanitizer tests, package smoke tests, CodeQL tracing,
 anonymous retrieval, or current-head cross-platform acceptance.
 
-`scripts/ci_build_metrics.py run-build` wraps the unchanged Linux
-`ci_build` invocation and reports the fresh Ninja log, measured wall time, and
-global ccache counter deltas (or an explicit `disabled`/`unmeasured` state) to
-`ci-build-metrics.json` inside the build root. Work-time sums are not elapsed
-time or critical-path measurements. Do not serialize normal builds, delete live
-Ninja logs, invent cache hit rates, or turn timing reports into CI wall-clock
-gates.
+`scripts/ci_build_metrics.py run-build` wraps the single unchanged `ci_build`
+invocation on Linux, macOS, and Windows. Each build leg uploads its small
+`ci-build-metrics.json` with the fresh Ninja log summary, measured build wall
+time, and current-run global ccache counter deltas where available. Windows
+reports its object cache as `disabled`; no Windows object-cache hit is inferred.
+Work-time sums are not elapsed time or critical-path measurements. Do not
+serialize normal builds, delete live Ninja logs, invent cache hit rates, or
+turn timing reports into CI wall-clock gates. Historical object counts do not
+justify introducing a compiled Vectorscan bundle without fresh warmed-cache
+end-to-end evidence.
