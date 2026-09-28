@@ -311,6 +311,8 @@ class OverviewFilteredDataFixture {
             REQUIRE( file_.open() );
             REQUIRE( file_.write( contents ) == contents.size() );
             REQUIRE( file_.flush() );
+            file_.close();
+            REQUIRE_FALSE( file_.isOpen() );
 
             auto source = std::make_unique<LogData>();
             SafeQSignalSpy readySpy{ source.get(), &LogData::loadingFinished };
