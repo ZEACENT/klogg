@@ -55,6 +55,11 @@ struct LiveSourceStreamingLogDataTestAccess {
         data.captureStore_.beforeSegmentMutationForTesting_
             = [] { throw std::bad_alloc{}; };
     }
+
+    static void useSpillClock( StreamingLogData& data, qint64& now )
+    {
+        data.captureStore_.spillClockForTesting_ = [ &now ] { return now; };
+    }
 };
 
 namespace {
@@ -831,7 +836,9 @@ TEST_CASE( "Source persistence retry is bounded precise and never finalizes norm
 {
     QTemporaryDir root;
     REQUIRE( root.isValid() );
+    qint64 now = 0;
     auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    LiveSourceStreamingLogDataTestAccess::useSpillClock( *data, now );
     RecordingLiveSourceTransportFactory factory;
     AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
     source.openTransport( 501u, LiveSourceTransportConfig{} );
@@ -849,7 +856,7 @@ TEST_CASE( "Source persistence retry is bounded precise and never finalizes norm
     REQUIRE( state.retryAfterMs.has_value() );
     CHECK( retry->isActive() );
     CHECK( retry->timerType() == Qt::PreciseTimer );
-    CHECK( retry->interval() >= *state.retryAfterMs );
+    CHECK( retry->interval() == *state.retryAfterMs );
     CHECK( retry->interval() > 0 );
     REQUIRE( QMetaObject::invokeMethod( retry, "timeout", Qt::DirectConnection ) );
     CHECK( data->getNbLine() == 1_lcount );
