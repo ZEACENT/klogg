@@ -6,10 +6,12 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -40,6 +42,23 @@ _CI_SPEC = importlib.util.spec_from_file_location("lint_ci_quality", CI_LINT)
 assert _CI_SPEC is not None and _CI_SPEC.loader is not None
 CI_MODULE = importlib.util.module_from_spec(_CI_SPEC)
 _CI_SPEC.loader.exec_module(CI_MODULE)
+
+
+def bash_for_script_projection() -> str:
+    if sys.platform != "win32":
+        return "bash"
+    roots = [pathlib.Path(os.environ[name]) / "Git"
+             for name in ("ProgramW6432", "ProgramFiles") if os.environ.get(name)]
+    for root in roots:
+        bash = root / "bin" / "bash.exe"
+        if bash.is_file():
+            return str(bash)
+    git = shutil.which("git")
+    if git:
+        bash = pathlib.Path(git).parent.parent / "bin" / "bash.exe"
+        if bash.is_file():
+            return str(bash)
+    raise AssertionError("Git for Windows bash.exe is required for workflow script projections")
 
 
 def read_text(path: pathlib.Path) -> str:
@@ -251,6 +270,24 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertIn('--repo-root "$GITHUB_WORKSPACE"', script)
         self.assertIn('"$transport_status" -eq 2', script)
 
+    def test_windows_projection_uses_git_bash_not_the_wsl_launcher(self):
+        with tempfile.TemporaryDirectory() as parent:
+            git_root = pathlib.Path(parent) / "Git"
+            bash = git_root / "bin" / "bash.exe"
+            bash.parent.mkdir(parents=True)
+            bash.write_bytes(b"")
+            with mock.patch.object(sys, "platform", "win32"), \
+                    mock.patch.dict(os.environ, {"ProgramW6432": parent}, clear=True), \
+                    mock.patch.object(shutil, "which", return_value="C:/Windows/System32/bash.exe") as which:
+                self.assertEqual(bash_for_script_projection(), str(bash))
+                which.assert_not_called()
+            bash.unlink()
+            with mock.patch.object(sys, "platform", "win32"), \
+                    mock.patch.dict(os.environ, {"ProgramW6432": parent}, clear=True), \
+                    mock.patch.object(shutil, "which", return_value=None):
+                with self.assertRaisesRegex(AssertionError, "Git for Windows bash.exe"):
+                    bash_for_script_projection()
+
     def test_adb_source_transport_event_and_exit_code_projections(self):
         steps = [CI_MODULE.workflow_step_fields(step)[0] for step in
                  CI_MODULE.workflow_job_steps(self.ci_build)["PrefetchAdbHelperSources"]]
@@ -280,8 +317,8 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
                         cache = root / "prefetch_artifacts/adb-helper-sources"
                         cache.mkdir(parents=True, exist_ok=True)
                         (cache / "stale").write_text("old", encoding="utf-8")
-                        env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
-                                   COMMAND_LOG=str(log), IMPORT_MARKER=str(marker),
+                        env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                                   COMMAND_LOG=log.name, IMPORT_MARKER=marker.name,
                                    GITHUB_WORKSPACE=str(root),
                                    KLOGG_ADB_SOURCE_EVENT=event, GH_TOKEN="test-token",
                                    TRANSPORT_STATUS=str(transport_status), OFFLINE_STATUS="1",
@@ -289,7 +326,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
                                    KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="adb-helper-sources-v1-old",
                                    KLOGG_ADB_SOURCE_CACHE_EXACT_KEY="adb-helper-sources-v2-new",
                                    KLOGG_ADB_SOURCE_CACHE_MAX_BYTES="536870912")
-                        result = subprocess.run(["bash", "-e", "-c", script], cwd=root,
+                        result = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
                                                 env=env, text=True, capture_output=True)
                         commands = log.read_text(encoding="utf-8")
                         imported = event != "workflow_dispatch" and transport_status == 0
@@ -308,7 +345,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             marker.unlink(missing_ok=True)
             env.update(KLOGG_ADB_SOURCE_EVENT="pull_request", OFFLINE_STATUS="1",
                        TRANSPORT_STATUS="0", IMPORTED_OFFLINE_STATUS="9")
-            invalid_import = subprocess.run(["bash", "-e", "-c", script], cwd=root,
+            invalid_import = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
                                             env=env, text=True, capture_output=True)
             self.assertEqual(invalid_import.returncode, 9)
             self.assertEqual(log.read_text(encoding="utf-8").count("scripts/prefetch_adb_helper_sources.py"), 2)
@@ -317,7 +354,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             log.write_text("", encoding="utf-8")
             env.update(KLOGG_ADB_SOURCE_EVENT="pull_request", OFFLINE_STATUS="0",
                        KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="adb-helper-sources-v2-new")
-            exact_hit = subprocess.run(["bash", "-e", "-c", script], cwd=root,
+            exact_hit = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
                                        env=env, text=True, capture_output=True)
             self.assertEqual(exact_hit.returncode, 0, exact_hit.stdout + exact_hit.stderr)
             self.assertNotIn("scripts/ci_adb_source_transport.py", log.read_text(encoding="utf-8"))
@@ -325,7 +362,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             log.write_text("", encoding="utf-8")
             env.update(OFFLINE_STATUS="1", TRANSPORT_STATUS="2",
                        KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="")
-            miss = subprocess.run(["bash", "-e", "-c", script], cwd=root,
+            miss = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
                                   env=env, text=True, capture_output=True)
             self.assertEqual(miss.returncode, 0, miss.stdout + miss.stderr)
             self.assertIn("scripts/ci_adb_source_transport.py", log.read_text(encoding="utf-8"))
@@ -333,7 +370,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             log.write_text("", encoding="utf-8")
             env.update(KLOGG_ADB_SOURCE_EVENT="pull_request", OFFLINE_STATUS="1",
                        KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="adb-helper-sources-v2-new")
-            rejected = subprocess.run(["bash", "-e", "-c", script], cwd=root,
+            rejected = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
                                       env=env, text=True, capture_output=True)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertNotIn("scripts/ci_adb_source_transport.py", log.read_text(encoding="utf-8"))
