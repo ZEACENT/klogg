@@ -65,16 +65,21 @@ env:
 jobs:
   DependencyModePreflight:
     name: "Native dependency dispatch preflight"
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
+      # A skipped ancestor makes ordinary descendants skip even when their direct needs pass.
+      - name: Inactive native dependency preflight
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dependency-mode == 'off' }}
+        run: ':'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Validate isolated dependency mode and exact source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}
         shell: bash
         env:
           KLOGG_DEPENDENCY_MODE: ${{ inputs.dependency-mode }}
@@ -473,7 +478,7 @@ jobs:
         id: adb-cache-key
         shell: bash
         run: >-
-          echo "key=adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py') }}"
+          echo "key=adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py', 'scripts/prefetch_adb_source_context.py') }}"
           >> "$GITHUB_OUTPUT"
 
       - name: Restore exact locked ADB source closure
@@ -520,7 +525,7 @@ jobs:
             python3 scripts/prefetch_adb_manifest_fallback.py \
               --lock packaging/adb/adb-helper.lock.json \
               --download-root "$adb_source_cache_root"
-            python3 scripts/prefetch_adb_helper_sources.py \
+            python3 scripts/prefetch_adb_source_context.py \
               --lock packaging/adb/adb-helper.lock.json \
               --download-root "$adb_source_cache_root" \
               --workers 2 \

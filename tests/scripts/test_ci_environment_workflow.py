@@ -178,25 +178,26 @@ class EnvironmentBootstrapTest(unittest.TestCase):
                 self.assertIn("CI job must isolate ordinary and native dependency dispatch: " + job,
                               QUALITY.ci_build_environment_mode_issues(mutated))
 
-    def test_isolated_producer_projections_exclude_mixed_environment_dependency_modes(self):
+    def test_isolated_environment_producer_excludes_mixed_modes_with_native_preflight_noop(self):
         blocks = QUALITY.workflow_job_blocks(CI_BUILD.read_text())
-        cases = (("push", "off", "off", False, False, False),
-                 ("pull_request", "off", "off", False, False, False),
-                 ("workflow_dispatch", "off", "off", False, False, False),
-                 ("workflow_dispatch", "qualify", "off", False, True, True),
-                 ("workflow_dispatch", "publish", "off", False, True, True),
+        cases = (("push", "off", "off", True, False, False),
+                 ("pull_request", "off", "off", True, False, False),
+                 ("workflow_dispatch", "off", "off", True, False, False),
+                 ("workflow_dispatch", "qualify", "off", True, True, True),
+                 ("workflow_dispatch", "publish", "off", True, True, True),
                  ("workflow_dispatch", "off", "qualify", True, False, False),
                  ("workflow_dispatch", "off", "publish", True, False, False),
                  ("workflow_dispatch", "qualify", "publish", True, False, False),
-                 ("push", "qualify", "publish", False, False, False))
+                 ("push", "qualify", "publish", True, False, False))
         for event, environment_mode, dependency_mode, dependency, preflight, producer in cases:
             with self.subTest(event=event, environment_mode=environment_mode, dependency_mode=dependency_mode):
                 for job, expected in (("DependencyModePreflight", dependency),
                                       ("EnvironmentModePreflight", preflight),
                                       ("EnvironmentProducer", producer)):
                     condition = QUALITY.workflow_job_direct_value(blocks[job], "if")
-                    self.assertEqual(bool(event_expression(condition, event, environment_mode, dependency_mode)), expected,
-                                     job)
+                    observed = (condition is None if job == "DependencyModePreflight" else
+                                bool(event_expression(condition, event, environment_mode, dependency_mode)))
+                    self.assertEqual(observed, expected, job)
 
     def test_mixed_mode_cannot_launch_environment_producer_or_preflight(self):
         text = CI_BUILD.read_text()

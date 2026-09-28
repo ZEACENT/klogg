@@ -29,7 +29,8 @@ GIT_ATTRIBUTES = ROOT / ".gitattributes"
 CI_LINT = ROOT / "scripts" / "lint_ci_quality.py"
 ADB_CACHE_KEY = (
     "adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', "
-    "'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py') }}"
+    "'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py', "
+    "'scripts/prefetch_adb_source_context.py') }}"
 )
 ADB_CACHE_KEY_REFERENCE = "${{ steps.adb-cache-key.outputs.key }}"
 ADB_CACHE_FALLBACK = "adb-helper-sources-v1-"
@@ -123,7 +124,7 @@ def adb_cache_contract(workflow: str) -> tuple[list[str], str | None]:
     prefetch_indexes = [
         index
         for index, (fields, _) in enumerate(parsed)
-        if "python3 scripts/prefetch_adb_helper_sources.py" in fields.get("run", "")
+        if "python3 scripts/prefetch_adb_source_context.py" in fields.get("run", "")
     ]
     if not all(
         len(indexes) == 1
@@ -188,11 +189,13 @@ def adb_cache_contract(workflow: str) -> tuple[list[str], str | None]:
     )
     fresh_start = prefetch_script.find('rm -rf "$adb_source_cache_root"')
     fallback_start = prefetch_script.find(fallback_command)
-    full_prefetch = prefetch_script.rfind("python3 scripts/prefetch_adb_helper_sources.py")
+    full_prefetch = prefetch_script.rfind("python3 scripts/prefetch_adb_source_context.py")
     if (prefetch_script.count(fallback_command) != 1
+            or prefetch_script.count("python3 scripts/prefetch_adb_source_context.py") != 1
+            or prefetch_script.count("python3 scripts/prefetch_adb_helper_sources.py") != 1
             or fresh_start < 0
             or not fresh_start < fallback_start < full_prefetch):
-        issues.append("fresh ADB source prefetch must seed the locked manifest before full verification")
+        issues.append("fresh ADB source prefetch must seed the locked manifest and retain source context")
     if "github.run_id" in "\n".join(
         str(value) for value in (*restore_with.values(), *save_with.values())
     ):
@@ -235,7 +238,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             '              --download-root "$adb_source_cache_root"\n'
         )
         full_command = (
-            "            python3 scripts/prefetch_adb_helper_sources.py \\\n"
+            "            python3 scripts/prefetch_adb_source_context.py \\\n"
             "              --lock packaging/adb/adb-helper.lock.json \\\n"
             '              --download-root "$adb_source_cache_root" \\\n'
             "              --workers 2 \\\n"

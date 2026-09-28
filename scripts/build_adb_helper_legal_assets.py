@@ -434,6 +434,7 @@ def main() -> int:
             "packaging/adb/superbuild/CMakeLists.txt",
             "scripts/prefetch_adb_helper_sources.py",
             "scripts/prefetch_adb_manifest_fallback.py",
+            "scripts/prefetch_adb_source_context.py",
             "scripts/build_adb_helper.py",
             "scripts/build_adb_helper_legal_assets.py",
             "scripts/source_publication_identity.py",

@@ -328,6 +328,34 @@ class DependencyQualificationWorkflowTest(unittest.TestCase):
     ROOT_JOBS = ("SaveVersion", "PrefetchAdbHelperSources", "PrefetchIosNativeSources")
     NATIVE_JOBS = (*ROOT_JOBS, "BuildAdbHelperLegalAssets", *TARGETS)
 
+    def test_optional_preflight_succeeds_as_noop_without_skipping_ordinary_descendants(self):
+        workflow = WORKFLOW.read_text()
+        block = LINT.workflow_job_blocks(workflow)["DependencyModePreflight"]
+        steps = [LINT.workflow_step_fields(step)[0]
+                 for step in LINT.workflow_job_steps(workflow)["DependencyModePreflight"]]
+        active = "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}"
+        inactive = "${{ github.event_name != 'workflow_dispatch' || inputs.dependency-mode == 'off' }}"
+        self.assertIsNone(LINT.workflow_job_direct_value(block, "if"))
+        self.assertEqual(steps[0].get("name"), "Inactive native dependency preflight")
+        self.assertEqual(steps[0].get("if"), inactive)
+        self.assertEqual(steps[0].get("run"), ":")
+        self.assertEqual(steps[1].get("if"), active)
+        self.assertEqual(steps[2].get("if"), active)
+        self.assertEqual(steps[2].get("name"), "Validate isolated dependency mode and exact source")
+        for event, mode in (("pull_request", "off"), ("push", "off"),
+                            ("workflow_dispatch", "off"),
+                            ("workflow_dispatch", "qualify"),
+                            ("workflow_dispatch", "publish"),
+                            ("workflow_dispatch", "invalid")):
+            with self.subTest(event=event, mode=mode):
+                for condition, expected in (
+                        (steps[0]["if"], event != "workflow_dispatch" or mode == "off"),
+                        (steps[1]["if"], event == "workflow_dispatch" and mode != "off")):
+                    expression = (condition[4:-3].replace("github.event_name", repr(event))
+                                  .replace("inputs.dependency-mode", repr(mode))
+                                  .replace("&&", " and ").replace("||", " or "))
+                    self.assertEqual(eval(expression, {"__builtins__": {}}, {}), expected)
+
     def test_both_dispatch_modes_run_native_builds_only_after_preflight(self):
         workflow = WORKFLOW.read_text()
         blocks = LINT.workflow_job_blocks(workflow)
@@ -359,13 +387,13 @@ class DependencyQualificationWorkflowTest(unittest.TestCase):
     def test_native_job_event_projections_preserve_ordinary_ci_and_isolate_producers(self):
         blocks = LINT.workflow_job_blocks(WORKFLOW.read_text())
         cases = (
-            ("pull_request", "off", "off", "skipped", True),
-            ("push", "off", "off", "skipped", True),
-            ("workflow_dispatch", "off", "off", "skipped", True),
+            ("pull_request", "off", "off", "success", True),
+            ("push", "off", "off", "success", True),
+            ("workflow_dispatch", "off", "off", "success", True),
             ("workflow_dispatch", "off", "qualify", "success", True),
             ("workflow_dispatch", "off", "publish", "success", True),
             ("workflow_dispatch", "off", "qualify", "failure", False),
-            ("workflow_dispatch", "qualify", "off", "skipped", False),
+            ("workflow_dispatch", "qualify", "off", "success", False),
             ("workflow_dispatch", "qualify", "qualify", "failure", False),
         )
         for event, environment, dependency, preflight, should_run in cases:

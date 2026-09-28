@@ -1530,9 +1530,16 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
     dependency = blocks.get("DependencyModePreflight", [])
     dependency_permissions = workflow_mapping_block(dependency, "permissions", 4)
     dependency_steps = [workflow_step_fields(step) for step in workflow_step_blocks(dependency)]
-    dependency_scripts = [fields.get("run", "") for fields, _ in dependency_steps
-                          if fields.get("name") == "Validate isolated dependency mode and exact source"
-                          and fields.get("shell") == "bash"]
+    native_active = "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}"
+    native_inactive = "${{ github.event_name != 'workflow_dispatch' || inputs.dependency-mode == 'off' }}"
+    noops = [fields for fields, _ in dependency_steps
+             if fields.get("name") == "Inactive native dependency preflight"]
+    validations = [fields for fields, _ in dependency_steps
+                   if fields.get("name") == "Validate isolated dependency mode and exact source"]
+    checkouts = [(fields, children) for fields, children in dependency_steps
+                 if fields.get("uses", "").startswith("actions/checkout@")]
+    dependency_scripts = [fields.get("run", "") for fields in validations
+                          if fields.get("shell") == "bash"]
     dependency_env = [workflow_mapping_block(step, "env", 8) for step in workflow_step_blocks(dependency)
                       if workflow_step_fields(step)[0].get("name") == "Validate isolated dependency mode and exact source"]
     required_script = (
@@ -1564,7 +1571,11 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
         return any(dependency_lines[index:index + len(lines)] == lines
                    for index in range(len(dependency_lines) - len(lines) + 1))
 
-    if (workflow_job_direct_value(dependency, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}"
+    if (workflow_job_direct_value(dependency, "if") is not None
+            or len(noops) != 1 or noops[0].get("if") != native_inactive
+            or active_script_content(noops[0].get("run", "")) != ":"
+            or len(validations) != 1 or validations[0].get("if") != native_active
+            or len(checkouts) != 1 or checkouts[0][0].get("if") != native_active
             or needs.get("DependencyModePreflight") != set()
             or workflow_job_direct_value(dependency, "runs-on") != "ubuntu-24.04"
             or dependency_permissions is None
@@ -1580,10 +1591,9 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
             or any(marker not in active_script_content(dependency_scripts[0]) for marker in required_script)
             or "exit 1" in active_script_content(dependency_scripts[0])
             or not all(contains_active_lines(branch) for branch in required_branches)
-            or len([1 for fields, _ in dependency_steps if fields.get("uses", "").startswith("actions/checkout@")]) != 1
             or not any(fields.get("uses") == "actions/checkout@" + REVIEWED_ACTION_REVISIONS["actions/checkout"]
                        and children.get("with") == {"ref": "${{ github.sha }}", "persist-credentials": "false"}
-                       for fields, children in dependency_steps)):
+                       for fields, children in checkouts)):
         issues.append("CI dependency dispatch must reject mixed modes, noncanonical or stale source")
 
     gate = blocks.get("DependencyGate", [])

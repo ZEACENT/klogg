@@ -1660,7 +1660,7 @@ jobs:
                     expression = expression.replace("inputs.environment-mode", repr(environment))
                     expression = expression.replace("inputs.dependency-mode", repr(dependency))
                     expression = expression.replace("github.event.head_commit.message", repr("ordinary commit"))
-                    preflight = "success" if event == "workflow_dispatch" and dependency != "off" and environment == "off" else "skipped"
+                    preflight = "success"  # Inactive native preflight is an explicit no-op, not a skipped ancestor.
                     expression = expression.replace("needs.DependencyModePreflight.result", repr(preflight))
                     expression = expression.replace("always()", "True").replace("!cancelled()", "True")
                     expression = expression.replace("!contains('ordinary commit', '[skip ci]')", "True")
@@ -1704,6 +1704,18 @@ jobs:
             ("wrong default", workflow.replace("      dependency-mode:\n", "      dependency-mode:\n        default: qualify\n", 1), "dependency mode"),
             ("unguarded app", workflow.replace("  LinuxPackages:\n", "  LinuxPackages:\n    # dependency-mode is off\n    if: ${{ always() }}\n", 1), "job must isolate ordinary and native"),
             ("missing preflight", workflow.replace("  DependencyModePreflight:\n", "  # DependencyModePreflight:\n", 1), "dependency"),
+            ("skipped ancestor", workflow.replace(
+                '  DependencyModePreflight:\n',
+                "  DependencyModePreflight:\n    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}\n", 1), "dependency"),
+            ("no inactive success step", workflow.replace(
+                "      - name: Inactive native dependency preflight\n",
+                "      - name: Skipped native dependency preflight\n", 1), "dependency"),
+            ("unguarded checkout", workflow.replace(
+                "        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}\n        with:\n          ref: ${{ github.sha }}",
+                "        with:\n          ref: ${{ github.sha }}", 1), "dependency"),
+            ("unguarded validation", workflow.replace(
+                "      - name: Validate isolated dependency mode and exact source\n        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}\n",
+                "      - name: Validate isolated dependency mode and exact source\n", 1), "dependency"),
             ("mutual exclusion", workflow.replace("dependency-mode cannot combine with environment-mode", "dependency-mode can combine with environment-mode", 1), "dependency"),
             ("source pin", workflow.replace("dispatched source does not match expected-source-sha", "source checked later", 1), "dependency"),
             ("checkout source", workflow.replace("          ref: ${{ github.sha }}", "          ref: master", 1), "dependency"),

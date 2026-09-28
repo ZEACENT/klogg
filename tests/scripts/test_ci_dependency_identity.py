@@ -189,7 +189,8 @@ class DependencyIdentityTest(unittest.TestCase):
             original_core = identity.core_identity("adb-helper", "linux-x86_64", self.adb, root)
             original_policy = identity.policy_identity("adb-helper", root, lock=self.adb)
             for name in ("scripts/prefetch_adb_helper_sources.py",
-                         "scripts/prefetch_adb_manifest_fallback.py"):
+                         "scripts/prefetch_adb_manifest_fallback.py",
+                         "scripts/prefetch_adb_source_context.py"):
                 with self.subTest(name=name):
                     target = root / name
                     target.write_text("changed\n", encoding="utf-8")
