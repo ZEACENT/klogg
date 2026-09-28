@@ -373,6 +373,28 @@ class PrefetchConcurrencyTest(unittest.TestCase):
                 (download_root / "adb-helper-prefetch-manifest.json").exists()
             )
 
+    def test_persistent_503_reports_locked_source_before_cancelling_prefetch(self):
+        module = load_prefetch_module()
+        lock, _ = self.locked_records(1)
+        unavailable = http_error(503)
+        with tempfile.TemporaryDirectory() as parent:
+            root = pathlib.Path(parent)
+            lock_path = root / "lock.json"
+            download_root = root / "downloads"
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            with mock.patch.object(module, "download", side_effect=unavailable), \
+                    mock.patch.object(sys, "argv", [
+                        str(PREFETCH_SCRIPT), "--lock", str(lock_path),
+                        "--download-root", str(download_root),
+                    ]):
+                with self.assertRaisesRegex(RuntimeError, "HTTP Error 503") as failure:
+                    module.main()
+            self.assertIn("source-0", str(failure.exception))
+            self.assertIn("https://example.invalid/source-0.tar.gz",
+                          str(failure.exception))
+            self.assertFalse((download_root / "adb-helper-prefetch-manifest.json").exists())
+        unavailable.close()
+
     def test_later_worker_failure_cancels_an_earlier_retry_without_submission_order_delay(self):
         module = load_prefetch_module()
         lock, _ = self.locked_records(2)

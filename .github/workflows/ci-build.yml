@@ -520,6 +520,7 @@ jobs:
             python3 scripts/prefetch_adb_helper_sources.py \
               --lock packaging/adb/adb-helper.lock.json \
               --download-root "$adb_source_cache_root" \
+              --workers 2 \
               --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"
           fi
 

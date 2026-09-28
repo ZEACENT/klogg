@@ -179,6 +179,8 @@ def adb_cache_contract(workflow: str) -> tuple[list[str], str | None]:
         '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"'
     ) != 2:
         issues.append("ADB source cache prefetch must enforce the named byte limit")
+    if prefetch_script.count("--workers 2") != 1:
+        issues.append("fresh ADB source downloads must limit concurrent upstream requests")
     if "github.run_id" in "\n".join(
         str(value) for value in (*restore_with.values(), *save_with.values())
     ):
@@ -231,6 +233,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
                 1,
             ),
             "missing size enforcement": self.ci_build.replace(size_option, "", 1),
+            "unbounded upstream fanout": self.ci_build.replace("--workers 2", "--workers 4", 1),
             "comment spoof": self.ci_build.replace(
                 size_option, "# " + size_option, 1
             ),

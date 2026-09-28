@@ -578,18 +578,25 @@ def main() -> int:
     elif missing:
         cancel_event = threading.Event()
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-            downloads = [
+            downloads = {
                 executor.submit(
                     download,
                     item["download_url"],
                     args.download_root / item["archive_file"],
                     cancel_event=cancel_event,
-                )
+                ): item
                 for item in missing
-            ]
+            }
             try:
                 for result in concurrent.futures.as_completed(downloads):
-                    result.result()
+                    try:
+                        result.result()
+                    except Exception as error:
+                        item = downloads[result]
+                        raise RuntimeError(
+                            f"ADB source fetch failed for {item['id']} "
+                            f"({item['download_url']}): {error}"
+                        ) from error
             except BaseException:
                 cancel_event.set()
                 for pending in downloads:
