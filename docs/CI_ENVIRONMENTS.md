@@ -7,14 +7,14 @@
 All six Linux environment families have reviewed digest pins and detached
 evidence in `ci/environments/lock.json` and `ci/environments/evidence/`.
 Ordinary Linux application CI is wired to consume locked environments rather
-than rebuild them on a cold BuildKit cache. On this checkout, however, the ADB
-lock/verifier changes alter the current policy identity for four packaging
-families. Their old signed receipts no longer match, so those lanes fail closed
-**before image pull** until they are requalified and their pins are reviewed.
-The `jammy-qt5` family also serves ASan/LSan and UBSan, so this policy drift
-blocks six ordinary jobs: four package lanes and two sanitizer lanes. The TSan
-and analysis families still match their reviewed policy identities.
-A signed lock from an earlier revision is not current-head validation.
+than rebuild them on a cold BuildKit cache. The ADB lock/verifier changes first
+invalidated four packaging families, blocking four package jobs plus Jammy
+ASan/LSan and UBSan. The shared Docker build action's optional-metrics fix
+also changes the verification policy for the TSan and analysis families. On
+this checkout **all six** families' old signed receipts fail closed before
+image pull until they are requalified and their pins are reviewed. Do not
+substitute calculated policy hashes for producer evidence. A signed lock from
+an earlier revision is not current-head validation.
 
 Native dependency cores are a separate, unfinished migration. The seven-target
 `ci/dependencies/catalog.json` defines five ADB and two iOS cores, but there is
@@ -26,15 +26,16 @@ been reviewed and pinned. The seven-way Gate therefore cannot issue a receipt.
 `dependency-mode=publish` has no registry write permission and deliberately
 fails; a passing local contract suite cannot authorize it.
 
-The macOS 26/Xcode 26.6 workflow migration is staged but not qualified. The
-native catalog and ADB toolchain locks now record the locally observed Intel
-Xcode build, SDK and clang as candidate identities for both architectures;
-actual `macos-26-intel` and `macos-26` hosted tool and image identities still
-require independent observation. Do not treat these candidates or prior signed
-artifacts as current-head qualification. The changed ADB lock also invalidates
-older full-lock-bound source/legal receipts and four Linux packaging environment
-policy identities. Keep the Intel 15.0/ARM 14.0 deployment floors separate
-from the new SDK version.
+The macOS 26/Xcode 26.6 workflow migration is staged but not fully qualified.
+Hosted native builders in PR run `36375653076` observed Intel image
+`macos-26/20260824.0517.1` and ARM image
+`macos-26-arm64/20260907.0351.1`. Both matched the reviewed Xcode 26.6
+build `17F113`, SDK 26.5, and Apple clang 21 identity. These successful
+native builds are not package, old-OS runtime, or seven-core qualification.
+The changed ADB lock also invalidates older full-lock-bound source/legal
+receipts. The subsequent metrics-action change invalidates all six Linux
+policy identities. Keep the Intel 15.0/ARM
+14.0 deployment floors separate from the new SDK version.
 
 Do not create placeholder locks, substitute mutable tags, or fall back to
 building an environment or native core when verified consumption fails.
@@ -314,10 +315,13 @@ real image builds, full sanitizer tests, package smoke tests, CodeQL tracing,
 anonymous retrieval, or current-head cross-platform acceptance.
 
 `scripts/ci_build_metrics.py run-build` wraps the single unchanged `ci_build`
-invocation on Linux, macOS, and Windows. Each build leg uploads its small
-`ci-build-metrics.json` with the fresh Ninja log summary, measured build wall
-time, and current-run global ccache counter deltas where available. Windows
-reports its object cache as `disabled`; no Windows object-cache hit is inferred.
+invocation on Linux, macOS, and Windows. Each build leg attempts to upload
+`ci-build-metrics-<run-id>-<attempt>.json` with the fresh Ninja log summary,
+measured build wall time, and current-run global ccache counter deltas where
+available. Missing or invalid telemetry and failed metrics uploads cannot
+change a successful build's status; no report is published without fresh
+valid evidence. Windows reports its object cache as `disabled`; no Windows
+object-cache hit is inferred.
 Work-time sums are not elapsed time or critical-path measurements. Do not
 serialize normal builds, delete live Ninja logs, invent cache hit rates, or
 turn timing reports into CI wall-clock gates. Historical object counts do not

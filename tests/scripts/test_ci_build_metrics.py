@@ -2,10 +2,12 @@ import importlib.util
 import json
 import os
 import pathlib
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -259,6 +261,12 @@ class RunBuildTest(unittest.TestCase):
         self.assertEqual(json.loads(self.output.read_text()), report)
         self.assertEqual(report["ninja_log"], ".ninja_log")
 
+    def test_report_is_readable_by_the_host_upload_step_after_container_build(self):
+        if os.name != "posix":
+            self.skipTest("POSIX mode bits are required for container-to-host artifacts")
+        self.run_build(object_cache="disabled")
+        self.assertEqual(stat.S_IMODE(self.output.stat().st_mode) & 0o444, 0o444)
+
     def test_child_failure_propagates_exact_status_without_a_report(self):
         self.status = 42
         with self.assertRaises(subprocess.CalledProcessError) as raised:
@@ -283,13 +291,102 @@ class RunBuildTest(unittest.TestCase):
         def without_cache(command, **kwargs):
             if command[0] == "ccache":
                 raise FileNotFoundError(command[0])
+            self.calls.append((command, kwargs))
             return subprocess.CompletedProcess(command, 0, "", "")
         report = self.run_build(runner=without_cache)
         self.assertEqual(report["object_cache"], "unmeasured")
         self.assertTrue(self.output.is_file())
         (self.build / ".ninja_log").unlink()
-        with self.assertRaises(MODULE.MetricsError):
-            self.run_build(runner=without_cache)
+        self.output = self.root / "missing-metrics.json"
+        self.assertIsNone(self.run_build(runner=without_cache))
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(self.calls), 2)
+
+    def test_malformed_prebuild_cache_stats_do_not_prevent_the_build(self):
+        def malformed(command, **kwargs):
+            self.calls.append((command, kwargs))
+            if command[:2] == ["ccache", "--print-stats"]:
+                return subprocess.CompletedProcess(command, 0, "unrecognized record\n", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        report = self.run_build(runner=malformed)
+        self.assertEqual(report["object_cache"], "unmeasured")
+        self.assertNotIn("cache_deltas", report)
+        self.assertEqual([command[0] for command, _ in self.calls],
+                         ["ccache", "cmake", "ccache"])
+
+    def test_preexisting_report_cannot_skip_the_child_or_be_overwritten(self):
+        self.output.write_text("previous report", encoding="utf-8")
+        self.assertIsNone(self.run_build(object_cache="disabled"))
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "previous report")
+        self.assertEqual([command[0] for command, _ in self.calls], ["cmake"])
+
+    def test_dangling_output_symlink_cannot_skip_build_or_publish_metrics(self):
+        target = self.root / "missing-target.json"
+        try:
+            self.output.symlink_to(target)
+        except OSError as error:
+            self.skipTest("symlink creation unavailable: " + str(error))
+        self.assertIsNone(self.run_build(object_cache="disabled"))
+        self.assertTrue(self.output.is_symlink())
+        self.assertFalse(target.exists())
+        self.assertEqual([command[0] for command, _ in self.calls], ["cmake"])
+
+    def test_report_publication_failure_is_non_gating_and_leaves_no_partial_file(self):
+        with mock.patch.object(MODULE.os, "link", side_effect=OSError("no hard links")):
+            self.assertIsNone(self.run_build(object_cache="disabled"))
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".*.part")), [])
+        self.assertEqual([command[0] for command, _ in self.calls], ["cmake"])
+
+    def test_cache_delta_bug_only_disables_optional_cache_counters(self):
+        with mock.patch.object(MODULE, "cache_deltas", side_effect=RuntimeError("counter bug")):
+            report = self.run_build()
+        self.assertEqual(report["object_cache"], "unmeasured")
+        self.assertNotIn("cache_deltas", report)
+        self.assertEqual([command[0] for command, _ in self.calls],
+                         ["ccache", "cmake", "ccache"])
+
+    def test_malformed_postbuild_cache_stats_only_disable_cache_counters(self):
+        def malformed_after(command, **kwargs):
+            self.calls.append((command, kwargs))
+            if command[:2] == ["ccache", "--print-stats"]:
+                stats = self.stats() if len(self.calls) == 1 else "broken\n"
+                return subprocess.CompletedProcess(command, 0, stats, "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        report = self.run_build(runner=malformed_after)
+        self.assertEqual(report["object_cache"], "unmeasured")
+        self.assertNotIn("cache_deltas", report)
+        self.assertEqual([command[0] for command, _ in self.calls], ["ccache", "cmake", "ccache"])
+
+    def test_child_failure_stays_authoritative_after_invalid_prebuild_cache_stats(self):
+        self.status = 42
+        def malformed_before(command, **kwargs):
+            self.calls.append((command, kwargs))
+            if command[0] == "ccache":
+                return subprocess.CompletedProcess(command, 0, "broken\n", "")
+            return subprocess.CompletedProcess(command, self.status, "", "")
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            self.run_build(runner=malformed_before)
+        self.assertEqual(raised.exception.returncode, 42)
+        self.assertEqual([command[0] for command, _ in self.calls], ["ccache", "cmake"])
+        self.assertFalse(self.output.exists())
+
+    def test_unexpected_metrics_parser_error_cannot_mask_successful_build(self):
+        with mock.patch.object(MODULE, "measure", side_effect=RuntimeError("unexpected format")):
+            self.assertIsNone(self.run_build(object_cache="disabled"))
+        self.assertFalse(self.output.exists())
+        self.assertEqual([command[0] for command, _ in self.calls], ["cmake"])
+
+    def test_invalid_ninja_evidence_keeps_successful_cli_build_non_gating(self):
+        (self.build / ".ninja_log").write_text("invalid ninja log\n", encoding="utf-8")
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "run-build", "--repo-root", str(self.repo),
+            "--build-root", str(self.build), "--output", str(self.output),
+            "--object-cache", "disabled", "--", sys.executable, "-c", "pass",
+        ], check=False, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("metrics", result.stderr)
+        self.assertFalse(self.output.exists())
 
     def test_wall_time_is_monotonic_not_wall_clock(self):
         class Clock:
@@ -300,6 +397,24 @@ class RunBuildTest(unittest.TestCase):
         self.status = 0
         report = self.run_build(clock=Clock())
         self.assertEqual(report["build_wall_ms"], 1000)
+
+    def test_cli_success_publishes_only_the_fresh_run_named_report(self):
+        self.output = self.build / "ci-build-metrics-123-2.json"
+        write_log = (
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("
+            "'# ninja log v5\\n0\\t1\\t0\\tCMakeFiles/app.dir/main.cpp.o\\t1\\n')"
+        )
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "run-build", "--repo-root", str(self.repo),
+            "--build-root", str(self.build), "--output", str(self.output),
+            "--object-cache", "disabled", "--", sys.executable, "-c", write_log,
+            str(self.build / ".ninja_log"),
+        ], check=False, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(self.output.read_text(encoding="utf-8"))
+        self.assertEqual(report["categories"]["first_party"]["edges"], 1)
+        self.assertEqual(report["object_cache"], "disabled")
+        self.assertFalse((self.build / "ci-build-metrics.json").exists())
 
     def test_cli_run_build_uses_child_exit_status(self):
         with tempfile.TemporaryDirectory() as directory:

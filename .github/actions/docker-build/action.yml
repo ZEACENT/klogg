@@ -70,4 +70,4 @@ runs:
           -v "$KLOGG_WORKSPACE":/usr/local \
           ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} \
           /bin/bash -c \
-          "python3 /usr/local/scripts/ci_build_metrics.py run-build --repo-root /usr/local --build-root /usr/local/$KLOGG_BUILD_ROOT --output /usr/local/$KLOGG_BUILD_ROOT/ci-build-metrics.json --object-cache $KLOGG_OBJECT_CACHE -- cmake --build /usr/local/$KLOGG_BUILD_ROOT --target ci_build"
+          "python3 /usr/local/scripts/ci_build_metrics.py run-build --repo-root /usr/local --build-root /usr/local/$KLOGG_BUILD_ROOT --output /usr/local/$KLOGG_BUILD_ROOT/ci-build-metrics-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json --object-cache $KLOGG_OBJECT_CACHE -- cmake --build /usr/local/$KLOGG_BUILD_ROOT --target ci_build"

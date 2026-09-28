@@ -39,7 +39,7 @@ class DockerBuildMetricsActionTest(unittest.TestCase):
         self.assertIn("--repo-root /usr/local", body)
         self.assertIn("--build-root /usr/local/$KLOGG_BUILD_ROOT", body)
         self.assertIn("--object-cache", body)
-        self.assertIn("ci-build-metrics.json", body)
+        self.assertIn("ci-build-metrics-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json", body)
         self.assertNotIn("klogg_codeql_thirdparty", body)
         self.assertNotIn("rm ", body)
 
@@ -50,7 +50,7 @@ class DockerBuildMetricsActionTest(unittest.TestCase):
 
     def test_metrics_output_stays_in_the_build_root(self):
         body = self.bodies["build"]
-        self.assertIn("--output /usr/local/$KLOGG_BUILD_ROOT/ci-build-metrics.json", body)
+        self.assertIn("--output /usr/local/$KLOGG_BUILD_ROOT/ci-build-metrics-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json", body)
 
 
 class NativeBuildMetricsActionTest(unittest.TestCase):
@@ -76,7 +76,7 @@ class NativeBuildMetricsActionTest(unittest.TestCase):
         self.assertIn('object_cache=measured', body)
         self.assertIn('--repo-root "$KLOGG_WORKSPACE"', body)
         self.assertIn('--build-root "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT"', body)
-        self.assertIn('--output "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/ci-build-metrics.json"', body)
+        self.assertIn('--output "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/ci-build-metrics-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"', body)
         self.assertIn('--object-cache "$object_cache"', body)
         self.assertIn('-- cmake --build "$KLOGG_BUILD_ROOT" -t ci_build', body)
 
@@ -99,10 +99,12 @@ class BuildMetricsUploadWorkflowTest(unittest.TestCase):
                 self.assertEqual(fields.get("uses"), "actions/upload-artifact@" +
                                  QUALITY.REVIEWED_ACTION_REVISIONS["actions/upload-artifact"])
                 self.assertNotIn("if", fields)
+                self.assertEqual(fields.get("continue-on-error"), "true")
                 self.assertEqual(options, {
                     "name": "build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}",
-                    "path": "${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics.json",
-                    "if-no-files-found": "error", "retention-days": "7", "compression-level": "0",
+                    "path": ("${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-"
+                             "${{ github.run_id }}-${{ github.run_attempt }}.json"),
+                    "if-no-files-found": "warn", "retention-days": "7", "compression-level": "0",
                 })
 
 

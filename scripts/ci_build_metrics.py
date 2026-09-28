@@ -13,12 +13,14 @@ import argparse
 import json
 import math
 import ntpath
+import os
 import posixpath
 import re
 import shlex
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -275,8 +277,8 @@ def cache_deltas(before: dict[str, int] | None, after: dict[str, int] | None) ->
     return deltas
 
 
-def run_build(command, *, repo_root, build_root, output, object_cache, runner=None, clock=None) -> dict[str, Any]:
-    """Run the caller's exact build once, then report its fresh Ninja evidence."""
+def run_build(command, *, repo_root, build_root, output, object_cache, runner=None, clock=None) -> dict[str, Any] | None:
+    """Run the exact build once; never promote optional telemetry to a build gate."""
     runner = subprocess.run if runner is None else runner
     clock = time.monotonic if clock is None else clock
     if object_cache not in ("measured", "disabled", "unmeasured"):
@@ -284,30 +286,56 @@ def run_build(command, *, repo_root, build_root, output, object_cache, runner=No
     repo_root = str(Path(repo_root).resolve())
     build_root = str(Path(build_root).resolve())
     output = Path(output)
-    if output.exists() or output.is_symlink():
-        raise MetricsError("metrics output already exists: " + str(output))
-    before = ccache_counters(runner) if object_cache == "measured" else None
+    try:
+        before = ccache_counters(runner) if object_cache == "measured" else None
+    except Exception as error:
+        print(f"notice: pre-build cache metrics unavailable: {error}", file=sys.stderr)
+        before = None
     started = clock()
     result = runner(list(command), check=False)
     wall_ms = max(0, round((clock() - started) * 1000))
     if result.returncode:
         raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
-    after = ccache_counters(runner) if object_cache == "measured" else None
-    deltas = cache_deltas(before, after)
+    try:
+        after = ccache_counters(runner) if object_cache == "measured" else None
+    except Exception as error:
+        print(f"notice: post-build cache metrics unavailable: {error}", file=sys.stderr)
+        after = None
+    try:
+        deltas = cache_deltas(before, after)
+    except Exception as error:
+        print(f"notice: cache delta metrics unavailable: {error}", file=sys.stderr)
+        deltas = None
+    if output.exists() or output.is_symlink():
+        print(f"notice: build metrics output already exists: {output}", file=sys.stderr)
+        return None
+    temporary = None
     try:
         report = measure((Path(build_root) / ".ninja_log").read_text(encoding="utf-8"),
                          json.loads((Path(build_root) / "compile_commands.json").read_text(encoding="utf-8")),
                          repo_root, build_root, wall_ms,
                          object_cache if deltas is not None or object_cache != "measured" else "unmeasured")
-    except (OSError, UnicodeError, ValueError) as error:
-        raise MetricsError("build succeeded but its metrics evidence is invalid: " + str(error)) from error
-    report["ninja_log"] = ".ninja_log"
-    if deltas is not None:
-        report["cache_deltas"] = deltas
-    temporary = output.with_name(output.name + ".part")
-    temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(output)
-    return report
+        report["ninja_log"] = ".ninja_log"
+        if deltas is not None:
+            report["cache_deltas"] = deltas
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent,
+                                         prefix="." + output.name + ".", suffix=".part",
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(report, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        os.chmod(temporary, 0o644)
+        os.link(temporary, output)
+        return report
+    except Exception as error:
+        print(f"notice: build succeeded but its metrics are unavailable: {error}", file=sys.stderr)
+        return None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"notice: could not remove metrics staging file: {error}", file=sys.stderr)
 
 
 def main(argv=None) -> int:
