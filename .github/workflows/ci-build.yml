@@ -478,7 +478,7 @@ jobs:
         id: adb-cache-key
         shell: bash
         run: >-
-          echo "key=adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py', 'scripts/prefetch_adb_source_context.py') }}"
+          echo "key=adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py') }}"
           >> "$GITHUB_OUTPUT"
 
       - name: Restore exact locked ADB source closure

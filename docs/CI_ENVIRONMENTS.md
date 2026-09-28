@@ -11,6 +11,9 @@ than rebuild them on a cold BuildKit cache. On this checkout, however, the ADB
 lock/verifier changes alter the current policy identity for four packaging
 families. Their old signed receipts no longer match, so those lanes fail closed
 **before image pull** until they are requalified and their pins are reviewed.
+The `jammy-qt5` family also serves ASan/LSan and UBSan, so this policy drift
+blocks six ordinary jobs: four package lanes and two sanitizer lanes. The TSan
+and analysis families still match their reviewed policy identities.
 A signed lock from an earlier revision is not current-head validation.
 
 Native dependency cores are a separate, unfinished migration. The seven-target

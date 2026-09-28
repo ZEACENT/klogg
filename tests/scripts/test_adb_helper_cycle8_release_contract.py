@@ -29,8 +29,7 @@ GIT_ATTRIBUTES = ROOT / ".gitattributes"
 CI_LINT = ROOT / "scripts" / "lint_ci_quality.py"
 ADB_CACHE_KEY = (
     "adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', "
-    "'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py', "
-    "'scripts/prefetch_adb_source_context.py') }}"
+    "'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py') }}"
 )
 ADB_CACHE_KEY_REFERENCE = "${{ steps.adb-cache-key.outputs.key }}"
 ADB_CACHE_FALLBACK = "adb-helper-sources-v1-"
@@ -224,6 +223,10 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         cls.build_script = read_text(BUILD_SCRIPT)
         cls.superbuild = read_text(SUPERBUILD)
         cls.verify_script = read_text(VERIFY_SCRIPT)
+
+    def test_diagnostics_only_wrapper_does_not_invalidate_verified_source_cache(self):
+        self.assertNotIn("prefetch_adb_source_context.py", ADB_CACHE_KEY)
+        self.assertIn("scripts/prefetch_adb_source_context.py", self.ci_build)
 
     def test_ci_reuses_the_exact_v2_adb_cache_with_one_controlled_v1_fallback(self):
         issues, guard_script = adb_cache_contract(self.ci_build)
