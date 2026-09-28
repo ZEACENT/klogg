@@ -29,7 +29,7 @@ GIT_ATTRIBUTES = ROOT / ".gitattributes"
 CI_LINT = ROOT / "scripts" / "lint_ci_quality.py"
 ADB_CACHE_KEY = (
     "adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', "
-    "'scripts/prefetch_adb_helper_sources.py') }}"
+    "'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py') }}"
 )
 ADB_CACHE_KEY_REFERENCE = "${{ steps.adb-cache-key.outputs.key }}"
 ADB_CACHE_FALLBACK = "adb-helper-sources-v1-"
@@ -181,6 +181,18 @@ def adb_cache_contract(workflow: str) -> tuple[list[str], str | None]:
         issues.append("ADB source cache prefetch must enforce the named byte limit")
     if prefetch_script.count("--workers 2") != 1:
         issues.append("fresh ADB source downloads must limit concurrent upstream requests")
+    fallback_command = (
+        "python3 scripts/prefetch_adb_manifest_fallback.py \\\n"
+        "--lock packaging/adb/adb-helper.lock.json \\\n"
+        '--download-root "$adb_source_cache_root"'
+    )
+    fresh_start = prefetch_script.find('rm -rf "$adb_source_cache_root"')
+    fallback_start = prefetch_script.find(fallback_command)
+    full_prefetch = prefetch_script.rfind("python3 scripts/prefetch_adb_helper_sources.py")
+    if (prefetch_script.count(fallback_command) != 1
+            or fresh_start < 0
+            or not fresh_start < fallback_start < full_prefetch):
+        issues.append("fresh ADB source prefetch must seed the locked manifest before full verification")
     if "github.run_id" in "\n".join(
         str(value) for value in (*restore_with.values(), *save_with.values())
     ):
@@ -217,6 +229,19 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
 
     def test_adb_cache_contract_rejects_key_fallback_spoof_and_guard_mutations(self):
         size_option = '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"'
+        manifest_command = (
+            "            python3 scripts/prefetch_adb_manifest_fallback.py \\\n"
+            "              --lock packaging/adb/adb-helper.lock.json \\\n"
+            '              --download-root "$adb_source_cache_root"\n'
+        )
+        full_command = (
+            "            python3 scripts/prefetch_adb_helper_sources.py \\\n"
+            "              --lock packaging/adb/adb-helper.lock.json \\\n"
+            '              --download-root "$adb_source_cache_root" \\\n'
+            "              --workers 2 \\\n"
+            '              --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"\n'
+        )
+        self.assertIn(manifest_command + full_command, self.ci_build)
         mutations = {
             "missing fallback": self.ci_build.replace(
                 f"          restore-keys: {ADB_CACHE_FALLBACK}\n", "", 1
@@ -234,6 +259,24 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             ),
             "missing size enforcement": self.ci_build.replace(size_option, "", 1),
             "unbounded upstream fanout": self.ci_build.replace("--workers 2", "--workers 4", 1),
+            "missing manifest fallback": self.ci_build.replace(
+                "python3 scripts/prefetch_adb_manifest_fallback.py",
+                "python3 scripts/prefetch_adb_helper_sources.py", 1,
+            ),
+            "commented manifest fallback": self.ci_build.replace(
+                "python3 scripts/prefetch_adb_manifest_fallback.py",
+                "# python3 scripts/prefetch_adb_manifest_fallback.py", 1,
+            ),
+            "missing fresh cache reset": self.ci_build.replace(
+                '            rm -rf "$adb_source_cache_root"\n', '', 1,
+            ),
+            "fallback after full prefetch": self.ci_build.replace(
+                manifest_command + full_command, full_command + manifest_command, 1,
+            ),
+            "fallback omitted from cache key": self.ci_build.replace(
+                ADB_CACHE_KEY,
+                ADB_CACHE_KEY.replace(", 'scripts/prefetch_adb_manifest_fallback.py'", ""), 1,
+            ),
             "comment spoof": self.ci_build.replace(
                 size_option, "# " + size_option, 1
             ),

@@ -42,6 +42,10 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_adb_helper_cycle8_release_contract.py
 )
 add_test(
+  NAME adb_manifest_fallback_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_prefetch_adb_manifest_fallback.py
+)
+add_test(
   NAME libimobiledevice_ostrace_patch_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_libimobiledevice_ostrace_patch_contract.py
 )
@@ -90,6 +94,7 @@ set_tests_properties(
   adb_helper_verifier_contract
   adb_helper_hardening_contract
   adb_helper_cycle8_release_contract
+  adb_manifest_fallback_contract
   libimobiledevice_ostrace_patch_contract
   ios_native_release_contract
   external_source_asset_package_contract

@@ -178,6 +178,27 @@ class DependencyIdentityTest(unittest.TestCase):
             builder.write_text("changed builder\n", encoding="utf-8")
             self.assertNotEqual(core, identity.core_identity("adb-helper", "linux-x86_64", self.adb, root))
 
+    def test_adb_source_acquisition_changes_requalify_without_rebuilding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            files = set(identity.ADB_BUILD_FILES + identity.ADB_POLICY_FILES)
+            for file_name in files:
+                target = root / file_name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("original\n", encoding="utf-8")
+            original_core = identity.core_identity("adb-helper", "linux-x86_64", self.adb, root)
+            original_policy = identity.policy_identity("adb-helper", root, lock=self.adb)
+            for name in ("scripts/prefetch_adb_helper_sources.py",
+                         "scripts/prefetch_adb_manifest_fallback.py"):
+                with self.subTest(name=name):
+                    target = root / name
+                    target.write_text("changed\n", encoding="utf-8")
+                    self.assertEqual(original_core,
+                                     identity.core_identity("adb-helper", "linux-x86_64", self.adb, root))
+                    self.assertNotEqual(original_policy,
+                                        identity.policy_identity("adb-helper", root, lock=self.adb))
+                    target.write_text("original\n", encoding="utf-8")
+
     def test_lock_qualification_policy_changes_requalify_without_rebuilding(self):
         before_core = identity.core_identity("adb-helper", "linux-x86_64", self.adb, ROOT)
         before_policy = identity.policy_identity("adb-helper", ROOT, lock=self.adb)

@@ -30,6 +30,8 @@ SHARED_POLICY_FILES = (
     "scripts/ci_dependency_toolchain.py",
 )
 ADB_POLICY_FILES = (
+    "scripts/prefetch_adb_helper_sources.py",
+    "scripts/prefetch_adb_manifest_fallback.py",
     "scripts/verify_adb_helper_artifact.py",
     "scripts/verify_adb_helper_toolchain.py",
     "scripts/smoke_adb_helper.py",
