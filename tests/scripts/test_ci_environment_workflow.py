@@ -66,6 +66,41 @@ def event_expression(expression, event, environment_mode, dependency_mode="off",
 
 
 class EnvironmentBootstrapTest(unittest.TestCase):
+    def test_macos_application_jobs_pin_hosts_and_xcode_before_shared_configuration(self):
+        text = CI_BUILD.read_text()
+        blocks = QUALITY.workflow_job_blocks(text)
+        steps = QUALITY.workflow_job_steps(text)
+        for job, runner, minimum in (("MacPackages", "macos-26-intel", "15.0"),
+                                     ("MacArmPackages", "macos-26", "14.0")):
+            with self.subTest(job=job):
+                block = blocks[job]
+                self.assertEqual(QUALITY.workflow_job_direct_value(block, "runs-on"), runner)
+                env = QUALITY.workflow_mapping_block(block, "env", 4)
+                self.assertEqual(env["KLOGG_CONFIG_OS"][0], runner)
+                self.assertIn("-DKLOGG_OSX_DEPLOYMENT_TARGET=" + minimum, env["KLOGG_CONFIG_CMAKE_OPTS"][0])
+        sanitizer = blocks["MacSanitizers"]
+        self.assertEqual(QUALITY.workflow_job_direct_value(sanitizer, "runs-on"), "${{ matrix.config.os }}")
+        sanitizer_text = "\n".join(sanitizer)
+        self.assertEqual(sanitizer_text.count("          - os: macos-26-intel\n"), 2)
+        self.assertEqual(sanitizer_text.count("-DKLOGG_OSX_DEPLOYMENT_TARGET=15.0"), 2)
+        for label in ("intel-qt6-asan-ubsan", "intel-qt6-first-party-tsan"):
+            self.assertIn("label: " + label, sanitizer_text)
+        self.assertNotIn("macos-15-intel", sanitizer_text)
+        selected = [QUALITY.workflow_step_fields(step)[0] for step in steps["MacPackages"]]
+        names = [step.get("name", "") for step in selected]
+        self.assertEqual(names.count("Select verified Xcode 26.6"), 1)
+        index = names.index("Select verified Xcode 26.6")
+        self.assertEqual(index, 1)
+        self.assertLess(index, names.index("Brew deps"))
+        self.assertLess(index, names.index("Disable Sentry on macOS"))
+        self.assertEqual(selected[index].get("shell"), "bash")
+        self.assertNotIn("if", selected[index])
+        self.assertNotIn("continue-on-error", selected[index])
+        self.assertIn("17F113", QUALITY.active_script_content(selected[index].get("run", "")))
+        self.assertNotIn("sudo xcode-select", text)
+        for job in ("MacArmPackages", "MacSanitizers"):
+            self.assertEqual([QUALITY.workflow_step_fields(step)[0] for step in steps[job]], selected)
+
     def test_registered_dispatch_exposes_explicit_environment_mode_and_source_pins(self):
         text = CI_BUILD.read_text()
         self.assertIn("      environment-mode:\n", text)

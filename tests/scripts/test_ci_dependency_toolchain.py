@@ -22,10 +22,10 @@ import ci_dependency_toolchain as toolchain
 class IosProducerToolchainTest(unittest.TestCase):
     def setUp(self):
         self.outputs = {
-            ("xcodebuild", "-version"): "Xcode 16.4\nBuild version 16F6\n",
-            ("xcrun", "--show-sdk-version"): "15.5\n",
-            ("xcrun", "--show-sdk-path"): "/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk\n",
-            ("clang", "--version"): "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin\n",
+            ("xcodebuild", "-version"): "Xcode 26.6\nBuild version 17F113\n",
+            ("xcrun", "--show-sdk-version"): "26.5\n",
+            ("xcrun", "--show-sdk-path"): "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk\n",
+            ("clang", "--version"): "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: arm64-apple-darwin\n",
             ("cmake", "--version"): "cmake version 3.31.6\n",
             ("ninja", "--version"): "1.12.1\n",
         }
@@ -37,7 +37,7 @@ class IosProducerToolchainTest(unittest.TestCase):
 
     def check(self, *, target="ios-arm64", arch="arm64", developer_dir=None):
         if developer_dir is None:
-            developer_dir = "/Applications/Xcode_16.4.app/Contents/Developer"
+            developer_dir = "/Applications/Xcode_26.6.app/Contents/Developer"
         return toolchain.check_ios_toolchain(
             target_id=target, repo_root=ROOT, host_arch=arch,
             developer_dir=developer_dir, run_command=self.fake_run,
@@ -131,8 +131,8 @@ class IosProducerToolchainTest(unittest.TestCase):
     def test_any_changed_observed_tool_refuses_native_qualification(self):
         for command, output in (
             (("xcodebuild", "-version"), "Xcode 26.5\nBuild version 26F6\n"),
-            (("xcrun", "--show-sdk-version"), "26.5\n"),
-            (("xcrun", "--show-sdk-path"), "/Applications/Xcode_26.5.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk\n"),
+            (("xcrun", "--show-sdk-version"), "26.4\n"),
+            (("xcrun", "--show-sdk-path"), "/Applications/Xcode_26.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk\n"),
             (("clang", "--version"), "Apple clang version 18.0.0\n"),
             (("cmake", "--version"), "cmake version 4.4.2\n"),
             (("ninja", "--version"), "1.12.0\n"),

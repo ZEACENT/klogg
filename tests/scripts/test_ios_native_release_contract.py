@@ -299,12 +299,12 @@ class IosStartupCiContractTest(unittest.TestCase):
             "jobs:\n"
             "  BuildIosNativeX64:\n"
             f'    if: {NATIVE_JOB_GUARD}\n'
-            "    runs-on: macos-15-intel\n"
+            "    runs-on: macos-26-intel\n"
             "    steps: &ios_native_steps\n"
             + (self.download + self.startup if steps is None else steps)
             + "  BuildIosNativeArm64:\n"
             f'    if: {NATIVE_JOB_GUARD}\n'
-            "    runs-on: macos-15\n"
+            "    runs-on: macos-26\n"
             "    steps: *ios_native_steps\n"
         )
 
@@ -359,8 +359,8 @@ class IosStartupCiContractTest(unittest.TestCase):
             "unknown-alias": good.replace("*ios_native_steps", "*missing"),
             "unknown-condition": good.replace("!contains(github.event.head_commit.message, '[skip ci]')", "fromJSON(inputs.native)"),
             "job-soft-failure": good.replace(
-                "    runs-on: macos-15-intel\n",
-                "    continue-on-error: true\n    runs-on: macos-15-intel\n",
+                "    runs-on: macos-26-intel\n",
+                "    continue-on-error: true\n    runs-on: macos-26-intel\n",
                 1,
             ),
             "duplicate-job": good + "  BuildIosNativeX64:\n    steps: []\n",
@@ -1573,16 +1573,20 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         names = [step.get("name", "") for step in steps]
         selection = "Verify pinned iOS producer toolchain"
         self.assertEqual(names.count(selection), 1)
+        self.assertLess(names.index("Select verified Xcode 26.6"), names.index("Install iOS native source-build tools"))
         self.assertLess(names.index("Install pinned CMake and Ninja"), names.index(selection))
         self.assertLess(names.index(selection),
                         names.index("Build disconnected thin iOS native stack"))
         preflight = steps[names.index(selection)]
         self.assertEqual(preflight.get("shell"), "bash")
         body = CI_MODULE.active_script_content(preflight.get("run", ""))
-        self.assertIn("/Applications/Xcode_16.4.app/Contents/Developer", body)
-        self.assertIn("$GITHUB_ENV", body)
+        self.assertNotIn("Xcode_16.4.app", body)
         self.assertIn("scripts/ci_dependency_toolchain.py", body)
         self.assertIn("ios-${KLOGG_IOS_ARCHITECTURE}", body)
+        select = CI_MODULE.active_script_content(steps[names.index("Select verified Xcode 26.6")].get("run", ""))
+        self.assertIn("/Applications/Xcode_26.6.app/Contents/Developer", select)
+        self.assertIn("17F113", select)
+        self.assertIn("$GITHUB_ENV", select)
         arm = CI_MODULE.workflow_job_blocks(workflow)["BuildIosNativeArm64"]
         self.assertTrue(any("steps: *ios_native_steps" in line for line in arm))
 
@@ -1672,11 +1676,11 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         for job, runner, architecture, artifact in (
             (
                 "BuildIosNativeX64",
-                "macos-15-intel",
+                "macos-26-intel",
                 "x86_64",
                 "ios-native-x86_64",
             ),
-            ("BuildIosNativeArm64", "macos-15", "arm64", "ios-native-arm64"),
+            ("BuildIosNativeArm64", "macos-26", "arm64", "ios-native-arm64"),
         ):
             with self.subTest(job=job):
                 job_block = blocks[job]

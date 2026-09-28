@@ -26,13 +26,13 @@ class DependencyCatalogTest(unittest.TestCase):
                          {"adb-helper", "ios-native"})
         self.assertEqual({row["runner"] for row in records.values()},
                          {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-2022",
-                          "macos-15-intel", "macos-15"})
+                          "macos-26-intel", "macos-26"})
         for name in ("ios-arm64", "ios-x86_64"):
             self.assertEqual(records[name]["toolchain"], {
-                "xcode": ["Xcode 16.4", "Build version 16F6"],
-                "sdk_version": "15.5",
-                "sdk_path": "/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
-                "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+                "xcode": ["Xcode 26.6", "Build version 17F113"],
+                "sdk_version": "26.5",
+                "sdk_path": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+                "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
                 "cmake": "cmake version 3.31.6",
                 "ninja": "1.12.1",
             })

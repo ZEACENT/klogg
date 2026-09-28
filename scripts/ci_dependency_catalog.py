@@ -8,10 +8,10 @@ from ci_environment_registry import DEPENDENCY_REGISTRY
 
 PRODUCER_WORKFLOW = ".github/workflows/ci-dependencies.yml"
 IOS_TOOLCHAIN = {
-    "xcode": ["Xcode 16.4", "Build version 16F6"],
-    "sdk_version": "15.5",
-    "sdk_path": "/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
-    "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+    "xcode": ["Xcode 26.6", "Build version 17F113"],
+    "sdk_version": "26.5",
+    "sdk_path": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
     "cmake": "cmake version 3.31.6",
     "ninja": "1.12.1",
 }
@@ -19,10 +19,10 @@ TARGETS = {
     "adb-linux-x86_64": ("adb-helper", "linux-x86_64", "ubuntu-24.04"),
     "adb-linux-arm64": ("adb-helper", "linux-arm64", "ubuntu-24.04-arm"),
     "adb-windows-x86_64": ("adb-helper", "windows-x86_64", "windows-2022"),
-    "adb-macos-x86_64": ("adb-helper", "macos-x86_64", "macos-15-intel"),
-    "adb-macos-arm64": ("adb-helper", "macos-arm64", "macos-15"),
-    "ios-x86_64": ("ios-native", "x86_64", "macos-15-intel"),
-    "ios-arm64": ("ios-native", "arm64", "macos-15"),
+    "adb-macos-x86_64": ("adb-helper", "macos-x86_64", "macos-26-intel"),
+    "adb-macos-arm64": ("adb-helper", "macos-arm64", "macos-26"),
+    "ios-x86_64": ("ios-native", "x86_64", "macos-26-intel"),
+    "ios-arm64": ("ios-native", "arm64", "macos-26"),
 }
 
 

@@ -4,6 +4,7 @@ import json
 import pathlib
 import re
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -33,6 +34,10 @@ _CI_SPEC = importlib.util.spec_from_file_location(
 assert _CI_SPEC is not None and _CI_SPEC.loader is not None
 CI_MODULE = importlib.util.module_from_spec(_CI_SPEC)
 _CI_SPEC.loader.exec_module(CI_MODULE)
+_TOOLCHAIN_SPEC = importlib.util.spec_from_file_location("adb_toolchain", TOOLCHAIN_SCRIPT)
+assert _TOOLCHAIN_SPEC is not None and _TOOLCHAIN_SPEC.loader is not None
+ADB_TOOLCHAIN = importlib.util.module_from_spec(_TOOLCHAIN_SPEC)
+_TOOLCHAIN_SPEC.loader.exec_module(ADB_TOOLCHAIN)
 
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -204,6 +209,11 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     identity_fields.extend(("container_image", "container_digest"))
                 else:
                     identity_fields.extend(("hosted_image_family", "ninja_version"))
+                    if target.startswith("macos-"):
+                        identity_fields.extend(("developer_dir", "sdk_version", "sdk_path", "clang_identity"))
+                        self.assertEqual(toolchain.get("xcode"), ["Xcode 26.6", "Build version 17F113"])
+                        self.assertEqual(toolchain.get("runner_image"),
+                                         "macos-26-intel" if target == "macos-x86_64" else "macos-26")
                     self.assertNotIn(
                         "runner_image_revision",
                         toolchain,
@@ -231,8 +241,48 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIn("lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb", workflow)
         self.assertIn("cmakeVersion: 3.31.6", workflow)
         self.assertIn("ninjaVersion: 1.12.1", workflow)
-        for family in ("macos15", "win22"):
+        for family in ("macos26", "win22"):
             self.assertIn(f'"hosted_image_family": "{family}"', LOCK.read_text())
+
+    def test_macos_toolchain_requires_selected_xcode_sdk_and_exact_clang(self):
+        developer_dir = "/Applications/Xcode_26.6.app/Contents/Developer"
+        expected = {
+            "developer_dir": developer_dir,
+            "xcode": ["Xcode 26.6", "Build version 17F113"],
+            "sdk_version": "26.5",
+            "sdk_path": developer_dir + "/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+            "clang_identity": "Apple clang version 99.0.0 (synthetic test identity)",
+        }
+        outputs = {
+            ("xcodebuild", "-version"): "Xcode 26.6\nBuild version 17F113\n",
+            ("xcrun", "--show-sdk-version"): "26.5",
+            ("xcrun", "--show-sdk-path"): expected["sdk_path"],
+        }
+
+        def fake_command(command):
+            return outputs[tuple(command)]
+
+        with mock.patch.dict("os.environ", {"DEVELOPER_DIR": developer_dir}), \
+                mock.patch.object(ADB_TOOLCHAIN, "command_text", side_effect=fake_command):
+            ADB_TOOLCHAIN.verify_apple_toolchain(expected, expected["clang_identity"])
+            for field, value in (("xcode", ["Xcode 26.5", "Build version 17F113"]),
+                                 ("sdk_version", "26.4"),
+                                 ("sdk_path", "/tmp/unreviewed.sdk"),
+                                 ("clang_identity", "unreviewed clang"),
+                                 ("developer_dir", "/Applications/Xcode.app/Contents/Developer")):
+                with self.subTest(field=field), self.assertRaises(RuntimeError):
+                    ADB_TOOLCHAIN.verify_apple_toolchain({**expected, field: value},
+                                                         expected["clang_identity"])
+            for field in expected:
+                with self.subTest(missing=field), self.assertRaises(RuntimeError):
+                    ADB_TOOLCHAIN.verify_apple_toolchain(
+                        {key: value for key, value in expected.items() if key != field},
+                        expected["clang_identity"])
+            with self.assertRaises(RuntimeError):
+                ADB_TOOLCHAIN.verify_apple_toolchain(expected, "different Apple clang")
+            outputs[("xcodebuild", "-version")] = "Xcode 26.6\nBuild version 17F114\n"
+            with self.assertRaises(RuntimeError):
+                ADB_TOOLCHAIN.verify_apple_toolchain(expected, expected["clang_identity"])
 
     def test_windows_build_selects_the_msys2_gnu_patch_binary_explicitly(self):
         workflow = self.required_text(BUILD_ACTION)

@@ -65,6 +65,28 @@ jobs:
 """
 
 
+class NativeMacosIdentityPolicyTest(unittest.TestCase):
+    def test_workflow_selection_requires_matching_reviewed_native_locks(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        catalog = json.loads((ROOT / "ci/dependencies/catalog.json").read_text())
+        adb_lock = json.loads((ROOT / "packaging/adb/adb-helper.lock.json").read_text())
+        ios_script = (ROOT / "scripts/ci_dependency_toolchain.py").read_text()
+        self.assertEqual(MODULE.native_macos_identity_issues(
+            workflow, catalog, adb_lock, ios_script), [])
+        adb = adb_lock["toolchains"]["macos-arm64"]
+        original_sdk = adb["sdk_version"]
+        adb["sdk_version"] = "26.4"
+        self.assertTrue(MODULE.native_macos_identity_issues(
+            workflow, catalog, adb_lock, ios_script))
+        adb["sdk_version"] = original_sdk
+        catalog["targets"]["ios-x86_64"]["runner"] = "macos-latest"
+        self.assertTrue(MODULE.native_macos_identity_issues(
+            workflow, catalog, adb_lock, ios_script))
+        self.assertTrue(MODULE.native_macos_identity_issues(
+            workflow, json.loads((ROOT / "ci/dependencies/catalog.json").read_text()),
+            adb_lock, ios_script.replace("Xcode_26.6.app", "Xcode.app")))
+
+
 class WorkflowTimerAndCliPolicyTest(unittest.TestCase):
     def test_schedule_triggers_are_rejected_in_block_quoted_flow_and_list_forms(self):
         for trigger in (

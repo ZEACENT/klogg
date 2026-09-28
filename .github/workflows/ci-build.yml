@@ -616,6 +616,20 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Select verified Xcode 26.6
+        if: ${{ startsWith(env.KLOGG_ADB_HELPER_TARGET, 'macos-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          version=$(xcodebuild -version)
+          if [[ "$version" != $'Xcode 26.6\nBuild version 17F113' ]]; then
+            echo "::error::Expected Xcode 26.6 build 17F113, got: $version" >&2
+            exit 1
+          fi
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
+
       - name: Install locked native CMake toolchain
         if: ${{ !startsWith(env.KLOGG_ADB_HELPER_TARGET, 'linux-') }}
         uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb
@@ -797,7 +811,7 @@ jobs:
     permissions: *artifact_attestation_permissions
     if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Source-built ADB helper macos-x86_64"
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     outputs:
       artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
       candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
@@ -813,7 +827,7 @@ jobs:
     permissions: *artifact_attestation_permissions
     if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Source-built ADB helper macos-arm64"
-    runs-on: macos-15
+    runs-on: macos-26
     outputs:
       artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
       candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
@@ -1343,7 +1357,7 @@ jobs:
     permissions: *artifact_attestation_permissions
     if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}iOS native stack x86_64"
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     outputs:
       artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
       candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
@@ -1358,6 +1372,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Select verified Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          version=$(xcodebuild -version)
+          if [[ "$version" != $'Xcode 26.6\nBuild version 17F113' ]]; then
+            echo "::error::Expected Xcode 26.6 build 17F113, got: $version" >&2
+            exit 1
+          fi
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
 
       - name: Install iOS native source-build tools
         shell: bash
@@ -1384,11 +1411,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
-          test -d "$DEVELOPER_DIR"
           python3 scripts/ci_dependency_toolchain.py \
             --target-id "ios-${KLOGG_IOS_ARCHITECTURE}"
-          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
 
       - name: Observe unreviewed iOS host tool inputs
         if: ${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}
@@ -1584,7 +1608,7 @@ jobs:
     permissions: *artifact_attestation_permissions
     if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}iOS native stack arm64"
-    runs-on: macos-15
+    runs-on: macos-26
     outputs:
       artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
       candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
@@ -1604,7 +1628,7 @@ jobs:
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}macOS intel-qt6 [vs-gen]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      KLOGG_CONFIG_OS: macos-15-intel
+      KLOGG_CONFIG_OS: macos-26-intel
       KLOGG_QT_VERSION: 6.9.3
       KLOGG_QT_MODULES: qt5compat qtimageformats
       KLOGG_QT_ARCHIVES: qtbase icu qtsvg qttools qttranslations
@@ -1619,12 +1643,25 @@ jobs:
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0
       KLOGG_PACKAGE_ENABLED: true
       KLOGG_SANITIZER: ""
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     timeout-minutes: 60
     steps: &mac_steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Select verified Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          version=$(xcodebuild -version)
+          if [[ "$version" != $'Xcode 26.6\nBuild version 17F113' ]]; then
+            echo "::error::Expected Xcode 26.6 build 17F113, got: $version" >&2
+            exit 1
+          fi
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
@@ -1722,14 +1759,6 @@ jobs:
             gh attestation verify "$artifact_root/SHA256SUMS" \
               --repo "$GITHUB_REPOSITORY"
           fi
-
-      - name: List available Xcode versions
-        shell: sh
-        run: ls /Applications | grep Xcode
-      
-      - name: Setup Xcode
-        shell: sh
-        run: sudo xcode-select -s /Applications/Xcode.app
 
 #Install build deps
       - name: Set brew env
@@ -1932,7 +1961,7 @@ jobs:
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}macOS arm64-qt6 [vs-arm64]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      KLOGG_CONFIG_OS: macos-latest
+      KLOGG_CONFIG_OS: macos-26
       KLOGG_QT_VERSION: 6.9.3
       KLOGG_QT_MODULES: qt5compat qtimageformats
       KLOGG_QT_ARCHIVES: qtbase icu qtsvg qttools qttranslations
@@ -1947,7 +1976,7 @@ jobs:
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_OSX_DEPLOYMENT_TARGET=14.0
       KLOGG_PACKAGE_ENABLED: true
       KLOGG_SANITIZER: ""
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
     steps: *mac_steps
 
@@ -1978,7 +2007,7 @@ jobs:
           # The Linux source-built Qt TSan leg is authoritative for Qt-internal races.
           # Run on the Intel runner so TSan's
           # threading overhead stays stable.
-          - os: macos-15-intel
+          - os: macos-26-intel
             qt_version: 6.9.3
             qt_modules: qt5compat qtimageformats
             qt_archives: qtbase icu qtsvg qttools qttranslations
@@ -1988,7 +2017,7 @@ jobs:
             package_tag: asan-ubsan
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
             sanitizer: address-undefined
-          - os: macos-15-intel
+          - os: macos-26-intel
             qt_version: 6.9.3
             qt_modules: qt5compat qtimageformats
             qt_archives: qtbase icu qtsvg qttools qttranslations

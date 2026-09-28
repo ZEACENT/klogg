@@ -15,7 +15,7 @@ import sys
 
 from ci_dependency_catalog import validate_catalog
 
-DEVELOPER_DIR = "/Applications/Xcode_16.4.app/Contents/Developer"
+DEVELOPER_DIR = "/Applications/Xcode_26.6.app/Contents/Developer"
 COMMANDS = {
     "xcode": ("xcodebuild", "-version"),
     "sdk_version": ("xcrun", "--show-sdk-version"),

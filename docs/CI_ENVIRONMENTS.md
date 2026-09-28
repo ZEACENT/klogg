@@ -23,6 +23,16 @@ been reviewed and pinned. The seven-way Gate therefore cannot issue a receipt.
 `dependency-mode=publish` has no registry write permission and deliberately
 fails; a passing local contract suite cannot authorize it.
 
+The macOS 26/Xcode 26.6 workflow migration is staged but not qualified. The
+native catalog and ADB toolchain locks now record the locally observed Intel
+Xcode build, SDK and clang as candidate identities for both architectures;
+actual `macos-26-intel` and `macos-26` hosted tool and image identities still
+require independent observation. Do not treat these candidates or prior signed
+artifacts as current-head qualification. The changed ADB lock also invalidates
+older full-lock-bound source/legal receipts and four Linux packaging environment
+policy identities. Keep the Intel 15.0/ARM 14.0 deployment floors separate
+from the new SDK version.
+
 Do not create placeholder locks, substitute mutable tags, or fall back to
 building an environment or native core when verified consumption fails.
 

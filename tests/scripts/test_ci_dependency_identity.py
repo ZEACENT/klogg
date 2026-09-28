@@ -106,7 +106,7 @@ class DependencyIdentityTest(unittest.TestCase):
             for mutated in (
                 lambda d: d["targets"]["ios-arm64"].pop("toolchain"),
                 lambda d: d["targets"]["ios-arm64"]["toolchain"].update(
-                    sdk_version="26.5"
+                    sdk_version="26.4"
                 ),
             ):
                 changed = copy.deepcopy(original)

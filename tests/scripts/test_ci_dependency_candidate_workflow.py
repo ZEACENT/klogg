@@ -26,10 +26,10 @@ TARGETS = {
     "BuildAdbLinuxX64": ("adb-linux-x86_64", "ubuntu-24.04", "adb"),
     "BuildAdbLinuxArm64": ("adb-linux-arm64", "ubuntu-24.04-arm", "adb"),
     "BuildAdbWindowsX64": ("adb-windows-x86_64", "windows-2022", "adb"),
-    "BuildAdbMacX64": ("adb-macos-x86_64", "macos-15-intel", "adb"),
-    "BuildAdbMacArm64": ("adb-macos-arm64", "macos-15", "adb"),
-    "BuildIosNativeX64": ("ios-x86_64", "macos-15-intel", "ios"),
-    "BuildIosNativeArm64": ("ios-arm64", "macos-15", "ios"),
+    "BuildAdbMacX64": ("adb-macos-x86_64", "macos-26-intel", "adb"),
+    "BuildAdbMacArm64": ("adb-macos-arm64", "macos-26", "adb"),
+    "BuildIosNativeX64": ("ios-x86_64", "macos-26-intel", "ios"),
+    "BuildIosNativeArm64": ("ios-arm64", "macos-26", "ios"),
 }
 
 
@@ -395,6 +395,83 @@ class DependencyQualificationWorkflowTest(unittest.TestCase):
         condition = LINT.workflow_job_direct_value(blocks[self.ROOT_JOBS[0]], "if")
         self.assertIn("!cancelled()", condition)
         self.assertIn("!contains(github.event.head_commit.message, '[skip ci]')", condition)
+
+    def test_native_macos_builders_select_exact_xcode_before_tools_and_builds(self):
+        workflow = WORKFLOW.read_text()
+        jobs = LINT.workflow_job_steps(workflow)
+        for job, (_, runner, family) in TARGETS.items():
+            if runner not in {"macos-26-intel", "macos-26"}:
+                continue
+            with self.subTest(job=job):
+                records = [LINT.workflow_step_fields(step)[0] for step in jobs[job]]
+                selections = [(index, step) for index, step in enumerate(records)
+                              if step.get("name") == "Select verified Xcode 26.6"]
+                self.assertEqual(len(selections), 1)
+                index, selection = selections[0]
+                self.assertEqual(index, 1, "selection must precede all toolchain actions")
+                self.assertEqual(selection.get("shell"), "bash")
+                self.assertNotIn("continue-on-error", selection)
+                self.assertEqual(selection.get("if"),
+                                 "${{ startsWith(env.KLOGG_ADB_HELPER_TARGET, 'macos-') }}" if family == "adb" else None)
+                script = LINT.active_script_content(selection.get("run", ""))
+                for marker in ("set -euo pipefail", "/Applications/Xcode_26.6.app/Contents/Developer",
+                               'test -d "$DEVELOPER_DIR"', "xcodebuild -version", "17F113",
+                               '>> "$GITHUB_ENV"'):
+                    self.assertIn(marker, script)
+                self.assertLess(index, next(i for i, step in enumerate(records)
+                                            if step.get("name") == ("Install locked native CMake toolchain"
+                                                                     if family == "adb" else "Install iOS native source-build tools")))
+                if family == "ios":
+                    verify = next(i for i, step in enumerate(records)
+                                  if step.get("name") == "Verify pinned iOS producer toolchain")
+                    self.assertLess(index, verify)
+                    self.assertNotIn("Xcode_16.4.app", records[verify].get("run", ""))
+                    self.assertIn("ci_dependency_toolchain.py", records[verify].get("run", ""))
+
+    def test_native_macos_xcode_selection_near_misses_fail_closed(self):
+        workflow = WORKFLOW.read_text()
+        for job in ("BuildAdbMacX64", "BuildAdbMacArm64", "BuildIosNativeX64", "BuildIosNativeArm64"):
+            with self.subTest(job=job):
+                steps = [LINT.workflow_step_fields(step)[0] for step in LINT.workflow_job_steps(workflow)[job]]
+                selection = next(step for step in steps if step.get("name") == "Select verified Xcode 26.6")
+                script = selection["run"]
+                self.assertNotIn("|| true", script)
+                self.assertNotIn("# xcodebuild -version", script)
+                self.assertNotIn("echo 'xcodebuild -version'", script)
+                self.assertNotIn("sudo xcode-select", script)
+                self.assertIn("17F113", script)
+        self.assertNotIn("sudo xcode-select", workflow)
+
+    def test_selected_xcode_rejects_missing_directory_and_near_miss_build(self):
+        workflow = WORKFLOW.read_text()
+        for job in ("BuildAdbMacX64", "BuildIosNativeX64"):
+            steps = [LINT.workflow_step_fields(step)[0] for step in LINT.workflow_job_steps(workflow)[job]]
+            selection = next(step for step in steps if step.get("name") == "Select verified Xcode 26.6")
+            with self.subTest(job=job), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                developer = root / "Xcode_26.6.app" / "Contents" / "Developer"
+                output = root / "github-env"
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                xcodebuild = bin_dir / "xcodebuild"
+                xcodebuild.write_text('#!/bin/sh\nprintf "Xcode 26.6\\nBuild version %s\\n" "$FAKE_XCODE_BUILD"\n')
+                xcodebuild.chmod(0o755)
+                script = selection["run"].replace("/Applications/Xcode_26.6.app/Contents/Developer", str(developer))
+                for exists, build, allowed in ((False, "17F113", False), (True, "17F112", False),
+                                               (True, "17F113", True)):
+                    with self.subTest(exists=exists, build=build):
+                        if exists:
+                            developer.mkdir(parents=True, exist_ok=True)
+                        else:
+                            output.unlink(missing_ok=True)
+                        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                                                timeout=10, env={**os.environ, "GITHUB_ENV": str(output),
+                                                                 "FAKE_XCODE_BUILD": build,
+                                                                 "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+                        self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
+                        self.assertEqual(output.read_text() if output.exists() else "",
+                                         f"DEVELOPER_DIR={developer}\n" if allowed else "")
+                        output.unlink(missing_ok=True)
 
     def test_ios_host_probe_runs_only_for_dependency_dispatch_before_native_build(self):
         steps = LINT.workflow_job_steps(WORKFLOW.read_text())

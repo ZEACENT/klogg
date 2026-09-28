@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fnmatch
 import itertools
+import json
 import math
 import re
 import shlex
@@ -4637,6 +4638,47 @@ def ci_manifests(root: Path) -> list[Path]:
     return sorted(paths)
 
 
+def native_macos_identity_issues(workflow: str, catalog: dict, adb_lock: dict,
+                                 ios_toolchain_script: str) -> list[str]:
+    """Keep selected Xcode and both native producer locks in one reviewed state."""
+    issues = []
+    developer_dir = "/Applications/Xcode_26.6.app/Contents/Developer"
+    xcode = ["Xcode 26.6", "Build version 17F113"]
+    sdk_path = developer_dir + "/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    if (f"export DEVELOPER_DIR={developer_dir}" not in workflow
+            or "Build version 17F113" not in workflow
+            or f'DEVELOPER_DIR = "{developer_dir}"' not in ios_toolchain_script):
+        issues.append("native macOS Xcode selection differs from the reviewed 26.6 build")
+    jobs = workflow_job_blocks(workflow)
+    try:
+        targets = catalog["targets"]
+        toolchains = adb_lock["toolchains"]
+        for arch, runner, suffix in (("x86_64", "macos-26-intel", "X64"),
+                                     ("arm64", "macos-26", "Arm64")):
+            for job in ("BuildAdbMac" + suffix, "BuildIosNative" + suffix):
+                if workflow_job_direct_value(jobs.get(job, []), "runs-on") != runner:
+                    issues.append(f"{job}: native macOS runner differs from the reviewed lock")
+            ios = targets["ios-" + arch]
+            adb_target = targets["adb-macos-" + arch]
+            adb = toolchains["macos-" + arch]
+            if ios["runner"] != runner or adb_target["runner"] != runner:
+                issues.append(f"{arch}: native catalog runner differs from the workflow")
+            observed = ios["toolchain"]
+            if (observed["xcode"] != xcode or observed["sdk_version"] != "26.5"
+                    or observed["sdk_path"] != sdk_path):
+                issues.append(f"{arch}: iOS Xcode/SDK lock differs from the selected toolchain")
+            if (adb.get("runner_image") != runner or adb.get("hosted_image_family") != "macos26"
+                    or adb.get("developer_dir") != developer_dir or adb.get("xcode") != xcode
+                    or adb.get("sdk_version") != observed["sdk_version"]
+                    or adb.get("sdk_path") != observed["sdk_path"]
+                    or adb.get("clang_identity") != observed["clang"]
+                    or adb.get("compiler_version") not in observed["clang"]):
+                issues.append(f"{arch}: ADB Xcode/SDK/clang lock differs from the iOS producer")
+    except (KeyError, TypeError, ValueError):
+        issues.append("native macOS toolchain locks are missing required target identities")
+    return issues
+
+
 def check_repo(root: Path) -> list[str]:
     issues: list[str] = []
     workflows = root / ".github" / "workflows"
@@ -4796,6 +4838,15 @@ def check_repo(root: Path) -> list[str]:
                       for issue in ci_dependency_workflow_issues(dependency_path.read_text()))
 
     ci_text = (workflows / "ci-build.yml").read_text()
+    issues.extend(
+        f".github/workflows/ci-build.yml: {issue}"
+        for issue in native_macos_identity_issues(
+            ci_text,
+            json.loads((root / "ci/dependencies/catalog.json").read_text()),
+            json.loads((root / "packaging/adb/adb-helper.lock.json").read_text()),
+            (root / "scripts/ci_dependency_toolchain.py").read_text(),
+        )
+    )
     issues.extend(
         f".github/workflows/ci-build.yml: {issue}"
         for issue in ci_build_workflow_issues(ci_text)
