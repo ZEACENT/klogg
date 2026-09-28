@@ -310,6 +310,11 @@ def import_source_cache(lock_path: pathlib.Path, repo_root: pathlib.Path,
         accepted = temporary / "accepted"
         extract_verified_zip(zipped, accepted, lock_path, identity["digest"])
         (validator or _offline_validator)(pathlib.Path(lock_path), accepted)
+        generated_manifest = accepted / PREFETCH_MANIFEST_NAME
+        require(generated_manifest.is_file() and not generated_manifest.is_symlink()
+                and generated_manifest.stat().st_size <= MAX_MANIFEST_BYTES,
+                "offline source validator did not produce its bounded manifest")
+        generated_manifest.unlink()
         require(not output_root.exists() and not output_root.is_symlink(),
                 "source cache destination appeared during verification")
         accepted.rename(output_root)

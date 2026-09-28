@@ -251,6 +251,16 @@ class SourceCacheTransportTest(unittest.TestCase):
                 cache.download_artifact_zip(self.artifact_id, self.root / "oversized.zip",
                                             limit=10, timeout=5)
 
+    def test_real_original_offline_validator_keeps_published_cache_archives_only(self):
+        output = self.root / "real-validator-import"
+        def download(artifact_id, archive, *, limit, timeout):
+            archive.write_bytes(self.zip_bytes)
+        cache.import_source_cache(self.lock, self.repo, self.current, self.prior,
+                                  self.run_id, self.attempt, self.artifact_id, output,
+                                  metadata=self.metadata, git_runner=self.git,
+                                  download=download)
+        self.assertEqual({path.name for path in output.iterdir()}, set(self.files))
+
     def test_complete_import_validates_offline_and_never_downloads_sources(self):
         output = self.root / "import"
         calls = []
@@ -260,12 +270,14 @@ class SourceCacheTransportTest(unittest.TestCase):
         def validator(lock, directory):
             calls.append(("offline", lock, directory))
             self.assertEqual({p.name for p in directory.iterdir()}, set(self.files))
+            (directory / "adb-helper-prefetch-manifest.json").write_text("generated", encoding="utf-8")
         cache.import_source_cache(self.lock, self.repo, self.current, self.prior,
                                   self.run_id, self.attempt, self.artifact_id, output,
                                   metadata=self.metadata, git_runner=self.git,
                                   download=download, validator=validator)
         self.assertEqual([call[0] for call in calls], ["download", "offline"])
         self.assertTrue(output.is_dir())
+        self.assertEqual({p.name for p in output.iterdir()}, set(self.files))
 
 
 if __name__ == "__main__":
