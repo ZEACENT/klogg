@@ -1731,6 +1731,69 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
     return issues
 
 
+def ci_build_adb_source_transport_issues(text: str) -> list[str]:
+    """Keep ordinary CI source imports isolated from dispatch and failed cache hits."""
+    issue = "ADB ordinary source transport must be read-only, ancestry-aware, and fail closed"
+    job = workflow_job_blocks(text).get("PrefetchAdbHelperSources")
+    if job is None:
+        return [issue]
+    permissions = workflow_mapping_block(job, "permissions", 4)
+    if (permissions is None or {key: value for key, (value, _) in permissions.items()}
+            != {"contents": "read", "actions": "read"}):
+        return [issue]
+    steps = [workflow_step_fields(step) for step in
+             workflow_job_steps(text).get("PrefetchAdbHelperSources", [])]
+    checkouts = [children.get("with", {}) for fields, children in steps
+                 if fields.get("uses", "").startswith("actions/checkout@")]
+    prefetch = [(fields, children) for fields, children in steps
+                if fields.get("name") == "Prefetch and hash immutable ADB sources"]
+    if (checkouts != [{"persist-credentials": "false", "fetch-depth": "0"}]
+            or len(prefetch) != 1):
+        return [issue]
+    fields, children = prefetch[0]
+    environment = children.get("env", {})
+    if (fields.get("shell") != "bash"
+            or environment.get("GH_TOKEN") != "${{ github.token }}"
+            or environment.get("KLOGG_ADB_SOURCE_EVENT") != "${{ github.event_name }}"):
+        return [issue]
+    script = active_script_content(fields.get("run", ""))
+    required = (
+        'if [[ "$KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY" == "$KLOGG_ADB_SOURCE_CACHE_EXACT_KEY" ]]; then\n'
+        'echo "::error::The exact ADB source cache failed verification; delete the immutable cache entry before retrying"\n'
+        'exit 1\nfi',
+        'if [[ "$cache_usable" != "true" ]]; then\n'
+        'rm -rf "$adb_source_cache_root"\ntransport_status=2\n'
+        'if [[ "$KLOGG_ADB_SOURCE_EVENT" == "pull_request" || "$KLOGG_ADB_SOURCE_EVENT" == "push" ]]; then\n'
+        'if python3 scripts/ci_adb_source_transport.py \\\n'
+        '--lock packaging/adb/adb-helper.lock.json \\\n'
+        '--repo-root "$GITHUB_WORKSPACE" \\\n'
+        '--download-root "$adb_source_cache_root"; then\n'
+        'transport_status=0\nelse\ntransport_status=$?\nfi\n'
+        'elif [[ "$KLOGG_ADB_SOURCE_EVENT" != "workflow_dispatch" ]]; then\n'
+        'echo "::error::Unsupported ADB source prefetch event: $KLOGG_ADB_SOURCE_EVENT"\n'
+        'exit 1\nfi\n'
+        'if [[ "$transport_status" -eq 2 ]]; then\n'
+        'python3 scripts/prefetch_adb_source_closure.py \\\n'
+        '--lock packaging/adb/adb-helper.lock.json \\\n'
+        '--download-root "$adb_source_cache_root" \\\n'
+        '--workers 2 \\\n'
+        '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"\n'
+        'elif [[ "$transport_status" -eq 0 ]]; then\n'
+        'python3 scripts/prefetch_adb_helper_sources.py \\\n'
+        '--lock packaging/adb/adb-helper.lock.json \\\n'
+        '--download-root "$adb_source_cache_root" \\\n'
+        '--offline \\\n'
+        '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"\n'
+        'else\nexit "$transport_status"\nfi\nfi',
+    )
+    if (any(fragment not in script for fragment in required)
+            or script.count("python3 scripts/ci_adb_source_transport.py") != 1
+            or script.count("python3 scripts/prefetch_adb_helper_sources.py") != 2
+            or script.count("python3 scripts/prefetch_adb_source_closure.py") != 1):
+        return [issue]
+    return []
+
+
 def ci_build_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
     active = active_script_content(text)
@@ -1911,6 +1974,7 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     if workflow_job_direct_value(job_blocks.get("ci-gate", []), "if") != CI_BUILD_ORDINARY_GATE_IF:
         issues.append("CI gate must run with if: always() for ordinary events only")
     issues.extend(ci_build_environment_mode_issues(text))
+    issues.extend(ci_build_adb_source_transport_issues(text))
     for job in (
         "LinuxPackages",
         "LinuxSanitizers",

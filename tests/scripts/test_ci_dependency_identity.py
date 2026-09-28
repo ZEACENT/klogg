@@ -202,6 +202,22 @@ class DependencyIdentityTest(unittest.TestCase):
                                         identity.policy_identity("adb-helper", root, lock=self.adb))
                     target.write_text("original\n", encoding="utf-8")
 
+    def test_ordinary_adb_source_transport_requalifies_without_rebuilding(self):
+        transport = "scripts/ci_adb_source_transport.py"
+        self.assertNotIn(transport, identity.ADB_BUILD_FILES)
+        self.assertIn(transport, identity.ADB_POLICY_FILES)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for file_name in set(identity.ADB_BUILD_FILES + identity.ADB_POLICY_FILES):
+                path = root / file_name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("original\n", encoding="utf-8")
+            core = identity.core_identity("adb-helper", "linux-x86_64", self.adb, root)
+            policy = identity.policy_identity("adb-helper", root, lock=self.adb)
+            (root / transport).write_text("changed transport\n", encoding="utf-8")
+            self.assertEqual(core, identity.core_identity("adb-helper", "linux-x86_64", self.adb, root))
+            self.assertNotEqual(policy, identity.policy_identity("adb-helper", root, lock=self.adb))
+
     def test_lock_qualification_policy_changes_requalify_without_rebuilding(self):
         before_core = identity.core_identity("adb-helper", "linux-x86_64", self.adb, ROOT)
         before_policy = identity.policy_identity("adb-helper", ROOT, lock=self.adb)

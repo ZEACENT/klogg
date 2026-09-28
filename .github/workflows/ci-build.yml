@@ -526,12 +526,16 @@ jobs:
     if: ${{ !cancelled() && ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') && needs.DependencyModePreflight.result == 'success')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Prefetch locked ADB helper source closure"
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     env:
       KLOGG_ADB_SOURCE_CACHE_MAX_BYTES: 536870912
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Compute exact ADB source cache key
         id: adb-cache-key
@@ -556,6 +560,8 @@ jobs:
           KLOGG_ADB_SOURCE_CACHE_EXACT_KEY: ${{ steps.adb-cache-key.outputs.key }}
           KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY: ${{ steps.cache-adb-sources.outputs.cache-matched-key }}
           KLOGG_ADB_SOURCE_CACHE_RESTORE_OUTCOME: ${{ steps.cache-adb-sources.outcome }}
+          KLOGG_ADB_SOURCE_EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           adb_source_cache_root="prefetch_artifacts/adb-helper-sources"
@@ -582,11 +588,35 @@ jobs:
 
           if [[ "$cache_usable" != "true" ]]; then
             rm -rf "$adb_source_cache_root"
-            python3 scripts/prefetch_adb_source_closure.py \
-              --lock packaging/adb/adb-helper.lock.json \
-              --download-root "$adb_source_cache_root" \
-              --workers 2 \
-              --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"
+            transport_status=2
+            if [[ "$KLOGG_ADB_SOURCE_EVENT" == "pull_request" || "$KLOGG_ADB_SOURCE_EVENT" == "push" ]]; then
+              if python3 scripts/ci_adb_source_transport.py \
+                --lock packaging/adb/adb-helper.lock.json \
+                --repo-root "$GITHUB_WORKSPACE" \
+                --download-root "$adb_source_cache_root"; then
+                transport_status=0
+              else
+                transport_status=$?
+              fi
+            elif [[ "$KLOGG_ADB_SOURCE_EVENT" != "workflow_dispatch" ]]; then
+              echo "::error::Unsupported ADB source prefetch event: $KLOGG_ADB_SOURCE_EVENT"
+              exit 1
+            fi
+            if [[ "$transport_status" -eq 2 ]]; then
+              python3 scripts/prefetch_adb_source_closure.py \
+                --lock packaging/adb/adb-helper.lock.json \
+                --download-root "$adb_source_cache_root" \
+                --workers 2 \
+                --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"
+            elif [[ "$transport_status" -eq 0 ]]; then
+              python3 scripts/prefetch_adb_helper_sources.py \
+                --lock packaging/adb/adb-helper.lock.json \
+                --download-root "$adb_source_cache_root" \
+                --offline \
+                --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"
+            else
+              exit "$transport_status"
+            fi
           fi
 
       - name: Save exact locked ADB source closure

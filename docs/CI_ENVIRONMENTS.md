@@ -23,8 +23,33 @@ can rebuild the locked manifest or libusb from their original, pinned Git
 objects, and the unchanged full validator still checks every cached source
 before offline extraction. A third producer attempt then encountered HTTP 503
 while fetching the pinned `aosp-adb` archive; the repeated source-host failure
-motivates a separate, optional already-verified cache seam. These attempts did
-not produce qualification evidence.
+motivates a separate, optional already-verified cache seam. Environment run
+`36447989583` imported source bytes and reached the offline prefetch validator,
+which generated a manifest, but the run failed and issued no qualification
+receipt. Follow-up correction `41c06eb7` keeps the imported cache archive-only
+after offline verification; that change still needs new-head hosted qualification.
+None of these attempts produced replacement environment evidence. The reviewed signed
+analysis-image recipe bytes and existing evidence status are unchanged.
+
+Ordinary ADB source transport is a separate, automatic **bounded bytes-only**
+path for ordinary `pull_request` and canonical `master` push (including a squash
+merge). It imports only current-lock archive bytes from a prior Actions
+artifact retained for 90 days; it does not produce an environment fixture,
+qualified dependency core, signed receipt, or publication authority. The
+read-only selector searches at most 20 name-filtered artifacts from this
+repository and downloads at most two candidate ZIPs. A current-lock exact v2
+cache hit with corrupted or substituted bytes is fatal: it must not be rescued
+by a different artifact, a reconstructed archive, or an online download. A
+missing compatible cache or invalid older v1 artifact can fall back to the
+normal bounded locked-source acquisition path. Master squash reuse may cross
+branches, but conveys only archive bytes, never older receipts or policy.
+
+Every accepted archive must match the current lock's exact file name and **raw**
+SHA-256, within the 536870912-byte aggregate limit, before the original prefetch
+validator checks the closure again with `--offline --max-cache-bytes 536870912`.
+Transport does not carry a prior prefetch manifest: the ordinary job regenerates
+its own current manifest before extraction or build. These steps do not alter
+the signed analysis-image recipe or replace environment qualification.
 
 An ancestor run's retained source cache supplies **archive bytes only**, not a
 qualified fixture, producer identity, publication authority, or permission to

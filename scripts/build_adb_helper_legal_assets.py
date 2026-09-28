@@ -437,6 +437,7 @@ def main() -> int:
             "scripts/prefetch_adb_source_context.py",
             "scripts/prefetch_adb_libusb_fallback.py",
             "scripts/prefetch_adb_source_closure.py",
+            "scripts/ci_adb_source_transport.py",
             "scripts/build_adb_helper.py",
             "scripts/build_adb_helper_legal_assets.py",
             "scripts/source_publication_identity.py",

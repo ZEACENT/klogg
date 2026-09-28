@@ -206,6 +206,45 @@ class SourceCacheTransportTest(unittest.TestCase):
                         override or hashlib.sha256(payload).hexdigest())
                 self.assertFalse(output.exists())
 
+    def test_optional_transport_rejects_missing_generated_manifest_as_corruption(self):
+        payload = self.make_zip(self.files)
+        archive = self.root / "missing-manifest.zip"
+        archive.write_bytes(payload)
+        output = self.root / "import"
+        with self.assertRaises(cache.SourceCacheError) as raised:
+            cache.extract_verified_zip(archive, output, self.lock,
+                                       hashlib.sha256(payload).hexdigest(),
+                                       allow_incompatible=True)
+        self.assertNotIsInstance(raised.exception, cache.IncompatibleSourceCacheError)
+        self.assertFalse(output.exists())
+
+    def test_optional_transport_distinguishes_old_lock_from_malformed_zip(self):
+        archive = self.root / "source.zip"
+        archive.write_bytes(self.zip_bytes)
+        changed = json.loads(self.lock.read_text(encoding="utf-8"))
+        changed["sources"][1]["archive_sha256"] = "0" * 64
+        self.lock.write_text(json.dumps(changed), encoding="utf-8")
+        output = self.root / "import"
+        with self.assertRaises(cache.IncompatibleSourceCacheError):
+            cache.extract_verified_zip(archive, output, self.lock, self.zip_digest,
+                                       allow_incompatible=True)
+        self.assertFalse(output.exists())
+        changed["sources"].append({"id": "c", "archive_file": "c.tar.gz",
+                                   "archive_sha256": hashlib.sha256(b"new").hexdigest()})
+        self.lock.write_text(json.dumps(changed), encoding="utf-8")
+        with self.assertRaises(cache.IncompatibleSourceCacheError):
+            cache.extract_verified_zip(archive, output, self.lock, self.zip_digest,
+                                       allow_incompatible=True)
+        self.assertFalse(output.exists())
+        unsafe = self.make_zip({**self.files, "../outside": b"unsafe"})
+        archive.write_bytes(unsafe)
+        with self.assertRaises(cache.SourceCacheError) as raised:
+            cache.extract_verified_zip(archive, output, self.lock,
+                                       hashlib.sha256(unsafe).hexdigest(),
+                                       allow_incompatible=True)
+        self.assertNotIsInstance(raised.exception, cache.IncompatibleSourceCacheError)
+        self.assertFalse(output.exists())
+
     def test_duplicate_and_oversized_members_fail_before_publication(self):
         archive = self.root / "source.zip"
         with warnings.catch_warnings():

@@ -35,6 +35,10 @@ class SourceCacheError(ValueError):
     """Prior-run source transport cannot satisfy the current lock."""
 
 
+class IncompatibleSourceCacheError(SourceCacheError):
+    """A valid older closure contains different archives than the current lock."""
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SourceCacheError(message)
@@ -200,8 +204,10 @@ def download_artifact_zip(artifact_id: int, archive: pathlib.Path, *,
 
 def extract_verified_zip(archive: pathlib.Path, output_root: pathlib.Path,
                          lock_path: pathlib.Path, digest: str, *,
-                         max_cache_bytes: int = MAX_CACHE_BYTES) -> None:
+                         max_cache_bytes: int = MAX_CACHE_BYTES,
+                         allow_incompatible: bool = False) -> None:
     """Verify transport and original locked archive bytes before publication."""
+    require(type(allow_incompatible) is bool, "invalid source compatibility policy")
     require(type(max_cache_bytes) is int and 0 < max_cache_bytes <= MAX_CACHE_BYTES,
             "invalid source cache budget")
     archive, output_root = pathlib.Path(archive), pathlib.Path(output_root)
@@ -227,8 +233,8 @@ def extract_verified_zip(archive: pathlib.Path, output_root: pathlib.Path,
         with zipfile.ZipFile(archive) as source:
             members = source.infolist()
             names = [member.filename for member in members]
-            require(len(names) == len(expected) and set(names) == set(expected),
-                    "source ZIP has missing, duplicate or unreviewed entries")
+            require(len(names) <= 256 and len(names) == len(set(names)),
+                    "source ZIP has too many or duplicate entries")
             advertised = 0
             for member in members:
                 mode = member.external_attr >> 16
@@ -244,6 +250,12 @@ def extract_verified_zip(archive: pathlib.Path, output_root: pathlib.Path,
                 if member.filename == PREFETCH_MANIFEST_NAME:
                     require(member.file_size <= MAX_MANIFEST_BYTES,
                             "oversized source ZIP prefetch manifest")
+            require(PREFETCH_MANIFEST_NAME in names,
+                    "source ZIP lacks the mandatory generated prefetch manifest")
+            if len(names) != len(expected) or set(names) != set(expected):
+                if allow_incompatible:
+                    raise IncompatibleSourceCacheError("source ZIP archive set differs from the current lock")
+                raise SourceCacheError("source ZIP has missing or unreviewed entries")
             with tempfile.TemporaryDirectory(dir=output_root.parent,
                                              prefix=".source-cache-import-") as directory:
                 staging = pathlib.Path(directory) / "cache"
@@ -262,9 +274,11 @@ def extract_verified_zip(archive: pathlib.Path, output_root: pathlib.Path,
                             actual.update(chunk)
                             output.write(chunk)
                     require(size == member.file_size, "source ZIP member size differs")
-                    if expected[member.filename] is not None:
-                        require(actual.hexdigest() == expected[member.filename],
-                                "source ZIP archive differs from the current lock: " + member.filename)
+                    if expected[member.filename] is not None and actual.hexdigest() != expected[member.filename]:
+                        message = "source ZIP archive differs from the current lock: " + member.filename
+                        if allow_incompatible:
+                            raise IncompatibleSourceCacheError(message)
+                        raise SourceCacheError(message)
                 (staging / PREFETCH_MANIFEST_NAME).unlink()
                 require(not output_root.exists() and not output_root.is_symlink(),
                         "source cache destination appeared during import")

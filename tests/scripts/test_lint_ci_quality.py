@@ -65,6 +65,57 @@ jobs:
 """
 
 
+class AdbSourceTransportPolicyTest(unittest.TestCase):
+    def test_transport_lint_rejects_unsafe_real_workflow_mutations(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        self.assertEqual(MODULE.ci_build_adb_source_transport_issues(workflow), [])
+        mutations = {
+            "missing invocation": ("python3 scripts/ci_adb_source_transport.py",
+                                   "python3 scripts/prefetch_adb_source_closure.py"),
+            "comment spoof": ("if python3 scripts/ci_adb_source_transport.py",
+                              "if false; then # python3 scripts/ci_adb_source_transport.py"),
+            "ignore fatal transport status": ('            else\n              exit "$transport_status"\n            fi\n          fi',
+                                              '            else\n              true\n            fi\n          fi'),
+            "dispatch import": ('"$KLOGG_ADB_SOURCE_EVENT" == "push"',
+                                '"$KLOGG_ADB_SOURCE_EVENT" == "workflow_dispatch"'),
+            "invalid exact hit bypass": ('exit 1\n              fi\n              echo "::warning::The restored v1',
+                                         'true\n              fi\n              echo "::warning::The restored v1'),
+            "shallow ancestry": ("          persist-credentials: false\n          fetch-depth: 0\n\n      - name: Compute exact ADB source cache key",
+                                 "          persist-credentials: false\n          fetch-depth: 1\n\n      - name: Compute exact ADB source cache key"),
+            "write permissions": ("      actions: read\n    env:\n      KLOGG_ADB_SOURCE_CACHE_MAX_BYTES",
+                                  "      actions: write\n    env:\n      KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"),
+            "missing token": ("          GH_TOKEN: ${{ github.token }}", "          GH_TOKEN: ''"),
+            "missing reset": ('            rm -rf "$adb_source_cache_root"\n', ''),
+            "skip post-import verification": (
+                '            elif [[ "$transport_status" -eq 0 ]]; then\n'
+                '              python3 scripts/prefetch_adb_helper_sources.py \\\n',
+                '            elif [[ "$transport_status" -eq 0 ]]; then\n'
+                '              true # python3 scripts/prefetch_adb_helper_sources.py \\\n'),
+        }
+        for label, (before, after) in mutations.items():
+            with self.subTest(label=label):
+                self.assertIn(before, workflow, label)
+                self.assertTrue(MODULE.ci_build_adb_source_transport_issues(
+                    workflow.replace(before, after, 1)), label)
+
+    def test_transport_lint_requires_post_import_validation(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        script = next(fields["run"] for step in MODULE.workflow_job_steps(workflow)["PrefetchAdbHelperSources"]
+                      if (fields := MODULE.workflow_step_fields(step)[0]).get("name")
+                      == "Prefetch and hash immutable ADB sources")
+        self.assertIn('elif [[ "$transport_status" -eq 0 ]]; then\n'
+                      'python3 scripts/prefetch_adb_helper_sources.py',
+                      MODULE.active_script_content(script))
+
+    def test_transport_lint_fails_closed_on_missing_or_malformed_job(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        for source in ("", "jobs:\n  PrefetchAdbHelperSources: {}\n",
+                       workflow.replace("  PrefetchAdbHelperSources:\n",
+                                        "  RenamedAdbHelperSources:\n", 1)):
+            with self.subTest(source=source[:42]):
+                self.assertTrue(MODULE.ci_build_adb_source_transport_issues(source))
+
+
 class NativeMacosIdentityPolicyTest(unittest.TestCase):
     def test_workflow_selection_requires_matching_reviewed_native_locks(self):
         workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
