@@ -8,6 +8,7 @@ import importlib
 import io
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -103,7 +104,7 @@ class EnvironmentFixtureTest(unittest.TestCase):
         directory.mkdir(parents=True)
         (directory / "package-tools.json").write_text(json.dumps({"schema_version": 1, "linuxdeployqt": self.pin}))
         (self.repo / "scripts").mkdir()
-        for name in ("prefetch_adb_helper_sources.py", "build_adb_helper_legal_assets.py", "verify_adb_helper_artifact.py",
+        for name in ("prefetch_adb_helper_sources.py", "prefetch_adb_source_closure.py", "build_adb_helper_legal_assets.py", "verify_adb_helper_artifact.py",
                      "verify_adb_helper_toolchain.py", "build_adb_helper.py", "smoke_adb_helper.py"):
             (self.repo / "scripts" / name).write_text("# Test process seam, not executed.\n")
         self.verifier_failure = False
@@ -166,7 +167,10 @@ class EnvironmentFixtureTest(unittest.TestCase):
             stdout = "built and smoke-verified fixture"
         else:
             name = pathlib.Path(command[1]).name
-            if name == "prefetch_adb_helper_sources.py":
+            if name in ("prefetch_adb_helper_sources.py", "prefetch_adb_source_closure.py"):
+                if name == "prefetch_adb_source_closure.py":
+                    self.assertLessEqual(kwargs["timeout"], 2700)
+                    self.assertEqual(command[command.index("--workers") + 1], "2")
                 directory = pathlib.Path(command[command.index("--download-root") + 1])
                 directory.mkdir(exist_ok=True)
                 if "--extract-root" in command:
@@ -235,7 +239,10 @@ class EnvironmentFixtureTest(unittest.TestCase):
         self.assertTrue((self.output / "source-assets/adb-helper/adb-helper-source-archive.tar.gz").is_file())
         self.assertEqual((self.output / "tools" / self.pin["asset_name"]).read_bytes(), TOOL_BYTES)
         commands = [pathlib.Path(command[1]).name for command in self.commands if len(command) > 1]
-        self.assertEqual(commands.count("prefetch_adb_helper_sources.py"), 2)
+        self.assertEqual(commands.count("prefetch_adb_source_closure.py"), 1)
+        self.assertEqual(commands.count("prefetch_adb_helper_sources.py"), 1)
+        self.assertTrue(any("--offline" in command for command in self.commands
+                            if len(command) > 1 and pathlib.Path(command[1]).name == "prefetch_adb_helper_sources.py"))
         self.assertEqual(commands.count("run"), 1)
         self.assertNotIn("attestation", json.dumps(self.commands))
         self.assertNotIn("inspection-only", json.dumps(self.commands))
@@ -270,6 +277,18 @@ class EnvironmentFixtureTest(unittest.TestCase):
                     self.module.prepare_fixture(self.repo, SOURCE, VERSION, self.output, runner=self.runner,
                         downloader=download, metadata_reader=metadata)
                 self.assertFalse(self.output.exists())
+
+    def test_failed_online_source_acquisition_preserves_url_without_publishing(self):
+        url = "https://android.googlesource.com/platform/external/libusb/+archive/locked.tar.gz"
+        def failed_source(command, **kwargs):
+            if len(command) > 1 and pathlib.Path(command[1]).name == "prefetch_adb_source_closure.py":
+                raise subprocess.CalledProcessError(1, command, stderr="RuntimeError: HTTP 503 " + url)
+            return self.runner(command, **kwargs)
+        with self.assertRaisesRegex(core.ContractError, re.escape(url)):
+            self.module.prepare_fixture(self.repo, SOURCE, VERSION, self.output,
+                runner=failed_source, downloader=self.download, metadata_reader=self.asset_metadata)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(any("--offline" in command for command in self.commands))
 
     def test_consumer_rejects_tampered_archive_without_workspace_writes(self):
         self.prepare()

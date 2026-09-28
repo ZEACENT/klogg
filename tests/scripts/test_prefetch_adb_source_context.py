@@ -28,10 +28,12 @@ class AdbSourceContextTest(unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(context.prefetch, "main", side_effect=error), \
                 contextlib.redirect_stderr(output):
-            with self.assertRaises(urllib.error.HTTPError):
+            with self.assertRaises(RuntimeError) as raised:
                 context.main()
+        self.assertIs(raised.exception.__cause__, error)
+        self.assertIn(url, str(raised.exception))
+        self.assertIn("503", str(raised.exception))
         self.assertIn(url, output.getvalue())
-        self.assertIn("503", output.getvalue())
 
 
 if __name__ == "__main__":

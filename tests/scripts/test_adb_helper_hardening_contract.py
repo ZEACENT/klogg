@@ -440,6 +440,8 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/prefetch_adb_helper_sources.py": "# prefetch\n",
             "scripts/prefetch_adb_manifest_fallback.py": "# manifest fallback\n",
             "scripts/prefetch_adb_source_context.py": "# source context\n",
+            "scripts/prefetch_adb_libusb_fallback.py": "# libusb fallback\n",
+            "scripts/prefetch_adb_source_closure.py": "# source closure\n",
             "scripts/build_adb_helper.py": "# build\n",
             "scripts/build_adb_helper_legal_assets.py": "# legal\n",
             "scripts/source_publication_identity.py": "# identity\n",
@@ -579,6 +581,8 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/prefetch_adb_helper_sources.py",
             "scripts/prefetch_adb_manifest_fallback.py",
             "scripts/prefetch_adb_source_context.py",
+            "scripts/prefetch_adb_libusb_fallback.py",
+            "scripts/prefetch_adb_source_closure.py",
             "scripts/build_adb_helper.py",
             "scripts/build_adb_helper_legal_assets.py",
             "scripts/source_publication_identity.py",
@@ -589,6 +593,23 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/smoke_adb_helper.py",
         }
         self.assertEqual(required_build_material - members, set())
+
+    def test_acquisition_contracts_are_registered_with_ctest(self):
+        cmake = (ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        for name, script in (
+            ("adb_libusb_fallback_contract", "test_prefetch_adb_libusb_fallback.py"),
+            ("adb_source_closure_contract", "test_prefetch_adb_source_closure.py"),
+        ):
+            with self.subTest(name=name):
+                self.assertIn(
+                    f"add_test(\n  NAME {name}\n"
+                    f"  COMMAND ${{Python3_EXECUTABLE}} ${{CMAKE_SOURCE_DIR}}/tests/scripts/{script}\n)",
+                    cmake,
+                )
+                timeout_tests = cmake.split("set_tests_properties(\n", 1)[1].split(
+                    "PROPERTIES TIMEOUT 60", 1
+                )[0]
+                self.assertIn(f"  {name}\n", timeout_tests)
 
     def test_core_legal_assets_are_version_independent(self):
         # Immutable-core reuse requires the binary build contract to survive an

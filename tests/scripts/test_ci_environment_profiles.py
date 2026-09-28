@@ -173,6 +173,43 @@ class EnvironmentProfilesTest(unittest.TestCase):
                 self.assertEqual(wants_adb, config["package"])
                 self.assertEqual("scripts/verify_adb_helper_artifact.py" in profile["verification_files"], config["package"])
 
+    def test_adb_acquisition_helpers_bind_package_fixture_policy(self):
+        acquisition = {
+            "scripts/ci_environment_fixture.py",
+            "scripts/prefetch_adb_helper_sources.py",
+            "scripts/prefetch_adb_manifest_fallback.py",
+            "scripts/prefetch_adb_source_context.py",
+            "scripts/prefetch_adb_libusb_fallback.py",
+            "scripts/prefetch_adb_source_closure.py",
+        }
+        for relative in acquisition:
+            script = self.root / relative
+            if not script.exists():
+                script.parent.mkdir(parents=True, exist_ok=True)
+                script.write_bytes((ROOT / relative).read_bytes())
+        for family, roles in self.profiles["families"].items():
+            for role, profile in roles.items():
+                with self.subTest(family=family, role=role):
+                    files = set(profile["verification_files"])
+                    if profile["configuration"]["package"]:
+                        self.assertEqual(acquisition - files, set())
+                    elif family == ANALYSIS and role == "codeql":
+                        self.assertEqual(acquisition & files, {"scripts/prefetch_adb_helper_sources.py"})
+                    else:
+                        self.assertTrue(acquisition.isdisjoint(files))
+        before = ci.policy_identity(self.policy())
+        recipe = ci.recipe_identity(self.catalog, "jammy-qt5", self.root)
+        for relative in acquisition:
+            with self.subTest(script=relative):
+                script = self.root / relative
+                original = script.read_bytes()
+                try:
+                    script.write_bytes(b"# revised acquisition policy\n")
+                    self.assertNotEqual(before, ci.policy_identity(self.policy()))
+                    self.assertEqual(recipe, ci.recipe_identity(self.catalog, "jammy-qt5", self.root))
+                finally:
+                    script.write_bytes(original)
+
     def test_sanitizer_runtime_environment_matches_current_workflow(self):
         workflow = (ROOT / ".github/workflows/ci-build.yml").read_text(encoding="utf-8")
         for profile, keys in (("asan-lsan", ("ASAN_OPTIONS", "LSAN_OPTIONS")), ("ubsan", ("UBSAN_OPTIONS",))):

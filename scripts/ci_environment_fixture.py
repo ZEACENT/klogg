@@ -299,9 +299,10 @@ def prepare_fixture(repo_root, source, version, output, *, runner=None, download
             _acquire_tool(pin, fixture / "tools" / pin["asset_name"], min(timeout, 600),
                           downloader or download, metadata_reader or _read_public_metadata)
             prefetch = pipeline.regular(root, "scripts/prefetch_adb_helper_sources.py")
+            closure = pipeline.regular(root, "scripts/prefetch_adb_source_closure.py")
             cache = work / "source-cache"
-            pipeline.run([sys.executable, str(prefetch), "--lock", str(lock_path), "--download-root", str(cache),
-                          "--max-cache-bytes", "536870912"], runner, timeout=timeout, cwd=root)
+            pipeline.run([sys.executable, str(closure), "--lock", str(lock_path), "--download-root", str(cache),
+                          "--workers", "2", "--max-cache-bytes", "536870912"], runner, timeout=min(timeout, 2700), cwd=root)
             pipeline.run([sys.executable, str(prefetch), "--lock", str(lock_path), "--download-root", str(cache),
                           "--extract-root", str(work / "sources"), "--offline"], runner, timeout=timeout, cwd=root)
             pipeline.run([sys.executable, str(pipeline.regular(root, "scripts/build_adb_helper_legal_assets.py")),

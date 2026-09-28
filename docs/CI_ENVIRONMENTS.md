@@ -14,7 +14,14 @@ also changes the verification policy for the TSan and analysis families. On
 this checkout **all six** families' old signed receipts fail closed before
 image pull until they are requalified and their pins are reviewed. Do not
 substitute calculated policy hashes for producer evidence. A signed lock from
-an earlier revision is not current-head validation.
+an earlier revision is not current-head validation. Evidence-only run
+`36380763036` built all six candidates, but its Linux package fixture failed
+while fetching an AOSP libusb archive with HTTP 503, so four package roles
+were skipped and no replacement receipt was issued. The PR and fixture now
+share a bounded source acquisition path: only a terminal Gitiles archive 503
+can rebuild the locked manifest or libusb from their original, pinned Git
+objects, and the unchanged full validator still checks every cached source
+before offline extraction. This is a proposed fix, not qualification evidence.
 
 Native dependency cores are a separate, unfinished migration. The seven-target
 `ci/dependencies/catalog.json` defines five ADB and two iOS cores, but there is

@@ -478,7 +478,7 @@ jobs:
         id: adb-cache-key
         shell: bash
         run: >-
-          echo "key=adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py') }}"
+          echo "key=adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py', 'scripts/prefetch_adb_libusb_fallback.py', 'scripts/prefetch_adb_source_closure.py') }}"
           >> "$GITHUB_OUTPUT"
 
       - name: Restore exact locked ADB source closure
@@ -491,6 +491,7 @@ jobs:
           restore-keys: adb-helper-sources-v1-
 
       - name: Prefetch and hash immutable ADB sources
+        timeout-minutes: 45
         shell: bash
         env:
           KLOGG_ADB_SOURCE_CACHE_EXACT_KEY: ${{ steps.adb-cache-key.outputs.key }}
@@ -522,10 +523,7 @@ jobs:
 
           if [[ "$cache_usable" != "true" ]]; then
             rm -rf "$adb_source_cache_root"
-            python3 scripts/prefetch_adb_manifest_fallback.py \
-              --lock packaging/adb/adb-helper.lock.json \
-              --download-root "$adb_source_cache_root"
-            python3 scripts/prefetch_adb_source_context.py \
+            python3 scripts/prefetch_adb_source_closure.py \
               --lock packaging/adb/adb-helper.lock.json \
               --download-root "$adb_source_cache_root" \
               --workers 2 \

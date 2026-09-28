@@ -11,8 +11,9 @@ def main() -> int:
     try:
         return prefetch.main()
     except urllib.error.HTTPError as error:
-        print(f"ADB source fetch failed ({error.url}): HTTP {error.code}", file=sys.stderr)
-        raise
+        message = f"ADB source fetch failed ({error.url}): HTTP {error.code}"
+        print(message, file=sys.stderr)
+        raise RuntimeError(message) from error
 
 
 if __name__ == "__main__":
