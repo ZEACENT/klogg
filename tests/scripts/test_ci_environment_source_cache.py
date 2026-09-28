@@ -25,6 +25,10 @@ class SourceCacheTransportTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
+        dispatch_ref = mock.patch.dict(cache.os.environ,
+                                       {"GITHUB_REF": "refs/heads/worktree-master-ci-fail"})
+        dispatch_ref.start()
+        self.addCleanup(dispatch_ref.stop)
         self.root = pathlib.Path(temporary.name).resolve()
         self.repo = self.root / "repo"
         self.repo.mkdir()

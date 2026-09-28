@@ -363,7 +363,7 @@ class EnvironmentFixtureTest(unittest.TestCase):
                 if case == "symlink":
                     archive.symlink_to(outside)
                 elif case == "hardlink":
-                    archive.hardlink_to(outside)
+                    os.link(outside, archive)
                 else:
                     os.mkfifo(archive)
                 with self.assertRaises((core.ContractError, OSError)):
