@@ -407,6 +407,7 @@ def main(argv=None):
     for field in ("repo-root", "source", "output"):
         fixture.add_argument("--" + field, required=True, type=pathlib.Path)
     fixture.add_argument("--version", required=True)
+    fixture.add_argument("--source-cache-root", type=pathlib.Path)
     fixture_consumer = commands.add_parser("consume-fixture")
     for field in ("repo-root", "source", "fixture-root", "output"):
         fixture_consumer.add_argument("--" + field, required=True, type=pathlib.Path)
@@ -446,7 +447,8 @@ def main(argv=None):
             materialize(args.repo_root, args.family, args.output, timeout=args.timeout)
         elif args.command == "prepare-fixture":
             from ci_environment_fixture import prepare_fixture
-            prepare_fixture(args.repo_root, core.load_json(args.source), args.version, args.output)
+            prepare_fixture(args.repo_root, core.load_json(args.source), args.version, args.output,
+                            source_cache_root=args.source_cache_root)
         elif args.command == "consume-fixture":
             from ci_environment_fixture import consume_fixture
             consume_fixture(args.repo_root, core.load_json(args.source), args.fixture_root,

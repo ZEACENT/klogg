@@ -14,6 +14,26 @@ on:
         description: Explicit earlier source commit for static analysis
         required: true
         type: string
+      prior-source-run-id:
+        description: Explicit prior source-cache run ID
+        required: false
+        default: ""
+        type: string
+      prior-source-artifact-id:
+        description: Exact prior source-cache artifact ID
+        required: false
+        default: ""
+        type: string
+      prior-source-run-attempt:
+        description: Explicit prior source-cache attempt
+        required: false
+        default: ""
+        type: string
+      prior-source-sha:
+        description: Explicit prior source-cache commit SHA
+        required: false
+        default: ""
+        type: string
 permissions:
   contents: read
   actions: read
@@ -37,6 +57,29 @@ jobs:
           ref: ${{ inputs.expected-source-sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Reject partial prior source tuple at reusable boundary
+        shell: bash
+        env:
+          KLOGG_PRIOR_SOURCE_RUN_ID: ${{ inputs.prior-source-run-id }}
+          KLOGG_PRIOR_SOURCE_ARTIFACT_ID: ${{ inputs.prior-source-artifact-id }}
+          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior-source-run-attempt }}
+          KLOGG_PRIOR_SOURCE_SHA: ${{ inputs.prior-source-sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          keys = ('KLOGG_PRIOR_SOURCE_RUN_ID', 'KLOGG_PRIOR_SOURCE_ARTIFACT_ID',
+                  'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_SHA')
+          values = [os.environ[key] for key in keys]
+          if any(values) and not all(values):
+              raise SystemExit('prior source inputs must be all-or-none')
+          if all(values):
+              if any(not re.fullmatch('[1-9][0-9]*', value) for value in values[:3]):
+                  raise SystemExit('prior source IDs must be positive decimal strings')
+              if not re.fullmatch('[0-9a-f]{40}', values[3]) or values[3] in ('0' * 40, os.environ['KLOGG_EXPECTED_SOURCE_SHA']):
+                  raise SystemExit('prior source SHA must be an earlier nonzero full commit SHA')
+          PY
       - name: Validate exact producer source and operation
         shell: bash
         run: |
@@ -106,17 +149,40 @@ jobs:
           ref: ${{ inputs.expected-source-sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Import explicitly pinned earlier source closure for Linux fixture
+        if: ${{ inputs.prior-source-run-id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLOGG_PRIOR_SOURCE_RUN_ID: ${{ inputs.prior-source-run-id }}
+          KLOGG_PRIOR_SOURCE_ARTIFACT_ID: ${{ inputs.prior-source-artifact-id }}
+          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior-source-run-attempt }}
+          KLOGG_PRIOR_SOURCE_SHA: ${{ inputs.prior-source-sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_environment_source_cache.py \
+            --lock packaging/adb/adb-helper.lock.json \
+            --repo-root "$GITHUB_WORKSPACE" --source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
+            --run-id "$KLOGG_PRIOR_SOURCE_RUN_ID" --run-attempt "$KLOGG_PRIOR_SOURCE_RUN_ATTEMPT" \
+            --artifact-id "$KLOGG_PRIOR_SOURCE_ARTIFACT_ID" --prior-sha "$KLOGG_PRIOR_SOURCE_SHA" \
+            --output-root "$RUNNER_TEMP/source-cache-import"
       - name: Prepare same-run Linux ADB, legal assets, and locked AppImage tool
         id: identity
         shell: bash
+        env:
+          KLOGG_PRIOR_SOURCE_RUN_ID: ${{ inputs.prior-source-run-id }}
         run: |
           set -euo pipefail
           python3 scripts/ci_environment_pipeline.py source-context \
             --expected-source-sha "$KLOGG_EXPECTED_SOURCE_SHA" \
             --analysis-base-sha "$KLOGG_ANALYSIS_BASE_SHA" --output "$RUNNER_TEMP/source.json"
+          source_cache_args=()
+          if [[ -n "$KLOGG_PRIOR_SOURCE_RUN_ID" ]]; then
+            source_cache_args+=(--source-cache-root "$RUNNER_TEMP/source-cache-import")
+          fi
           python3 scripts/ci_environment_pipeline.py prepare-fixture \
             --repo-root "$GITHUB_WORKSPACE" --source "$RUNNER_TEMP/source.json" \
-            --version "$KLOGG_VERSION" --output "$RUNNER_TEMP/fixture"
+            --version "$KLOGG_VERSION" --output "$RUNNER_TEMP/fixture" "${source_cache_args[@]}"
           tar -czf "$RUNNER_TEMP/fixture.tar.gz" -C "$RUNNER_TEMP/fixture" .
           printf 'archive-sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/fixture.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

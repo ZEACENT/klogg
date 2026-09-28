@@ -40,7 +40,7 @@
           "packaging/linux/appimage/generate_appimage.sh",
           "packaging/adb/adb-helper.lock.json",
           "scripts/verify_adb_helper_artifact.py", "scripts/smoke_adb_helper.py",
-          "scripts/ci_environment_fixture.py", "scripts/prefetch_adb_helper_sources.py",
+          "scripts/ci_environment_fixture.py", "scripts/ci_environment_source_cache.py", "scripts/prefetch_adb_helper_sources.py",
           "scripts/prefetch_adb_manifest_fallback.py", "scripts/prefetch_adb_source_context.py",
           "scripts/prefetch_adb_libusb_fallback.py", "scripts/prefetch_adb_source_closure.py"
         ],
@@ -62,7 +62,7 @@
         "verification_files": [
           ".github/actions/docker-package/action.yml", "packaging/adb/adb-helper.lock.json",
           "scripts/verify_adb_helper_artifact.py", "scripts/smoke_adb_helper.py",
-          "scripts/ci_environment_fixture.py", "scripts/prefetch_adb_helper_sources.py",
+          "scripts/ci_environment_fixture.py", "scripts/ci_environment_source_cache.py", "scripts/prefetch_adb_helper_sources.py",
           "scripts/prefetch_adb_manifest_fallback.py", "scripts/prefetch_adb_source_context.py",
           "scripts/prefetch_adb_libusb_fallback.py", "scripts/prefetch_adb_source_closure.py"
         ],
@@ -115,7 +115,7 @@
         "verification_files": [
           ".github/actions/docker-package/action.yml", "packaging/adb/adb-helper.lock.json",
           "scripts/verify_adb_helper_artifact.py", "scripts/smoke_adb_helper.py",
-          "scripts/ci_environment_fixture.py", "scripts/prefetch_adb_helper_sources.py",
+          "scripts/ci_environment_fixture.py", "scripts/ci_environment_source_cache.py", "scripts/prefetch_adb_helper_sources.py",
           "scripts/prefetch_adb_manifest_fallback.py", "scripts/prefetch_adb_source_context.py",
           "scripts/prefetch_adb_libusb_fallback.py", "scripts/prefetch_adb_source_closure.py"
         ],
@@ -137,7 +137,7 @@
         "verification_files": [
           ".github/actions/docker-package/action.yml", "packaging/adb/adb-helper.lock.json",
           "scripts/verify_adb_helper_artifact.py", "scripts/smoke_adb_helper.py",
-          "scripts/ci_environment_fixture.py", "scripts/prefetch_adb_helper_sources.py",
+          "scripts/ci_environment_fixture.py", "scripts/ci_environment_source_cache.py", "scripts/prefetch_adb_helper_sources.py",
           "scripts/prefetch_adb_manifest_fallback.py", "scripts/prefetch_adb_source_context.py",
           "scripts/prefetch_adb_libusb_fallback.py", "scripts/prefetch_adb_source_closure.py"
         ],

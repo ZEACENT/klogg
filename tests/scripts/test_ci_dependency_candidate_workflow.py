@@ -336,12 +336,17 @@ class DependencyQualificationWorkflowTest(unittest.TestCase):
         active = "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}"
         inactive = "${{ github.event_name != 'workflow_dispatch' || inputs.dependency-mode == 'off' }}"
         self.assertIsNone(LINT.workflow_job_direct_value(block, "if"))
-        self.assertEqual(steps[0].get("name"), "Inactive native dependency preflight")
-        self.assertEqual(steps[0].get("if"), inactive)
-        self.assertEqual(steps[0].get("run"), ":")
-        self.assertEqual(steps[1].get("if"), active)
-        self.assertEqual(steps[2].get("if"), active)
-        self.assertEqual(steps[2].get("name"), "Validate isolated dependency mode and exact source")
+        inactive_step = next(step for step in steps
+                             if step.get("name") == "Inactive native dependency preflight")
+        checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
+        validation = next(step for step in steps
+                          if step.get("name") == "Validate isolated dependency mode and exact source")
+        self.assertEqual(inactive_step.get("if"), inactive)
+        self.assertEqual(inactive_step.get("run"), ":")
+        self.assertEqual(checkout.get("if"), active)
+        self.assertEqual(validation.get("if"), active)
+        self.assertLess(steps.index(inactive_step), steps.index(checkout))
+        self.assertLess(steps.index(checkout), steps.index(validation))
         for event, mode in (("pull_request", "off"), ("push", "off"),
                             ("workflow_dispatch", "off"),
                             ("workflow_dispatch", "qualify"),
@@ -349,8 +354,8 @@ class DependencyQualificationWorkflowTest(unittest.TestCase):
                             ("workflow_dispatch", "invalid")):
             with self.subTest(event=event, mode=mode):
                 for condition, expected in (
-                        (steps[0]["if"], event != "workflow_dispatch" or mode == "off"),
-                        (steps[1]["if"], event == "workflow_dispatch" and mode != "off")):
+                        (inactive_step["if"], event != "workflow_dispatch" or mode == "off"),
+                        (checkout["if"], event == "workflow_dispatch" and mode != "off")):
                     expression = (condition[4:-3].replace("github.event_name", repr(event))
                                   .replace("inputs.dependency-mode", repr(mode))
                                   .replace("&&", " and ").replace("||", " or "))

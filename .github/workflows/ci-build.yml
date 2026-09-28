@@ -50,6 +50,26 @@ on:
         required: false
         default: ""
         type: string
+      prior-source-run-id:
+        description: Explicit earlier source-cache run ID for environment fixture only
+        required: false
+        default: ""
+        type: string
+      prior-source-artifact-id:
+        description: Exact earlier source-cache artifact ID for environment fixture only
+        required: false
+        default: ""
+        type: string
+      prior-source-run-attempt:
+        description: Explicit earlier source-cache run attempt for environment fixture only
+        required: false
+        default: ""
+        type: string
+      prior-source-sha:
+        description: Explicit earlier source-cache commit SHA for environment fixture only
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -70,6 +90,27 @@ jobs:
       contents: read
     steps:
       # A skipped ancestor makes ordinary descendants skip even when their direct needs pass.
+      - name: Reject prior environment source inputs outside producer dispatch
+        shell: bash
+        env:
+          KLOGG_ENVIRONMENT_MODE: ${{ inputs.environment-mode }}
+          KLOGG_DEPENDENCY_MODE: ${{ inputs.dependency-mode }}
+          KLOGG_PRIOR_SOURCE_RUN_ID: ${{ inputs.prior-source-run-id }}
+          KLOGG_PRIOR_SOURCE_ARTIFACT_ID: ${{ inputs.prior-source-artifact-id }}
+          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior-source-run-attempt }}
+          KLOGG_PRIOR_SOURCE_SHA: ${{ inputs.prior-source-sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          prior = ('KLOGG_PRIOR_SOURCE_RUN_ID', 'KLOGG_PRIOR_SOURCE_ARTIFACT_ID',
+                   'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_SHA')
+          producer = (os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+                      and os.environ['KLOGG_ENVIRONMENT_MODE'] in ('qualify', 'publish')
+                      and os.environ['KLOGG_DEPENDENCY_MODE'] == 'off')
+          if not producer and any(os.environ[name] for name in prior):
+              raise SystemExit('prior source inputs are restricted to environment producer dispatch')
+          PY
       - name: Inactive native dependency preflight
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.dependency-mode == 'off' }}
         run: ':'
@@ -126,6 +167,10 @@ jobs:
           KLOGG_QUALIFICATION_MODE: ${{ inputs.qualification-mode }}
           KLOGG_EXPECTED_SOURCE_SHA: ${{ inputs.expected-source-sha }}
           KLOGG_ANALYSIS_BASE_SHA: ${{ inputs.analysis-base-sha }}
+          KLOGG_PRIOR_SOURCE_RUN_ID: ${{ inputs.prior-source-run-id }}
+          KLOGG_PRIOR_SOURCE_ARTIFACT_ID: ${{ inputs.prior-source-artifact-id }}
+          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior-source-run-attempt }}
+          KLOGG_PRIOR_SOURCE_SHA: ${{ inputs.prior-source-sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -145,6 +190,16 @@ jobs:
               raise SystemExit('dispatched source does not match expected-source-sha')
           if os.environ['KLOGG_ANALYSIS_BASE_SHA'] == os.environ['GITHUB_SHA']:
               raise SystemExit('analysis base must precede the qualification source')
+          prior = ('KLOGG_PRIOR_SOURCE_RUN_ID', 'KLOGG_PRIOR_SOURCE_ARTIFACT_ID',
+                   'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_SHA')
+          values = [os.environ[key] for key in prior]
+          if any(values) and not all(values):
+              raise SystemExit('prior source inputs must be all-or-none')
+          if all(values):
+              if any(not re.fullmatch('[1-9][0-9]*', value) for value in values[:3]):
+                  raise SystemExit('prior source run, artifact and attempt IDs must be positive decimal strings')
+              if not re.fullmatch('[0-9a-f]{40}', values[3]) or values[3] in ('0' * 40, os.environ['GITHUB_SHA']):
+                  raise SystemExit('prior source SHA must be an earlier nonzero full commit SHA')
           PY
           test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"
           git cat-file -e "$KLOGG_ANALYSIS_BASE_SHA^{commit}"
@@ -168,6 +223,10 @@ jobs:
       mode: ${{ inputs.environment-mode }}
       expected-source-sha: ${{ inputs.expected-source-sha }}
       analysis-base-sha: ${{ inputs.analysis-base-sha }}
+      prior-source-run-id: ${{ inputs.prior-source-run-id }}
+      prior-source-artifact-id: ${{ inputs.prior-source-artifact-id }}
+      prior-source-run-attempt: ${{ inputs.prior-source-run-attempt }}
+      prior-source-sha: ${{ inputs.prior-source-sha }}
 
   DependencyGate:
     name: "Native dependency qualification gate"

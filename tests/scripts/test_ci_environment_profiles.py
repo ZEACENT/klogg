@@ -176,6 +176,7 @@ class EnvironmentProfilesTest(unittest.TestCase):
     def test_adb_acquisition_helpers_bind_package_fixture_policy(self):
         acquisition = {
             "scripts/ci_environment_fixture.py",
+            "scripts/ci_environment_source_cache.py",
             "scripts/prefetch_adb_helper_sources.py",
             "scripts/prefetch_adb_manifest_fallback.py",
             "scripts/prefetch_adb_source_context.py",

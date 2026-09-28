@@ -30,6 +30,26 @@ class PipelineEntryTest(unittest.TestCase):
             self.assertIn(command, result.stdout)
 
 
+class PipelineFixtureCliTest(unittest.TestCase):
+    def test_prepare_fixture_cli_forwards_optional_cache_root(self):
+        import ci_environment_pipeline as pipeline
+        import ci_environment_fixture as fixture
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = pathlib.Path(temporary.name)
+        source = root / "source.json"
+        source.write_text(json.dumps(dict(fixtures.source(), workflow=pipeline.WORKFLOW)))
+        cache = root / "ancestor-cache"
+        output = root / "fixture"
+        with mock.patch.object(fixture, "prepare_fixture") as prepare:
+            result = pipeline.main(["prepare-fixture", "--repo-root", str(root), "--source", str(source),
+                                    "--output", str(output), "--version", "26.09.24.1234",
+                                    "--source-cache-root", str(cache)])
+        self.assertEqual(result, 0)
+        prepare.assert_called_once_with(root, json.loads(source.read_text()), "26.09.24.1234", output,
+                                        source_cache_root=cache)
+
+
 class PipelineCandidateTest(unittest.TestCase):
     def setUp(self):
         self.pipeline = importlib.import_module("ci_environment_pipeline")

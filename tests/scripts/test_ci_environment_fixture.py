@@ -278,6 +278,133 @@ class EnvironmentFixtureTest(unittest.TestCase):
                         downloader=download, metadata_reader=metadata)
                 self.assertFalse(self.output.exists())
 
+    def test_explicit_verified_cache_uses_original_prefetch_twice_offline(self):
+        source_cache = self.root / "ancestor-cache"
+        source_cache.mkdir()
+        result = self.module.prepare_fixture(self.repo, SOURCE, VERSION, self.output,
+            runner=self.runner, downloader=self.download, metadata_reader=self.asset_metadata,
+            source_cache_root=source_cache)
+        self.assertEqual(result["kind"], "ci-linux-package-fixture")
+        prefetch = [command for command in self.commands if len(command) > 1
+                    and pathlib.Path(command[1]).name == "prefetch_adb_helper_sources.py"]
+        self.assertEqual(len(prefetch), 2)
+        self.assertTrue(all("--offline" in command for command in prefetch))
+        self.assertNotIn("--extract-root", prefetch[0])
+        self.assertIn("--max-cache-bytes", prefetch[0])
+        self.assertIn("--extract-root", prefetch[1])
+        self.assertEqual(prefetch[0][prefetch[0].index("--download-root") + 1],
+                         prefetch[1][prefetch[1].index("--download-root") + 1])
+        self.assertNotEqual(pathlib.Path(prefetch[0][prefetch[0].index("--download-root") + 1]), source_cache)
+        self.assertFalse(any(len(command) > 1 and pathlib.Path(command[1]).name == "prefetch_adb_source_closure.py"
+                             for command in self.commands))
+
+    def test_explicit_cache_offline_prefetch_failure_never_invokes_online_tool_acquisition(self):
+        source = self.root / "ancestor-cache"
+        source.mkdir()
+        def runner(command, **kwargs):
+            if len(command) > 1 and pathlib.Path(command[1]).name == "prefetch_adb_helper_sources.py":
+                raise subprocess.CalledProcessError(1, command, stderr="invalid locked source archive")
+            return self.runner(command, **kwargs)
+        with mock.patch.object(self, "download", wraps=self.download) as download, \
+                mock.patch.object(self, "asset_metadata", wraps=self.asset_metadata) as metadata:
+            with self.assertRaises(core.ContractError):
+                self.module.prepare_fixture(self.repo, SOURCE, VERSION, self.output,
+                    runner=runner, downloader=download, metadata_reader=metadata,
+                    source_cache_root=source)
+            download.assert_not_called()
+            metadata.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_explicit_cache_rejects_symlinked_root_and_parent_before_online_helpers(self):
+        source = self.root / "ancestor-cache"
+        source.mkdir()
+        alias = self.root / "alias"
+        alias.symlink_to(source, target_is_directory=True)
+        parent = self.root / "parent-alias"
+        parent.symlink_to(self.root, target_is_directory=True)
+        for candidate in (alias, parent / source.name):
+            with self.subTest(candidate=candidate):
+                self.commands.clear()
+                with self.assertRaises(core.ContractError):
+                    self.module.prepare_fixture(self.repo, SOURCE, VERSION, self.output,
+                        runner=self.runner, downloader=self.download, metadata_reader=self.asset_metadata,
+                        source_cache_root=candidate)
+                self.assertFalse(self.output.exists())
+                self.assertFalse(any(len(command) > 1 and pathlib.Path(command[1]).name.startswith("prefetch_adb")
+                                     for command in self.commands))
+
+    def test_explicit_cache_copies_only_lock_listed_verified_raw_archive_bytes(self):
+        source = self.root / "ancestor-cache"
+        source.mkdir()
+        archive = source / "locked-source.tar.gz"
+        archive.write_bytes(b"verified raw archive bytes")
+        lock = {"sources": [{"id": "locked-source", "archive_file": archive.name,
+                             "archive_sha256": pipeline.sha256(archive),
+                             "archive_identity": "canonical-tar-gz-v1"}]}
+        private = self.root / "private-cache"
+        self.module._stage_source_cache(source, private, lock)
+        self.assertEqual((private / archive.name).read_bytes(), archive.read_bytes())
+        self.assertEqual({path.name for path in private.iterdir()}, {archive.name})
+        archive.write_bytes(b"tampered bytes")
+        with self.assertRaisesRegex(core.ContractError, "raw SHA-256"):
+            self.module._stage_source_cache(source, self.root / "rejected-cache", lock)
+
+    def test_explicit_cache_rejects_lock_named_symlinks_hardlinks_and_special_files(self):
+        import os
+        source = self.root / "ancestor-cache"
+        source.mkdir()
+        outside = self.root / "outside"
+        outside.write_bytes(b"verified bytes")
+        lock = {"sources": [{"id": "locked-source", "archive_file": "locked-source.tar.gz",
+                             "archive_sha256": pipeline.sha256(outside)}]}
+        archive = source / "locked-source.tar.gz"
+        for case in ("symlink", "hardlink", "fifo"):
+            with self.subTest(case=case):
+                if case == "symlink":
+                    archive.symlink_to(outside)
+                elif case == "hardlink":
+                    archive.hardlink_to(outside)
+                else:
+                    os.mkfifo(archive)
+                with self.assertRaises((core.ContractError, OSError)):
+                    self.module._stage_source_cache(source, self.root / ("private-" + case), lock)
+                archive.unlink()
+
+    def test_explicit_cache_rejects_extra_missing_wrong_hash_and_oversize_without_online_helpers(self):
+        source_cache = self.root / "ancestor-cache"
+        source_cache.mkdir()
+        cases = ("extra", "directory", "missing", "wrong-hash", "oversize")
+        for case in cases:
+            with self.subTest(case=case):
+                shutil.rmtree(source_cache)
+                source_cache.mkdir()
+                lock = core.load_json(self.lock)
+                if case in ("missing", "wrong-hash", "oversize"):
+                    lock["sources"] = [{"id": "locked-source", "archive_file": "locked-source.tar.gz",
+                                        "archive_sha256": hashlib.sha256(b"expected").hexdigest(),
+                                        "download_url": "https://example.invalid/source.tar.gz"}]
+                    self.lock.write_text(json.dumps(lock))
+                    if case != "missing":
+                        (source_cache / "locked-source.tar.gz").write_bytes(b"different")
+                elif case == "extra":
+                    (source_cache / "unexpected.tar.gz").write_bytes(b"extra")
+                elif case == "directory":
+                    (source_cache / "nested").mkdir()
+                self.commands.clear()
+                limit = 1 if case == "oversize" else 536870912
+                with mock.patch.object(self.module, "MAX_SOURCE_CACHE_BYTES", limit), \
+                        mock.patch.object(self, "download", wraps=self.download) as download, \
+                        mock.patch.object(self, "asset_metadata", wraps=self.asset_metadata) as metadata:
+                    with self.assertRaises(core.ContractError):
+                        self.module.prepare_fixture(self.repo, SOURCE, VERSION, self.output,
+                            runner=self.runner, downloader=download, metadata_reader=metadata,
+                            source_cache_root=source_cache)
+                    download.assert_not_called()
+                    metadata.assert_not_called()
+                self.assertFalse(self.output.exists())
+                self.assertFalse(any(len(command) > 1 and pathlib.Path(command[1]).name.startswith("prefetch_adb")
+                                     for command in self.commands))
+
     def test_failed_online_source_acquisition_preserves_url_without_publishing(self):
         url = "https://android.googlesource.com/platform/external/libusb/+archive/locked.tar.gz"
         def failed_source(command, **kwargs):

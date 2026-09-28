@@ -1632,6 +1632,41 @@ jobs:
             MODULE.ci_build_workflow_issues(flow_mutated),
         )
 
+    def test_environment_prior_source_input_contract_fails_closed_on_real_tree_mutations(self):
+        parent = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        child = (ROOT / ".github/workflows/ci-environments.yml").read_text()
+        parent_changes = (
+            ("      prior-source-run-id:\n", "      # prior-source-run-id:\n"),
+            ("      prior-source-artifact-id: ${{ inputs.prior-source-artifact-id }}",
+             "      prior-source-artifact-id: ${{ github.run_id }}"),
+            ("        default: \"\"\n        type: string\n      prior-source-artifact-id:",
+             "        default: 123\n        type: string\n      prior-source-artifact-id:"),
+            ("if not producer and any(os.environ[name] for name in prior):",
+             "print('if not producer and any(os.environ[name] for name in prior):')"),
+            ("if any(values) and not all(values):", "# if any(values) and not all(values):"),
+            ("if any(values) and not all(values):", "print('if any(values) and not all(values):')"),
+            ("          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior-source-run-attempt }}",
+             "          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ github.run_attempt }}"),
+        )
+        for old, new in parent_changes:
+            with self.subTest(parent=old):
+                mutated = parent.replace(old, new, 1)
+                self.assertNotEqual(mutated, parent)
+                issues = MODULE.ci_build_environment_mode_issues(mutated)
+                self.assertTrue(any("prior source" in issue.lower() or "source pins" in issue.lower() or
+                                    "dispatch requires exact" in issue.lower() or "environment caller" in issue.lower()
+                                    for issue in issues), issues)
+        child_changes = (
+            ("      prior-source-sha:\n", "      # prior-source-sha:\n"),
+            ("      prior-source-run-attempt:\n        description: Explicit prior source-cache attempt\n        required: false",
+             "      prior-source-run-attempt:\n        description: Explicit prior source-cache attempt\n        required: true"),
+        )
+        for old, new in child_changes:
+            with self.subTest(child=old):
+                mutated = child.replace(old, new, 1)
+                self.assertNotEqual(mutated, child)
+                self.assertTrue(MODULE.ci_environment_workflow_issues(mutated))
+
     def test_dependency_dispatch_isolated_from_ordinary_ci_on_all_events(self):
         workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
         blocks = MODULE.workflow_job_blocks(workflow)

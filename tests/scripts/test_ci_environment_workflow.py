@@ -26,6 +26,8 @@ PREFIX = ("${{ github.event_name == 'workflow_dispatch' && "
 NATIVE_PREFIX = ("${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' "
                  "&& '[producer-mode skipped] ' || '' }}")
 ORDINARY = "(github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off'))"
+PRIOR_INPUTS = ("prior-source-run-id", "prior-source-artifact-id", "prior-source-run-attempt", "prior-source-sha")
+PRIOR_ENV = tuple("KLOGG_" + name.upper().replace("-", "_") for name in PRIOR_INPUTS)
 
 
 def mutate_job(text, job, old, new):
@@ -110,6 +112,124 @@ class EnvironmentBootstrapTest(unittest.TestCase):
         blocks = QUALITY.workflow_job_blocks(text)
         self.assertEqual(QUALITY.workflow_job_direct_value(blocks.get("EnvironmentProducer", []), "uses"),
                          "./.github/workflows/ci-environments.yml")
+
+    def test_prior_source_tuple_is_optional_and_only_forwarded_to_environment_producer(self):
+        parent = CI_BUILD.read_text()
+        child = PRODUCER.read_text()
+        dispatch = QUALITY.workflow_mapping_block(parent.splitlines(), "inputs", 4)
+        call = QUALITY.workflow_mapping_block(QUALITY.workflow_job_blocks(parent)["EnvironmentProducer"], "with", 4)
+        child_inputs = QUALITY.workflow_mapping_block(child.splitlines(), "inputs", 4)
+        self.assertIsNotNone(dispatch)
+        self.assertIsNotNone(call)
+        self.assertIsNotNone(child_inputs)
+        for name in PRIOR_INPUTS:
+            with self.subTest(name=name):
+                self.assertIn(name, dispatch)
+                values = QUALITY.workflow_mapping_block(dispatch[name][1], name, 6)
+                self.assertEqual({key: value for key, (value, _) in values.items() if key in {"required", "default", "type"}},
+                                 {"required": "false", "default": "", "type": "string"})
+                self.assertEqual(call[name][0], "${{ inputs." + name + " }}")
+                self.assertIn(name, child_inputs)
+                values = QUALITY.workflow_mapping_block(child_inputs[name][1], name, 6)
+                self.assertEqual({key: value for key, (value, _) in values.items() if key in {"required", "default", "type"}},
+                                 {"required": "false", "default": "", "type": "string"})
+
+    def test_prior_tuple_rejected_by_ordinary_events_and_dependency_dispatch(self):
+        text = CI_BUILD.read_text()
+        payload = python_payload(text, "DependencyModePreflight", "Reject prior environment source inputs outside producer dispatch")
+        base = {name: "" for name in PRIOR_ENV}
+        prior = {**base, PRIOR_ENV[0]: "123"}
+        for event, environment, dependency, values, accepted in (
+            ("pull_request", "off", "off", base, True),
+            ("push", "off", "off", base, True),
+            ("workflow_dispatch", "off", "off", base, True),
+            ("workflow_dispatch", "off", "qualify", base, True),
+            ("workflow_dispatch", "qualify", "off", base, True),
+            ("pull_request", "off", "off", prior, False),
+            ("push", "off", "off", prior, False),
+            ("workflow_dispatch", "off", "off", prior, False),
+            ("workflow_dispatch", "off", "qualify", prior, False),
+            ("workflow_dispatch", "off", "publish", prior, False),
+            ("workflow_dispatch", "qualify", "off", prior, True),
+        ):
+            with self.subTest(event=event, environment=environment, dependency=dependency, accepted=accepted):
+                env = {"GITHUB_EVENT_NAME": event, "KLOGG_ENVIRONMENT_MODE": environment,
+                       "KLOGG_DEPENDENCY_MODE": dependency, **values}
+                with mock.patch.dict(os.environ, env):
+                    if accepted:
+                        exec(compile(payload, "<prior isolation>", "exec"), {})
+                    else:
+                        with self.assertRaises(SystemExit):
+                            exec(compile(payload, "<prior isolation>", "exec"), {})
+
+    def test_environment_preflight_rejects_partial_or_invalid_prior_tuple(self):
+        payload = python_payload(CI_BUILD.read_text(), "EnvironmentModePreflight", "Validate isolated producer mode and exact source")
+        valid = {"KLOGG_ENVIRONMENT_MODE": "qualify", "KLOGG_QUALIFICATION_MODE": "validation",
+                 "KLOGG_EXPECTED_SOURCE_SHA": "1" * 40, "KLOGG_ANALYSIS_BASE_SHA": "2" * 40,
+                 "GITHUB_SHA": "1" * 40, "GITHUB_REPOSITORY": "ZEACENT/klogg", "GITHUB_REF": "refs/heads/feature",
+                 **dict.fromkeys(PRIOR_ENV, "")}
+        complete = dict(zip(PRIOR_ENV, ("123", "456", "2", "3" * 40)))
+        for values in ({}, complete):
+            with mock.patch.dict(os.environ, {**valid, **values}):
+                exec(compile(payload, "<prior preflight>", "exec"), {})
+        invalid = ({PRIOR_ENV[0]: "123"}, {**complete, PRIOR_ENV[1]: ""},
+                   {**complete, PRIOR_ENV[0]: "0"}, {**complete, PRIOR_ENV[2]: "01"},
+                   {**complete, PRIOR_ENV[3]: "0" * 40}, {**complete, PRIOR_ENV[3]: "1" * 40})
+        for values in invalid:
+            with self.subTest(values=values), mock.patch.dict(os.environ, {**valid, **values}):
+                with self.assertRaises(SystemExit):
+                    exec(compile(payload, "<prior preflight>", "exec"), {})
+
+    def test_direct_child_workflow_call_rejects_partial_prior_tuple_before_any_producer_work(self):
+        steps = [QUALITY.workflow_step_fields(step) for step in QUALITY.workflow_job_steps(PRODUCER.read_text())["Source"]]
+        validation = [(index, fields, children) for index, (fields, children) in enumerate(steps)
+                      if fields.get("name") == "Reject partial prior source tuple at reusable boundary"]
+        self.assertEqual(len(validation), 1)
+        index, fields, children = validation[0]
+        self.assertEqual(fields.get("shell"), "bash")
+        self.assertIsNone(fields.get("if"))
+        self.assertEqual(children.get("env"), {name: "${{ inputs." + source + " }}"
+                                               for name, source in zip(PRIOR_ENV, PRIOR_INPUTS)})
+        self.assertLess(index, next(i for i, (item, _) in enumerate(steps)
+                                    if item.get("name") == "Validate exact producer source and operation"))
+        payload = python_payload(PRODUCER.read_text(), "Source", "Reject partial prior source tuple at reusable boundary")
+        complete = dict(zip(PRIOR_ENV, ("123", "456", "2", "3" * 40)))
+        for values in (dict.fromkeys(PRIOR_ENV, ""), complete):
+            with self.subTest(values=values), mock.patch.dict(os.environ, {"KLOGG_EXPECTED_SOURCE_SHA": "1" * 40, **values}):
+                exec(compile(payload, "<child prior gate>", "exec"), {})
+        for values in ({PRIOR_ENV[1]: "456"}, {PRIOR_ENV[3]: "3" * 40},
+                       {**complete, PRIOR_ENV[0]: ""}, {**complete, PRIOR_ENV[2]: ""},
+                       {**complete, PRIOR_ENV[0]: "0"}, {**complete, PRIOR_ENV[2]: "01"},
+                       {**complete, PRIOR_ENV[3]: "1" * 40}):
+            with self.subTest(values=values), mock.patch.dict(os.environ, {"KLOGG_EXPECTED_SOURCE_SHA": "1" * 40,
+                                                                  **dict.fromkeys(PRIOR_ENV, ""), **values}):
+                with self.assertRaises(SystemExit):
+                    exec(compile(payload, "<child prior gate>", "exec"), {})
+
+    def test_linux_fixture_only_imports_prior_bytes_before_fixture_preparation(self):
+        steps = QUALITY.workflow_job_steps(PRODUCER.read_text())
+        fixture = [QUALITY.workflow_step_fields(step) for step in steps["LinuxFixture"]]
+        commands = [(index, tokens) for index, step in enumerate(steps["LinuxFixture"])
+                    for tokens in QUALITY.environment_shell_commands(step)]
+        imports = [(index, tokens) for index, tokens in commands
+                   if tokens[:2] == ["python3", "scripts/ci_environment_source_cache.py"]]
+        self.assertEqual(len(imports), 1)
+        index, command = imports[0]
+        self.assertIn('"$KLOGG_PRIOR_SOURCE_RUN_ID"', fixture[index][0].get("run", ""))
+        self.assertEqual(command[2:], ["--lock", "packaging/adb/adb-helper.lock.json",
+                                       "--repo-root", "$GITHUB_WORKSPACE", "--source-sha", "$KLOGG_EXPECTED_SOURCE_SHA",
+                                       "--run-id", "$KLOGG_PRIOR_SOURCE_RUN_ID", "--run-attempt", "$KLOGG_PRIOR_SOURCE_RUN_ATTEMPT",
+                                       "--artifact-id", "$KLOGG_PRIOR_SOURCE_ARTIFACT_ID", "--prior-sha", "$KLOGG_PRIOR_SOURCE_SHA",
+                                       "--output-root", "$RUNNER_TEMP/source-cache-import"])
+        prepare = next(position for position, tokens in commands if tokens[:3] ==
+                       ["python3", "scripts/ci_environment_pipeline.py", "prepare-fixture"])
+        self.assertLess(index, prepare)
+        self.assertIn('source_cache_args+=(--source-cache-root "$RUNNER_TEMP/source-cache-import")',
+                      fixture[prepare][0].get("run", ""))
+        self.assertIn('"${source_cache_args[@]}"', fixture[prepare][0].get("run", ""))
+        for job, job_steps in steps.items():
+            if job != "LinuxFixture":
+                self.assertNotIn("ci_environment_source_cache.py", "\n".join("\n".join(step) for step in job_steps))
 
     def test_skipped_producer_mode_jobs_cannot_emit_ordinary_required_check_names(self):
         blocks = QUALITY.workflow_job_blocks(CI_BUILD.read_text())
@@ -230,7 +350,8 @@ class EnvironmentBootstrapTest(unittest.TestCase):
         payload = python_payload(CI_BUILD.read_text(), "EnvironmentModePreflight", "Validate isolated producer mode and exact source")
         valid = {"KLOGG_ENVIRONMENT_MODE": "qualify", "KLOGG_QUALIFICATION_MODE": "validation",
                  "KLOGG_EXPECTED_SOURCE_SHA": "1" * 40, "KLOGG_ANALYSIS_BASE_SHA": "2" * 40,
-                 "GITHUB_SHA": "1" * 40, "GITHUB_REPOSITORY": "ZEACENT/klogg", "GITHUB_REF": "refs/heads/feature"}
+                 "GITHUB_SHA": "1" * 40, "GITHUB_REPOSITORY": "ZEACENT/klogg", "GITHUB_REF": "refs/heads/feature",
+                 **dict.fromkeys(PRIOR_ENV, "")}
         with mock.patch.dict(os.environ, valid):
             exec(compile(payload, "<dispatch preflight>", "exec"), {})
         for key, value in (("KLOGG_QUALIFICATION_MODE", "release"), ("KLOGG_EXPECTED_SOURCE_SHA", ""),
@@ -304,6 +425,52 @@ jobs:
 """
         self.assertIn("Environment artifact downloads require exact same-run IDs: QualifyAsan",
                       QUALITY.ci_environment_workflow_issues(unsafe))
+
+    def test_direct_child_prior_gate_mutations_fail_closed(self):
+        text = PRODUCER.read_text()
+        cases = (
+            ("if any(values) and not all(values):", "# if any(values) and not all(values):"),
+            ("if any(values) and not all(values):", "print('if any(values) and not all(values):')"),
+            ("if any(values) and not all(values):", "if all(values):"),
+            ("      - name: Reject partial prior source tuple at reusable boundary\n",
+             "      - name: Reject partial prior source tuple at reusable boundary\n        if: ${{ false }}\n"),
+            ("          KLOGG_PRIOR_SOURCE_SHA: ${{ inputs.prior-source-sha }}",
+             "          KLOGG_PRIOR_SOURCE_SHA: ${{ github.sha }}"),
+            ("'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_SHA')",
+             "'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT')"),
+        )
+        for old, new in cases:
+            with self.subTest(old=old, new=new):
+                mutated = mutate_job(text, "Source", old, new)
+                self.assertIn("Environment reusable Source must reject incomplete or malformed prior source tuples",
+                              QUALITY.ci_environment_workflow_issues(mutated))
+
+    def test_source_preflight_cannot_import_prior_bytes(self):
+        text = PRODUCER.read_text()
+        mutated = mutate_job(text, "Source", "          PY\n      - name: Validate exact producer source and operation",
+                             "          PY\n          python3 scripts/ci_environment_source_cache.py --output-root /tmp/source\n"
+                             "      - name: Validate exact producer source and operation")
+        self.assertIn("Environment prior source bytes must stay inside LinuxFixture: Source",
+                      QUALITY.ci_environment_workflow_issues(mutated))
+
+    def test_prior_import_must_be_fixture_only_bounded_and_not_spoofed(self):
+        text = PRODUCER.read_text()
+        fixtures = (
+            ("LinuxFixture", '"$KLOGG_PRIOR_SOURCE_RUN_ID"', '"$KLOGG_IGNORED"'),
+            ("LinuxFixture", '--artifact-id "$KLOGG_PRIOR_SOURCE_ARTIFACT_ID"', '--artifact-id 42'),
+            ("LinuxFixture", '--output-root "$RUNNER_TEMP/source-cache-import"', '--output-root "$GITHUB_WORKSPACE"'),
+            ("LinuxFixture", 'python3 scripts/ci_environment_source_cache.py', '# python3 scripts/ci_environment_source_cache.py'),
+            ("LinuxFixture", '--source-cache-root "$RUNNER_TEMP/source-cache-import"', '--source-cache-root "$GITHUB_WORKSPACE"'),
+            ("CpmSources", '      - uses: ./.github/actions/prefetch-cpm-cache',
+             '      - run: python3 scripts/ci_environment_source_cache.py --output-root /tmp/cache\n      - uses: ./.github/actions/prefetch-cpm-cache'),
+        )
+        for job, old, new in fixtures:
+            with self.subTest(job=job, old=old):
+                mutated = mutate_job(text, job, old, new)
+                self.assertTrue(any("prior source" in issue.lower() or "fixture" in issue.lower()
+                                    for issue in QUALITY.ci_environment_workflow_issues(mutated)))
+        malformed = text.replace("      prior-source-sha:\n", "      prior-source-sha:\n        required: true\n", 1)
+        self.assertTrue(QUALITY.ci_environment_workflow_issues(malformed))
 
     def test_actual_workflow_has_exact_six_candidates_ten_profiles_and_is_lint_clean(self):
         text = PRODUCER.read_text()

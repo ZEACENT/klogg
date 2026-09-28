@@ -21,7 +21,24 @@ were skipped and no replacement receipt was issued. The PR and fixture now
 share a bounded source acquisition path: only a terminal Gitiles archive 503
 can rebuild the locked manifest or libusb from their original, pinned Git
 objects, and the unchanged full validator still checks every cached source
-before offline extraction. This is a proposed fix, not qualification evidence.
+before offline extraction. A third producer attempt then encountered HTTP 503
+while fetching the pinned `aosp-adb` archive; the repeated source-host failure
+motivates a separate, optional already-verified cache seam. These attempts did
+not produce qualification evidence.
+
+An ancestor run's retained source cache supplies **archive bytes only**, not a
+qualified fixture, producer identity, publication authority, or permission to
+reuse an old receipt. For `prepare-fixture`, pass
+`--source-cache-root /path/to/already-verified-archives` only after verifying
+that ancestor's artifact provenance and archive bytes independently. The input
+must be a real directory containing exactly the lock-listed regular archives;
+symlinks, hardlinks, special files, missing or extra paths, incorrect raw
+SHA-256, and aggregate bytes above 536870912 fail before any online source
+helper runs. The fixture copies these bytes into its private `work/source-cache`,
+then runs the original prefetch validator offline once without extraction and
+again with `--offline --extract-root`. Omit the option to preserve the existing
+online closure acquisition. The current checkout, same-run fixture validators,
+package tests, and protected qualification/publisher gates remain mandatory.
 
 Native dependency cores are a separate, unfinished migration. The seven-target
 `ci/dependencies/catalog.json` defines five ADB and two iOS cores, but there is

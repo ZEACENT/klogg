@@ -1117,6 +1117,11 @@ def environment_shell_commands(step: list[str]) -> list[list[str]]:
     return result
 
 
+CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS = (
+    "prior-source-run-id", "prior-source-artifact-id", "prior-source-run-attempt", "prior-source-sha",
+)
+
+
 def ci_environment_workflow_issues(text: str) -> list[str]:
     """Require the explicit producer DAG and its closed privilege boundaries."""
     issues: list[str] = []
@@ -1130,12 +1135,14 @@ def ci_environment_workflow_issues(text: str) -> list[str]:
     if triggers is None or set(triggers) != {"workflow_call"}:
         issues.append("Environment producer must be reusable-only with no timer or direct publication event")
     call_inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
-    if call_inputs is None or set(call_inputs) != {"mode", "expected-source-sha", "analysis-base-sha"}:
-        issues.append("Environment producer requires exact operation and source/base inputs")
+    if call_inputs is None or set(call_inputs) != {"mode", "expected-source-sha", "analysis-base-sha", *CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}:
+        issues.append("Environment producer requires exact operation, source/base and prior source inputs")
     elif any((fields := workflow_mapping_block(block, key, 6)) is None
-             or fields.get("type", (None,))[0] != "string" or fields.get("required", (None,))[0] != "true"
+             or fields.get("type", (None,))[0] != "string"
+             or fields.get("required", (None,))[0] != ("false" if key in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS else "true")
+             or (key in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS and fields.get("default", (None,))[0] != "")
              for key, (_, block) in call_inputs.items()):
-        issues.append("Environment producer inputs must be required strings")
+        issues.append("Environment producer inputs must bind required source and optional empty prior source strings")
     if set(blocks) != expected_jobs or workflow_mapping_block(text.splitlines(), "jobs", 0) is None:
         issues.append("Environment producer requires exactly six explicit builders and ten qualification lanes plus reviewed gates")
     root_permissions = workflow_mapping_block(text.splitlines(), "permissions", 0)
@@ -1214,6 +1221,14 @@ def ci_environment_workflow_issues(text: str) -> list[str]:
         if job != "CpmSources" and job != "UploadCodeqlSarif" and command_step(job, helper + ["source-context"], source_flags) is None:
             issues.append("Environment job must bind exact source/ref/run/attempt through source-context: " + job)
         env = mapping(job, "env")
+        if job != "LinuxFixture":
+            job_script = active_script_content("\n".join(block))
+            prior_steps = [step for step in steps.get(job, [])
+                           if job != "Source" or workflow_step_fields(step)[0].get("name") != "Reject partial prior source tuple at reusable boundary"]
+            unapproved_inputs = active_script_content("\n".join("\n".join(step) for step in prior_steps))
+            if (re.search(r"ci_environment_source_cache\.py|source-cache-import|--source-cache-root", job_script)
+                    or re.search(r"inputs\.prior-source-|KLOGG_PRIOR_SOURCE_", unapproved_inputs)):
+                issues.append("Environment prior source bytes must stay inside LinuxFixture: " + job)
         for step in steps.get(job, []):
             fields, children = workflow_step_fields(step)
             if not workflow_step_direct_fields_are_unique(step) or fields.get("continue-on-error") not in {None, "false"}:
@@ -1247,6 +1262,66 @@ def ci_environment_workflow_issues(text: str) -> list[str]:
                 if (command[:2] == ["docker", "push"] or "--push" in command
                         or command[:2] in (["skopeo", "copy"], ["oras", "push"])):
                     issues.append("Environment registry writes must use only the qualified publication helper")
+
+    source_steps = [workflow_step_fields(step) for step in steps.get("Source", [])]
+    source_prior = [(index, fields, children) for index, (fields, children) in enumerate(source_steps)
+                    if fields.get("name") == "Reject partial prior source tuple at reusable boundary"]
+    source_validation = [index for index, (fields, _) in enumerate(source_steps)
+                         if fields.get("name") == "Validate exact producer source and operation"]
+    prior_env = {"KLOGG_" + name.upper().replace("-", "_"): "${{ inputs." + name + " }}"
+                 for name in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}
+    source_lines = (active_script_content(source_prior[0][1].get("run", "")).splitlines()
+                    if source_prior else [])
+    source_rejections = (
+        ["keys = ('KLOGG_PRIOR_SOURCE_RUN_ID', 'KLOGG_PRIOR_SOURCE_ARTIFACT_ID',",
+         "'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_SHA')",
+         "values = [os.environ[key] for key in keys]"],
+        ["if any(values) and not all(values):", "raise SystemExit('prior source inputs must be all-or-none')"],
+        ["if any(not re.fullmatch('[1-9][0-9]*', value) for value in values[:3]):",
+         "raise SystemExit('prior source IDs must be positive decimal strings')"],
+        ["if not re.fullmatch('[0-9a-f]{40}', values[3]) or values[3] in ('0' * 40, os.environ['KLOGG_EXPECTED_SOURCE_SHA']):",
+         "raise SystemExit('prior source SHA must be an earlier nonzero full commit SHA')"],
+    )
+    if (len(source_prior) != 1 or len(source_validation) != 1 or source_prior[0][0] >= source_validation[0]
+            or source_prior[0][1].get("if") is not None or source_prior[0][1].get("shell") != "bash"
+            or source_prior[0][2].get("env") != prior_env
+            or not source_prior[0][1].get("run", "").startswith("set -euo pipefail\n")
+            or not all(any(source_lines[index:index + len(branch)] == branch
+                            for index in range(len(source_lines) - len(branch) + 1))
+                       for branch in source_rejections)):
+        issues.append("Environment reusable Source must reject incomplete or malformed prior source tuples")
+
+    fixture_steps = [workflow_step_fields(step) for step in steps.get("LinuxFixture", [])]
+    import_steps = [(index, fields, children) for index, (fields, children) in enumerate(fixture_steps)
+                    if "ci_environment_source_cache.py" in fields.get("run", "")]
+    expected_import = ["python3", "scripts/ci_environment_source_cache.py",
+                       "--lock", "packaging/adb/adb-helper.lock.json",
+                       "--repo-root", "$GITHUB_WORKSPACE", "--source-sha", "$KLOGG_EXPECTED_SOURCE_SHA",
+                       "--run-id", "$KLOGG_PRIOR_SOURCE_RUN_ID", "--run-attempt", "$KLOGG_PRIOR_SOURCE_RUN_ATTEMPT",
+                       "--artifact-id", "$KLOGG_PRIOR_SOURCE_ARTIFACT_ID", "--prior-sha", "$KLOGG_PRIOR_SOURCE_SHA",
+                       "--output-root", "$RUNNER_TEMP/source-cache-import"]
+    expected_import_env = {"GH_TOKEN": "${{ github.token }}", **{
+        "KLOGG_" + key.upper().replace("-", "_"): "${{ inputs." + key + " }}"
+        for key in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}}
+    if (len(import_steps) != 1
+            or import_steps[0][1].get("if") != "${{ inputs.prior-source-run-id != '' }}"
+            or import_steps[0][1].get("shell") != "bash"
+            or import_steps[0][2].get("env") != expected_import_env
+            or [command for command in environment_shell_commands(steps["LinuxFixture"][import_steps[0][0]])
+                if command[:2] == expected_import[:2]] != [expected_import]
+            or not import_steps[0][1].get("run", "").startswith("set -euo pipefail\n")):
+        issues.append("Environment prior source import must be exact, token-scoped and fixture-only")
+    prepare_steps = [(index, fields) for index, (fields, _) in enumerate(fixture_steps)
+                     if "ci_environment_pipeline.py prepare-fixture" in fields.get("run", "")]
+    if (len(prepare_steps) != 1 or not import_steps or import_steps[0][0] >= prepare_steps[0][0]
+            or prepare_steps[0][1].get("if") is not None
+            or prepare_steps[0][1].get("shell") != "bash"
+            or prepare_steps[0][1].get("run", "").count('source_cache_args+=(--source-cache-root "$RUNNER_TEMP/source-cache-import")') != 1
+            or 'if [[ -n "$KLOGG_PRIOR_SOURCE_RUN_ID" ]]; then' not in active_script_content(prepare_steps[0][1].get("run", ""))
+            or '"${source_cache_args[@]}"' not in active_script_content(prepare_steps[0][1].get("run", ""))
+            or prepare_steps[0][1].get("run", "").count("source_cache_args=()") != 1
+            or fixture_steps[prepare_steps[0][0]][1].get("env") != {"KLOGG_PRIOR_SOURCE_RUN_ID": "${{ inputs.prior-source-run-id }}"}):
+        issues.append("Environment fixture must conditionally bind only imported prior source bytes before preparation")
 
     for job, family in CI_ENVIRONMENT_BUILDERS.items():
         if job not in blocks:
@@ -1467,7 +1542,7 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
             issues.append("CI native prerequisites must directly require dispatch preflight: " + job)
 
     dispatch_inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
-    expected_input_names = {"qualification-mode", "environment-mode", "dependency-mode", "expected-source-sha", "analysis-base-sha"}
+    expected_input_names = {"qualification-mode", "environment-mode", "dependency-mode", "expected-source-sha", "analysis-base-sha", *CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}
     if dispatch_inputs is None or set(dispatch_inputs) != expected_input_names:
         issues.append("CI environment dispatch requires exact mode and source/base inputs")
     else:
@@ -1487,7 +1562,7 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
                 or dependency_fields.get("required", (None,))[0] != "true"
                 or dependency_options != ["off", "qualify", "publish"]):
             issues.append("CI dependency mode must default off with exact off/qualify/publish choices")
-        for pin in ("expected-source-sha", "analysis-base-sha"):
+        for pin in ("expected-source-sha", "analysis-base-sha", *CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS):
             pin_fields = workflow_mapping_block(dispatch_inputs[pin][1], pin, 6)
             if (pin_fields is None or pin_fields.get("type", (None,))[0] != "string"
                     or pin_fields.get("required", (None,))[0] != "false"
@@ -1507,7 +1582,8 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
             or call_inputs is None
             or {key: value for key, (value, _) in call_inputs.items()} != {
                 "mode": "${{ inputs.environment-mode }}", "expected-source-sha": "${{ inputs.expected-source-sha }}",
-                "analysis-base-sha": "${{ inputs.analysis-base-sha }}"}):
+                "analysis-base-sha": "${{ inputs.analysis-base-sha }}",
+                **{name: "${{ inputs." + name + " }}" for name in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}}):
         issues.append("CI environment caller must use the exact source-local reusable workflow and narrow permission ceiling")
     permissions = workflow_mapping_block(preflight, "permissions", 4)
     if (workflow_job_direct_value(preflight, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && inputs.dependency-mode == 'off' }}"
@@ -1524,12 +1600,51 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
     )
     if len(validation) != 1 or any(marker not in validation[0] for marker in required_validation):
         issues.append("CI environment dispatch must reject release mixing and stale/non-ancestor source pins")
+    validation_steps = [step for step in workflow_step_blocks(preflight)
+                        if workflow_step_fields(step)[0].get("name") == "Validate isolated producer mode and exact source"]
+    expected_prior_env = {"KLOGG_" + name.upper().replace("-", "_"): "${{ inputs." + name + " }}"
+                          for name in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}
+    required_prior_preflight = (
+        ["if any(values) and not all(values):", "raise SystemExit('prior source inputs must be all-or-none')"],
+        ["if any(not re.fullmatch('[1-9][0-9]*', value) for value in values[:3]):",
+         "raise SystemExit('prior source run, artifact and attempt IDs must be positive decimal strings')"],
+        ["if not re.fullmatch('[0-9a-f]{40}', values[3]) or values[3] in ('0' * 40, os.environ['GITHUB_SHA']):",
+         "raise SystemExit('prior source SHA must be an earlier nonzero full commit SHA')"],
+    )
+    validation_lines = active_script_content(validation[0]).splitlines() if validation else []
+    prior_preflight_covered = all(any(validation_lines[index:index + len(branch)] == branch
+                                      for index in range(len(validation_lines) - len(branch) + 1))
+                                  for branch in required_prior_preflight)
+    if (len(validation_steps) != 1 or not validation
+            or workflow_step_fields(validation_steps[0])[1].get("env", {}) != {
+                "KLOGG_ENVIRONMENT_MODE": "${{ inputs.environment-mode }}",
+                "KLOGG_QUALIFICATION_MODE": "${{ inputs.qualification-mode }}",
+                "KLOGG_EXPECTED_SOURCE_SHA": "${{ inputs.expected-source-sha }}",
+                "KLOGG_ANALYSIS_BASE_SHA": "${{ inputs.analysis-base-sha }}", **expected_prior_env}
+            or not prior_preflight_covered):
+        issues.append("CI environment prior source tuple must be all-or-none with strict source identities")
 
     # The read-only gate requires the exact preflight and producer ancestry;
     # publication remains explicitly disabled in the called workflow.
     dependency = blocks.get("DependencyModePreflight", [])
     dependency_permissions = workflow_mapping_block(dependency, "permissions", 4)
     dependency_steps = [workflow_step_fields(step) for step in workflow_step_blocks(dependency)]
+    prior_guards = [(fields, children) for fields, children in dependency_steps
+                    if fields.get("name") == "Reject prior environment source inputs outside producer dispatch"]
+    required_isolation = ("os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'",
+                          "os.environ['KLOGG_ENVIRONMENT_MODE'] in ('qualify', 'publish')",
+                          "os.environ['KLOGG_DEPENDENCY_MODE'] == 'off'")
+    prior_lines = active_script_content(prior_guards[0][0].get("run", "")).splitlines() if prior_guards else []
+    required_rejection = ["if not producer and any(os.environ[name] for name in prior):",
+                          "raise SystemExit('prior source inputs are restricted to environment producer dispatch')"]
+    if (len(prior_guards) != 1 or prior_guards[0][0].get("shell") != "bash"
+            or prior_guards[0][0].get("if") is not None
+            or prior_guards[0][1].get("env") != {"KLOGG_ENVIRONMENT_MODE": "${{ inputs.environment-mode }}",
+                                                 "KLOGG_DEPENDENCY_MODE": "${{ inputs.dependency-mode }}", **expected_prior_env}
+            or any(marker not in active_script_content(prior_guards[0][0].get("run", "")) for marker in required_isolation)
+            or not any(prior_lines[index:index + 2] == required_rejection
+                       for index in range(len(prior_lines) - 1))):
+        issues.append("CI ordinary and dependency events must reject prior source input leakage")
     native_active = "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}"
     native_inactive = "${{ github.event_name != 'workflow_dispatch' || inputs.dependency-mode == 'off' }}"
     noops = [fields for fields, _ in dependency_steps

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import pathlib
@@ -30,6 +31,7 @@ import verify_adb_helper_artifact as adb
 import verify_adb_helper_envelope as envelope
 from materialize_ci_environment import download, extract_archive, secure_url, _SecureRedirect
 from source_publication_identity import published_source_name, validate_version
+from prefetch_adb_helper_sources import validated_records
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TARGET = "linux-x86_64"
@@ -39,6 +41,7 @@ CONSUMPTION = "prefetch_artifacts/ci-environment-fixture.json"
 TOOL_NAME = "linuxdeployqt-continuous-x86_64.AppImage"
 MAX_FILES = 10000
 MAX_BYTES = 2 * 1024**3
+MAX_SOURCE_CACHE_BYTES = 536870912
 
 # Fixed container paths, never interpolated caller-controlled shell commands.
 # All helper build and live smoke operations run on Linux, also for local macOS
@@ -184,6 +187,39 @@ def _lock(repo_root):
     return path, document
 
 
+def _stage_source_cache(source_cache_root, destination, lock):
+    """Copy only the already-verified raw lock bytes into this build's private cache."""
+    source = pathlib.Path(source_cache_root).absolute()
+    require(all(stat.S_ISDIR(parent.lstat().st_mode) for parent in (source, *source.parents)),
+            "source cache path must contain only real directories")
+    records = validated_records(lock, require_download_urls=False)
+    expected = {record["archive_file"]: record["archive_sha256"] for record in records}
+    require({path.name for path in source.iterdir()} == set(expected),
+            "source cache must contain exactly the locked archives")
+    destination.mkdir()
+    total = 0
+    for name, digest in expected.items():
+        archive = source / name
+        # Open without following links, then verify the opened file rather than
+        # relying on a prior path check that could race an untrusted cache writer.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(archive, flags), "rb") as incoming:
+            info = os.fstat(incoming.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+                    "source cache links and special files are forbidden: " + name)
+            total += info.st_size
+            require(total <= MAX_SOURCE_CACHE_BYTES, "source cache exceeds the aggregate byte limit")
+            actual = hashlib.sha256()
+            with (destination / name).open("xb") as staged:
+                while block := incoming.read(1024 * 1024):
+                    actual.update(block)
+                    staged.write(block)
+            require(info.st_size == (destination / name).stat().st_size and actual.hexdigest() == digest,
+                    "source cache raw SHA-256 or size mismatch: " + name)
+    require({path.name for path in source.iterdir()} == set(expected),
+            "source cache changed during staging")
+
+
 def _expected_paths(lock, pin):
     names = {HELPER + "/" + name for name in (*envelope.REQUIRED_RECEIPTS, "SHA256SUMS", "helpers/adb")}
     for runtime in lock["targets"][TARGET].get("usb", {}).get("runtime_files", []):
@@ -274,7 +310,8 @@ def _run_build(command, name, runner, timeout):
         raise
 
 
-def prepare_fixture(repo_root, source, version, output, *, runner=None, downloader=None, metadata_reader=None, timeout=5400):
+def prepare_fixture(repo_root, source, version, output, *, runner=None, downloader=None, metadata_reader=None,
+                    timeout=5400, source_cache_root=None):
     """Build one Linux-only fixture with existing production validators, atomically."""
     root, output = pathlib.Path(repo_root).resolve(), pathlib.Path(output).absolute()
     version = _version(version)
@@ -296,15 +333,26 @@ def prepare_fixture(repo_root, source, version, output, *, runner=None, download
             require(not any(char in str(path) for path in (root, work) for char in ",\r\n"), "unsupported Docker bind path")
             fixture = work / "fixture"
             fixture.mkdir()
-            _acquire_tool(pin, fixture / "tools" / pin["asset_name"], min(timeout, 600),
-                          downloader or download, metadata_reader or _read_public_metadata)
             prefetch = pipeline.regular(root, "scripts/prefetch_adb_helper_sources.py")
             closure = pipeline.regular(root, "scripts/prefetch_adb_source_closure.py")
             cache = work / "source-cache"
-            pipeline.run([sys.executable, str(closure), "--lock", str(lock_path), "--download-root", str(cache),
-                          "--workers", "2", "--max-cache-bytes", "536870912"], runner, timeout=min(timeout, 2700), cwd=root)
+            if source_cache_root is not None:
+                _stage_source_cache(source_cache_root, cache, lock)
+            if source_cache_root is None:
+                _acquire_tool(pin, fixture / "tools" / pin["asset_name"], min(timeout, 600),
+                              downloader or download, metadata_reader or _read_public_metadata)
+                pipeline.run([sys.executable, str(closure), "--lock", str(lock_path), "--download-root", str(cache),
+                              "--workers", "2", "--max-cache-bytes", str(MAX_SOURCE_CACHE_BYTES)],
+                             runner, timeout=min(timeout, 2700), cwd=root)
+            else:
+                pipeline.run([sys.executable, str(prefetch), "--lock", str(lock_path), "--download-root", str(cache),
+                              "--offline", "--max-cache-bytes", str(MAX_SOURCE_CACHE_BYTES)],
+                             runner, timeout=timeout, cwd=root)
             pipeline.run([sys.executable, str(prefetch), "--lock", str(lock_path), "--download-root", str(cache),
                           "--extract-root", str(work / "sources"), "--offline"], runner, timeout=timeout, cwd=root)
+            if source_cache_root is not None:
+                _acquire_tool(pin, fixture / "tools" / pin["asset_name"], min(timeout, 600),
+                              downloader or download, metadata_reader or _read_public_metadata)
             pipeline.run([sys.executable, str(pipeline.regular(root, "scripts/build_adb_helper_legal_assets.py")),
                           "--lock", str(lock_path), "--archive-root", str(cache), "--repository-root", str(root),
                           "--version", version, "--base-url", "https://github.com/" + pipeline.REPOSITORY,
@@ -437,6 +485,7 @@ def main(argv=None):
         command.add_argument("--output", type=pathlib.Path, required=True)
         if name == "prepare-fixture":
             command.add_argument("--version", required=True)
+            command.add_argument("--source-cache-root", type=pathlib.Path)
         else:
             command.add_argument("--fixture-root", type=pathlib.Path, required=True)
             command.add_argument("--fixture-artifact-id", type=int, required=True)
@@ -445,7 +494,8 @@ def main(argv=None):
     try:
         source = core.load_json(args.source)
         if args.command == "prepare-fixture":
-            result = prepare_fixture(args.repo_root, source, args.version, args.output)
+            result = prepare_fixture(args.repo_root, source, args.version, args.output,
+                                     source_cache_root=args.source_cache_root)
         else:
             result = consume_fixture(args.repo_root, source, args.fixture_root, args.fixture_artifact_id,
                                      args.archive_sha256, args.output)
