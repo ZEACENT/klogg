@@ -307,6 +307,7 @@ class EnvironmentBootstrapTest(unittest.TestCase):
                  ("workflow_dispatch", "publish", "off", True, True, True),
                  ("workflow_dispatch", "off", "qualify", True, False, False),
                  ("workflow_dispatch", "off", "publish", True, False, False),
+                 ("workflow_dispatch", "off", "observe-ios-host", True, False, False),
                  ("workflow_dispatch", "qualify", "publish", True, False, False),
                  ("push", "qualify", "publish", True, False, False))
         for event, environment_mode, dependency_mode, dependency, preflight, producer in cases:
@@ -368,7 +369,7 @@ class EnvironmentBootstrapTest(unittest.TestCase):
         valid = {"KLOGG_DEPENDENCY_MODE": "qualify", "KLOGG_ENVIRONMENT_MODE": "off",
                  "KLOGG_QUALIFICATION_MODE": "validation", "KLOGG_EXPECTED_SOURCE_SHA": "1" * 40,
                  "GITHUB_SHA": "1" * 40, "GITHUB_REPOSITORY": "ZEACENT/klogg", "GITHUB_REF": "refs/heads/feature"}
-        for mode in ("qualify", "publish"):
+        for mode in ("qualify", "publish", "observe-ios-host"):
             with self.subTest(mode=mode), mock.patch.dict(os.environ, {**valid, "KLOGG_DEPENDENCY_MODE": mode}):
                 exec(compile(payload, "<dependency dispatch preflight>", "exec"), {})
         for key, value in (("KLOGG_DEPENDENCY_MODE", "off"), ("KLOGG_DEPENDENCY_MODE", "unknown"),
@@ -377,6 +378,11 @@ class EnvironmentBootstrapTest(unittest.TestCase):
                            ("KLOGG_EXPECTED_SOURCE_SHA", "3" * 40), ("GITHUB_REPOSITORY", "fork/klogg"),
                            ("GITHUB_REF", "refs/tags/release")):
             with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {**valid, key: value}):
+                with self.assertRaises(SystemExit):
+                    exec(compile(payload, "<dependency dispatch preflight>", "exec"), {})
+        for ref in ("refs/heads/master", "refs/heads/main"):
+            with self.subTest(ref=ref), mock.patch.dict(os.environ, {
+                    **valid, "KLOGG_DEPENDENCY_MODE": "observe-ios-host", "GITHUB_REF": ref}):
                 with self.assertRaises(SystemExit):
                     exec(compile(payload, "<dependency dispatch preflight>", "exec"), {})
         for old, new in (("dependency-mode cannot combine with environment-mode", "mixed modes accepted"),

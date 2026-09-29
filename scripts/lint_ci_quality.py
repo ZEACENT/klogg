@@ -99,7 +99,7 @@ CI_BUILD_REQUIRED_JOBS = {
 }
 
 CI_BUILD_POST_GATE_JOBS = {"DispatchContinuous"}
-CI_BUILD_PRODUCER_JOBS = {"EnvironmentModePreflight", "EnvironmentProducer", "DependencyModePreflight", "DependencyGate"}
+CI_BUILD_PRODUCER_JOBS = {"EnvironmentModePreflight", "EnvironmentProducer", "DependencyModePreflight", "DependencyGate", "IosHostEvidence"}
 CI_BUILD_NATIVE_ROOT_JOBS = {"SaveVersion", "PrefetchAdbHelperSources", "PrefetchIosNativeSources"}
 CI_BUILD_NATIVE_JOBS = CI_BUILD_NATIVE_ROOT_JOBS | {
     "BuildAdbHelperLegalAssets", "BuildAdbLinuxX64", "BuildAdbLinuxArm64",
@@ -1400,6 +1400,93 @@ def ci_environment_workflow_issues(text: str) -> list[str]:
     return issues
 
 
+def ci_ios_host_evidence_workflow_issues(text: str) -> list[str]:
+    """Keep the reusable host inventory disconnected from native qualification."""
+    issues: list[str] = []
+    triggers = workflow_trigger_mapping(text)
+    jobs = workflow_job_blocks(text)
+    if triggers is None or set(triggers) != {"workflow_call"} or set(jobs) != {
+            "Source", "IosIntel", "IosArm"}:
+        issues.append("iOS host diagnostics require a reusable source and two host jobs only")
+    inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
+    if (inputs is None or set(inputs) != {"expected-source-sha"}
+            or not {"expected-source-sha:", "required: true", "type: string"}.issubset(
+                {line.strip() for line in inputs["expected-source-sha"][1]})):
+        issues.append("iOS host diagnostics require an exact source SHA input")
+    permissions = workflow_mapping_block(text.splitlines(), "permissions", 0)
+    allowed = {"contents": "read", "actions": "read"}
+    if (permissions is None or {key: value for key, (value, _) in permissions.items()} != allowed
+            or re.search(r"\bsecrets\b", active_script_content(text))):
+        issues.append("iOS host diagnostics cannot receive publishing or secret credentials")
+    try:
+        steps = workflow_job_steps(text)
+    except ValueError as error:
+        return issues + [str(error)]
+    needs = workflow_job_needs(text)
+    if needs.get("Source") != set() or workflow_job_direct_value(jobs.get("Source", []), "runs-on") != "ubuntu-24.04":
+        issues.append("iOS host source prefetch must be independent and hosted")
+    for name, block in jobs.items():
+        direct = workflow_mapping_block(block, "permissions", 4)
+        if (direct is not None and {key: value for key, (value, _) in direct.items()} != allowed
+                or workflow_job_direct_value(block, "continue-on-error") not in (None, "false")
+                or workflow_job_direct_value(block, "if") is not None):
+            issues.append(name + ": diagnostics must not bypass failures or gain credentials")
+        limit = workflow_job_direct_value(block, "timeout-minutes")
+        if not limit or not limit.isdecimal() or not 0 < int(limit) <= 60:
+            issues.append(name + ": diagnostic job requires a bounded timeout")
+        rows = [workflow_step_fields(step) for step in steps.get(name, [])]
+        allowed_actions = {"actions/checkout", "actions/upload-artifact"}
+        if name != "Source":
+            allowed_actions.update({"actions/download-artifact", "lukka/get-cmake"})
+        pinned_actions = {action + "@" + REVIEWED_ACTION_REVISIONS[action]
+                          for action in allowed_actions}
+        if any(row["uses"] not in pinned_actions for row, _ in rows if "uses" in row):
+            issues.append(name + ": only reviewed diagnostic actions may execute")
+        checkouts = [(row, children.get("with", {})) for row, children in rows
+                     if row.get("uses", "").startswith("actions/checkout@")]
+        if (len(checkouts) != 1
+                or checkouts[0][0].get("uses") != "actions/checkout@" + REVIEWED_ACTION_REVISIONS["actions/checkout"]
+                or checkouts[0][1] != {"ref": "${{ inputs.expected-source-sha }}", "persist-credentials": "false"}):
+            issues.append(name + ": exact SHA checkout without persisted credentials is required")
+        if any(row.get("continue-on-error") not in (None, "false")
+               or row.get("if") is not None and not (
+                   row.get("uses", "").startswith("actions/upload-artifact@")
+                   and row["if"] == "${{ always() }}") for row, _ in rows):
+            issues.append(name + ": critical diagnostic steps cannot be skipped")
+    source = [workflow_step_fields(step) for step in steps.get("Source", [])]
+    scripts = active_script_content("\n".join(row.get("run", "") for row, _ in source))
+    if (sum(row.get("name") == "Validate exact diagnostic source" for row, _ in source) != 1
+            or "prefetch_ios_native_sources.py" not in scripts
+            or "libimobiledevice.lock.json" not in scripts
+            or "GITHUB_REPOSITORY" not in scripts or "GITHUB_SHA" not in scripts
+            or "git', 'rev-parse', 'HEAD'" not in scripts):
+        issues.append("iOS host source preflight must bind canonical checkout and locked archives")
+    for name, runner, arch in (("IosIntel", "macos-26-intel", "x86_64"),
+                               ("IosArm", "macos-26", "arm64")):
+        block = jobs.get(name, [])
+        if workflow_job_direct_value(block, "runs-on") != runner or needs.get(name) != {"Source"}:
+            issues.append(name + ": wrong host or source dependency")
+        rows = [workflow_step_fields(step) for step in steps.get(name, [])]
+        scripts = active_script_content("\n".join(row.get("run", "") for row, _ in rows))
+        if ("ci_ios_host_evidence.py" not in scripts or "build_ios_native_stack.py" not in scripts
+                or "verify_ios_native_stack.py" not in scripts or arch not in "\n".join(block)):
+            issues.append(name + ": real diagnostic build and fail-closed observer required")
+        downloads = [children.get("with", {}) for row, children in rows
+                     if row.get("uses", "").startswith("actions/download-artifact@")]
+        uploads = [children.get("with", {}) for row, children in rows
+                   if row.get("uses", "").startswith("actions/upload-artifact@")]
+        if (len(downloads) != 1 or downloads[0].get("name") != "ios-native-source-cache"
+                or len(uploads) != 1 or not uploads[0].get("path", "").endswith(".json")
+                or "evidence" not in uploads[0].get("name", "")
+                or uploads[0].get("if-no-files-found") != "error"):
+            issues.append(name + ": only same-run sources and diagnostic JSON may transfer")
+    if any(token in active_script_content(text) for token in (
+            "ci_dependency_gate.py", "ci_dependency_producer.py", "publish_ci_dependency.py",
+            "ghcr.io/", "native-core-candidate-", "--probe-unreviewed-host-tools")):
+        issues.append("iOS host diagnostic must not qualify, publish or bypass native preflight")
+    return issues
+
+
 def ci_dependency_workflow_issues(text: str) -> list[str]:
     """Keep the child Gate read-only and publication visibly disabled."""
     issues: list[str] = []
@@ -1560,8 +1647,8 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
         if (dependency_fields is None or dependency_fields.get("type", (None,))[0] != "choice"
                 or dependency_fields.get("default", (None,))[0] != "off"
                 or dependency_fields.get("required", (None,))[0] != "true"
-                or dependency_options != ["off", "qualify", "publish"]):
-            issues.append("CI dependency mode must default off with exact off/qualify/publish choices")
+                or dependency_options != ["off", "qualify", "publish", "observe-ios-host"]):
+            issues.append("CI dependency mode must default off with exact off/qualify/publish/observe choices")
         for pin in ("expected-source-sha", "analysis-base-sha", *CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS):
             pin_fields = workflow_mapping_block(dispatch_inputs[pin][1], pin, 6)
             if (pin_fields is None or pin_fields.get("type", (None,))[0] != "string"
@@ -1658,7 +1745,10 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
     dependency_env = [workflow_mapping_block(step, "env", 8) for step in workflow_step_blocks(dependency)
                       if workflow_step_fields(step)[0].get("name") == "Validate isolated dependency mode and exact source"]
     required_script = (
-        "os.environ['KLOGG_DEPENDENCY_MODE'] not in ('qualify', 'publish')",
+        "os.environ['KLOGG_DEPENDENCY_MODE'] not in ('qualify', 'publish', 'observe-ios-host')",
+        "os.environ['KLOGG_DEPENDENCY_MODE'] == 'observe-ios-host'",
+        "os.environ['GITHUB_REF'] in ('refs/heads/master', 'refs/heads/main')",
+        "iOS host observation requires a non-default branch",
         "os.environ['KLOGG_ENVIRONMENT_MODE'] != 'off'",
         "dependency-mode cannot combine with environment-mode",
         "os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation'",
@@ -1673,6 +1763,7 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
         "git rev-parse HEAD",
     )
     required_branches = (
+        "if (os.environ['KLOGG_DEPENDENCY_MODE'] == 'observe-ios-host'\nand os.environ['GITHUB_REF'] in ('refs/heads/master', 'refs/heads/main')):\nraise SystemExit('iOS host observation requires a non-default branch')",
         "if os.environ['KLOGG_ENVIRONMENT_MODE'] != 'off':\nraise SystemExit('dependency-mode cannot combine with environment-mode')",
         "if os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation':\nraise SystemExit('dependency-mode cannot combine with release qualification')",
         "if os.environ['GITHUB_REPOSITORY'] != 'ZEACENT/klogg' or not os.environ['GITHUB_REF'].startswith('refs/heads/'):\nraise SystemExit('dependency production requires a canonical repository branch')",
@@ -1728,6 +1819,21 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
             or any(workflow_job_direct_value(gate, field) is not None
                    for field in ("secrets", "runs-on", "steps", "environment", "continue-on-error"))):
         issues.append("CI dependency caller must require exact nine producer results and read-only local Gate")
+    observer = blocks.get("IosHostEvidence", [])
+    observer_permissions = workflow_mapping_block(observer, "permissions", 4)
+    observer_inputs = workflow_mapping_block(observer, "with", 4)
+    if (workflow_job_direct_value(observer, "uses") != "./.github/workflows/ci-ios-host-evidence.yml"
+            or workflow_job_direct_value(observer, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode == 'observe-ios-host' && needs.DependencyModePreflight.result == 'success' }}"
+            or needs.get("IosHostEvidence") != {"DependencyModePreflight"}
+            or observer_permissions is None
+            or {key: value for key, (value, _) in observer_permissions.items()} != {
+                "contents": "read", "actions": "read"}
+            or observer_inputs is None
+            or {key: value for key, (value, _) in observer_inputs.items()} != {
+                "expected-source-sha": "${{ inputs.expected-source-sha }}"}
+            or any(workflow_job_direct_value(observer, key) is not None for key in (
+                "secrets", "runs-on", "steps", "environment", "continue-on-error"))):
+        issues.append("CI iOS host observer must call only the isolated read-only workflow after exact preflight")
     return issues
 
 
@@ -5018,6 +5124,13 @@ def check_repo(root: Path) -> list[str]:
     else:
         issues.extend(f".github/workflows/ci-environments.yml: {issue}"
                       for issue in ci_environment_workflow_issues(producer_path.read_text()))
+
+    ios_evidence_path = workflows / "ci-ios-host-evidence.yml"
+    if not ios_evidence_path.is_file():
+        issues.append(".github/workflows/ci-ios-host-evidence.yml: isolated iOS host diagnostic workflow is missing")
+    else:
+        issues.extend(f".github/workflows/ci-ios-host-evidence.yml: {issue}"
+                      for issue in ci_ios_host_evidence_workflow_issues(ios_evidence_path.read_text()))
 
     dependency_path = workflows / "ci-dependencies.yml"
     if not dependency_path.is_file():

@@ -195,7 +195,8 @@ jobs:
             with self.subTest(workflow=path.name):
                 self.assertEqual(MODULE.workflow_schedule_issues(text), [])
                 expected = {"workflow_dispatch"}
-                if path.name in ("ci-environments.yml", "ci-dependencies.yml"):
+                if path.name in ("ci-environments.yml", "ci-dependencies.yml",
+                                 "ci-ios-host-evidence.yml"):
                     expected = {"workflow_call"}
                 elif path.name not in ("ci-release.yml", "ci-continuous.yml"):
                     expected |= {"push", "pull_request"}
@@ -823,6 +824,7 @@ jobs:
 
         expected_needs = {
             "DependencyModePreflight": set(),
+            "IosHostEvidence": {"DependencyModePreflight"},
             "EnvironmentModePreflight": set(),
             "EnvironmentProducer": {"EnvironmentModePreflight"},
             "DependencyGate": {"DependencyModePreflight", "BuildAdbHelperLegalAssets", "BuildAdbLinuxX64",
@@ -1733,6 +1735,7 @@ jobs:
             ("workflow_dispatch", "qualify", "off", "validation", set()),
             ("workflow_dispatch", "off", "qualify", "validation", MODULE.CI_BUILD_NATIVE_JOBS),
             ("workflow_dispatch", "off", "publish", "validation", MODULE.CI_BUILD_NATIVE_JOBS),
+            ("workflow_dispatch", "off", "observe-ios-host", "validation", set()),
         ):
             with self.subTest(event=event, environment=environment, dependency=dependency):
                 available = set()
@@ -1751,16 +1754,17 @@ jobs:
                     expression = expression.replace("always()", "True").replace("!cancelled()", "True")
                     expression = expression.replace("!contains('ordinary commit', '[skip ci]')", "True")
                     expression = expression.replace("&&", " and ").replace("||", " or ")
-                    self.assertRegex(expression, r"^[\s\w'()=!]+$")
+                    self.assertRegex(expression, r"^[\s\w'()=!\-]+$")
                     if eval(expression, {"__builtins__": {}}, {}):
                         available.add(job)
                 if event == "push" and environment == dependency == "off":
                     available.add("DispatchContinuous")
                 self.assertEqual(available, expected)
-                self.assertEqual(
-                    event == "workflow_dispatch" and dependency in {"qualify", "publish"},
-                    event == "workflow_dispatch" and dependency != "off",
-                )
+                if dependency == "observe-ios-host":
+                    self.assertEqual(available, set())
+                    self.assertIn("IosHostEvidence", blocks)
+                    self.assertEqual(MODULE.workflow_job_needs(workflow)["IosHostEvidence"],
+                                     {"DependencyModePreflight"})
 
     def test_dependency_child_requires_read_only_gate_and_disabled_publisher(self):
         child = (ROOT / ".github/workflows/ci-dependencies.yml").read_text()
@@ -1831,7 +1835,15 @@ jobs:
                 result = subprocess.run(["bash", "-c", scripts[0]], cwd=ROOT, env=env,
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        observed = {**os.environ, **defaults, "GITHUB_REF": "refs/heads/worktree-master-ci-fail",
+                    "KLOGG_DEPENDENCY_MODE": "observe-ios-host"}
+        result = subprocess.run(["bash", "-c", scripts[0]], cwd=ROOT, env=observed,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for mode, overrides, expected in (
+            ("observe-ios-host", {}, "non-default branch"),
+            ("observe-ios-host", {"GITHUB_REF": "refs/heads/feature", "KLOGG_ENVIRONMENT_MODE": "qualify"}, "cannot combine with environment-mode"),
+            ("observe-ios-host", {"GITHUB_REF": "refs/heads/feature", "KLOGG_QUALIFICATION_MODE": "release"}, "cannot combine with release qualification"),
             ("qualify", {"KLOGG_ENVIRONMENT_MODE": "publish"}, "cannot combine with environment-mode"),
             ("publish", {"KLOGG_QUALIFICATION_MODE": "release"}, "cannot combine with release qualification"),
             ("qualify", {"GITHUB_REPOSITORY": "fork/klogg"}, "canonical repository branch"),

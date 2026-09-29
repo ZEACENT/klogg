@@ -252,6 +252,21 @@ qualification. Review and pin the real input closure for **both** macOS runner
 architectures before allowing the Gate to succeed. Normal PR/push iOS source
 builds do not run this dependency-only probe.
 
+A separate, **unreviewed** host-input diagnostic can be dispatched through the
+registered CI Build workflow on a non-default canonical branch with
+`qualification-mode=validation`, `environment-mode=off`,
+`dependency-mode=observe-ios-host`, and the exact full `expected-source-sha`.
+It calls the source-local `ci-ios-host-evidence.yml` reusable workflow: one
+locked iOS source prefetch and two macOS host observations, with no dependency
+builders, Gate, registry access, or production-core upload. Diagnostic JSON is
+bound to the run/attempt/SHA, size-limited and retained for seven days. The
+collector distinguishes published Homebrew bottle metadata from **verified**
+poured bytes and reports `complete: false` whenever the actual process,
+interpreter/module, dylib, or bottle closure remains unknown. A failed trace
+capability probe stops before the expensive native build; even a successful
+capability probe does not qualify an untraced build. These diagnostic failures
+are expected evidence gaps, not permission to bypass the original Gate.
+
 Native publication remains disabled: the child Publisher has no package or OIDC
 write scopes and exits with an error. The `publish_ci_dependency.py` library has
 no connected independently authenticated Gate callback, detached signing step,

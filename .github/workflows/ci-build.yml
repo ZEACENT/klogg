@@ -32,7 +32,7 @@ on:
           - qualify
           - publish
       dependency-mode:
-        description: Isolated native dependency qualification or fail-closed publish validation
+        description: Isolated native qualification, host evidence observation, or fail-closed publish validation
         required: true
         default: "off"
         type: choice
@@ -40,6 +40,7 @@ on:
           - "off"
           - qualify
           - publish
+          - observe-ios-host
       expected-source-sha:
         description: Exact dispatched commit required for producer modes
         required: false
@@ -132,8 +133,11 @@ jobs:
           python3 - <<'PY'
           import os
           import re
-          if os.environ['KLOGG_DEPENDENCY_MODE'] not in ('qualify', 'publish'):
-              raise SystemExit('dependency-mode must be off, qualify, or publish')
+          if os.environ['KLOGG_DEPENDENCY_MODE'] not in ('qualify', 'publish', 'observe-ios-host'):
+              raise SystemExit('unsupported native dependency dispatch mode')
+          if (os.environ['KLOGG_DEPENDENCY_MODE'] == 'observe-ios-host'
+                  and os.environ['GITHUB_REF'] in ('refs/heads/master', 'refs/heads/main')):
+              raise SystemExit('iOS host observation requires a non-default branch')
           if os.environ['KLOGG_ENVIRONMENT_MODE'] != 'off':
               raise SystemExit('dependency-mode cannot combine with environment-mode')
           if os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation':
@@ -147,6 +151,17 @@ jobs:
               raise SystemExit('dispatched source does not match expected-source-sha')
           PY
           test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"
+
+  IosHostEvidence:
+    name: Unreviewed iOS host evidence
+    needs: [DependencyModePreflight]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode == 'observe-ios-host' && needs.DependencyModePreflight.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ci-ios-host-evidence.yml
+    with:
+      expected-source-sha: ${{ inputs.expected-source-sha }}
 
   EnvironmentModePreflight:
     name: "Environment producer dispatch preflight"

@@ -945,6 +945,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     or "Signed release qualification must run from master" in line
                 ):
                     line = line.replace("refs/heads/master", "trusted-master-ref")
+                    line = line.replace("refs/heads/main", "trusted-main-ref")
                 if "startswith('refs/heads/')" in line:
                     # Producer preflight validates the dispatch ref shape; it is
                     # not a floating source revision for helper materials.

@@ -398,6 +398,8 @@ class DependencyQualificationWorkflowTest(unittest.TestCase):
             ("workflow_dispatch", "off", "qualify", "success", True),
             ("workflow_dispatch", "off", "publish", "success", True),
             ("workflow_dispatch", "off", "qualify", "failure", False),
+            ("workflow_dispatch", "off", "observe-ios-host", "success", False),
+            ("workflow_dispatch", "off", "observe-ios-host", "failure", False),
             ("workflow_dispatch", "qualify", "off", "success", False),
             ("workflow_dispatch", "qualify", "qualify", "failure", False),
         )
