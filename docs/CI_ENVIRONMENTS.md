@@ -267,6 +267,20 @@ capability probe stops before the expensive native build; even a successful
 capability probe does not qualify an untraced build. These diagnostic failures
 are expected evidence gaps, not permission to bypass the original Gate.
 
+`materialize_ios_host_tools.py` can create and independently recheck a private,
+architecture-bound, byte-exact **unreviewed** snapshot of a specifically
+provided local tool tree on POSIX hosts. A canonical manifest lives inside
+the private, atomically no-replace-published output directory. It rejects
+changed modules/macros, extra files, nonportable links, hardlinks, mode drift,
+unsafe paths, and stale manifest bytes before that snapshot can be reused as
+diagnostic data. No real Brew,
+Xcode, or system tree is pinned by this test-only tool, and a verified snapshot
+alone does not prove which files a native build reads. The hosted DTrace probes
+did not establish build-wide observation; no supported, enforced macOS host
+read/execute boundary has yet passed child-process and negative-access checks.
+Until that separate capability and actual per-architecture materials are
+reviewed, iOS core qualification stays blocked.
+
 Native publication remains disabled: the child Publisher has no package or OIDC
 write scopes and exits with an error. The `publish_ci_dependency.py` library has
 no connected independently authenticated Gate callback, detached signing step,
