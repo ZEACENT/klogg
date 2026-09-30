@@ -2402,6 +2402,8 @@ jobs:
           # dumps; the dump directory is only uploaded on test failure below.
           $dumpDir = Join-Path $env:GITHUB_WORKSPACE "build_root\crash_dumps"
           New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+          "KLOGG_TEST_MINIDUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "KLOGG_TEST_TRACE_SEARCH_STARTS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
           foreach ($exe in @("klogg_itests.exe", "klogg_tests.exe")) {
             $regPath = "HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\$exe"
@@ -2473,10 +2475,12 @@ jobs:
             Copy-Item $dumpDir -Destination (Join-Path $diagRoot "crash_dumps") -Recurse -Force
           }
 
-          foreach ($name in @("klogg_itests.pdb", "klogg_tests.pdb")) {
-            $pdb = Join-Path $workspace "build_root\output\$name"
-            if ( Test-Path $pdb ) {
-              Copy-Item $pdb -Destination $diagRoot -Force
+          foreach ($name in @("klogg_itests.exe", "klogg_itests.pdb", "klogg_tests.exe", "klogg_tests.pdb")) {
+            $binary = Join-Path $workspace "build_root\output\$name"
+            if ( Test-Path $binary ) {
+              Copy-Item $binary -Destination $diagRoot -Force
+            } else {
+              "Missing test diagnostic file: $name" | Add-Content -Path (Join-Path $diagRoot "missing-files.txt")
             }
           }
 

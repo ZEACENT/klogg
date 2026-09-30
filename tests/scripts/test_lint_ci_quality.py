@@ -2055,6 +2055,18 @@ jobs:
             "steps.run-tests.outcome == 'failure' }}"
         )
         mutations = {
+            "missing explicit test dump directory": (
+                '          "KLOGG_TEST_MINIDUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8\n',
+                '          # "KLOGG_TEST_MINIDUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8\n',
+            ),
+            "missing startup trace opt-in": (
+                '          "KLOGG_TEST_TRACE_SEARCH_STARTS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8\n',
+                '          # "KLOGG_TEST_TRACE_SEARCH_STARTS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8\n',
+            ),
+            "missing unit executable evidence": (
+                '@("klogg_itests.exe", "klogg_itests.pdb", "klogg_tests.exe", "klogg_tests.pdb")',
+                '@("klogg_itests.exe", "klogg_itests.pdb", "missing.exe", "klogg_tests.pdb")',
+            ),
             "conditional test continuation": (
                 "        continue-on-error: true\n\n"
                 "      - name: Collect Windows diagnostics on test failure\n",

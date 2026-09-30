@@ -71,6 +71,17 @@ bool traceSearchTerminals()
     return enabled;
 }
 
+void traceSearchStart( const char* phase, quint64 generation, quint64 operationId, int type = -1 )
+{
+    static const bool enabled = qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" );
+    if ( enabled ) {
+        std::fprintf( stderr, "Search start %s generation %llu operation %llu type %d\n", phase,
+                      static_cast<unsigned long long>( generation ),
+                      static_cast<unsigned long long>( operationId ), type );
+        std::fflush( stderr );
+    }
+}
+
 struct PartialSearchResults {
     PartialSearchResults() = default;
 
@@ -278,6 +289,7 @@ void LogFilteredDataWorker::connectSignalsAndRun( SearchOperation* operationRequ
              },
              Qt::DirectConnection );
 
+    traceSearchStart( "operation.run", generation, operationId );
     operationRequested->run( searchData_ );
 }
 
@@ -287,7 +299,9 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
     const auto generation = operationGeneration_.fetch_add( 1 ) + 1;
     const auto operationId = operationId_.fetch_add( 1 ) + 1;
     LOG_INFO << "Search requested (async dispatch, gen " << generation << ")";
+    traceSearchStart( "compile.begin", generation, operationId );
     compiledExpression_ = std::make_shared<RegularExpression>( regExp );
+    traceSearchStart( "compile.end", generation, operationId );
 
     // A new full search implicitly cancels any pending or coalesced live
     // update.  Without this reset, liveUpdateRunning_ would stay true and
@@ -298,6 +312,7 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
         deferredLiveRequest_.reset();
     }
 
+    traceSearchStart( "enqueue.request", generation, operationId );
     enqueueRequest( SearchRequest{ SearchRequest::Type::Full, regExp, startLine, endLine, {},
                                    generation, operationId, compiledExpression_ } );
 }
@@ -440,6 +455,8 @@ void LogFilteredDataWorker::dispatchLoop()
             }
         }
 
+        traceSearchStart( "dispatch.selected", request.generation, request.operationId,
+                          static_cast<int>( request.type ) );
         // Check if this request has been superseded by a newer one before
         // doing any work. Serialization with the previous operation is
         // provided by joining opThread_ below; the worker itself acquires
@@ -458,6 +475,8 @@ void LogFilteredDataWorker::dispatchLoop()
             opThread_ = std::thread(
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
+                    traceSearchStart( "worker.entry", request.generation, request.operationId,
+                                      static_cast<int>( request.type ) );
                     ScopedLock operationLock( operationsMutex_ );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {
@@ -476,6 +495,8 @@ void LogFilteredDataWorker::dispatchLoop()
             opThread_ = std::thread(
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
+                    traceSearchStart( "worker.entry", request.generation, request.operationId,
+                                      static_cast<int>( request.type ) );
                     ScopedLock operationLock( operationsMutex_ );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {
@@ -495,6 +516,8 @@ void LogFilteredDataWorker::dispatchLoop()
             opThread_ = std::thread(
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
+                    traceSearchStart( "worker.entry", request.generation, request.operationId,
+                                      static_cast<int>( request.type ) );
                     ScopedLock operationLock( operationsMutex_ );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {

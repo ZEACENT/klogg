@@ -853,7 +853,10 @@ WINDOWS_DIAGNOSTIC_RUN_MARKERS = {
     "Collect Windows diagnostics on test failure": (
         "build_root\\Testing\\Temporary",
         "build_root\\crash_dumps",
+        "klogg_itests.exe",
         "klogg_itests.pdb",
+        "klogg_tests.exe",
+        "klogg_tests.pdb",
         "eventlog_application.txt",
     ),
     "Collect Windows ASan diagnostics": (
@@ -880,6 +883,8 @@ def windows_test_diagnostics_issues(text: str) -> list[str]:
     issues: list[str] = []
     steps_by_job = workflow_job_steps(text)
     expected = (
+        ("Configure crash dumps for Windows test binaries", "name",
+         "Configure crash dumps for Windows test binaries"),
         ("run-tests", "uses", "./.github/actions/agent-run-tests"),
         (
             "Collect Windows diagnostics on test failure",
@@ -937,6 +942,17 @@ def windows_test_diagnostics_issues(text: str) -> list[str]:
         children_by_label = {
             label: children for (label, _, _), (_, _, children) in zip(expected, selected)
         }
+        setup = fields_by_label["Configure crash dumps for Windows test binaries"]
+        setup_script = active_script_content(strip_powershell_comments(setup.get("run", "")))
+        required_setup = (
+            'New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null',
+            '"KLOGG_TEST_MINIDUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8',
+            '"KLOGG_TEST_TRACE_SEARCH_STARTS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8',
+        )
+        if (setup.get("shell") != "pwsh" or setup.get("if") is not None
+                or setup.get("continue-on-error") not in (None, "false")
+                or any(line not in setup_script.splitlines() for line in required_setup)):
+            issues.append(f"CI build job {job} must prepare explicit test dump and startup trace before testing")
         run_tests = fields_by_label["run-tests"]
         if run_tests.get("continue-on-error") != "true":
             issues.append(

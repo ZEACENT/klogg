@@ -25,6 +25,16 @@ add_dependencies(ci_build klogg_test_build)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+if(WIN32)
+  add_test(
+    NAME windows_crash_trace_smoke
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/windows_crash_trace_smoke.py
+            --helper $<TARGET_FILE:crash_trace_test_helper>
+  )
+  set_tests_properties(windows_crash_trace_smoke PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+  klogg_set_test_isolation(windows_crash_trace_smoke)
+endif()
+
 add_test(
   NAME adb_helper_release_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_adb_helper_release_contract.py
