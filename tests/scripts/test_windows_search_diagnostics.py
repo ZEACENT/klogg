@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import windows_crash_trace_smoke as crash_smoke
 from windows_crash_trace_smoke import exception_from_dump, run_smoke
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -59,9 +60,11 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         self.assertIn("set(_klogg_debug_option /DEBUG:NONE)", helper)
 
     def test_dump_decoder_checks_original_exception_and_context_bounds(self):
-        for architecture in ("x64", "x86"):
-            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as directory:
-                content = bytearray(1600)
+        layouts = (("x64", 1232), ("x64", 1663), ("x64", 3263),
+                   ("x86", 716), ("x86", 1147), ("x86", 1663))
+        for architecture, size in layouts:
+            with self.subTest(architecture=architecture, size=size), tempfile.TemporaryDirectory() as directory:
+                content = bytearray(4096)
                 struct.pack_into("<4sI", content, 0, b"MDMP", 0xA793)
                 struct.pack_into("<II", content, 8, 1, 32)
                 struct.pack_into("<III", content, 32, 6, 168, 44)
@@ -69,7 +72,6 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                 struct.pack_into("<Q", content, 68, 0xABC)
                 struct.pack_into("<I", content, 76, 2)
                 struct.pack_into("<QQ", content, 84, 0, 0x1234)
-                size = 1232 if architecture == "x64" else 716
                 struct.pack_into("<II", content, 204, size, 220)
                 flag_offset, flags = (48, 0x100003) if architecture == "x64" else (0, 0x10003)
                 struct.pack_into("<I", content, 220 + flag_offset, flags)
@@ -81,7 +83,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                     struct.pack_into(width, content, 220 + offset, value)
                 dump = pathlib.Path(directory) / "synthetic.dmp"
                 dump.write_bytes(content)
-                self.assertEqual(exception_from_dump(dump), {
+                self.assertEqual(exception_from_dump(dump, architecture), {
                     "thread": 42, "code": 0xC0000005, "address": 0xABC,
                     "parameters": 2, "operation": 0, "accessed": 0x1234,
                     "pc": 0xABC, "sp": 0xDEF, "fp": 0xAAA})
@@ -89,16 +91,126 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                     struct.pack_into("<II", content, 204, unsupported_size, 220)
                     dump.write_bytes(content)
                     with self.assertRaisesRegex(ValueError, "context"):
-                        exception_from_dump(dump)
+                        exception_from_dump(dump, architecture)
                 struct.pack_into("<II", content, 204, size, 220)
                 struct.pack_into("<I", content, 220 + flag_offset, 0x200003)
                 dump.write_bytes(content)
                 with self.assertRaisesRegex(ValueError, "context"):
-                    exception_from_dump(dump)
+                    exception_from_dump(dump, architecture)
                 struct.pack_into("<II", content, 204, 16, len(content) - 10)
                 dump.write_bytes(content)
                 with self.assertRaisesRegex(ValueError, "context"):
-                    exception_from_dump(dump)
+                    exception_from_dump(dump, architecture)
+
+    def write_pe(self, path, architecture="x64"):
+        machine, magic = (0x8664, 0x20B) if architecture == "x64" else (0x14C, 0x10B)
+        content = bytearray(256)
+        content[:2] = b"MZ"
+        struct.pack_into("<I", content, 60, 128)
+        content[128:132] = b"PE\0\0"
+        struct.pack_into("<HH", content, 132, machine, 1)
+        struct.pack_into("<H", content, 148, 2)
+        struct.pack_into("<H", content, 152, magic)
+        path.write_bytes(content)
+        return content
+
+    def test_process_architecture_comes_from_bounded_pe_machine_and_magic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = pathlib.Path(directory) / "helper.exe"
+            for architecture in ("x86", "x64"):
+                content = self.write_pe(helper, architecture)
+                self.assertEqual(crash_smoke.architecture_from_pe(helper), architecture)
+                mutations = ("short", "dos", "offset", "signature", "machine", "magic")
+                for mutation in mutations:
+                    changed = bytearray(content)
+                    if mutation == "short":
+                        changed = changed[:32]
+                    elif mutation == "dos":
+                        changed[:2] = b"NO"
+                    elif mutation == "offset":
+                        struct.pack_into("<I", changed, 60, 0xFFFFFFFF)
+                    elif mutation == "signature":
+                        changed[128:132] = b"NOPE"
+                    elif mutation == "machine":
+                        struct.pack_into("<H", changed, 132, 0xAA64)
+                    else:
+                        struct.pack_into("<H", changed, 152, 0x10B if architecture == "x64" else 0x20B)
+                    helper.write_bytes(changed)
+                    with self.subTest(architecture=architecture, mutation=mutation):
+                        with self.assertRaisesRegex(ValueError, "PE"):
+                            crash_smoke.architecture_from_pe(helper)
+
+    def test_native_context_requires_control_and_x64_integer_register_flags(self):
+        for architecture, size, flag_offset, flags in (("x86", 716, 0, 0x10000),
+                                                       ("x64", 1232, 48, 0x100001)):
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as directory:
+                content = bytearray(2048)
+                struct.pack_into("<4sI", content, 0, b"MDMP", 0xA793)
+                struct.pack_into("<II", content, 8, 1, 32)
+                struct.pack_into("<III", content, 32, 6, 168, 44)
+                struct.pack_into("<II", content, 204, size, 220)
+                struct.pack_into("<I", content, 220 + flag_offset, flags)
+                dump = pathlib.Path(directory) / "synthetic.dmp"
+                dump.write_bytes(content)
+                with self.assertRaisesRegex(ValueError, "register flags"):
+                    exception_from_dump(dump, architecture)
+
+    def write_extended_context_dump(self, path, architecture):
+        content = bytearray(4096)
+        struct.pack_into("<4sI", content, 0, b"MDMP", 0xA793)
+        struct.pack_into("<II", content, 8, 1, 32)
+        struct.pack_into("<III", content, 32, 6, 168, 44)
+        struct.pack_into("<I4xI", content, 44, 42, 0xC0000005)
+        struct.pack_into("<Q", content, 68, 0xABC)
+        struct.pack_into("<I", content, 76, 2)
+        struct.pack_into("<QQ", content, 84, 0, 0x1234)
+        size, flags, flag_offset = (3263, 0x10004F, 48) if architecture == "x64" else (1147, 0x1007F, 0)
+        struct.pack_into("<II", content, 204, size, 220)
+        struct.pack_into("<I", content, 220 + flag_offset, flags)
+        width, offsets = ("<Q", (248, 152, 160)) if architecture == "x64" else ("<I", (184, 196, 180))
+        for offset, value in zip(offsets, (0xABC, 0xDEF, 0x123)):
+            struct.pack_into(width, content, 220 + offset, value)
+        path.write_bytes(content)
+
+    def test_complete_smoke_checks_extended_context_and_all_disabled_cases(self):
+        for architecture in ("x86", "x64"):
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as directory:
+                helper = pathlib.Path(directory) / "helper.exe"
+                self.write_pe(helper, architecture)
+                cases = []
+
+                def capture(command, **kwargs):
+                    output = pathlib.Path(kwargs["cwd"])
+                    cases.append(output.name)
+                    stderr = ("Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n" * 2)
+                    if output.name == "enabled":
+                        self.write_extended_context_dump(output / "synthetic.dmp", architecture)
+                        stderr += "Test minidump captured 1 error 0\n"
+                    return subprocess.CompletedProcess(command, 67, "", stderr)
+
+                with mock.patch.dict(os.environ, {}, clear=True), \
+                        mock.patch("windows_crash_trace_smoke.subprocess.run", side_effect=capture):
+                    run_smoke(helper)
+                self.assertEqual(cases, ["enabled", "absent", "invalid"])
+
+    def test_extended_context_does_not_weaken_original_exception_or_register_parity(self):
+        valid = "Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n"
+        mutations = (("address abc", "address abd"), ("thread 42", "thread 43"),
+                     ("PC 0xabc", "PC 0xabd"), ("SP 0xdef", "SP 0xdee"), ("FP 0x123", "FP 0x124"))
+        for original, altered in mutations:
+            with self.subTest(field=original), tempfile.TemporaryDirectory() as directory:
+                helper = pathlib.Path(directory) / "helper.exe"
+                self.write_pe(helper)
+
+                def capture(command, **kwargs):
+                    self.write_extended_context_dump(pathlib.Path(kwargs["cwd"]) / "synthetic.dmp", "x64")
+                    stderr = valid.replace(original, altered) + valid + "Test minidump captured 1 error 0\n"
+                    return subprocess.CompletedProcess(command, 67, "", stderr)
+
+                with mock.patch.dict(os.environ, {}, clear=True), \
+                        mock.patch("windows_crash_trace_smoke.subprocess.run", side_effect=capture):
+                    with self.assertRaisesRegex(ValueError, "differs from original exception context"):
+                        run_smoke(helper)
 
     def write_unsupported_context_dump(self, path):
         content = bytearray(1024)
@@ -117,13 +229,14 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             self.write_unsupported_context_dump(path)
             with self.assertRaisesRegex(
                     ValueError, r"size 512 RVA 220 flags0 0x00010003 flags48 0x00100003"):
-                exception_from_dump(path)
+                exception_from_dump(path, "x64")
 
     def test_failed_synthetic_dump_survives_only_in_explicit_existing_parent(self):
         stderr = ("Exception address abc thread 42\n" * 2
                   + "Test minidump captured 1 error 0\n")
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
+            self.write_pe(root / "helper.exe")
             evidence = root / "evidence"
             evidence.mkdir()
             outputs = []
@@ -148,6 +261,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
     def test_failed_smoke_does_not_create_missing_evidence_parent(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
+            self.write_pe(root / "helper.exe")
             missing = root / "missing"
 
             def capture(command, **kwargs):
