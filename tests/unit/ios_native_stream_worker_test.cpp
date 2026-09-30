@@ -1877,7 +1877,19 @@ TEST_CASE( "native synchronous startup bursts drain before ready without losing 
     }
     std::atomic_bool startReturned{ false };
     std::atomic_bool readyBeforeStartReturned{ false };
+    std::mutex drainMutex;
+    std::condition_variable drainChanged;
+    bool drainRequested = false;
     auto callbacks = observed.callbacks();
+    const auto observeBytes = callbacks.bytesAvailable;
+    callbacks.bytesAvailable = [ & ]( Generation generation ) {
+        observeBytes( generation );
+        {
+            std::lock_guard<std::mutex> lock( drainMutex );
+            drainRequested = true;
+        }
+        drainChanged.notify_all();
+    };
     const auto observeReady = callbacks.ready;
     callbacks.ready = [ & ]( Generation generation ) {
         readyBeforeStartReturned = !startReturned.load();
@@ -1887,7 +1899,11 @@ TEST_CASE( "native synchronous startup bursts drain before ready without losing 
         for ( std::size_t index = 0u; index < recordCount; ++index ) {
             state.emitSyslog( std::to_string( index ) + '\0' );
         }
-        startReturned = true;
+        {
+            std::lock_guard<std::mutex> lock( drainMutex );
+            startReturned = true;
+        }
+        drainChanged.notify_all();
     };
     IosNativeStreamWorker worker( makeApi(), executor.executor(), options, callbacks );
     REQUIRE( worker.start() );
@@ -1899,13 +1915,24 @@ TEST_CASE( "native synchronous startup bursts drain before ready without losing 
     const bool waitedBeforeReady = worker.waitingProducerCount() == 1u && !startReturned.load();
     std::string actual;
     std::size_t chunks = 0u;
-    const bool completed = waitForNativeCondition( [ & ] {
+    // Await latched producer notifications instead of competing for the queue
+    // mutex through empty drain polls. The existing deadline remains a watchdog.
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    bool completed = false;
+    while ( !completed ) {
+        std::unique_lock<std::mutex> lock( drainMutex );
+        if ( !drainChanged.wait_until( lock, deadline,
+                                      [ & ] { return drainRequested || startReturned.load(); } ) ) {
+            break;
+        }
+        drainRequested = false;
+        completed = startReturned.load();
+        lock.unlock();
         if ( const auto batch = worker.drain() ) {
             actual.append( batch->bytes.begin(), batch->bytes.end() );
             chunks += batch->sourceChunks;
         }
-        return startReturned.load();
-    } );
+    }
     if ( !completed ) {
         worker.shutdown();
     }

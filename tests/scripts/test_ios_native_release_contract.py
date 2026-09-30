@@ -470,6 +470,19 @@ class IosNativeReleaseContractTest(unittest.TestCase):
             )
             yield exported_symbols
 
+    def test_startup_burst_consumer_waits_on_notifications_without_drain_polling(self):
+        source = (ROOT / "tests/unit/ios_native_stream_worker_test.cpp").read_text()
+        startup = source.split('TEST_CASE( "native synchronous startup bursts', 1)[1].split(
+            'TEST_CASE( "native terminal paths', 1)[0]
+        self.assertIn("std::condition_variable drainChanged", startup)
+        self.assertIn("callbacks.bytesAvailable =", startup)
+        self.assertLess(startup.index("callbacks.bytesAvailable ="), startup.index("worker.start()"))
+        self.assertIn("drainChanged.wait_until", startup)
+        self.assertIn("drainRequested || startReturned.load()", startup)
+        self.assertGreaterEqual(startup.count("drainChanged.notify_all()"), 2)
+        self.assertIn("std::chrono::steady_clock::now() + 2s", startup)
+        self.assertNotIn("const bool completed = waitForNativeCondition", startup)
+
     def test_catalog_dispatch_retains_its_executor_through_service_shutdown(self):
         source = required_text(IOS_LIVE_SERVICES)
         self.assertIn(

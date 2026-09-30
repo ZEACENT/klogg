@@ -1,11 +1,14 @@
 """Windows search failures retain diagnostics without altering test outcomes."""
 
+import os
 import pathlib
 import struct
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
-from windows_crash_trace_smoke import exception_from_dump
+from windows_crash_trace_smoke import exception_from_dump, run_smoke
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -96,6 +99,69 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                 dump.write_bytes(content)
                 with self.assertRaisesRegex(ValueError, "context"):
                     exception_from_dump(dump)
+
+    def write_unsupported_context_dump(self, path):
+        content = bytearray(1024)
+        struct.pack_into("<4sI", content, 0, b"MDMP", 0xA793)
+        struct.pack_into("<II", content, 8, 1, 32)
+        struct.pack_into("<III", content, 32, 6, 168, 44)
+        struct.pack_into("<II", content, 204, 512, 220)
+        struct.pack_into("<I", content, 220, 0x10003)
+        struct.pack_into("<I", content, 268, 0x100003)
+        path.write_bytes(content)
+        return bytes(content)
+
+    def test_unsupported_context_reports_actual_size_rva_and_candidate_flags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "synthetic.dmp"
+            self.write_unsupported_context_dump(path)
+            with self.assertRaisesRegex(
+                    ValueError, r"size 512 RVA 220 flags0 0x00010003 flags48 0x00100003"):
+                exception_from_dump(path)
+
+    def test_failed_synthetic_dump_survives_only_in_explicit_existing_parent(self):
+        stderr = ("Exception address abc thread 42\n" * 2
+                  + "Test minidump captured 1 error 0\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            outputs = []
+            expected = []
+
+            def capture(command, **kwargs):
+                output = pathlib.Path(kwargs["cwd"])
+                outputs.append(output)
+                expected.append(self.write_unsupported_context_dump(output / "synthetic.dmp"))
+                return subprocess.CompletedProcess(command, 67, "", stderr)
+
+            with mock.patch.dict(os.environ, {"KLOGG_TEST_MINIDUMP_DIR": str(evidence)}, clear=True), \
+                    mock.patch("windows_crash_trace_smoke.subprocess.run", side_effect=capture):
+                with self.assertRaisesRegex(ValueError, "context layout unsupported"):
+                    run_smoke(root / "helper.exe")
+            self.assertFalse(outputs[0].exists())
+            retained = list(evidence.glob("windows-crash-smoke-*"))
+            self.assertEqual(len(retained), 1)
+            self.assertEqual((retained[0] / "synthetic.dmp").read_bytes(), expected[0])
+            self.assertEqual((retained[0] / "helper-stderr.txt").read_text(), stderr)
+
+    def test_failed_smoke_does_not_create_missing_evidence_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            missing = root / "missing"
+
+            def capture(command, **kwargs):
+                self.write_unsupported_context_dump(pathlib.Path(kwargs["cwd"]) / "synthetic.dmp")
+                return subprocess.CompletedProcess(
+                    command, 67, "", "Exception address abc thread 42\n" * 2
+                    + "Test minidump captured 1 error 0\n")
+
+            for environment in ({}, {"KLOGG_TEST_MINIDUMP_DIR": str(missing)}):
+                with mock.patch.dict(os.environ, environment, clear=True), \
+                        mock.patch("windows_crash_trace_smoke.subprocess.run", side_effect=capture):
+                    with self.assertRaisesRegex(ValueError, "context layout unsupported"):
+                        run_smoke(root / "helper.exe")
+                self.assertFalse(missing.exists())
 
     def test_windows_dump_probe_runs_in_disposable_process(self):
         helpers = (ROOT / "tests/helpers/CMakeLists.txt").read_text()
