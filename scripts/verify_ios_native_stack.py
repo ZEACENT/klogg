@@ -12,6 +12,13 @@ import re
 import subprocess
 import sys
 
+from source_publication_identity import (
+    SourcePublicationIdentityError,
+    normalize_base_url,
+    published_source_name,
+    validate_version,
+)
+
 
 class VerificationError(RuntimeError):
     pass
@@ -384,6 +391,63 @@ def bound_asset(base: pathlib.Path, record: object, label: str) -> dict:
     return {"path": relative, "sha256": expected}
 
 
+def verify_overlay(
+    assets_root: pathlib.Path, source: dict, source_set_hash: str
+) -> str:
+    overlay = read_json(assets_root / "ios-native-overlay-receipt.json", "iOS native overlay receipt")
+    if (
+        not has_exact_schema(overlay, 1)
+        or set(overlay) != {
+            "schema_version", "receipt_kind", "component", "version", "base_url",
+            "source_set_receipt_sha256", "assets", "distribution",
+        }
+        or overlay.get("receipt_kind") != "component-source-overlay"
+        or overlay.get("component") != "ios-native"
+        or overlay.get("source_set_receipt_sha256") != source_set_hash
+        or overlay.get("distribution") != {"package_required": True, "release_required": True}
+    ):
+        raise VerificationError("invalid or wrong-core iOS native overlay receipt")
+    try:
+        version = validate_version(overlay.get("version"))
+        base_url = normalize_base_url(overlay.get("base_url"))
+        archive = source["archive"]
+        archive_hash = archive["sha256"]
+        if re.fullmatch(r"[0-9a-f]{64}", archive_hash) is None:
+            raise VerificationError("invalid iOS native overlay source archive hash")
+        published = published_source_name(version, "ios-native", archive_hash)
+    except (SourcePublicationIdentityError, TypeError, KeyError, AttributeError) as error:
+        raise VerificationError(f"invalid iOS native overlay publication identity: {error}") from error
+    if base_url != overlay["base_url"]:
+        raise VerificationError("iOS native overlay URL is not normalized")
+    assets = overlay.get("assets")
+    expected = {
+        "source-offer": "ios-native-source-offer.txt",
+        "replacement-guide": "ios-native-lgpl-replacement.txt",
+    }
+    if (
+        not isinstance(assets, list)
+        or len(assets) != len(expected)
+        or any(not isinstance(item, dict) or set(item) != {"kind", "file_name", "sha256"}
+               for item in assets)
+        or {item["kind"]: item["file_name"] for item in assets} != expected
+    ):
+        raise VerificationError("iOS native overlay asset coverage mismatch")
+    for item in assets:
+        bound_asset(
+            assets_root, {"path": item["file_name"], "sha256": item["sha256"]},
+            f"iOS native overlay asset {item['kind']}",
+        )
+    offer = (assets_root / expected["source-offer"]).read_text(encoding="utf-8")
+    guide = (assets_root / expected["replacement-guide"]).read_text(encoding="utf-8")
+    if any(marker not in offer for marker in (
+        f"Published archive: {published}\n", f"SHA-256: {archive_hash}\n",
+        f"Versioned releases page: {base_url}/releases\n",
+        f"Rolling continuous release page: {base_url}/releases/tag/continuous\n",
+    )) or f"from {published} and replace" not in guide:
+        raise VerificationError("iOS native overlay publication identity does not match its assets")
+    return sha256(assets_root / "ios-native-overlay-receipt.json")
+
+
 def verify_legal_assets(
     lock_path: pathlib.Path,
     architecture: str,
@@ -393,6 +457,7 @@ def verify_legal_assets(
     *,
     asset_scope: str | None = None,
     source_assets_root: pathlib.Path | None = None,
+    build_receipt_path: pathlib.Path | None = None,
 ) -> dict:
     lock_hash = sha256(lock_path)
     source = read_json(source_receipt_path, "iOS native source-set receipt")
@@ -448,11 +513,26 @@ def verify_legal_assets(
             {"path": item.get("file_name"), "sha256": item.get("sha256")},
             f"iOS native package support asset {item['kind']}",
         )
-    required_support = {"source-offer", "replacement-guide", "notices"}
-    if not required_support.issubset(seen_support) or not any(
-        kind.startswith("license:") for kind in seen_support
+    versioned_support = {"source-offer", "replacement-guide"}
+    legacy_layout = versioned_support.issubset(seen_support)
+    if (
+        not {"notices"}.issubset(seen_support)
+        or not any(kind.startswith("license:") for kind in seen_support)
+        or (seen_support & versioned_support and not legacy_layout)
     ):
         raise VerificationError("iOS native source-set package support coverage is incomplete")
+    source_set_hash = sha256(source_receipt_path)
+    overlay_hash = None
+    if not legacy_layout:
+        overlay_hash = verify_overlay(assets_root, source, source_set_hash)
+        if legal.get("source_set_receipt_sha256") != source_set_hash:
+            raise VerificationError("iOS native legal receipt source-set binding mismatch")
+        if build_receipt_path is not None and (
+            legal.get("build_receipt_sha256") != sha256(build_receipt_path)
+        ):
+            raise VerificationError("iOS native legal receipt build binding mismatch")
+    elif legal.get("source_set_receipt_sha256") is not None:
+        raise VerificationError("iOS native legal receipt has mixed legacy/core bindings")
 
     archive = source.get("archive")
     if not isinstance(archive, dict):
@@ -475,7 +555,8 @@ def verify_legal_assets(
             "corresponding source",
         )
     bound_asset(legal_receipt_path.parent, legal.get("notice"), "native notice")
-    bound_asset(legal_receipt_path.parent, legal.get("replacement_guide"), "LGPL replacement guide")
+    if legacy_layout:
+        bound_asset(legal_receipt_path.parent, legal.get("replacement_guide"), "LGPL replacement guide")
     license_files = legal.get("license_files")
     if not isinstance(license_files, list) or not license_files:
         raise VerificationError("legal receipt has no license files")
@@ -486,10 +567,10 @@ def verify_legal_assets(
         raise VerificationError("explicit SBOM path does not match the legal receipt")
     if sbom.get("spdxVersion") != "SPDX-2.3":
         raise VerificationError("unsupported or missing SPDX version")
-    source_set_hash = sha256(source_receipt_path)
     return {
         "source_receipt_sha256": source_set_hash,
         "source_set_receipt_sha256": source_set_hash,
+        **({"overlay_receipt_sha256": overlay_hash} if overlay_hash is not None else {}),
         "legal_receipt_sha256": sha256(legal_receipt_path),
         "sbom_sha256": sha256(sbom_path),
     }
@@ -514,6 +595,8 @@ def verify_package_receipt(
     for key, value in legal_hashes.items():
         if package.get(key) != value:
             raise VerificationError(f"package receipt {key} mismatch")
+    if "overlay_receipt_sha256" not in legal_hashes and "overlay_receipt_sha256" in package:
+        raise VerificationError("package receipt contains an unverified iOS native overlay")
     expected = {item["name"]: item["sha256"] for item in evidence}
     actual = {
         item.get("name"): item.get("sha256")
@@ -605,13 +688,10 @@ def main() -> int:
                 args.sbom,
                 asset_scope=args.asset_scope,
                 source_assets_root=args.source_assets_root,
+                build_receipt_path=receipt_path,
             )
             expected_source_set_hash = legal_hashes["source_set_receipt_sha256"]
             bound_source_set_hash = receipt.get("source_set_receipt_sha256")
-            if args.asset_scope is not None and bound_source_set_hash != expected_source_set_hash:
-                raise VerificationError(
-                    "iOS native build receipt source-set receipt sha256 mismatch"
-                )
             if bound_source_set_hash not in (None, expected_source_set_hash):
                 raise VerificationError(
                     "iOS native build receipt has a stale source-set receipt binding"
@@ -630,9 +710,7 @@ def main() -> int:
                 "stack_root": str(args.stack_root),
                 "application": application,
                 **legal_hashes,
-                "source_set_receipt_sha256": legal_hashes.get(
-                    "source_set_receipt_sha256"
-                ),
+                "source_set_receipt_sha256": legal_hashes["source_set_receipt_sha256"],
                 "dylibs": evidence,
                 "status": "passed",
             }

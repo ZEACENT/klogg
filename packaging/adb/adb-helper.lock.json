@@ -506,24 +506,34 @@
       "msys2_environment": "UCRT64"
     },
     "macos-x86_64": {
-      "identifier": "klogg-adb-macos-x86_64-appleclang-17",
+      "identifier": "klogg-adb-macos-x86_64-appleclang-21.0.0",
       "compiler": "appleclang",
-      "compiler_version": "17.0.0",
+      "compiler_version": "21.0.0",
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
       "ninja_version": "1.12.1",
-      "runner_image": "macos-15-intel",
-      "hosted_image_family": "macos15"
+      "runner_image": "macos-26-intel",
+      "hosted_image_family": "macos26",
+      "developer_dir": "/Applications/Xcode_26.6.app/Contents/Developer",
+      "xcode": ["Xcode 26.6", "Build version 17F113"],
+      "sdk_version": "26.5",
+      "sdk_path": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+      "clang_identity": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
     },
     "macos-arm64": {
-      "identifier": "klogg-adb-macos-arm64-appleclang-17",
+      "identifier": "klogg-adb-macos-arm64-appleclang-21.0.0",
       "compiler": "appleclang",
-      "compiler_version": "17.0.0",
+      "compiler_version": "21.0.0",
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
       "ninja_version": "1.12.1",
-      "runner_image": "macos-15",
-      "hosted_image_family": "macos15"
+      "runner_image": "macos-26",
+      "hosted_image_family": "macos26",
+      "developer_dir": "/Applications/Xcode_26.6.app/Contents/Developer",
+      "xcode": ["Xcode 26.6", "Build version 17F113"],
+      "sdk_version": "26.5",
+      "sdk_path": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+      "clang_identity": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
     }
   },
   "targets": {
@@ -821,6 +831,7 @@
     {
       "kind": "source-archive",
       "required": true,
+      "ownership": "core",
       "distribution": {
         "package_required": false,
         "release_required": true
@@ -831,6 +842,7 @@
     {
       "kind": "licenses",
       "required": true,
+      "ownership": "core",
       "distribution": {
         "package_required": true,
         "release_required": true
@@ -841,6 +853,7 @@
     {
       "kind": "notices",
       "required": true,
+      "ownership": "core",
       "distribution": {
         "package_required": true,
         "release_required": true
@@ -851,6 +864,7 @@
     {
       "kind": "sbom",
       "required": true,
+      "ownership": "core",
       "distribution": {
         "package_required": true,
         "release_required": true
@@ -861,6 +875,7 @@
     {
       "kind": "source-offer",
       "required": true,
+      "ownership": "overlay",
       "distribution": {
         "package_required": true,
         "release_required": true
@@ -871,6 +886,7 @@
     {
       "kind": "source-manifest",
       "required": true,
+      "ownership": "core",
       "distribution": {
         "package_required": true,
         "release_required": true
@@ -881,12 +897,24 @@
     {
       "kind": "source-set-receipt",
       "required": true,
+      "ownership": "core",
       "distribution": {
         "package_required": true,
         "release_required": true
       },
       "file_name": "adb-helper-source-set-receipt.json",
       "sha256_file": "adb-helper-source-set-receipt.json.sha256"
+    },
+    {
+      "kind": "overlay-receipt",
+      "required": true,
+      "ownership": "overlay",
+      "distribution": {
+        "package_required": true,
+        "release_required": true
+      },
+      "file_name": "adb-helper-overlay-receipt.json",
+      "sha256_file": "adb-helper-overlay-receipt.json.sha256"
     }
   ],
   "package_targets": {

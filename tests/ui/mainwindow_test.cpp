@@ -43,6 +43,8 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QProgressDialog>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -906,6 +908,343 @@ TEST_CASE( "Close All can retry after a file close confirmation is declined",
     CHECK( declined );
     CHECK( retainedTabs == 1 );
     CHECK( closedOnRetry );
+}
+
+TEST_CASE( "Tab context batch closes live and file tabs safely",
+           "[ui][tab-batch][live-close]" )
+{
+    constexpr auto ChildEnvironment = "KLOGG_CLOSE_LEFT_REPRO_CHILD";
+    if ( !qEnvironmentVariableIsSet( ChildEnvironment ) ) {
+        for ( const auto& mode : { QStringLiteral( "confirm" ),
+                                  QStringLiteral( "no-confirm" ),
+                                  QStringLiteral( "cancel" ),
+                                  QStringLiteral( "shutdown" ),
+                                  QStringLiteral( "unrelated" ),
+                                  QStringLiteral( "others" ),
+                                  QStringLiteral( "right" ),
+                                  QStringLiteral( "all" ) } ) {
+            QTemporaryDir childTempDirectory(
+                QDir( QCoreApplication::applicationDirPath() )
+                    .filePath( QStringLiteral( "test_tmp/close-left-XXXXXX" ) ) );
+            REQUIRE( childTempDirectory.isValid() );
+            QProcess child;
+            auto environment = QProcessEnvironment::systemEnvironment();
+            environment.insert( QString::fromLatin1( ChildEnvironment ), mode );
+            environment.insert( QStringLiteral( "KLOGG_UI_TEST_CHILD_TEMP_DIR" ),
+                                childTempDirectory.path() );
+            environment.insert( QStringLiteral( "KLOGG_PORTABLE_CONFIG_DIR" ),
+                                childTempDirectory.path() );
+            child.setProcessEnvironment( environment );
+            child.start( QCoreApplication::applicationFilePath(),
+                         { QStringLiteral( "-platform" ), QStringLiteral( "offscreen" ),
+                           QStringLiteral( "Tab context batch closes live and file tabs safely" ) } );
+            REQUIRE( child.waitForStarted( 10000 ) );
+            const bool finished = child.waitForFinished( 45000 );
+            if ( !finished ) {
+                child.kill();
+                child.waitForFinished( 5000 );
+            }
+            const auto childError = child.readAllStandardError();
+            const auto childOutput = child.readAllStandardOutput();
+            CAPTURE( mode.toStdString() );
+            INFO( childError.constData() );
+            INFO( childOutput.constData() );
+            CHECK( finished );
+            if ( finished ) {
+                CHECK( child.exitStatus() == QProcess::NormalExit );
+                CHECK( child.exitCode() == 0 );
+            }
+        }
+        return;
+    }
+    const auto mode = qEnvironmentVariable( ChildEnvironment );
+    const bool confirm = mode != QLatin1String( "no-confirm" )
+                         && mode != QLatin1String( "shutdown" );
+    const bool cancel = mode == QLatin1String( "cancel" );
+    const bool shutdown = mode == QLatin1String( "shutdown" );
+    const bool closeRight = mode == QLatin1String( "right" );
+    const bool closeAllTabs = mode == QLatin1String( "all" );
+
+    QTemporaryDir files;
+    REQUIRE( files.isValid() );
+    const auto makeFile = [ &files ]( const QString& name ) {
+        const auto path = files.filePath( name );
+        QFile file( path );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "line\n" ) == 5 );
+        return path;
+    };
+    const auto leftFile = makeFile( QStringLiteral( "left.log" ) );
+    const auto retainedFile = makeFile( QStringLiteral( "retained.log" ) );
+
+    MenuLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    auto& sessionInfo = SessionInfo::getSynced();
+    SessionInfoRestoreGuard restoreGuard{ sessionInfo };
+    const auto windowId = QStringLiteral( "close-left-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto existingWindows = sessionInfo.windows();
+    sessionInfo.add( windowId );
+    for ( const auto& id : existingWindows ) {
+        sessionInfo.remove( id );
+    }
+    AdbLogcatSessionData liveData{
+        QStringLiteral( "unused-test-backend" ), QStringLiteral( "close-left-device" ),
+        QStringLiteral( "Close left device" ), QString{},
+        QUuid::createUuid().toString( QUuid::WithoutBraces ), QString{},
+        LiveLogSourceType::AdbLogcat,
+    };
+    liveData.autoReconnectEnabled = true;
+    liveData.adbBackend = AdbTransportBackend::SmartSocket;
+    sessionInfo.setOpenFiles(
+        windowId,
+        { SessionInfo::OpenFile( liveData.documentId(), 0, {}, liveData.persistedSourceType(),
+                                 liveData.displayName(),
+                                 klogg::livelog::serializeSpec(
+                                     klogg::livelog::sessionSpecFromSessionData( liveData ) ) ),
+          SessionInfo::OpenFile( leftFile, 0, {}, {}, QFileInfo( leftFile ).fileName(), {} ),
+          SessionInfo::OpenFile( retainedFile, 0, {}, {}, QFileInfo( retainedFile ).fileName(), {} ) } );
+    sessionInfo.setCurrentFileIndex( windowId, 2 );
+    sessionInfo.save();
+
+    auto mainWindow = std::make_unique<MainWindow>( WindowSession{ appSession, windowId, 0 } );
+    mainWindow->resize( 900, 600 );
+    mainWindow->show();
+    mainWindow->reloadSession();
+    auto* tabs = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 3; } ) );
+    auto* liveTab = qobject_cast<CrawlerWidget*>( tabs->widget( 0 ) );
+    REQUIRE( liveTab != nullptr );
+    REQUIRE( waitUiState( [ & ] { return liveTab->isFirstLoadDone(); } ) );
+    REQUIRE( appSession->getAdbLogcatSource( liveTab )->reconnectSource() );
+    REQUIRE( factory.created.size() == 1u );
+    auto* transport = factory.created.front();
+    transport->publishConnected();
+    transport->deferStop = true;
+    if ( closeRight ) {
+        auto* tabBar = tabs->findChild<QTabBar*>();
+        REQUIRE( tabBar != nullptr );
+        tabBar->moveTab( 0, 1 );
+    }
+    const int targetIndex = closeRight ? 0 : 2;
+    auto* retainedTab = tabs->widget( targetIndex );
+    tabs->setCurrentIndex( targetIndex );
+
+    auto& config = Configuration::get();
+    const auto previousConfirm = config.confirmTabClose();
+    const auto previousMinimizeToTray = config.minimizeToTray();
+    config.setConfirmTabClose( confirm );
+    config.setMinimizeToTray( false );
+    int confirmations = 0;
+    const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+        ++confirmations;
+        if ( cancel ) {
+            return static_cast<int>( QDialogButtonBox::No );
+        }
+        if ( confirmations == 1 ) {
+            QTimer::singleShot( 0, Qt::PreciseTimer, tabs, [ transport ] {
+                if ( transport->pendingStoppedGeneration ) {
+                    transport->publishStopped();
+                }
+            } );
+        }
+        else if ( mode == QLatin1String( "unrelated" ) && tabs->indexOf( liveTab ) >= 0 ) {
+            return static_cast<int>( QDialogButtonBox::No );
+        }
+        else if ( tabs->indexOf( liveTab ) >= 0 ) {
+            REQUIRE( waitUiState( [ & ] { return tabs->indexOf( liveTab ) < 0; } ) );
+        }
+        return static_cast<int>( QDialogButtonBox::Yes );
+    } };
+
+    const auto actionText = closeAllTabs ? QStringLiteral( "Close All" )
+                            : closeRight  ? QStringLiteral( "Close to the Right" )
+                            : mode == QLatin1String( "others" )
+                                ? QStringLiteral( "Close Others" )
+                                : QStringLiteral( "Close to the Left" );
+    QTimer::singleShot( 0, Qt::PreciseTimer, tabs, [ & ] {
+        auto* menu = qobject_cast<QMenu*>( QApplication::activePopupWidget() );
+        REQUIRE( menu != nullptr );
+        for ( auto* action : menu->actions() ) {
+            if ( action->text() == actionText ) {
+                action->trigger();
+                if ( mode == QLatin1String( "unrelated" ) ) {
+                    Q_EMIT tabs->tabCloseRequested( tabs->indexOf( retainedTab ) );
+                }
+                if ( shutdown ) {
+                    mainWindow->close();
+                }
+                if ( !confirm && transport->pendingStoppedGeneration ) {
+                    transport->publishStopped();
+                }
+                menu->close();
+                return;
+            }
+        }
+        FAIL( "Tab close action is missing" );
+    } );
+    REQUIRE( QMetaObject::invokeMethod(
+        tabs, "showContextMenu", Qt::DirectConnection, Q_ARG( int, targetIndex ),
+        Q_ARG( QPoint, tabs->mapToGlobal( QPoint( 20, 20 ) ) ) ) );
+    if ( cancel ) {
+        CHECK( tabs->count() == 3 );
+        CHECK( appSession->openedDocuments().size() == 3u );
+        CHECK( confirmations == 1 );
+    }
+    else if ( shutdown ) {
+        REQUIRE( waitUiState( [ & ] {
+            return tabs->count() == 0 && !mainWindow->isVisible();
+        } ) );
+        CHECK( confirmations == 0 );
+    }
+    else if ( closeAllTabs ) {
+        REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+        CHECK( appSession->openedDocuments().empty() );
+        CHECK( confirmations == 3 );
+    }
+    else {
+        REQUIRE( waitUiState( [ & ] { return tabs->count() == 1; } ) );
+        CHECK( tabs->widget( 0 ) == retainedTab );
+        CHECK( appSession->openedDocuments().size() == 1u );
+        CHECK( confirmations == ( confirm ? 2 : 0 ) );
+    }
+    config.setConfirmTabClose( false );
+    if ( cancel ) {
+        transport->deferStop = false;
+        MainWindowLiveSaveTestAccess::closeAllByUser( *mainWindow );
+        REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+    }
+    if ( !shutdown ) {
+        mainWindow->close();
+        REQUIRE( waitUiState( [ & ] {
+            return tabs->count() == 0 && !mainWindow->isVisible();
+        } ) );
+    }
+    config.setConfirmTabClose( previousConfirm );
+    config.setMinimizeToTray( previousMinimizeToTray );
+}
+
+TEST_CASE( "Close All in Group stops when a tab close is declined", "[ui][tabgroup][tab-batch]" )
+{
+    TabGroupCleanupGuard groupCleanup;
+    QTemporaryDir files;
+    REQUIRE( files.isValid() );
+    const auto firstPath = files.filePath( QStringLiteral( "group-first.log" ) );
+    const auto secondPath = files.filePath( QStringLiteral( "group-second.log" ) );
+    for ( const auto& path : { firstPath, secondPath } ) {
+        QFile file( path );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "line\n" ) == 5 );
+    }
+
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "GroupCloseCancel", 0 } };
+    window.show();
+    window.loadInitialFile( firstPath, false );
+    window.loadInitialFile( secondPath, false );
+    auto* tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 2; } ) );
+    auto* firstCrawler = qobject_cast<CrawlerWidget*>( tabs->widget( 0 ) );
+    auto* secondCrawler = qobject_cast<CrawlerWidget*>( tabs->widget( 1 ) );
+    REQUIRE( firstCrawler != nullptr );
+    REQUIRE( secondCrawler != nullptr );
+    REQUIRE( waitUiState( [ & ] {
+        return firstCrawler->isFirstLoadDone() && secondCrawler->isFirstLoadDone();
+    } ) );
+
+    auto& groups = TabGroupManager::get();
+    groups.createGroup( QStringLiteral( "Close group" ), QColor( "#D96C1A" ) );
+    const auto groupId = groups.groups().back().id;
+    groups.addTabToGroup( groupId, firstPath );
+    groups.addTabToGroup( groupId, secondPath );
+    groups.save();
+
+    auto& config = Configuration::get();
+    const auto previousConfirm = config.confirmTabClose();
+    config.setConfirmTabClose( true );
+    int confirmations = 0;
+    const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+        return static_cast<int>( ++confirmations == 1 ? QDialogButtonBox::No
+                                                       : QDialogButtonBox::Yes );
+    } };
+    bool triggered = false;
+    QTimer::singleShot( 0, Qt::PreciseTimer, tabs, [ & ] {
+        auto* menu = qobject_cast<QMenu*>( QApplication::activePopupWidget() );
+        REQUIRE( menu != nullptr );
+        for ( auto* parentAction : menu->actions() ) {
+            if ( auto* submenu = parentAction->menu() ) {
+                for ( auto* action : submenu->actions() ) {
+                    if ( action->text() == QStringLiteral( "Close All in Group" ) ) {
+                        triggered = true;
+                        action->trigger();
+                        menu->close();
+                        return;
+                    }
+                }
+            }
+        }
+        FAIL( "Close All in Group action is missing" );
+    } );
+    REQUIRE( QMetaObject::invokeMethod(
+        tabs, "showContextMenu", Qt::DirectConnection, Q_ARG( int, 1 ),
+        Q_ARG( QPoint, tabs->mapToGlobal( QPoint( 20, 20 ) ) ) ) );
+    CHECK( triggered );
+    CHECK( confirmations == 1 );
+    CHECK( tabs->count() == 2 );
+    CHECK( session->openedDocuments().size() == 2u );
+
+    config.setConfirmTabClose( false );
+    MainWindowLiveSaveTestAccess::closeAllByUser( window );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+    config.setConfirmTabClose( previousConfirm );
+}
+
+TEST_CASE( "A folder close confirmation cannot retire another tab after reentry",
+           "[ui][folder][tab-batch]" )
+{
+    QTemporaryDir folder;
+    REQUIRE( folder.isValid() );
+    const auto filePath = folder.filePath( QStringLiteral( "remaining.log" ) );
+    QFile file( filePath );
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    REQUIRE( file.write( "line\n" ) == 5 );
+    file.close();
+
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "ReentrantFolderClose", 0 } };
+    window.show();
+    window.openFolderByPath( folder.path() );
+    window.loadInitialFile( filePath, false );
+    auto* tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 2; } ) );
+    auto* remainingTab = tabs->widget( 1 );
+    REQUIRE( qobject_cast<FolderCrawlerWidget*>( tabs->widget( 0 ) ) != nullptr );
+
+    auto& config = Configuration::get();
+    const auto previousConfirm = config.confirmTabClose();
+    config.setConfirmTabClose( true );
+    int confirmations = 0;
+    const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+        if ( ++confirmations == 1 ) {
+            config.setConfirmTabClose( false );
+            Q_EMIT tabs->tabCloseRequested( 0 );
+            config.setConfirmTabClose( true );
+        }
+        return static_cast<int>( QDialogButtonBox::Yes );
+    } };
+    Q_EMIT tabs->tabCloseRequested( 0 );
+    CHECK( confirmations == 1 );
+    CHECK( tabs->count() == 1 );
+    CHECK( tabs->widget( 0 ) == remainingTab );
+    CHECK( session->openedDocuments().size() == 1u );
+
+    config.setConfirmTabClose( false );
+    MainWindowLiveSaveTestAccess::closeAllByUser( window );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+    config.setConfirmTabClose( previousConfirm );
 }
 
 SCENARIO( "Tab group chip shows the full group name", "[ui][tabgroup]" )

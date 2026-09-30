@@ -166,16 +166,16 @@ def unexpected_legacy_owner_references(root: pathlib.Path = ROOT):
         rf"https://github\.com/{re.escape(LEGACY_OWNER)}/klogg/commit/[0-9a-f]+",
         re.IGNORECASE,
     )
-    readme_reference = re.compile(
-        rf"{re.escape(LEGACY_OWNER)}(?:/[A-Za-z0-9_.-]+)?", re.IGNORECASE
-    )
-    readme_history_lines = {
-        f"### Comparing with {LEGACY_OWNER}/klogg",
-        (
-            f"This fork builds on [{LEGACY_OWNER}/klogg]"
-            f"(https://github.com/{LEGACY_OWNER}/klogg) and adds:"
-        ),
-        f"* **[Anton Filimonov](https://github.com/{LEGACY_OWNER})**",
+    markdown_link = re.compile(r"\[[^\]\r\n]*\]\((https://github\.com/[^\s)]+)\)")
+    upstream_url = f"https://github.com/{LEGACY_OWNER}/klogg"
+    documented_links = {
+        "README.md": {upstream_url, f"https://github.com/{LEGACY_OWNER}"},
+        "CONTRIBUTING.md": {upstream_url},
+        "docs/TECHNICAL_DOCUMENTATION.md": {upstream_url},
+        "website/content/_index.md": {upstream_url},
+        "docs/DEPENDENCIES.md": {
+            f"https://github.com/{fork}" for fork in KNOWN_LEGACY_FORKS
+        },
     }
     funding_lines = {
         f"github: {LEGACY_OWNER}",
@@ -196,25 +196,11 @@ def unexpected_legacy_owner_references(root: pathlib.Path = ROOT):
         remainder = line
         if relative == "CHANGELOG.md":
             remainder = commit_url.sub("", remainder)
-        elif relative == "README.md":
-            references = {match.lower() for match in readme_reference.findall(line)}
-            history_references = {
-                LEGACY_OWNER.lower(),
-                f"{LEGACY_OWNER}/klogg".lower(),
-            }
-            dependency_row = (
-                line.startswith("| ")
-                and references.issubset({fork.lower() for fork in KNOWN_LEGACY_FORKS})
-                and any(
-                    f"https://github.com/{fork}" in line and f"`{fork}`" in line
-                    for fork in KNOWN_LEGACY_FORKS
-                )
+        elif relative in documented_links:
+            remainder = markdown_link.sub(
+                lambda match: "" if match[1] in documented_links[relative] else match[0],
+                remainder,
             )
-            history_line = line in readme_history_lines and references.issubset(
-                history_references
-            )
-            if history_line or dependency_row:
-                remainder = readme_reference.sub("", remainder)
         elif relative == "3rdparty/CMakeLists.txt":
             if line.strip() in KNOWN_LEGACY_FORKS:
                 remainder = ""
@@ -284,6 +270,45 @@ class RepositoryInventoryFallbackTest(unittest.TestCase):
             failures,
             [f"future-component/nested.txt:1: unexpected {LEGACY_OWNER} owner"],
         )
+
+    def test_documented_upstream_links_survive_documentation_reorganization(self):
+        root = self.make_root()
+        examples = {
+            "README.md": f"Built on [{LEGACY_OWNER}/klogg](https://github.com/{LEGACY_OWNER}/klogg).",
+            "CONTRIBUTING.md": f"Upstream: [klogg](https://github.com/{LEGACY_OWNER}/klogg).",
+            "docs/TECHNICAL_DOCUMENTATION.md": f"Fork of [klogg](https://github.com/{LEGACY_OWNER}/klogg).",
+            "website/content/_index.md": f"Based on [klogg](https://github.com/{LEGACY_OWNER}/klogg).",
+            "docs/DEPENDENCIES.md": "\n".join(
+                f"| [{fork}](https://github.com/{fork}) | pinned source |"
+                for fork in sorted(KNOWN_LEGACY_FORKS)
+            ),
+        }
+        for relative, content in examples.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content + "\n", encoding="utf-8")
+        with self.unavailable_git():
+            self.assertEqual(unexpected_legacy_owner_references(root), [])
+
+    def test_upstream_link_allowance_does_not_hide_other_legacy_identity(self):
+        cases = (
+            ("docs/DEPENDENCIES.md", f"[download](https://github.com/{LEGACY_OWNER}/klogg/releases)"),
+            ("docs/DEPENDENCIES.md", f"[unknown](https://github.com/{LEGACY_OWNER}/unknown)"),
+            ("docs/DEPENDENCIES.md", f"[maddy](https://github.com/{LEGACY_OWNER}/maddy-extra)"),
+            ("docs/DEPENDENCIES.md", f"[maddy](https://github.com/{LEGACY_OWNER}/maddy"),
+            ("README.md", f"[upstream](https://github.com/{LEGACY_OWNER}/klogg) image={LEGACY_OWNER}/klogg"),
+            ("src/app/main.cpp", f"// [upstream](https://github.com/{LEGACY_OWNER}/klogg)"),
+            ("docs/new-guide.md", f"[upstream](https://github.com/{LEGACY_OWNER}/klogg)"),
+        )
+        for relative, content in cases:
+            with self.subTest(relative=relative, content=content):
+                root = self.make_root()
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content + "\n", encoding="utf-8")
+                with self.unavailable_git():
+                    failures = unexpected_legacy_owner_references(root)
+                self.assertEqual(failures, [f"{relative}:1: {content}"])
 
     def test_gitless_cmake_inventory_uses_the_same_complete_file_set(self):
         root = self.make_root()
@@ -677,8 +702,8 @@ class ApplicationIdentityContractTest(unittest.TestCase):
         self.assertEqual(
             failures,
             [],
-            "legacy owner appears outside CHANGELOG commit links, README upstream/"
-            "dependency/personal references, known matching dependency forks, or FUNDING handles",
+            "legacy owner appears outside CHANGELOG commit links, explicit documentation "
+            "source/author links, known matching dependency forks, or FUNDING handles",
         )
 
     def test_compatibility_identities_and_urls_remain_unchanged(self):

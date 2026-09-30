@@ -19,7 +19,10 @@
 
 #include <catch2/catch.hpp>
 
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QEvent>
+#include <QSignalSpy>
 #include <QTextCodec>
 
 #include <atomic>
@@ -116,6 +119,20 @@ struct LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate> {
         return worker->deferredLiveRequest_->operationId;
     }
 
+    static void setActiveOperation( LogFilteredDataWorker* worker, quint64 generation,
+                                    quint64 operationId )
+    {
+        worker->operationGeneration_.store( generation );
+        worker->operationId_.store( operationId );
+    }
+
+    static void queueTerminalProgress( LogFilteredDataWorker* worker, quint64 generation,
+                                       quint64 operationId )
+    {
+        worker->emitSearchProgressedOnOwnerThread( 2_lcount, 100, 1_lnum, generation,
+                                                   operationId );
+    }
+
   private:
     static SearchRequest makeLiveRequest( quint64 operationId, LineNumber endLine )
     {
@@ -174,4 +191,31 @@ TEST_CASE( "LogFilteredDataWorker deterministically coalesces deferred live endp
     CHECK( WorkerVisitor::deferredLiveEndLine( &worker ) == 50000_lnum );
     CHECK( WorkerVisitor::deferredLiveOperationId( &worker ) == 4 );
     CHECK( worker.performanceCounters().coalescedLiveUpdates == 3 );
+}
+
+TEST_CASE( "LogFilteredDataWorker delivers typed terminal progress on its owner thread" )
+{
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+
+    TestSearchableLogData sourceLogData;
+    LogFilteredDataWorker worker( sourceLogData );
+    worker.shutdownAndWait();
+    WorkerVisitor::setActiveOperation( &worker, 2, 9 );
+
+    QSignalSpy progress{ &worker, &LogFilteredDataWorker::searchProgressed };
+    REQUIRE( progress.isValid() );
+
+    WorkerVisitor::queueTerminalProgress( &worker, 2, 9 );
+    REQUIRE( progress.isEmpty() );
+    QCoreApplication::sendPostedEvents( &worker, QEvent::MetaCall );
+    REQUIRE( progress.size() == 1 );
+    const auto arguments = progress.takeFirst();
+    CHECK( arguments.at( 0 ).value<LinesCount>() == 2_lcount );
+    CHECK( arguments.at( 1 ).toInt() == 100 );
+    CHECK( arguments.at( 2 ).value<LineNumber>() == 1_lnum );
+    CHECK( arguments.at( 3 ).toULongLong() == 2 );
+
+    WorkerVisitor::queueTerminalProgress( &worker, 2, 8 );
+    QCoreApplication::sendPostedEvents( &worker, QEvent::MetaCall );
+    CHECK( progress.isEmpty() );
 }

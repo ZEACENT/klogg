@@ -3,6 +3,7 @@
   "source_sets": {
     "adb-helper": {
       "receipt_file": "adb-helper-source-set-receipt.json",
+      "overlay_receipt_file": "adb-helper-overlay-receipt.json",
       "archive_file": "adb-helper-source-archive.tar.gz",
       "stable_archive_pattern": "klogg-v{version}-adb-helper-source-{sha12}.tar.gz",
       "package_support_assets": [
@@ -15,6 +16,7 @@
     },
     "ios-native": {
       "receipt_file": "ios-native-source-set-receipt.json",
+      "overlay_receipt_file": "ios-native-overlay-receipt.json",
       "archive_file": "ios-native-corresponding-source.tar.gz",
       "stable_archive_pattern": "klogg-v{version}-ios-native-source-{sha12}.tar.gz",
       "package_support_assets": [
@@ -40,9 +42,9 @@
     "continuous_channel": "continuous"
   },
   "release_publication": {
-    "uploaded_asset_count": 23,
+    "uploaded_asset_count": 25,
     "github_generated_asset_count": 2,
-    "visible_asset_count": 25,
+    "visible_asset_count": 27,
     "packages": [
       "klogg-{version}-x64-Qt6-vs-avx2-setup.exe",
       "klogg-{version}-x64-Qt6-vs-avx2-portable.zip",
@@ -71,7 +73,7 @@
     },
     "checksums": {
       "file_name": "SHA256SUMS",
-      "covered_asset_count": 22,
+      "covered_asset_count": 24,
       "format": "sha256sum-binary-v1"
     }
   }

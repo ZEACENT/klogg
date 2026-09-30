@@ -484,10 +484,12 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
             return;
         }
 
-        if ( line.has_value() && mouseEvent->modifiers() & Qt::ControlModifier ) {
-            // Ctrl+click toggles the line's membership in a (possibly
-            // non-contiguous) selection without disturbing the other
-            // selected lines. In the bullet zone it still toggles selection:
+        if ( line.has_value()
+             && mouseEvent->modifiers() & klogg::platform::PrimaryMod ) {
+            // Command+click on macOS and Ctrl+click elsewhere toggle the line's
+            // membership in a (possibly non-contiguous) selection without
+            // disturbing the other selected lines. In the bullet zone it still
+            // toggles selection:
             // marking stays a plain-click gesture. No drag is started, so a
             // subsequent move does not turn this into a range selection.
             if ( *line < logData_->getNbLine() ) {

@@ -12,6 +12,12 @@ import pathlib
 import re
 import stat
 
+from source_publication_identity import (
+    SourcePublicationIdentityError,
+    normalize_base_url,
+    published_source_name,
+    validate_version,
+)
 from verify_adb_helper_envelope import EnvelopeError, verify_checksum_file
 
 
@@ -242,6 +248,7 @@ def validate_source_set_receipt(
         for asset in lock.get("release_assets", [])
         if isinstance(asset, dict)
         and asset.get("kind") != "source-set-receipt"
+        and asset.get("ownership") != "overlay"
         and isinstance(asset.get("distribution"), dict)
         and asset["distribution"].get("package_required") is True
     }
@@ -294,6 +301,135 @@ def validate_source_set_receipt(
         if sha256(archive_path) != archive["sha256"]:
             raise VerificationError("ADB corresponding source archive sha256 mismatch")
     return actual_receipt_hash
+
+
+def validate_overlay_receipt(
+    lock: dict,
+    source_assets_root: pathlib.Path,
+    scope: str | None,
+    source_set_receipt_hash: str | None,
+) -> None:
+    """Verify the versioned overlay assets through the packaged overlay receipt.
+
+    Overlay assets embed the application version/publication URLs, so the
+    binary build contract cannot bind them. The packaged overlay receipt binds
+    them to the version and to the (core-anchored) source-set receipt instead.
+    """
+    overlay_assets = [
+        asset
+        for asset in lock.get("release_assets", [])
+        if isinstance(asset, dict)
+        and asset.get("ownership") == "overlay"
+        and asset.get("kind") != "overlay-receipt"
+        and asset_required_for_scope(asset, scope)
+    ]
+    receipt_assets = [
+        asset
+        for asset in lock.get("release_assets", [])
+        if isinstance(asset, dict) and asset.get("kind") == "overlay-receipt"
+    ]
+    if not overlay_assets and not receipt_assets:
+        return
+    if len(receipt_assets) != 1 or {asset["kind"] for asset in overlay_assets} != {"source-offer"}:
+        raise VerificationError("ADB lock must declare one source-offer and one overlay receipt")
+    locked_receipt = receipt_assets[0]
+    if locked_receipt.get("ownership") != "overlay":
+        raise VerificationError("ADB overlay receipt must be overlay-owned")
+    if scope is not None and not asset_required_for_scope(locked_receipt, scope):
+        raise VerificationError("ADB overlay receipt is outside the verified asset scope")
+
+    receipt_relative = safe_relative(
+        str(locked_receipt.get("file_name", "")), "ADB overlay receipt"
+    )
+    receipt_path = source_assets_root / receipt_relative
+    require_regular_file(receipt_path, "ADB overlay receipt")
+    overlay = read_json(receipt_path, "ADB overlay receipt")
+    if (
+        not has_exact_schema(overlay, 1)
+        or overlay.get("receipt_kind") != "component-source-overlay"
+        or overlay.get("component") != "adb-helper"
+    ):
+        raise VerificationError("invalid ADB component source overlay receipt")
+    try:
+        version = validate_version(overlay.get("version"))
+        base_url = normalize_base_url(overlay.get("base_url"))
+    except (SourcePublicationIdentityError, TypeError, AttributeError) as error:
+        raise VerificationError(f"invalid ADB overlay publication identity: {error}") from error
+    if base_url != overlay["base_url"]:
+        raise VerificationError("ADB overlay publication URL is not normalized")
+    if source_set_receipt_hash is None:
+        raise VerificationError("ADB overlay receipt requires a verified source-set receipt")
+    if overlay.get("source_set_receipt_sha256") != source_set_receipt_hash:
+        raise VerificationError("ADB overlay receipt is not bound to the packaged source-set receipt")
+    if overlay.get("distribution") != {"package_required": True, "release_required": True}:
+        raise VerificationError("ADB overlay receipt has invalid distribution")
+    source_sets = [
+        asset for asset in lock.get("release_assets", [])
+        if isinstance(asset, dict) and asset.get("kind") == "source-set-receipt"
+    ]
+    if len(source_sets) != 1:
+        raise VerificationError("ADB overlay requires exactly one locked source-set receipt")
+    core_receipt = read_json(
+        source_assets_root / safe_relative(
+            str(source_sets[0].get("file_name", "")), "ADB source-set receipt"
+        ),
+        "ADB source-set receipt",
+    )
+    archive = core_receipt.get("archive")
+    if not isinstance(archive, dict) or re.fullmatch(
+        r"[0-9a-f]{64}", str(archive.get("sha256", ""))
+    ) is None:
+        raise VerificationError("ADB overlay lacks a verified corresponding source identity")
+
+    records = overlay.get("assets")
+    if not isinstance(records, list):
+        raise VerificationError("ADB overlay receipt assets must be an array")
+    records_by_kind = {
+        record.get("kind"): record for record in records if isinstance(record, dict)
+    }
+    if len(records_by_kind) != len(records):
+        raise VerificationError("ADB overlay receipt contains duplicate asset kinds")
+    expected_kinds = {asset["kind"] for asset in overlay_assets}
+    if set(records_by_kind) != expected_kinds:
+        raise VerificationError("ADB overlay receipt asset coverage mismatch")
+
+    for asset in overlay_assets:
+        kind = asset["kind"]
+        record = records_by_kind[kind]
+        if record.get("file_name") != asset.get("file_name"):
+            raise VerificationError(f"ADB overlay asset path mismatch: {kind}")
+        relative = safe_relative(record["file_name"], f"{kind} overlay asset")
+        path = source_assets_root / relative
+        require_regular_file(path, f"ADB overlay asset {kind}")
+        actual = sha256(path)
+        if record.get("sha256") != actual:
+            raise VerificationError(f"ADB overlay asset sha256 mismatch: {kind}")
+        if kind == "source-offer":
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError as error:
+                raise VerificationError("ADB source-offer overlay is not UTF-8") from error
+            expected = {
+                "Published archive:": published_source_name(version, "adb-helper", archive["sha256"]),
+                "SHA-256:": archive["sha256"],
+                "Versioned releases page:": base_url + "/releases",
+                "Rolling continuous release page:": base_url + "/releases/tag/continuous",
+            }
+            for label, value in expected.items():
+                if [line for line in lines if line.startswith(label)] != [f"{label} {value}"]:
+                    raise VerificationError(f"ADB source-offer overlay {label} mismatch")
+        sidecar_relative = safe_relative(
+            str(asset.get("sha256_file", "")), f"{kind} sha256 sidecar"
+        )
+        verify_hash_sidecar(source_assets_root / sidecar_relative, actual, relative.name)
+
+    actual_receipt_hash = sha256(receipt_path)
+    receipt_sidecar = safe_relative(
+        str(locked_receipt.get("sha256_file", "")), "ADB overlay receipt sha256 sidecar"
+    )
+    verify_hash_sidecar(
+        source_assets_root / receipt_sidecar, actual_receipt_hash, receipt_relative.name
+    )
 
 
 def main() -> int:
@@ -746,8 +882,10 @@ def main() -> int:
             raise VerificationError(f"unsupported locked USB backend: {usb.get('backend')}")
 
         for required in lock.get("release_assets", []):
-            if not isinstance(required, dict) or not asset_required_for_scope(
-                required, args.asset_scope
+            if (
+                not isinstance(required, dict)
+                or required.get("ownership") == "overlay"
+                or not asset_required_for_scope(required, args.asset_scope)
             ):
                 continue
             kind = required.get("kind")
@@ -780,6 +918,12 @@ def main() -> int:
             receipt,
             source_assets_root,
             args.asset_scope,
+        )
+        validate_overlay_receipt(
+            lock,
+            source_assets_root,
+            args.asset_scope,
+            source_set_receipt_hash,
         )
 
         verified_receipts = [BINARY_BUILD_RECEIPT]

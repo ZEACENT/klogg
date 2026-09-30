@@ -6,10 +6,12 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -29,7 +31,8 @@ GIT_ATTRIBUTES = ROOT / ".gitattributes"
 CI_LINT = ROOT / "scripts" / "lint_ci_quality.py"
 ADB_CACHE_KEY = (
     "adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', "
-    "'scripts/prefetch_adb_helper_sources.py') }}"
+    "'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py', "
+    "'scripts/prefetch_adb_libusb_fallback.py', 'scripts/prefetch_adb_source_closure.py') }}"
 )
 ADB_CACHE_KEY_REFERENCE = "${{ steps.adb-cache-key.outputs.key }}"
 ADB_CACHE_FALLBACK = "adb-helper-sources-v1-"
@@ -39,6 +42,23 @@ _CI_SPEC = importlib.util.spec_from_file_location("lint_ci_quality", CI_LINT)
 assert _CI_SPEC is not None and _CI_SPEC.loader is not None
 CI_MODULE = importlib.util.module_from_spec(_CI_SPEC)
 _CI_SPEC.loader.exec_module(CI_MODULE)
+
+
+def bash_for_script_projection() -> str:
+    if sys.platform != "win32":
+        return "bash"
+    roots = [pathlib.Path(os.environ[name]) / "Git"
+             for name in ("ProgramW6432", "ProgramFiles") if os.environ.get(name)]
+    for root in roots:
+        bash = root / "bin" / "bash.exe"
+        if bash.is_file():
+            return str(bash)
+    git = shutil.which("git")
+    if git:
+        bash = pathlib.Path(git).parent.parent / "bin" / "bash.exe"
+        if bash.is_file():
+            return str(bash)
+    raise AssertionError("Git for Windows bash.exe is required for workflow script projections")
 
 
 def read_text(path: pathlib.Path) -> str:
@@ -123,7 +143,7 @@ def adb_cache_contract(workflow: str) -> tuple[list[str], str | None]:
     prefetch_indexes = [
         index
         for index, (fields, _) in enumerate(parsed)
-        if "python3 scripts/prefetch_adb_helper_sources.py" in fields.get("run", "")
+        if "python3 scripts/prefetch_adb_source_closure.py" in fields.get("run", "")
     ]
     if not all(
         len(indexes) == 1
@@ -149,6 +169,8 @@ def adb_cache_contract(workflow: str) -> tuple[list[str], str | None]:
     save_fields, save_children = parsed[save_index]
     restore_with = restore_children.get("with", {})
     prefetch_env = prefetch_children.get("env", {})
+    if prefetch_fields.get("timeout-minutes") != "45":
+        issues.append("full ADB acquisition including both fallbacks must have a wall-clock limit")
     save_with = save_children.get("with", {})
 
     key_script = CI_MODULE.active_script_content(key_fields.get("run", ""))
@@ -177,8 +199,19 @@ def adb_cache_contract(workflow: str) -> tuple[list[str], str | None]:
         issues.append("an invalid exact ADB source cache must fail closed")
     if prefetch_script.count(
         '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"'
-    ) != 2:
+    ) != 3:
         issues.append("ADB source cache prefetch must enforce the named byte limit")
+    if prefetch_script.count("--workers 2") != 1:
+        issues.append("fresh ADB source downloads must limit concurrent upstream requests")
+    fresh_start = prefetch_script.find('rm -rf "$adb_source_cache_root"')
+    full_prefetch = prefetch_script.rfind("python3 scripts/prefetch_adb_source_closure.py")
+    if (prefetch_script.count("python3 scripts/prefetch_adb_source_closure.py") != 1
+            or prefetch_script.count("python3 scripts/prefetch_adb_helper_sources.py") != 2
+            or prefetch_script.count("--offline") != 2
+            or "python3 scripts/prefetch_adb_manifest_fallback.py" in prefetch_script
+            or "python3 scripts/prefetch_adb_source_context.py" in prefetch_script
+            or fresh_start < 0 or not fresh_start < full_prefetch):
+        issues.append("fresh ADB source prefetch must use the common locked closure")
     if "github.run_id" in "\n".join(
         str(value) for value in (*restore_with.values(), *save_with.values())
     ):
@@ -208,14 +241,155 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         cls.superbuild = read_text(SUPERBUILD)
         cls.verify_script = read_text(VERIFY_SCRIPT)
 
+    def test_diagnostics_only_wrapper_does_not_invalidate_verified_source_cache(self):
+        self.assertNotIn("prefetch_adb_source_context.py", ADB_CACHE_KEY)
+        self.assertIn("prefetch_adb_source_context.py", read_text(ROOT / "scripts" / "prefetch_adb_source_closure.py"))
+
     def test_ci_reuses_the_exact_v2_adb_cache_with_one_controlled_v1_fallback(self):
         issues, guard_script = adb_cache_contract(self.ci_build)
         self.assertEqual(issues, [], "\n".join(issues))
         self.assertIsNotNone(guard_script)
 
+    def test_ordinary_source_transport_is_read_only_and_has_full_commit_history(self):
+        block = CI_MODULE.workflow_job_blocks(self.ci_build)["PrefetchAdbHelperSources"]
+        permissions = CI_MODULE.workflow_mapping_block(block, "permissions", 4)
+        self.assertEqual({key: value for key, (value, _) in permissions.items()},
+                         {"contents": "read", "actions": "read"})
+        steps = [CI_MODULE.workflow_step_fields(step) for step in
+                 CI_MODULE.workflow_job_steps(self.ci_build)["PrefetchAdbHelperSources"]]
+        checkout = next(children for fields, children in steps
+                        if fields.get("uses", "").startswith("actions/checkout@"))
+        self.assertEqual(checkout["with"].get("fetch-depth"), "0")
+        prefetch = next((fields, children) for fields, children in steps
+                        if fields.get("name") == "Prefetch and hash immutable ADB sources")
+        self.assertEqual(prefetch[1]["env"].get("GH_TOKEN"), "${{ github.token }}")
+        self.assertEqual(prefetch[1]["env"].get("KLOGG_ADB_SOURCE_EVENT"),
+                         "${{ github.event_name }}")
+        script = CI_MODULE.active_script_content(prefetch[0]["run"])
+        self.assertIn("python3 scripts/ci_adb_source_transport.py", script)
+        self.assertIn('--repo-root "$GITHUB_WORKSPACE"', script)
+        self.assertIn('"$transport_status" -eq 2', script)
+
+    def test_windows_projection_uses_git_bash_not_the_wsl_launcher(self):
+        with tempfile.TemporaryDirectory() as parent:
+            git_root = pathlib.Path(parent) / "Git"
+            bash = git_root / "bin" / "bash.exe"
+            bash.parent.mkdir(parents=True)
+            bash.write_bytes(b"")
+            with mock.patch.object(sys, "platform", "win32"), \
+                    mock.patch.dict(os.environ, {"ProgramW6432": parent}, clear=True), \
+                    mock.patch.object(shutil, "which", return_value="C:/Windows/System32/bash.exe") as which:
+                self.assertEqual(bash_for_script_projection(), str(bash))
+                which.assert_not_called()
+            bash.unlink()
+            with mock.patch.object(sys, "platform", "win32"), \
+                    mock.patch.dict(os.environ, {"ProgramW6432": parent}, clear=True), \
+                    mock.patch.object(shutil, "which", return_value=None):
+                with self.assertRaisesRegex(AssertionError, "Git for Windows bash.exe"):
+                    bash_for_script_projection()
+
+    def test_adb_source_transport_event_and_exit_code_projections(self):
+        steps = [CI_MODULE.workflow_step_fields(step)[0] for step in
+                 CI_MODULE.workflow_job_steps(self.ci_build)["PrefetchAdbHelperSources"]]
+        script = next(fields["run"] for fields in steps
+                      if fields.get("name") == "Prefetch and hash immutable ADB sources")
+        with tempfile.TemporaryDirectory() as parent:
+            root = pathlib.Path(parent)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            shim = bin_dir / "python3"
+            shim.write_text("#!/bin/bash\n"
+                            'printf "%s\\n" "$*" >> "$COMMAND_LOG"\n'
+                            'case "$1" in\n'
+                            '  scripts/prefetch_adb_helper_sources.py) if [[ -f "$IMPORT_MARKER" ]]; then exit "${IMPORTED_OFFLINE_STATUS:-0}"; fi; exit "${OFFLINE_STATUS:-0}";;\n'
+                            '  scripts/ci_adb_source_transport.py) if [[ "${TRANSPORT_STATUS:-2}" == 0 ]]; then touch "$IMPORT_MARKER"; fi; exit "${TRANSPORT_STATUS:-2}";;\n'
+                            '  scripts/prefetch_adb_source_closure.py) exit 0;;\n'
+                            '  *) exit 99;;\n'
+                            'esac\n', encoding="utf-8")
+            shim.chmod(0o755)
+            for event in ("pull_request", "push", "workflow_dispatch"):
+                for transport_status in (0, 2, 7):
+                    with self.subTest(event=event, transport_status=transport_status):
+                        log = root / "commands.log"
+                        log.write_text("", encoding="utf-8")
+                        marker = root / "imported.marker"
+                        marker.unlink(missing_ok=True)
+                        cache = root / "prefetch_artifacts/adb-helper-sources"
+                        cache.mkdir(parents=True, exist_ok=True)
+                        (cache / "stale").write_text("old", encoding="utf-8")
+                        env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                                   COMMAND_LOG=log.name, IMPORT_MARKER=marker.name,
+                                   GITHUB_WORKSPACE=str(root),
+                                   KLOGG_ADB_SOURCE_EVENT=event, GH_TOKEN="test-token",
+                                   TRANSPORT_STATUS=str(transport_status), OFFLINE_STATUS="1",
+                                   KLOGG_ADB_SOURCE_CACHE_RESTORE_OUTCOME="success",
+                                   KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="adb-helper-sources-v1-old",
+                                   KLOGG_ADB_SOURCE_CACHE_EXACT_KEY="adb-helper-sources-v2-new",
+                                   KLOGG_ADB_SOURCE_CACHE_MAX_BYTES="536870912")
+                        result = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
+                                                env=env, text=True, capture_output=True)
+                        commands = log.read_text(encoding="utf-8")
+                        imported = event != "workflow_dispatch" and transport_status == 0
+                        fatal = event != "workflow_dispatch" and transport_status == 7
+                        self.assertEqual(result.returncode, 7 if fatal else 0,
+                                         result.stdout + result.stderr)
+                        self.assertEqual(commands.count("scripts/ci_adb_source_transport.py"),
+                                         int(event != "workflow_dispatch"))
+                        self.assertEqual(commands.count("scripts/prefetch_adb_helper_sources.py"),
+                                         2 if imported else 1)
+                        self.assertEqual(commands.count("scripts/prefetch_adb_source_closure.py"),
+                                         int(not imported and not fatal))
+                        self.assertNotIn("stale", os.listdir(cache) if cache.exists() else [])
+            log = root / "commands.log"
+            log.write_text("", encoding="utf-8")
+            marker.unlink(missing_ok=True)
+            env.update(KLOGG_ADB_SOURCE_EVENT="pull_request", OFFLINE_STATUS="1",
+                       TRANSPORT_STATUS="0", IMPORTED_OFFLINE_STATUS="9")
+            invalid_import = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
+                                            env=env, text=True, capture_output=True)
+            self.assertEqual(invalid_import.returncode, 9)
+            self.assertEqual(log.read_text(encoding="utf-8").count("scripts/prefetch_adb_helper_sources.py"), 2)
+            self.assertNotIn("scripts/prefetch_adb_source_closure.py", log.read_text(encoding="utf-8"))
+            marker.unlink(missing_ok=True)
+            log.write_text("", encoding="utf-8")
+            env.update(KLOGG_ADB_SOURCE_EVENT="pull_request", OFFLINE_STATUS="0",
+                       KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="adb-helper-sources-v2-new")
+            exact_hit = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
+                                       env=env, text=True, capture_output=True)
+            self.assertEqual(exact_hit.returncode, 0, exact_hit.stdout + exact_hit.stderr)
+            self.assertNotIn("scripts/ci_adb_source_transport.py", log.read_text(encoding="utf-8"))
+            self.assertNotIn("scripts/prefetch_adb_source_closure.py", log.read_text(encoding="utf-8"))
+            log.write_text("", encoding="utf-8")
+            env.update(OFFLINE_STATUS="1", TRANSPORT_STATUS="2",
+                       KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="")
+            miss = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
+                                  env=env, text=True, capture_output=True)
+            self.assertEqual(miss.returncode, 0, miss.stdout + miss.stderr)
+            self.assertIn("scripts/ci_adb_source_transport.py", log.read_text(encoding="utf-8"))
+            self.assertIn("scripts/prefetch_adb_source_closure.py", log.read_text(encoding="utf-8"))
+            log.write_text("", encoding="utf-8")
+            env.update(KLOGG_ADB_SOURCE_EVENT="pull_request", OFFLINE_STATUS="1",
+                       KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="adb-helper-sources-v2-new")
+            rejected = subprocess.run([bash_for_script_projection(), "-e", "-c", script], cwd=root,
+                                      env=env, text=True, capture_output=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertNotIn("scripts/ci_adb_source_transport.py", log.read_text(encoding="utf-8"))
+
     def test_adb_cache_contract_rejects_key_fallback_spoof_and_guard_mutations(self):
         size_option = '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"'
+        full_command = (
+            "              python3 scripts/prefetch_adb_source_closure.py \\\n"
+            "                --lock packaging/adb/adb-helper.lock.json \\\n"
+            '                --download-root "$adb_source_cache_root" \\\n'
+            "                --workers 2 \\\n"
+            '                --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"\n'
+        )
+        self.assertIn(full_command, self.ci_build)
         mutations = {
+            "missing total acquisition bound": self.ci_build.replace(
+                "      - name: Prefetch and hash immutable ADB sources\n        timeout-minutes: 45\n",
+                "      - name: Prefetch and hash immutable ADB sources\n", 1,
+            ),
             "missing fallback": self.ci_build.replace(
                 f"          restore-keys: {ADB_CACHE_FALLBACK}\n", "", 1
             ),
@@ -231,6 +405,33 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
                 1,
             ),
             "missing size enforcement": self.ci_build.replace(size_option, "", 1),
+            "unbounded upstream fanout": self.ci_build.replace("--workers 2", "--workers 4", 1),
+            "missing closure": self.ci_build.replace(
+                "python3 scripts/prefetch_adb_source_closure.py",
+                "python3 scripts/prefetch_adb_helper_sources.py", 1,
+            ),
+            "commented closure": self.ci_build.replace(
+                "python3 scripts/prefetch_adb_source_closure.py",
+                "# python3 scripts/prefetch_adb_source_closure.py", 1,
+            ),
+            "missing fresh cache reset": self.ci_build.replace(
+                '            rm -rf "$adb_source_cache_root"\n', '', 1,
+            ),
+            "closure before fresh reset": self.ci_build.replace(
+                '            rm -rf "$adb_source_cache_root"\n', '', 1,
+            ).replace(full_command, full_command + '              rm -rf "$adb_source_cache_root"\n', 1),
+            "manifest omitted from cache key": self.ci_build.replace(
+                ADB_CACHE_KEY,
+                ADB_CACHE_KEY.replace("'scripts/prefetch_adb_manifest_fallback.py', ", ""), 1,
+            ),
+            "libusb omitted from cache key": self.ci_build.replace(
+                ADB_CACHE_KEY,
+                ADB_CACHE_KEY.replace("'scripts/prefetch_adb_libusb_fallback.py', ", ""), 1,
+            ),
+            "closure omitted from cache key": self.ci_build.replace(
+                ADB_CACHE_KEY,
+                ADB_CACHE_KEY.replace(", 'scripts/prefetch_adb_source_closure.py'", ""), 1,
+            ),
             "comment spoof": self.ci_build.replace(
                 size_option, "# " + size_option, 1
             ),

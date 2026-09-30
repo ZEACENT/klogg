@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -811,8 +812,128 @@ class SanitizerConfigurationTest(unittest.TestCase):
             "rm /etc/apt/apt.conf.d/99snapshot-bootstrap",
             dockerfile,
         )
-        self.assertEqual(dockerfile.count("FROM jammy-snapshot"), 3)
+        self.assertIn("FROM ${KLOGG_APT_STAGE}-bootstrap AS jammy-snapshot", dockerfile)
         self.assertNotIn("FROM ubuntu:jammy", dockerfile)
+
+    def assert_tsan_snapshot_apt_contract(self, dockerfile):
+        # Join Docker continuations and ignore comments before inspecting active
+        # instructions. Tokenize shell commands so quoted config values are not
+        # confused with command separators or accepted as executable guards.
+        active = "\n".join(
+            line for line in dockerfile.splitlines()
+            if not line.lstrip().startswith("#")
+        ).replace("\\\n", " ")
+        instructions = [line.strip() for line in active.splitlines() if line.strip()]
+        helper = "/usr/local/bin/apt_snapshot_retry.sh"
+        copy = "COPY --chmod=0755 apt_snapshot_retry.sh " + helper
+        self.assertEqual(instructions.count(copy), 1)
+        first_run = next(i for i, line in enumerate(instructions) if line.startswith("RUN "))
+        self.assertLess(instructions.index(copy), first_run)
+        self.assertNotRegex(active, r"\bapt(?:-get)?\s+(?:-\S+\s+)*(?:update|install)\b")
+        self.assertNotRegex(
+            active,
+            r"(?i)allow-unauthenticated|allow-insecure|AllowInsecureRepositories|"
+            r"AllowUnauthenticated|trusted\s*=|Verify-Host",
+        )
+        commands = []
+        for instruction in instructions:
+            if not instruction.startswith("RUN "):
+                continue
+            lexer = shlex.shlex(instruction[4:], posix=True, punctuation_chars=";&|<>")
+            lexer.whitespace_split = True
+            command = []
+            for token in lexer:
+                if token in (";", "&&", "||", "|", "&"):
+                    if command:
+                        commands.append(command)
+                    command = []
+                else:
+                    command.append(token)
+            if command:
+                commands.append(command)
+        calls = [command for command in commands if command[0] == helper]
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(calls[:2], [[helper, "ca-certificates"], [helper]])
+        for call, package in zip(calls[2:], ("curl", "clang-14", "build-essential")):
+            self.assertIn(package, call)
+        # All downstream online APT branches still inherit the retry helper
+        # and verified CA bundle. Check named ancestry, not a fixed stage count:
+        # the locked branches are independently verified and never run APT here.
+        stages = {}
+        for block in re.split(r"(?m)^FROM ", active)[1:]:
+            header, _, body = block.partition("\n")
+            match = re.fullmatch(r"(\S+)\s+AS\s+(\S+)", header)
+            self.assertIsNotNone(match, header)
+            stages[match.group(2)] = (match.group(1), body)
+        self.assertEqual(stages["jammy-snapshot"][0], "${KLOGG_APT_STAGE}-bootstrap")
+        for name in ("online-qt-source", "online-qt-deps", "online-runtime"):
+            self.assertEqual(stages[name][1].count(helper), 1)
+            ancestors = set()
+            current = name
+            while current in stages:
+                self.assertNotIn(current, ancestors, "cyclic Docker stage inheritance")
+                ancestors.add(current)
+                current = stages[current][0].replace("${KLOGG_APT_STAGE}", "online")
+            self.assertIn("online-bootstrap", ancestors)
+
+        sources = [token for command in commands for token in command
+                   if token.startswith("deb ") or token.startswith("deb-src ")]
+        self.assertCountEqual(sources, [
+            "deb https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/ "
+            + suite + " main universe"
+            for suite in ("jammy", "jammy-updates", "jammy-security")
+        ])
+        override = "/etc/apt/apt.conf.d/99snapshot-bootstrap"
+        creation = ["printf", "%s\\n",
+                    'Acquire::https::snapshot.ubuntu.com::Verify-Peer "false";',
+                    ">", override]
+        arm_cleanup = ["trap", "rm -f " + override, "EXIT"]
+        disarm_cleanup = ["trap", "-", "EXIT"]
+        for command in (creation, arm_cleanup, disarm_cleanup):
+            self.assertEqual(commands.count(command), 1)
+        self.assertEqual(active.count("Verify-Peer"), 1)
+        ordered = [arm_cleanup, creation, calls[0], ["rm", override],
+                   ["test", "!", "-e", override], disarm_cleanup, calls[1]]
+        positions = [commands.index(command) for command in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("Verify-Peer", (UBUNTU_22_TSAN_DOCKERFILE.parent / "apt_snapshot_retry.sh").read_text())
+
+    def test_linux_tsan_all_snapshot_transactions_share_retry_and_tls_contract(self):
+        self.assert_tsan_snapshot_apt_contract(UBUNTU_22_TSAN_DOCKERFILE.read_text())
+
+    def test_linux_tsan_snapshot_contract_rejects_bypass_and_spoof_mutations(self):
+        dockerfile = UBUNTU_22_TSAN_DOCKERFILE.read_text()
+        helper = "/usr/local/bin/apt_snapshot_retry.sh"
+        guard = "test ! -e /etc/apt/apt.conf.d/99snapshot-bootstrap"
+        cleanup_trap = "trap 'rm -f /etc/apt/apt.conf.d/99snapshot-bootstrap' EXIT"
+        mutations = (
+            ("missing failure cleanup", dockerfile.replace(cleanup_trap, "true")),
+            ("comment failure cleanup", dockerfile.replace(cleanup_trap, "true")
+             + "\n# " + cleanup_trap),
+            ("quoted failure cleanup", dockerfile.replace(
+                cleanup_trap, "printf '%s' " + shlex.quote(cleanup_trap))),
+            ("early cleanup disarm", dockerfile.replace(
+                cleanup_trap + ";", cleanup_trap + "; trap - EXIT;", 1)),
+            ("global TLS exception", dockerfile.replace(
+                "Acquire::https::snapshot.ubuntu.com::Verify-Peer",
+                "Acquire::https::Verify-Peer")),
+            ("floating source", dockerfile.replace(
+                "https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/",
+                "https://archive.ubuntu.com/ubuntu/", 1)),
+            ("direct apt", dockerfile.replace("RUN " + helper, "RUN apt-get install", 1)),
+            ("comment guard", dockerfile.replace(guard, "true") + "\n# " + guard),
+            ("quoted guard", dockerfile.replace(guard, "printf '%s' '" + guard + "'")),
+            ("missing removal", dockerfile.replace("rm /etc/apt/apt.conf.d/99snapshot-bootstrap", "true")),
+            ("later TLS bypass", dockerfile + '\nRUN printf \'%s\\n\' \'Acquire::https::Verify-Peer "false";\' > /etc/apt/apt.conf.d/99late\n'),
+            ("unsigned apt", dockerfile + "\nRUN apt-get --allow-unauthenticated install curl\n"),
+            ("comment copy", dockerfile.replace("COPY --chmod=0755 apt_snapshot_retry.sh", "# COPY --chmod=0755 apt_snapshot_retry.sh")),
+            ("missing bootstrap", dockerfile.replace(helper + " ca-certificates;", "true;", 1)),
+        )
+        for name, mutation in mutations:
+            with self.subTest(name=name):
+                self.assertNotEqual(mutation, dockerfile)
+                with self.assertRaises((AssertionError, ValueError)):
+                    self.assert_tsan_snapshot_apt_contract(mutation)
 
     def test_linux_tsan_qt_backports_atomic_signal_publication(self):
         dockerfile = UBUNTU_22_TSAN_DOCKERFILE.read_text()
@@ -978,15 +1099,23 @@ class SanitizerConfigurationTest(unittest.TestCase):
         self.assertIn("failed to enumerate runtime artifacts", result.stderr)
         self.assertIn("synthetic find failure", result.stderr)
 
-    def test_cmake_installer_is_hash_verified_before_root_execution(self):
+    def test_cmake_installer_is_hash_pinned_only_in_the_producer_recipe(self):
         digest = "ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d"
         workflow = CI_BUILD.read_text()
         dockerfile = UBUNTU_22_TSAN_DOCKERFILE.read_text()
-        self.assertIn(digest, workflow)
-        self.assertIn("sha256sum --check --strict", workflow)
+        materials = (ROOT / "ci" / "environments" / "materials.json").read_text()
+        # Ordinary CI consumes the locked environment image; it must not
+        # download or execute the CMake installer on the runner.
+        self.assertNotIn(digest, workflow)
+        self.assertNotIn("CMAKE_INSTALLER_URL", workflow)
+        self.assertNotIn("sha256sum --check --strict", workflow)
+        # The producer recipe keeps the installer hash-verified inside the
+        # image build, and the lock material closure records the same pin.
         self.assertIn(digest, dockerfile)
         self.assertIn("CMAKE_INSTALLER_URL", dockerfile)
+        self.assertIn("sha256sum --check --strict", dockerfile)
         self.assertNotIn("COPY cmake-3.20.2-linux-x86_64.sh", dockerfile)
+        self.assertIn(digest, materials)
 
     def test_tsan_qt_verifier_accepts_only_the_pinned_instrumented_runtime(self):
         result = self.configure_tsan_qt_consumer()
@@ -1067,21 +1196,20 @@ class SanitizerConfigurationTest(unittest.TestCase):
         self.assertIn("libQt5Gui.so.5", result.stderr)
         self.assertIn("not compiler-instrumented", result.stderr)
 
-    def test_linux_tsan_uses_buildkit_cache_for_the_qt_builder(self):
+    def test_linux_tsan_consumes_the_locked_environment_instead_of_rebuilding_qt(self):
         workflow = CI_BUILD.read_text()
-        self.assertIn(
-            "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
-            workflow,
-        )
-        self.assertIn(
-            "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
-            workflow,
-        )
-        self.assertIn("cache-from: type=gha,scope=klogg-qt5-tsan", workflow)
-        self.assertIn(
-            "cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && 'type=gha,mode=max,scope=klogg-qt5-tsan' || '' }}",
-            workflow,
-        )
+        producer = (ROOT / ".github" / "workflows" / "ci-environments.yml").read_text()
+        # Ordinary CI never rebuilds the instrumented Qt builder: no image
+        # build actions or BuildKit cache wiring remain in the consumer
+        # workflow. The locked jammy-qt5-tsan image replaces them.
+        self.assertNotIn("docker/setup-buildx-action", workflow)
+        self.assertNotIn("docker/build-push-action", workflow)
+        self.assertNotIn("cache-from: type=gha,scope=klogg-qt5-tsan", workflow)
+        self.assertNotIn("cache-to:", workflow)
+        self.assertIn("KLOGG_ENV_FAMILY: jammy-qt5-tsan", workflow)
+        # The producer workflow keeps the single authoritative BuildKit
+        # candidate build for environment images.
+        self.assertIn("docker/setup-buildx-action@", producer)
 
     def test_linux_lsan_uses_complete_stacks_for_narrow_suppressions(self):
         workflow = CI_BUILD.read_text()
@@ -1136,8 +1264,15 @@ class SanitizerConfigurationTest(unittest.TestCase):
 
         display_name = CI_MODULE.workflow_job_direct_value(block, "name")
         self.assertIsNotNone(display_name)
-        self.assertIn("ASan", display_name)
-        self.assertNotIn("${{", display_name)
+        producer_prefix = (
+            "${{ github.event_name == 'workflow_dispatch' && "
+            "(inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') "
+            "&& '[producer-mode skipped] ' || '' }}"
+        )
+        self.assertEqual(display_name, producer_prefix + "Windows x64-qt6 ASan [asan]")
+        ordinary_name = display_name[len(producer_prefix):]
+        self.assertEqual(ordinary_name, "Windows x64-qt6 ASan [asan]")
+        self.assertNotIn("${{", ordinary_name)
         self.assertEqual(
             CI_MODULE.workflow_job_direct_value(block, "runs-on"),
             "windows-2022",

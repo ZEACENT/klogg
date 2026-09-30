@@ -28,7 +28,18 @@ STATIC_ANALYSIS_WORKFLOW = ROOT / ".github" / "workflows" / "static-analysis.yml
 
 
 def function_body(source, signature):
-    start = source.index(signature)
+    # The signature must be followed by its parameter list, so a prefix match
+    # cannot select a longer name: "void CaptureStore::clear" must not extract
+    # "void CaptureStore::clearCapturePathGateWaitsForTesting()", which would
+    # silently move every assertion in the caller onto the wrong function.
+    # Signatures that already spell out the parameter list are matched as is.
+    pattern = re.escape(signature)
+    if "(" not in signature:
+        pattern += r"\s*\("
+    match = re.search(pattern, source)
+    if match is None:
+        raise AssertionError(f"Function not found: {signature}")
+    start = match.start()
     # The body opens at the first "{" that is either alone on its line
     # (Allman style) or directly follows the parameter list (K&R). Brace
     # pairs inside the declaration (for example "= {}" default arguments)
@@ -55,6 +66,29 @@ def function_body(source, signature):
 
 
 class StaticAnalysisRegressionTest(unittest.TestCase):
+    def test_function_body_requires_the_parameter_list(self):
+        # Every contract below extracts a function by a signature prefix; a
+        # longer name sharing that prefix must not be selected instead (see
+        # the capturestore gate-wait helpers, which sit before clear()).
+        source = (
+            "void clearCapturePathGateWaitsForTesting()\n"
+            "{\n"
+            "    wrong();\n"
+            "}\n"
+            "\n"
+            "void clear()\n"
+            "{\n"
+            "    right();\n"
+            "}\n"
+        )
+        body = function_body(source, "void clear")
+        self.assertIn("right()", body)
+        self.assertNotIn("wrong()", body)
+
+    def test_function_body_reports_a_missing_signature(self):
+        with self.assertRaises(AssertionError):
+            function_body("void other()\n{\n}\n", "void clear")
+
     def test_static_analysis_alone_detaches_ui_autogen_from_link_dependencies(self):
         cmake = UI_CMAKE.read_text()
         workflow = STATIC_ANALYSIS_WORKFLOW.read_text()

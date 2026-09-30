@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fnmatch
 import itertools
+import json
 import math
 import re
 import shlex
@@ -29,7 +30,6 @@ REVIEWED_ACTION_REVISIONS = {
     "docker/build-push-action": "53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
     "docker/setup-buildx-action": "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
     "github/codeql-action": "cdf488f595d80d6e07e03d4674febd5ab45fa938",
-    "ilshidur/action-discord": "d2594079a10f1d6739ee50a2471f0ca57418b554",
     "joncloud/makensis-action": "971ef20f43e4f9f3af2c7f276cb7348d033da1cd",
     "jurplel/install-qt-action": "48d3ad6db93f3627c8ee7a0454bc6f3744f7e730",
     "lukka/get-cmake": "fffaaafeea488556c2c12dad60690008bc1caacb",
@@ -74,7 +74,6 @@ CI_BUILD_REQUIRED_JOBS = {
     "PrefetchBoost",
     "PrefetchOpenSsl",
     "PrefetchLinuxDeployQt",
-    "PrefetchCmakeInstaller",
     "PrefetchWindowsTools",
     "PrefetchAdbHelperSources",
     "PrefetchIosNativeSources",
@@ -100,6 +99,45 @@ CI_BUILD_REQUIRED_JOBS = {
 }
 
 CI_BUILD_POST_GATE_JOBS = {"DispatchContinuous"}
+CI_BUILD_PRODUCER_JOBS = {"EnvironmentModePreflight", "EnvironmentProducer", "DependencyModePreflight", "DependencyGate", "IosHostEvidence"}
+CI_BUILD_NATIVE_ROOT_JOBS = {"SaveVersion", "PrefetchAdbHelperSources", "PrefetchIosNativeSources"}
+CI_BUILD_NATIVE_JOBS = CI_BUILD_NATIVE_ROOT_JOBS | {
+    "BuildAdbHelperLegalAssets", "BuildAdbLinuxX64", "BuildAdbLinuxArm64",
+    "BuildAdbWindowsX64", "BuildAdbMacX64", "BuildAdbMacArm64",
+    "BuildIosNativeX64", "BuildIosNativeArm64",
+}
+CI_BUILD_NATIVE_NAMES = {
+    "SaveVersion": "Resolve build version",
+    "PrefetchAdbHelperSources": "Prefetch locked ADB helper source closure",
+    "PrefetchIosNativeSources": "Prefetch locked iOS native sources",
+    "BuildAdbHelperLegalAssets": "Build ADB helper legal assets",
+    "BuildAdbLinuxX64": "Source-built ADB helper linux-x86_64",
+    "BuildAdbLinuxArm64": "Source-built ADB helper linux-arm64",
+    "BuildAdbWindowsX64": "Source-built ADB helper windows-x86_64",
+    "BuildAdbMacX64": "Source-built ADB helper macos-x86_64",
+    "BuildAdbMacArm64": "Source-built ADB helper macos-arm64",
+    "BuildIosNativeX64": "iOS native stack x86_64",
+    "BuildIosNativeArm64": "iOS native stack arm64",
+}
+CI_BUILD_ORDINARY_EVENT = "(github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off'))"
+CI_BUILD_NATIVE_EVENT = "(github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))"
+CI_BUILD_NATIVE_IF = "${{ (" + CI_BUILD_ORDINARY_EVENT + " || " + CI_BUILD_NATIVE_EVENT + ") && !contains(github.event.head_commit.message, '[skip ci]') }}"
+CI_BUILD_NATIVE_ROOT_IF = "${{ !cancelled() && (" + CI_BUILD_ORDINARY_EVENT + " || (" + CI_BUILD_NATIVE_EVENT[1:-1] + " && needs.DependencyModePreflight.result == 'success')) && !contains(github.event.head_commit.message, '[skip ci]') }}"
+CI_BUILD_ORDINARY_IF = "${{ " + CI_BUILD_ORDINARY_EVENT + " && !contains(github.event.head_commit.message, '[skip ci]') }}"
+CI_BUILD_ORDINARY_GATE_IF = "${{ always() && " + CI_BUILD_ORDINARY_EVENT + " }}"
+CI_BUILD_PRODUCER_NAME_PREFIX = (
+    "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') "
+    "&& '[producer-mode skipped] ' || '' }}"
+)
+CI_BUILD_NATIVE_NAME_PREFIX = (
+    "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' "
+    "&& '[producer-mode skipped] ' || '' }}"
+)
+CI_DEPENDENCY_CALL_PERMISSIONS = {"contents": "read", "actions": "read", "attestations": "read"}
+CI_ENVIRONMENT_CALL_PERMISSIONS = {
+    "contents": "read", "actions": "read", "packages": "write", "id-token": "write",
+    "attestations": "write", "security-events": "write",
+}
 
 CI_BUILD_PACKAGE_ENABLEMENT = {
     "LinuxPackages": "true",
@@ -114,15 +152,11 @@ CI_BUILD_PACKAGE_ENABLEMENT = {
 }
 
 CI_BUILD_ROOT_JOBS = {
-    "SaveVersion",
     "PrefetchCpmCache",
     "PrefetchBoost",
     "PrefetchOpenSsl",
     "PrefetchLinuxDeployQt",
-    "PrefetchCmakeInstaller",
     "PrefetchWindowsTools",
-    "PrefetchAdbHelperSources",
-    "PrefetchIosNativeSources",
 }
 
 CI_BUILD_ARTIFACT_PRODUCERS = {
@@ -131,7 +165,6 @@ CI_BUILD_ARTIFACT_PRODUCERS = {
     "boost-root": "PrefetchBoost",
     "openssl-archive": "PrefetchOpenSsl",
     "linuxdeployqt": "PrefetchLinuxDeployQt",
-    "cmake-installer": "PrefetchCmakeInstaller",
     "msys2-tools": "PrefetchWindowsTools",
     "adb-helper-source-cache": "PrefetchAdbHelperSources",
     "adb-helper-package-support": "BuildAdbHelperLegalAssets",
@@ -162,7 +195,6 @@ CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS = {
     },
     "openssl-archive": {"WindowsX86"},
     "linuxdeployqt": {"LinuxPackages"},
-    "cmake-installer": {"LinuxPackages", "LinuxSanitizers"},
     "msys2-tools": {"WindowsPackages", "WindowsX86", "WindowsAsan"},
     "adb-helper-source-cache": {
         "BuildAdbHelperLegalAssets",
@@ -200,12 +232,8 @@ CI_BUILD_ARTIFACT_CONDITIONS = {
         "${{ env.klogg_ios_architecture == 'arm64' }}",
     ("LinuxPackages", "downloads", "linuxdeployqt"):
         "${{ env.klogg_config_os == 'ubuntu_appimage' }}",
-    ("LinuxPackages", "downloads", "cmake-installer"):
-        "${{ env.klogg_sanitizer != 'thread' }}",
-    ("LinuxSanitizers", "downloads", "cmake-installer"):
-        "${{ env.klogg_sanitizer != 'thread' }}",
     ("BuildAdbHelperLegalAssets", "uploads", "adb-helper-legal-assets"):
-        "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release') }}",
+        "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release') || (github.repository == 'zeacent/klogg' && github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish')))) }}",
     ("LinuxPackages", "downloads", "adb-helper-package-support"):
         "${{ env.klogg_package_enabled == 'true' }}",
     ("MacPackages", "downloads", "adb-helper-package-support"):
@@ -825,7 +853,10 @@ WINDOWS_DIAGNOSTIC_RUN_MARKERS = {
     "Collect Windows diagnostics on test failure": (
         "build_root\\Testing\\Temporary",
         "build_root\\crash_dumps",
+        "klogg_itests.exe",
         "klogg_itests.pdb",
+        "klogg_tests.exe",
+        "klogg_tests.pdb",
         "eventlog_application.txt",
     ),
     "Collect Windows ASan diagnostics": (
@@ -852,6 +883,8 @@ def windows_test_diagnostics_issues(text: str) -> list[str]:
     issues: list[str] = []
     steps_by_job = workflow_job_steps(text)
     expected = (
+        ("Configure crash dumps for Windows test binaries", "name",
+         "Configure crash dumps for Windows test binaries"),
         ("run-tests", "uses", "./.github/actions/agent-run-tests"),
         (
             "Collect Windows diagnostics on test failure",
@@ -909,6 +942,17 @@ def windows_test_diagnostics_issues(text: str) -> list[str]:
         children_by_label = {
             label: children for (label, _, _), (_, _, children) in zip(expected, selected)
         }
+        setup = fields_by_label["Configure crash dumps for Windows test binaries"]
+        setup_script = active_script_content(strip_powershell_comments(setup.get("run", "")))
+        required_setup = (
+            'New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null',
+            '"KLOGG_TEST_MINIDUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8',
+            '"KLOGG_TEST_TRACE_SEARCH_STARTS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8',
+        )
+        if (setup.get("shell") != "pwsh" or setup.get("if") is not None
+                or setup.get("continue-on-error") not in (None, "false")
+                or any(line not in setup_script.splitlines() for line in required_setup)):
+            issues.append(f"CI build job {job} must prepare explicit test dump and startup trace before testing")
         run_tests = fields_by_label["run-tests"]
         if run_tests.get("continue-on-error") != "true":
             issues.append(
@@ -1040,6 +1084,838 @@ def workflow_artifact_actions(text: str) -> dict[str, dict[str, set[str]]]:
     return actions
 
 
+CI_ENVIRONMENT_BUILDERS = {
+    "BuildFocal": "focal-qt5-gcc13", "BuildJammy": "jammy-qt5", "BuildNoble": "noble-qt6",
+    "BuildResolute": "resolute-qt6", "BuildTsan": "jammy-qt5-tsan", "BuildAnalysis": "noble-qt693-analysis",
+}
+CI_ENVIRONMENT_PROFILES = {
+    "QualifyAppImage": ("focal-qt5-gcc13", "appimage", "BuildFocal", True),
+    "QualifyJammyDeb": ("jammy-qt5", "deb", "BuildJammy", True),
+    "QualifyAsan": ("jammy-qt5", "asan-lsan", "BuildJammy", False),
+    "QualifyUbsan": ("jammy-qt5", "ubsan", "BuildJammy", False),
+    "QualifyNobleDeb": ("noble-qt6", "deb", "BuildNoble", True),
+    "QualifyResoluteDeb": ("resolute-qt6", "deb", "BuildResolute", True),
+    "QualifyTsan": ("jammy-qt5-tsan", "tsan", "BuildTsan", False),
+    "QualifyStatic": ("noble-qt693-analysis", "static", "BuildAnalysis", False),
+    "QualifyCoverage": ("noble-qt693-analysis", "coverage", "BuildAnalysis", False),
+    "QualifyCodeql": ("noble-qt693-analysis", "codeql", "BuildAnalysis", False),
+}
+
+
+def environment_shell_commands(step: list[str]) -> list[list[str]]:
+    """Read literal shell commands, excluding comments and heredoc payloads."""
+    fields, _ = workflow_step_fields(step)
+    result: list[list[str]] = []
+    pending = ""
+    delimiter: str | None = None
+    for line in fields.get("run", "").splitlines():
+        line = line.strip()
+        if delimiter is not None:
+            if line == delimiter:
+                delimiter = None
+            continue
+        line = strip_yaml_comment(line)
+        if not line:
+            continue
+        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if match:
+            delimiter = match.group(1)
+        pending += " " + (line[:-1].rstrip() if line.endswith("\\") else line)
+        if line.endswith("\\"):
+            continue
+        try:
+            result.append(shlex.split(pending))
+        except ValueError:
+            result.append(["<unsupported-shell>"])
+        pending = ""
+    if pending or delimiter:
+        result.append(["<unsupported-shell>"])
+    return result
+
+
+CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS = (
+    "prior-source-run-id", "prior-source-artifact-id", "prior-source-run-attempt", "prior-source-sha",
+)
+
+
+def ci_environment_workflow_issues(text: str) -> list[str]:
+    """Require the explicit producer DAG and its closed privilege boundaries."""
+    issues: list[str] = []
+    builders = set(CI_ENVIRONMENT_BUILDERS)
+    qualifiers = set(CI_ENVIRONMENT_PROFILES)
+    evidence_jobs = builders | qualifiers
+    expected_jobs = evidence_jobs | {"Source", "CpmSources", "LinuxFixture", "UploadCodeqlSarif", "QualificationGate", "Publisher", "PublicVerification"}
+    blocks = workflow_job_blocks(text)
+    needs = workflow_job_needs(text)
+    triggers = workflow_trigger_mapping(text)
+    if triggers is None or set(triggers) != {"workflow_call"}:
+        issues.append("Environment producer must be reusable-only with no timer or direct publication event")
+    call_inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
+    if call_inputs is None or set(call_inputs) != {"mode", "expected-source-sha", "analysis-base-sha", *CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}:
+        issues.append("Environment producer requires exact operation, source/base and prior source inputs")
+    elif any((fields := workflow_mapping_block(block, key, 6)) is None
+             or fields.get("type", (None,))[0] != "string"
+             or fields.get("required", (None,))[0] != ("false" if key in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS else "true")
+             or (key in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS and fields.get("default", (None,))[0] != "")
+             for key, (_, block) in call_inputs.items()):
+        issues.append("Environment producer inputs must bind required source and optional empty prior source strings")
+    if set(blocks) != expected_jobs or workflow_mapping_block(text.splitlines(), "jobs", 0) is None:
+        issues.append("Environment producer requires exactly six explicit builders and ten qualification lanes plus reviewed gates")
+    root_permissions = workflow_mapping_block(text.splitlines(), "permissions", 0)
+    read_only = {"contents": "read", "actions": "read"}
+    if root_permissions is None or {key: value for key, (value, _) in root_permissions.items()} != read_only:
+        issues.append("Environment workflow default permissions must be read-only")
+    root_env = workflow_mapping_block(text.splitlines(), "env", 0)
+    if root_env is None or {key: value for key, (value, _) in root_env.items()} != {
+        "KLOGG_ENVIRONMENT_MODE": "${{ inputs.mode }}", "KLOGG_EXPECTED_SOURCE_SHA": "${{ inputs.expected-source-sha }}",
+        "KLOGG_ANALYSIS_BASE_SHA": "${{ inputs.analysis-base-sha }}", "KLOGG_WORKSPACE": "${{ github.workspace }}",
+    }:
+        issues.append("Environment producer must bind current source/operation and host workspace explicitly")
+    if re.search(r"\bsecrets\b", active_script_content(text)):
+        issues.append("Environment producer must not inherit or reference external secrets")
+    try:
+        steps = workflow_job_steps(text)
+        ancestors = {job: workflow_job_ancestors(needs, job) for job in needs}
+    except ValueError as error:
+        return issues + [str(error)]
+
+    def mapping(job: str, key: str) -> dict[str, str]:
+        values = workflow_mapping_block(blocks.get(job, []), key, 4)
+        return {} if values is None else {name: value for name, (value, _) in values.items()}
+
+    def command_step(job: str, executable: list[str], flags: dict[str, str] | None = None) -> int | None:
+        matches = []
+        for index, step in enumerate(steps.get(job, [])):
+            fields, _ = workflow_step_fields(step)
+            for command in environment_shell_commands(step):
+                if command[:len(executable)] != executable:
+                    continue
+                if fields.get("if") is not None or fields.get("shell") != "bash":
+                    continue
+                if any(token in command for token in ("||", "&&", ";", "<unsupported-shell>")):
+                    continue
+                valid = True
+                for key, expected in (flags or {}).items():
+                    positions = [offset for offset, value in enumerate(command) if value == key]
+                    if len(positions) != 1 or positions[0] + 1 >= len(command) or command[positions[0] + 1] != expected:
+                        valid = False
+                if valid:
+                    matches.append(index)
+        return matches[0] if len(matches) == 1 else None
+
+    helper = ["python3", "scripts/ci_environment_pipeline.py"]
+    direct = {"Source": set(), "CpmSources": {"Source"}, "LinuxFixture": {"Source"},
+              "UploadCodeqlSarif": {"QualifyCodeql"}, "QualificationGate": evidence_jobs | {"UploadCodeqlSarif"},
+              "Publisher": evidence_jobs | {"QualificationGate"}, "PublicVerification": {"Publisher"}}
+    direct.update({job: {"Source"} for job in builders})
+    direct.update({job: {"Source", builder, "CpmSources"} | ({"LinuxFixture"} if package else set())
+                   for job, (_, _, builder, package) in CI_ENVIRONMENT_PROFILES.items()})
+    conditions = {"QualificationGate": "${{ always() }}", "UploadCodeqlSarif": "${{ inputs.mode == 'publish' }}",
+                  "Publisher": "${{ inputs.mode == 'publish' && needs.QualificationGate.result == 'success' }}",
+                  "PublicVerification": "${{ inputs.mode == 'publish' && needs.Publisher.result == 'success' }}"}
+    source_flags = {"--expected-source-sha": "$KLOGG_EXPECTED_SOURCE_SHA", "--analysis-base-sha": "$KLOGG_ANALYSIS_BASE_SHA", "--output": "$RUNNER_TEMP/source.json"}
+    for job, block in blocks.items():
+        permissions = mapping(job, "permissions")
+        expected_permissions = dict(read_only)
+        if job == "Publisher":
+            expected_permissions.update({"packages": "write", "id-token": "write", "attestations": "write"})
+        elif job == "UploadCodeqlSarif":
+            expected_permissions["security-events"] = "write"
+        if permissions != expected_permissions:
+            issues.append("Environment executable build/qualification jobs must be read-only: " + job if job not in {"Publisher", "UploadCodeqlSarif"}
+                          else "Environment privileged job requires exact isolated permissions: " + job)
+        if needs.get(job) != direct.get(job):
+            issues.append("Environment job must have exact reviewed artifact ancestors: " + job)
+        if workflow_job_direct_value(block, "if") != conditions.get(job):
+            issues.append("Environment job has an unreviewed event/success condition: " + job)
+        if (not workflow_job_direct_fields_are_unique(block)
+                or workflow_job_direct_value(block, "strategy") is not None
+                or workflow_job_direct_value(block, "continue-on-error") is not None
+                or workflow_job_direct_value(block, "uses") is not None
+                or workflow_job_direct_value(block, "environment") != ("ci-environment-publish" if job == "Publisher" else None)):
+            issues.append("Environment jobs must be explicit fail-closed lanes with only a protected publisher: " + job)
+        if job != "CpmSources" and job != "UploadCodeqlSarif" and command_step(job, helper + ["source-context"], source_flags) is None:
+            issues.append("Environment job must bind exact source/ref/run/attempt through source-context: " + job)
+        env = mapping(job, "env")
+        if job != "LinuxFixture":
+            job_script = active_script_content("\n".join(block))
+            prior_steps = [step for step in steps.get(job, [])
+                           if job != "Source" or workflow_step_fields(step)[0].get("name") != "Reject partial prior source tuple at reusable boundary"]
+            unapproved_inputs = active_script_content("\n".join("\n".join(step) for step in prior_steps))
+            if (re.search(r"ci_environment_source_cache\.py|source-cache-import|--source-cache-root", job_script)
+                    or re.search(r"inputs\.prior-source-|KLOGG_PRIOR_SOURCE_", unapproved_inputs)):
+                issues.append("Environment prior source bytes must stay inside LinuxFixture: " + job)
+        for step in steps.get(job, []):
+            fields, children = workflow_step_fields(step)
+            if not workflow_step_direct_fields_are_unique(step) or fields.get("continue-on-error") not in {None, "false"}:
+                issues.append("Environment qualification/publication steps must fail closed: " + job)
+            action = fields.get("uses", "")
+            values = children.get("with", {})
+            if action.startswith("actions/checkout@") and (values.get("ref") != "${{ inputs.expected-source-sha }}" or values.get("persist-credentials") != "false"):
+                issues.append("Environment checkout must use the exact source pin without persisted credentials: " + job)
+            if action.startswith("actions/download-artifact@"):
+                identifier = values.get("artifact-ids", "")
+                match = re.fullmatch(r"\$\{\{ needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+) \}\}", identifier)
+                env_match = re.fullmatch(r"\$\{\{ env\.([A-Z0-9_]+) \}\}", identifier)
+                # A package-only fixture step is present in the shared Linux
+                # anchor but cannot execute for a sanitizer/analysis profile.
+                skipped_fixture = (job in qualifiers and not CI_ENVIRONMENT_PROFILES[job][3]
+                                   and identifier == "${{ env.KLOGG_FIXTURE_ARTIFACT_ID }}"
+                                   and fields.get("if") == "${{ env.KLOGG_PACKAGE_PROFILE == 'true' }}"
+                                   and env.get("KLOGG_PACKAGE_PROFILE") == "false")
+                if env_match and not skipped_fixture:
+                    match = re.fullmatch(r"\$\{\{ needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+) \}\}", env.get(env_match.group(1), ""))
+                if (set(values) != {"artifact-ids", "merge-multiple", "path"} or values.get("merge-multiple") != "true"
+                        or (not skipped_fixture and (match is None or match.group(1) not in needs.get(job, set())))):
+                    issues.append("Environment artifact downloads require exact same-run IDs: " + job)
+            if action.startswith("actions/upload-artifact@") and (values.get("if-no-files-found") != "error" or "${{ github.run_attempt }}" not in values.get("name", "")):
+                issues.append("Environment evidence uploads must be exact nonempty current-attempt artifacts: " + job)
+            if action.startswith("actions/attest-build-provenance@") and job != "Publisher":
+                issues.append("Only the protected environment publisher may create attestations")
+            if action.startswith("github/codeql-action/") and (job != "UploadCodeqlSarif" or not action.startswith("github/codeql-action/upload-sarif@")):
+                issues.append("CodeQL execution must be read-only and SARIF upload isolated")
+            for command in environment_shell_commands(step):
+                if (command[:2] == ["docker", "push"] or "--push" in command
+                        or command[:2] in (["skopeo", "copy"], ["oras", "push"])):
+                    issues.append("Environment registry writes must use only the qualified publication helper")
+
+    source_steps = [workflow_step_fields(step) for step in steps.get("Source", [])]
+    source_prior = [(index, fields, children) for index, (fields, children) in enumerate(source_steps)
+                    if fields.get("name") == "Reject partial prior source tuple at reusable boundary"]
+    source_validation = [index for index, (fields, _) in enumerate(source_steps)
+                         if fields.get("name") == "Validate exact producer source and operation"]
+    prior_env = {"KLOGG_" + name.upper().replace("-", "_"): "${{ inputs." + name + " }}"
+                 for name in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}
+    source_lines = (active_script_content(source_prior[0][1].get("run", "")).splitlines()
+                    if source_prior else [])
+    source_rejections = (
+        ["keys = ('KLOGG_PRIOR_SOURCE_RUN_ID', 'KLOGG_PRIOR_SOURCE_ARTIFACT_ID',",
+         "'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_SHA')",
+         "values = [os.environ[key] for key in keys]"],
+        ["if any(values) and not all(values):", "raise SystemExit('prior source inputs must be all-or-none')"],
+        ["if any(not re.fullmatch('[1-9][0-9]*', value) for value in values[:3]):",
+         "raise SystemExit('prior source IDs must be positive decimal strings')"],
+        ["if not re.fullmatch('[0-9a-f]{40}', values[3]) or values[3] in ('0' * 40, os.environ['KLOGG_EXPECTED_SOURCE_SHA']):",
+         "raise SystemExit('prior source SHA must be an earlier nonzero full commit SHA')"],
+    )
+    if (len(source_prior) != 1 or len(source_validation) != 1 or source_prior[0][0] >= source_validation[0]
+            or source_prior[0][1].get("if") is not None or source_prior[0][1].get("shell") != "bash"
+            or source_prior[0][2].get("env") != prior_env
+            or not source_prior[0][1].get("run", "").startswith("set -euo pipefail\n")
+            or not all(any(source_lines[index:index + len(branch)] == branch
+                            for index in range(len(source_lines) - len(branch) + 1))
+                       for branch in source_rejections)):
+        issues.append("Environment reusable Source must reject incomplete or malformed prior source tuples")
+
+    fixture_steps = [workflow_step_fields(step) for step in steps.get("LinuxFixture", [])]
+    import_steps = [(index, fields, children) for index, (fields, children) in enumerate(fixture_steps)
+                    if "ci_environment_source_cache.py" in fields.get("run", "")]
+    expected_import = ["python3", "scripts/ci_environment_source_cache.py",
+                       "--lock", "packaging/adb/adb-helper.lock.json",
+                       "--repo-root", "$GITHUB_WORKSPACE", "--source-sha", "$KLOGG_EXPECTED_SOURCE_SHA",
+                       "--run-id", "$KLOGG_PRIOR_SOURCE_RUN_ID", "--run-attempt", "$KLOGG_PRIOR_SOURCE_RUN_ATTEMPT",
+                       "--artifact-id", "$KLOGG_PRIOR_SOURCE_ARTIFACT_ID", "--prior-sha", "$KLOGG_PRIOR_SOURCE_SHA",
+                       "--output-root", "$RUNNER_TEMP/source-cache-import"]
+    expected_import_env = {"GH_TOKEN": "${{ github.token }}", **{
+        "KLOGG_" + key.upper().replace("-", "_"): "${{ inputs." + key + " }}"
+        for key in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}}
+    if (len(import_steps) != 1
+            or import_steps[0][1].get("if") != "${{ inputs.prior-source-run-id != '' }}"
+            or import_steps[0][1].get("shell") != "bash"
+            or import_steps[0][2].get("env") != expected_import_env
+            or [command for command in environment_shell_commands(steps["LinuxFixture"][import_steps[0][0]])
+                if command[:2] == expected_import[:2]] != [expected_import]
+            or not import_steps[0][1].get("run", "").startswith("set -euo pipefail\n")):
+        issues.append("Environment prior source import must be exact, token-scoped and fixture-only")
+    prepare_steps = [(index, fields) for index, (fields, _) in enumerate(fixture_steps)
+                     if "ci_environment_pipeline.py prepare-fixture" in fields.get("run", "")]
+    if (len(prepare_steps) != 1 or not import_steps or import_steps[0][0] >= prepare_steps[0][0]
+            or prepare_steps[0][1].get("if") is not None
+            or prepare_steps[0][1].get("shell") != "bash"
+            or prepare_steps[0][1].get("run", "").count('source_cache_args+=(--source-cache-root "$RUNNER_TEMP/source-cache-import")') != 1
+            or 'if [[ -n "$KLOGG_PRIOR_SOURCE_RUN_ID" ]]; then' not in active_script_content(prepare_steps[0][1].get("run", ""))
+            or '"${source_cache_args[@]}"' not in active_script_content(prepare_steps[0][1].get("run", ""))
+            or prepare_steps[0][1].get("run", "").count("source_cache_args=()") != 1
+            or fixture_steps[prepare_steps[0][0]][1].get("env") != {"KLOGG_PRIOR_SOURCE_RUN_ID": "${{ inputs.prior-source-run-id }}"}):
+        issues.append("Environment fixture must conditionally bind only imported prior source bytes before preparation")
+
+    for job, family in CI_ENVIRONMENT_BUILDERS.items():
+        if job not in blocks:
+            continue
+        if mapping(job, "env") != {"KLOGG_FAMILY": family}:
+            issues.append("Environment builder family must be a literal reviewed mapping: " + job)
+        if mapping(job, "outputs") != {"candidate-artifact-id": "${{ steps.upload.outputs.artifact-id }}", "archive-sha256": "${{ steps.identity.outputs.archive-sha256 }}"}:
+            issues.append("Environment candidate IDs and original archive hashes must be explicit job outputs: " + job)
+        materialize = command_step(job, helper + ["materialize"], {"--family": "$KLOGG_FAMILY", "--source": "$RUNNER_TEMP/source.json"})
+        build = command_step(job, ["scripts/build_ci_environment.sh"], {"--family": "$KLOGG_FAMILY", "--inputs": "$RUNNER_TEMP/materialized/inputs.json", "--materials": "$RUNNER_TEMP/materialized/materials", "--source": "$RUNNER_TEMP/source.json"})
+        if materialize is None or build is None or materialize > build:
+            issues.append("Environment builder must materialize authenticated inputs then build original local OCI bytes: " + job)
+
+    for job, (family, profile, builder, package) in CI_ENVIRONMENT_PROFILES.items():
+        if job not in blocks:
+            continue
+        env = mapping(job, "env")
+        expected = {"KLOGG_FAMILY": family, "KLOGG_PROFILE": profile, "KLOGG_PACKAGE_PROFILE": str(package).lower(),
+                    "KLOGG_VERSION": "${{ needs.Source.outputs.version }}",
+                    "KLOGG_CANDIDATE_ARTIFACT_ID": "${{ needs." + builder + ".outputs.candidate-artifact-id }}",
+                    "KLOGG_CANDIDATE_ARCHIVE_SHA256": "${{ needs." + builder + ".outputs.archive-sha256 }}",
+                    "KLOGG_CPM_ARTIFACT_ID": "${{ needs.CpmSources.outputs.artifact-id }}",
+                    "KLOGG_CPM_ARCHIVE_SHA256": "${{ needs.CpmSources.outputs.archive-sha256 }}"}
+        if package:
+            expected.update({"KLOGG_FIXTURE_ARTIFACT_ID": "${{ needs.LinuxFixture.outputs.artifact-id }}", "KLOGG_FIXTURE_ARCHIVE_SHA256": "${{ needs.LinuxFixture.outputs.archive-sha256 }}"})
+        if env != expected:
+            issues.append("Environment qualifier family/profile/source artifact mapping must be exact: " + job)
+        if not package and "LinuxFixture" in ancestors.get(job, set()):
+            issues.append("Environment sanitizer/analysis lanes must not acquire mobile fixture ancestors: " + job)
+        expected_outputs = {"receipt-artifact-id": "${{ steps.upload.outputs.artifact-id }}", "archive-sha256": "${{ steps.identity.outputs.archive-sha256 }}", "receipt-sha256": "${{ steps.identity.outputs.receipt-sha256 }}"}
+        if profile == "codeql":
+            expected_outputs.update({"sarif-artifact-id": "${{ steps.sarif.outputs.artifact-id }}", "sarif-sha256": "${{ steps.sarif_identity.outputs.sarif-sha256 }}"})
+        if mapping(job, "outputs") != expected_outputs:
+            issues.append("Environment qualifier artifact/archive/receipt identities must be explicit outputs: " + job)
+        prepare = command_step(job, helper + ["prepare-candidate"], {"--candidate-artifact-id": "$KLOGG_CANDIDATE_ARTIFACT_ID", "--archive-sha256": "$KLOGG_CANDIDATE_ARCHIVE_SHA256", "--source": "$RUNNER_TEMP/source.json"})
+        receipt = command_step(job, helper + ["profile-receipt"], {"--family": "$KLOGG_FAMILY", "--profile": "$KLOGG_PROFILE", "--candidate-artifact-id": "$KLOGG_CANDIDATE_ARTIFACT_ID", "--source": "$RUNNER_TEMP/source.json"})
+        if family == "noble-qt693-analysis":
+            validation = command_step(job, ["python3", "scripts/qualify_ci_analysis.py"], {"--role": "$KLOGG_PROFILE", "--analysis-base-sha": "$KLOGG_ANALYSIS_BASE_SHA", "--role-materials": "$GITHUB_WORKSPACE/ci/environments/role-materials.json"})
+        else:
+            validations = [index for index, step in enumerate(steps.get(job, []))
+                           if (parsed := workflow_step_fields(step))[0].get("uses") == "./.github/actions/linux-validate"
+                           and parsed[0].get("if") is None
+                           and parsed[1].get("with") == {"family": "${{ env.KLOGG_FAMILY }}", "profile": "${{ env.KLOGG_PROFILE }}"}]
+            validation = validations[0] if len(validations) == 1 else None
+        if prepare is None or validation is None or receipt is None or not prepare < validation < receipt:
+            issues.append("Environment qualification must verify candidate, execute real profile, then issue its bound receipt: " + job)
+        allowed_uploads = {"${{ runner.temp }}/qualification.tar.gz"}
+        if family == "noble-qt693-analysis":
+            allowed_uploads.add("${{ runner.temp }}/analysis-result/codeql.sarif")
+        for step in steps.get(job, []):
+            fields, children = workflow_step_fields(step)
+            if fields.get("uses", "").startswith("actions/upload-artifact@") and children.get("with", {}).get("path") not in allowed_uploads:
+                issues.append("Environment qualification artifacts must not transport CodeQL binaries or unbounded workspaces: " + job)
+
+    aggregate = command_step("QualificationGate", helper + ["aggregate"], {"--job-results": "$RUNNER_TEMP/job-results.json", "--artifact-identities": "$RUNNER_TEMP/artifact-identities.json", "--operation": "$KLOGG_ENVIRONMENT_MODE", "--sarif-result": "$KLOGG_SARIF_RESULT"})
+    if aggregate is None:
+        issues.append("Environment gate must bind exact authoritative results and operation/SARIF publication policy")
+    publish = command_step("Publisher", helper + ["publish"], {"--qualified-artifact-id": "$KLOGG_QUALIFIED_ARTIFACT_ID", "--qualified-archive-sha256": "$KLOGG_QUALIFIED_ARCHIVE_SHA256", "--evidence-root": "$RUNNER_TEMP/evidence"})
+    finalize = command_step("Publisher", helper + ["finalize-publication"], {"--bundle-map": "$RUNNER_TEMP/bundle-map.json", "--publication-root": "$RUNNER_TEMP/publication"})
+    attestations = []
+    for index, step in enumerate(steps.get("Publisher", [])):
+        fields, children = workflow_step_fields(step)
+        if fields.get("uses", "").startswith("actions/attest-build-provenance@"):
+            attestations.append((index, fields, children.get("with", {})))
+    expected_subjects = {}
+    for key in ("focal", "jammy", "noble", "resolute", "tsan", "analysis"):
+        expected_subjects["attest_" + key + "_image"] = {"subject-name": "ghcr.io/zeacent/klogg-ci-env", "subject-digest": "${{ steps.publish.outputs." + key + "_image_digest }}", "push-to-registry": "false"}
+        expected_subjects["attest_" + key + "_receipt"] = {"subject-name": "verification.json", "subject-digest": "sha256:${{ steps.publish.outputs." + key + "_receipt_sha256 }}", "push-to-registry": "false"}
+    if (publish is None or finalize is None or len(attestations) != 12
+            or {fields.get("id"): values for _, fields, values in attestations} != expected_subjects
+            or any(fields.get("if") is not None or not publish < index < finalize for index, fields, _ in attestations)):
+        issues.append("Environment publisher must attest all six image and exact raw receipt subjects between qualified copy and evidence retention")
+    public = command_step("PublicVerification", helper + ["verify-publication"], {"--publication-artifact-id": "$KLOGG_PUBLICATION_ARTIFACT_ID", "--archive-sha256": "$KLOGG_PUBLICATION_ARCHIVE_SHA256"})
+    if public is None or any(command[:3] == helper + ["verify-publication"] for step in steps.get("Publisher", []) for command in environment_shell_commands(step)):
+        issues.append("Environment public availability verification must be separate and read-only after evidence retention")
+    return issues
+
+
+def ci_ios_host_evidence_workflow_issues(text: str) -> list[str]:
+    """Keep the reusable host inventory disconnected from native qualification."""
+    issues: list[str] = []
+    triggers = workflow_trigger_mapping(text)
+    jobs = workflow_job_blocks(text)
+    if triggers is None or set(triggers) != {"workflow_call"} or set(jobs) != {
+            "Source", "IosIntel", "IosArm"}:
+        issues.append("iOS host diagnostics require a reusable source and two host jobs only")
+    inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
+    if (inputs is None or set(inputs) != {"expected-source-sha"}
+            or not {"expected-source-sha:", "required: true", "type: string"}.issubset(
+                {line.strip() for line in inputs["expected-source-sha"][1]})):
+        issues.append("iOS host diagnostics require an exact source SHA input")
+    permissions = workflow_mapping_block(text.splitlines(), "permissions", 0)
+    allowed = {"contents": "read", "actions": "read"}
+    if (permissions is None or {key: value for key, (value, _) in permissions.items()} != allowed
+            or re.search(r"\bsecrets\b", active_script_content(text))):
+        issues.append("iOS host diagnostics cannot receive publishing or secret credentials")
+    try:
+        steps = workflow_job_steps(text)
+    except ValueError as error:
+        return issues + [str(error)]
+    needs = workflow_job_needs(text)
+    if needs.get("Source") != set() or workflow_job_direct_value(jobs.get("Source", []), "runs-on") != "ubuntu-24.04":
+        issues.append("iOS host source prefetch must be independent and hosted")
+    for name, block in jobs.items():
+        direct = workflow_mapping_block(block, "permissions", 4)
+        if (direct is not None and {key: value for key, (value, _) in direct.items()} != allowed
+                or workflow_job_direct_value(block, "continue-on-error") not in (None, "false")
+                or workflow_job_direct_value(block, "if") is not None):
+            issues.append(name + ": diagnostics must not bypass failures or gain credentials")
+        limit = workflow_job_direct_value(block, "timeout-minutes")
+        if not limit or not limit.isdecimal() or not 0 < int(limit) <= 60:
+            issues.append(name + ": diagnostic job requires a bounded timeout")
+        rows = [workflow_step_fields(step) for step in steps.get(name, [])]
+        allowed_actions = {"actions/checkout", "actions/upload-artifact"}
+        if name != "Source":
+            allowed_actions.update({"actions/download-artifact", "lukka/get-cmake"})
+        pinned_actions = {action + "@" + REVIEWED_ACTION_REVISIONS[action]
+                          for action in allowed_actions}
+        if any(row["uses"] not in pinned_actions for row, _ in rows if "uses" in row):
+            issues.append(name + ": only reviewed diagnostic actions may execute")
+        checkouts = [(row, children.get("with", {})) for row, children in rows
+                     if row.get("uses", "").startswith("actions/checkout@")]
+        if (len(checkouts) != 1
+                or checkouts[0][0].get("uses") != "actions/checkout@" + REVIEWED_ACTION_REVISIONS["actions/checkout"]
+                or checkouts[0][1] != {"ref": "${{ inputs.expected-source-sha }}", "persist-credentials": "false"}):
+            issues.append(name + ": exact SHA checkout without persisted credentials is required")
+        if any(row.get("continue-on-error") not in (None, "false")
+               or row.get("if") is not None and not (
+                   row.get("uses", "").startswith("actions/upload-artifact@")
+                   and row["if"] == "${{ always() }}") for row, _ in rows):
+            issues.append(name + ": critical diagnostic steps cannot be skipped")
+    source = [workflow_step_fields(step) for step in steps.get("Source", [])]
+    scripts = active_script_content("\n".join(row.get("run", "") for row, _ in source))
+    if (sum(row.get("name") == "Validate exact diagnostic source" for row, _ in source) != 1
+            or "prefetch_ios_native_sources.py" not in scripts
+            or "libimobiledevice.lock.json" not in scripts
+            or "GITHUB_REPOSITORY" not in scripts or "GITHUB_SHA" not in scripts
+            or "git', 'rev-parse', 'HEAD'" not in scripts):
+        issues.append("iOS host source preflight must bind canonical checkout and locked archives")
+    for name, runner, arch in (("IosIntel", "macos-26-intel", "x86_64"),
+                               ("IosArm", "macos-26", "arm64")):
+        block = jobs.get(name, [])
+        if workflow_job_direct_value(block, "runs-on") != runner or needs.get(name) != {"Source"}:
+            issues.append(name + ": wrong host or source dependency")
+        rows = [workflow_step_fields(step) for step in steps.get(name, [])]
+        scripts = active_script_content("\n".join(row.get("run", "") for row, _ in rows))
+        if ("ci_ios_host_evidence.py" not in scripts or "build_ios_native_stack.py" not in scripts
+                or "verify_ios_native_stack.py" not in scripts or arch not in "\n".join(block)):
+            issues.append(name + ": real diagnostic build and fail-closed observer required")
+        downloads = [children.get("with", {}) for row, children in rows
+                     if row.get("uses", "").startswith("actions/download-artifact@")]
+        uploads = [children.get("with", {}) for row, children in rows
+                   if row.get("uses", "").startswith("actions/upload-artifact@")]
+        if (len(downloads) != 1 or downloads[0].get("name") != "ios-native-source-cache"
+                or len(uploads) != 1 or not uploads[0].get("path", "").endswith(".json")
+                or "evidence" not in uploads[0].get("name", "")
+                or uploads[0].get("if-no-files-found") != "error"):
+            issues.append(name + ": only same-run sources and diagnostic JSON may transfer")
+    if any(token in active_script_content(text) for token in (
+            "ci_dependency_gate.py", "ci_dependency_producer.py", "publish_ci_dependency.py",
+            "ghcr.io/", "native-core-candidate-", "--probe-unreviewed-host-tools")):
+        issues.append("iOS host diagnostic must not qualify, publish or bypass native preflight")
+    return issues
+
+
+def ci_dependency_workflow_issues(text: str) -> list[str]:
+    """Keep the child Gate read-only and publication visibly disabled."""
+    issues: list[str] = []
+    triggers = workflow_trigger_mapping(text)
+    blocks = workflow_job_blocks(text)
+    needs = workflow_job_needs(text)
+    if triggers is None or set(triggers) != {"workflow_call"} or set(blocks) != {"Gate", "Publish"}:
+        issues.append("Native dependency workflow must be reusable-only with exact Gate and disabled Publish jobs")
+    inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
+    if (inputs is None or set(inputs) != {"mode", "expected-source-sha", "needs-json"}
+            or any((fields := workflow_mapping_block(block, key, 6)) is None
+                   or fields.get("type", (None,))[0] != "string"
+                   or fields.get("required", (None,))[0] != "true"
+                   for key, (_, block) in inputs.items())):
+        issues.append("Native Gate inputs must require exact parent mode, SHA and GitHub-controlled needs")
+    call_block = triggers.get("workflow_call", (None, []))[1] if triggers is not None else []
+    outputs = workflow_mapping_block(call_block, "outputs", 4)
+    if (outputs is None or {key: (fields or {}).get("value", (None,))[0]
+                            for key, (_, block) in outputs.items()
+                            for fields in [workflow_mapping_block(block, key, 6)]} != {
+                                key: "${{ jobs.Gate.outputs." + key + " }}"
+                                for key in ("gate-tar-sha256", "gate-tar-size", "gate-artifact-id")
+                            }):
+        issues.append("Native Gate must expose exact archive digest, size and independent upload ID")
+    def mapping(block, key):
+        values = workflow_mapping_block(block, key, 4)
+        return None if values is None else {name: value for name, (value, _) in values.items()}
+
+    root_permissions = workflow_mapping_block(text.splitlines(), "permissions", 0)
+    if (root_permissions is None or {key: value for key, (value, _) in root_permissions.items()} != CI_DEPENDENCY_CALL_PERMISSIONS
+            or mapping(blocks.get("Gate", []), "permissions") != CI_DEPENDENCY_CALL_PERMISSIONS
+            or mapping(blocks.get("Publish", []), "permissions") != {"contents": "read"}
+            or re.search(r"\bsecrets\b", active_script_content(text))):
+        issues.append("Native qualification jobs must not receive package, OIDC, attestation write or inherited secrets")
+    gate = blocks.get("Gate", [])
+    publish = blocks.get("Publish", [])
+    gate_outputs = mapping(gate, "outputs")
+    if (needs.get("Gate") != set() or workflow_job_direct_value(gate, "runs-on") != "ubuntu-24.04"
+            or workflow_job_direct_value(gate, "if") is not None
+            or gate_outputs != {
+                "gate-tar-sha256": "${{ steps.archive.outputs.sha256 }}",
+                "gate-tar-size": "${{ steps.archive.outputs.size }}",
+                "gate-artifact-id": "${{ steps.upload_gate.outputs.artifact-id }}",
+            }):
+        issues.append("Native Gate must expose only reviewed same-run artifact identities")
+    if (needs.get("Publish") != {"Gate"} or workflow_job_direct_value(publish, "runs-on") != "ubuntu-24.04"
+            or workflow_job_direct_value(publish, "if") != "${{ inputs.mode == 'publish' }}"):
+        issues.append("Native Publisher must require successful Gate and publish mode")
+    try:
+        gate_steps = [workflow_step_fields(step) for step in workflow_step_blocks(gate)]
+        publish_steps = [workflow_step_fields(step) for step in workflow_step_blocks(publish)]
+    except ValueError as error:
+        return issues + [str(error)]
+    if (any(fields.get("if") is not None or fields.get("continue-on-error") not in (None, "false")
+            for fields, _ in gate_steps + publish_steps)
+            or any(workflow_job_direct_value(block, "continue-on-error") not in (None, "false")
+                   for block in (gate, publish))):
+        issues.append("Native Gate and Publisher steps must not skip work or ignore failures")
+    if (len(gate_steps) != 5 or len(publish_steps) != 1
+            or gate_steps[0][0].get("uses") != "actions/checkout@" + REVIEWED_ACTION_REVISIONS["actions/checkout"]
+            or gate_steps[0][1].get("with") != {"ref": "${{ inputs.expected-source-sha }}", "persist-credentials": "false"}
+            or [fields.get("name") for fields, _ in gate_steps[1:]] != [
+                "Validate and filter parent needs",
+                "Verify independent full builds and qualify exact candidate bytes",
+                "Archive exact eight Gate publisher inputs",
+                "Upload immutable same-run Gate evidence",
+            ]):
+        issues.append("Native Gate must check out exact source and execute only the reviewed qualification steps")
+    else:
+        filtered, verify, archive, upload = gate_steps[1:]
+        filter_lines = filtered[0].get("run", "").splitlines()
+        if (filtered[0].get("shell") != "bash"
+                or filtered[1].get("env") != {
+                    "KLOGG_DEPENDENCY_MODE": "${{ inputs.mode }}",
+                    "KLOGG_EXPECTED_SOURCE_SHA": "${{ inputs.expected-source-sha }}",
+                    "KLOGG_PARENT_NEEDS_JSON": "${{ inputs.needs-json }}",
+                }
+                or not all(line in filter_lines for line in (
+                    'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
+                    'test "$KLOGG_EXPECTED_SOURCE_SHA" = "$GITHUB_SHA"',
+                    "if not isinstance(needs, dict) or set(needs) != expected:",
+                    "if not isinstance(job, dict) or job.get('result') != 'success' or not isinstance(job.get('outputs'), dict):",
+                    "del needs['DependencyModePreflight']",
+                    "destination.write_text(json.dumps(needs, sort_keys=True, separators=(',', ':')) + '\\n', encoding='utf-8')",
+                ))):
+            issues.append("Native Gate must authenticate and filter exactly nine successful parent needs")
+        if (verify[0].get("shell") != "bash"
+                or verify[1].get("env") != {"GH_TOKEN": "${{ github.token }}", "KLOGG_DEPENDENCY_MODE": "${{ inputs.mode }}"}
+                or verify[0].get("run") != '''set -euo pipefail
+python3 scripts/ci_dependency_gate.py \\
+--mode "$KLOGG_DEPENDENCY_MODE" \\
+--repo-root "$GITHUB_WORKSPACE" \\
+--needs-json "$RUNNER_TEMP/native-gate-needs.json" \\
+--output-dir "$RUNNER_TEMP/native-gate-output"'''):
+            issues.append("Native Gate must independently verify full signed builds before archiving")
+        if (archive[0].get("id") != "archive" or archive[0].get("shell") != "bash"
+                or "identity = write_gate_archive(temp / 'native-gate-output', temp / 'native-gate.tar.gz')" not in archive[0].get("run", "")
+                or "output.write('sha256=' + identity['sha256'] + '\\n')" not in archive[0].get("run", "")
+                or "output.write('size=' + str(identity['size']) + '\\n')" not in archive[0].get("run", "")):
+            issues.append("Native Gate must upload exactly the computed archive digest and size")
+        if (upload[0].get("id") != "upload_gate"
+                or upload[0].get("uses") != "actions/upload-artifact@" + REVIEWED_ACTION_REVISIONS["actions/upload-artifact"]
+                or upload[1].get("with") != {
+                    "name": "native-gate-${{ github.run_id }}-${{ github.run_attempt }}",
+                    "path": "${{ runner.temp }}/native-gate.tar.gz",
+                    "if-no-files-found": "error", "compression-level": "0", "retention-days": "7",
+                }):
+            issues.append("Native Gate must upload exactly one bounded same-run archive")
+    if (len(publish_steps) != 1 or publish_steps[0][0].get("shell") != "bash"
+            or publish_steps[0][0].get("run") != (
+                "echo '::error::Native dependency publication is not implemented; "
+                "no registry or release writes are permitted'\nexit 1")):
+        issues.append("Native Publisher must fail explicitly without write privileges")
+    return issues
+
+
+def ci_build_environment_mode_issues(text: str) -> list[str]:
+    """Model the producer branch without letting skipped jobs satisfy app checks."""
+    issues: list[str] = []
+    blocks = workflow_job_blocks(text)
+    needs = workflow_job_needs(text)
+    for job in sorted(CI_BUILD_REQUIRED_JOBS & set(blocks)):
+        name = workflow_job_direct_value(blocks[job], "name") or ""
+        expected_name = (CI_BUILD_NATIVE_NAME_PREFIX + CI_BUILD_NATIVE_NAMES[job]
+                         if job in CI_BUILD_NATIVE_JOBS else CI_BUILD_PRODUCER_NAME_PREFIX)
+        if name != expected_name and not (job not in CI_BUILD_NATIVE_JOBS
+                                           and name.startswith(expected_name)):
+            issues.append("CI producer mode must distinguish every skipped ordinary check name: " + job)
+        if job == "ci-gate" and name != CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate":
+            issues.append("CI ordinary required gate name must remain exactly ci-gate")
+        expected = (CI_BUILD_ORDINARY_GATE_IF if job == "ci-gate" else
+                    CI_BUILD_NATIVE_ROOT_IF if job in CI_BUILD_NATIVE_ROOT_JOBS else
+                    CI_BUILD_NATIVE_IF if job in CI_BUILD_NATIVE_JOBS else CI_BUILD_ORDINARY_IF)
+        if job != "DispatchContinuous" and workflow_job_direct_value(blocks[job], "if") != expected:
+            issues.append("CI job must isolate ordinary and native dependency dispatch: " + job)
+        allowed_producers = {"DependencyModePreflight"} if job in CI_BUILD_NATIVE_ROOT_JOBS else set()
+        if needs.get(job, set()) & (CI_BUILD_PRODUCER_JOBS - allowed_producers):
+            issues.append("CI ordinary jobs must not depend on the environment producer: " + job)
+        if job in CI_BUILD_NATIVE_ROOT_JOBS and needs.get(job) != {"DependencyModePreflight"}:
+            issues.append("CI native prerequisites must directly require dispatch preflight: " + job)
+
+    dispatch_inputs = workflow_mapping_block(text.splitlines(), "inputs", 4)
+    expected_input_names = {"qualification-mode", "environment-mode", "dependency-mode", "expected-source-sha", "analysis-base-sha", *CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}
+    if dispatch_inputs is None or set(dispatch_inputs) != expected_input_names:
+        issues.append("CI environment dispatch requires exact mode and source/base inputs")
+    else:
+        mode_block = dispatch_inputs["environment-mode"][1]
+        mode = workflow_mapping_block(mode_block, "environment-mode", 6)
+        options = [scalar(line.strip()[2:]) for line in mode_block if line.startswith("          - ")]
+        if (mode is None or mode.get("type", (None,))[0] != "choice"
+                or mode.get("default", (None,))[0] != "off"
+                or mode.get("required", (None,))[0] != "true"
+                or options != ["off", "qualify", "publish"]):
+            issues.append("CI environment mode must default off with exact off/qualify/publish choices")
+        dependency_block = dispatch_inputs["dependency-mode"][1]
+        dependency_fields = workflow_mapping_block(dependency_block, "dependency-mode", 6)
+        dependency_options = [scalar(line.strip()[2:]) for line in dependency_block if line.startswith("          - ")]
+        if (dependency_fields is None or dependency_fields.get("type", (None,))[0] != "choice"
+                or dependency_fields.get("default", (None,))[0] != "off"
+                or dependency_fields.get("required", (None,))[0] != "true"
+                or dependency_options != ["off", "qualify", "publish", "observe-ios-host"]):
+            issues.append("CI dependency mode must default off with exact off/qualify/publish/observe choices")
+        for pin in ("expected-source-sha", "analysis-base-sha", *CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS):
+            pin_fields = workflow_mapping_block(dispatch_inputs[pin][1], pin, 6)
+            if (pin_fields is None or pin_fields.get("type", (None,))[0] != "string"
+                    or pin_fields.get("required", (None,))[0] != "false"
+                    or pin_fields.get("default", (None,))[0] != ""):
+                issues.append("CI producer source pins must not change ordinary dispatch defaults: " + pin)
+
+    preflight = blocks.get("EnvironmentModePreflight", [])
+    call = blocks.get("EnvironmentProducer", [])
+    call_permissions = workflow_mapping_block(call, "permissions", 4)
+    call_inputs = workflow_mapping_block(call, "with", 4)
+    if (workflow_job_direct_value(call, "uses") != "./.github/workflows/ci-environments.yml"
+            or workflow_job_direct_value(call, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode == 'off' && (inputs.environment-mode == 'qualify' || inputs.environment-mode == 'publish') }}"
+            or needs.get("EnvironmentProducer") != {"EnvironmentModePreflight"}
+            or any(workflow_job_direct_value(call, field) is not None for field in ("secrets", "runs-on", "steps", "environment", "continue-on-error"))
+            or call_permissions is None
+            or {key: value for key, (value, _) in call_permissions.items()} != CI_ENVIRONMENT_CALL_PERMISSIONS
+            or call_inputs is None
+            or {key: value for key, (value, _) in call_inputs.items()} != {
+                "mode": "${{ inputs.environment-mode }}", "expected-source-sha": "${{ inputs.expected-source-sha }}",
+                "analysis-base-sha": "${{ inputs.analysis-base-sha }}",
+                **{name: "${{ inputs." + name + " }}" for name in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}}):
+        issues.append("CI environment caller must use the exact source-local reusable workflow and narrow permission ceiling")
+    permissions = workflow_mapping_block(preflight, "permissions", 4)
+    if (workflow_job_direct_value(preflight, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && inputs.dependency-mode == 'off' }}"
+            or needs.get("EnvironmentModePreflight") != set()
+            or permissions is None or {key: value for key, (value, _) in permissions.items()} != {"contents": "read"}):
+        issues.append("CI environment dispatch preflight must be a read-only producer-only root")
+    preflight_steps = [workflow_step_fields(step) for step in workflow_step_blocks(preflight)]
+    validation = [fields.get("run", "") for fields, _ in preflight_steps
+                  if fields.get("name") == "Validate isolated producer mode and exact source" and fields.get("shell") == "bash"]
+    required_validation = (
+        "environment producer modes cannot combine with release qualification",
+        "dispatched source does not match expected-source-sha", "analysis base must precede the qualification source",
+        "git merge-base --is-ancestor", "git rev-parse HEAD",
+    )
+    if len(validation) != 1 or any(marker not in validation[0] for marker in required_validation):
+        issues.append("CI environment dispatch must reject release mixing and stale/non-ancestor source pins")
+    validation_steps = [step for step in workflow_step_blocks(preflight)
+                        if workflow_step_fields(step)[0].get("name") == "Validate isolated producer mode and exact source"]
+    expected_prior_env = {"KLOGG_" + name.upper().replace("-", "_"): "${{ inputs." + name + " }}"
+                          for name in CI_ENVIRONMENT_PRIOR_SOURCE_INPUTS}
+    required_prior_preflight = (
+        ["if any(values) and not all(values):", "raise SystemExit('prior source inputs must be all-or-none')"],
+        ["if any(not re.fullmatch('[1-9][0-9]*', value) for value in values[:3]):",
+         "raise SystemExit('prior source run, artifact and attempt IDs must be positive decimal strings')"],
+        ["if not re.fullmatch('[0-9a-f]{40}', values[3]) or values[3] in ('0' * 40, os.environ['GITHUB_SHA']):",
+         "raise SystemExit('prior source SHA must be an earlier nonzero full commit SHA')"],
+    )
+    validation_lines = active_script_content(validation[0]).splitlines() if validation else []
+    prior_preflight_covered = all(any(validation_lines[index:index + len(branch)] == branch
+                                      for index in range(len(validation_lines) - len(branch) + 1))
+                                  for branch in required_prior_preflight)
+    if (len(validation_steps) != 1 or not validation
+            or workflow_step_fields(validation_steps[0])[1].get("env", {}) != {
+                "KLOGG_ENVIRONMENT_MODE": "${{ inputs.environment-mode }}",
+                "KLOGG_QUALIFICATION_MODE": "${{ inputs.qualification-mode }}",
+                "KLOGG_EXPECTED_SOURCE_SHA": "${{ inputs.expected-source-sha }}",
+                "KLOGG_ANALYSIS_BASE_SHA": "${{ inputs.analysis-base-sha }}", **expected_prior_env}
+            or not prior_preflight_covered):
+        issues.append("CI environment prior source tuple must be all-or-none with strict source identities")
+
+    # The read-only gate requires the exact preflight and producer ancestry;
+    # publication remains explicitly disabled in the called workflow.
+    dependency = blocks.get("DependencyModePreflight", [])
+    dependency_permissions = workflow_mapping_block(dependency, "permissions", 4)
+    dependency_steps = [workflow_step_fields(step) for step in workflow_step_blocks(dependency)]
+    prior_guards = [(fields, children) for fields, children in dependency_steps
+                    if fields.get("name") == "Reject prior environment source inputs outside producer dispatch"]
+    required_isolation = ("os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'",
+                          "os.environ['KLOGG_ENVIRONMENT_MODE'] in ('qualify', 'publish')",
+                          "os.environ['KLOGG_DEPENDENCY_MODE'] == 'off'")
+    prior_lines = active_script_content(prior_guards[0][0].get("run", "")).splitlines() if prior_guards else []
+    required_rejection = ["if not producer and any(os.environ[name] for name in prior):",
+                          "raise SystemExit('prior source inputs are restricted to environment producer dispatch')"]
+    if (len(prior_guards) != 1 or prior_guards[0][0].get("shell") != "bash"
+            or prior_guards[0][0].get("if") is not None
+            or prior_guards[0][1].get("env") != {"KLOGG_ENVIRONMENT_MODE": "${{ inputs.environment-mode }}",
+                                                 "KLOGG_DEPENDENCY_MODE": "${{ inputs.dependency-mode }}", **expected_prior_env}
+            or any(marker not in active_script_content(prior_guards[0][0].get("run", "")) for marker in required_isolation)
+            or not any(prior_lines[index:index + 2] == required_rejection
+                       for index in range(len(prior_lines) - 1))):
+        issues.append("CI ordinary and dependency events must reject prior source input leakage")
+    native_active = "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}"
+    native_inactive = "${{ github.event_name != 'workflow_dispatch' || inputs.dependency-mode == 'off' }}"
+    noops = [fields for fields, _ in dependency_steps
+             if fields.get("name") == "Inactive native dependency preflight"]
+    validations = [fields for fields, _ in dependency_steps
+                   if fields.get("name") == "Validate isolated dependency mode and exact source"]
+    checkouts = [(fields, children) for fields, children in dependency_steps
+                 if fields.get("uses", "").startswith("actions/checkout@")]
+    dependency_scripts = [fields.get("run", "") for fields in validations
+                          if fields.get("shell") == "bash"]
+    dependency_env = [workflow_mapping_block(step, "env", 8) for step in workflow_step_blocks(dependency)
+                      if workflow_step_fields(step)[0].get("name") == "Validate isolated dependency mode and exact source"]
+    required_script = (
+        "os.environ['KLOGG_DEPENDENCY_MODE'] not in ('qualify', 'publish', 'observe-ios-host')",
+        "os.environ['KLOGG_DEPENDENCY_MODE'] == 'observe-ios-host'",
+        "os.environ['GITHUB_REF'] in ('refs/heads/master', 'refs/heads/main')",
+        "iOS host observation requires a non-default branch",
+        "os.environ['KLOGG_ENVIRONMENT_MODE'] != 'off'",
+        "dependency-mode cannot combine with environment-mode",
+        "os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation'",
+        "dependency-mode cannot combine with release qualification",
+        "os.environ['GITHUB_REPOSITORY'] != 'ZEACENT/klogg'",
+        "os.environ['GITHUB_REF'].startswith('refs/heads/')",
+        "dependency production requires a canonical repository branch",
+        "re.fullmatch('[0-9a-f]{40}', source)",
+        "source == '0' * 40",
+        "source != os.environ['GITHUB_SHA']",
+        "dispatched source does not match expected-source-sha",
+        "git rev-parse HEAD",
+    )
+    required_branches = (
+        "if (os.environ['KLOGG_DEPENDENCY_MODE'] == 'observe-ios-host'\nand os.environ['GITHUB_REF'] in ('refs/heads/master', 'refs/heads/main')):\nraise SystemExit('iOS host observation requires a non-default branch')",
+        "if os.environ['KLOGG_ENVIRONMENT_MODE'] != 'off':\nraise SystemExit('dependency-mode cannot combine with environment-mode')",
+        "if os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation':\nraise SystemExit('dependency-mode cannot combine with release qualification')",
+        "if os.environ['GITHUB_REPOSITORY'] != 'ZEACENT/klogg' or not os.environ['GITHUB_REF'].startswith('refs/heads/'):\nraise SystemExit('dependency production requires a canonical repository branch')",
+        "if not re.fullmatch('[0-9a-f]{40}', source) or source == '0' * 40:\nraise SystemExit('expected-source-sha must be an explicit nonzero full commit SHA')",
+        "if source != os.environ['GITHUB_SHA']:\nraise SystemExit('dispatched source does not match expected-source-sha')",
+        "test \"$(git rev-parse HEAD)\" = \"$KLOGG_EXPECTED_SOURCE_SHA\"",
+    )
+    dependency_lines = active_script_content(dependency_scripts[0]).splitlines() if len(dependency_scripts) == 1 else []
+    def contains_active_lines(pattern: str) -> bool:
+        lines = pattern.splitlines()
+        return any(dependency_lines[index:index + len(lines)] == lines
+                   for index in range(len(dependency_lines) - len(lines) + 1))
+
+    if (workflow_job_direct_value(dependency, "if") is not None
+            or len(noops) != 1 or noops[0].get("if") != native_inactive
+            or active_script_content(noops[0].get("run", "")) != ":"
+            or len(validations) != 1 or validations[0].get("if") != native_active
+            or len(checkouts) != 1 or checkouts[0][0].get("if") != native_active
+            or needs.get("DependencyModePreflight") != set()
+            or workflow_job_direct_value(dependency, "runs-on") != "ubuntu-24.04"
+            or dependency_permissions is None
+            or {key: value for key, (value, _) in dependency_permissions.items()} != {"contents": "read"}
+            or len(dependency_scripts) != 1 or len(dependency_env) != 1
+            or dependency_env[0] is None
+            or {key: value for key, (value, _) in dependency_env[0].items()} != {
+                "KLOGG_DEPENDENCY_MODE": "${{ inputs.dependency-mode }}",
+                "KLOGG_ENVIRONMENT_MODE": "${{ inputs.environment-mode }}",
+                "KLOGG_QUALIFICATION_MODE": "${{ inputs.qualification-mode }}",
+                "KLOGG_EXPECTED_SOURCE_SHA": "${{ inputs.expected-source-sha }}",
+            }
+            or any(marker not in active_script_content(dependency_scripts[0]) for marker in required_script)
+            or "exit 1" in active_script_content(dependency_scripts[0])
+            or not all(contains_active_lines(branch) for branch in required_branches)
+            or not any(fields.get("uses") == "actions/checkout@" + REVIEWED_ACTION_REVISIONS["actions/checkout"]
+                       and children.get("with") == {"ref": "${{ github.sha }}", "persist-credentials": "false"}
+                       for fields, children in checkouts)):
+        issues.append("CI dependency dispatch must reject mixed modes, noncanonical or stale source")
+
+    gate = blocks.get("DependencyGate", [])
+    gate_permissions = workflow_mapping_block(gate, "permissions", 4)
+    gate_inputs = workflow_mapping_block(gate, "with", 4)
+    if (workflow_job_direct_value(gate, "uses") != "./.github/workflows/ci-dependencies.yml"
+            or workflow_job_direct_value(gate, "if") != "${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}"
+            or needs.get("DependencyGate") != ({"DependencyModePreflight"} | (CI_BUILD_NATIVE_JOBS - CI_BUILD_NATIVE_ROOT_JOBS))
+            or gate_permissions is None
+            or {key: value for key, (value, _) in gate_permissions.items()} != CI_DEPENDENCY_CALL_PERMISSIONS
+            or gate_inputs is None
+            or {key: value for key, (value, _) in gate_inputs.items()} != {
+                "mode": "${{ inputs.dependency-mode }}",
+                "expected-source-sha": "${{ inputs.expected-source-sha }}",
+                "needs-json": "${{ toJSON(needs) }}",
+            }
+            or any(workflow_job_direct_value(gate, field) is not None
+                   for field in ("secrets", "runs-on", "steps", "environment", "continue-on-error"))):
+        issues.append("CI dependency caller must require exact nine producer results and read-only local Gate")
+    observer = blocks.get("IosHostEvidence", [])
+    observer_permissions = workflow_mapping_block(observer, "permissions", 4)
+    observer_inputs = workflow_mapping_block(observer, "with", 4)
+    if (workflow_job_direct_value(observer, "uses") != "./.github/workflows/ci-ios-host-evidence.yml"
+            or workflow_job_direct_value(observer, "if") != "${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode == 'observe-ios-host' && needs.DependencyModePreflight.result == 'success' }}"
+            or needs.get("IosHostEvidence") != {"DependencyModePreflight"}
+            or observer_permissions is None
+            or {key: value for key, (value, _) in observer_permissions.items()} != {
+                "contents": "read", "actions": "read"}
+            or observer_inputs is None
+            or {key: value for key, (value, _) in observer_inputs.items()} != {
+                "expected-source-sha": "${{ inputs.expected-source-sha }}"}
+            or any(workflow_job_direct_value(observer, key) is not None for key in (
+                "secrets", "runs-on", "steps", "environment", "continue-on-error"))):
+        issues.append("CI iOS host observer must call only the isolated read-only workflow after exact preflight")
+    return issues
+
+
+def ci_build_adb_source_transport_issues(text: str) -> list[str]:
+    """Keep ordinary CI source imports isolated from dispatch and failed cache hits."""
+    issue = "ADB ordinary source transport must be read-only, ancestry-aware, and fail closed"
+    job = workflow_job_blocks(text).get("PrefetchAdbHelperSources")
+    if job is None:
+        return [issue]
+    permissions = workflow_mapping_block(job, "permissions", 4)
+    if (permissions is None or {key: value for key, (value, _) in permissions.items()}
+            != {"contents": "read", "actions": "read"}):
+        return [issue]
+    steps = [workflow_step_fields(step) for step in
+             workflow_job_steps(text).get("PrefetchAdbHelperSources", [])]
+    checkouts = [children.get("with", {}) for fields, children in steps
+                 if fields.get("uses", "").startswith("actions/checkout@")]
+    prefetch = [(fields, children) for fields, children in steps
+                if fields.get("name") == "Prefetch and hash immutable ADB sources"]
+    if (checkouts != [{"persist-credentials": "false", "fetch-depth": "0"}]
+            or len(prefetch) != 1):
+        return [issue]
+    fields, children = prefetch[0]
+    environment = children.get("env", {})
+    if (fields.get("shell") != "bash"
+            or environment.get("GH_TOKEN") != "${{ github.token }}"
+            or environment.get("KLOGG_ADB_SOURCE_EVENT") != "${{ github.event_name }}"):
+        return [issue]
+    script = active_script_content(fields.get("run", ""))
+    required = (
+        'if [[ "$KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY" == "$KLOGG_ADB_SOURCE_CACHE_EXACT_KEY" ]]; then\n'
+        'echo "::error::The exact ADB source cache failed verification; delete the immutable cache entry before retrying"\n'
+        'exit 1\nfi',
+        'if [[ "$cache_usable" != "true" ]]; then\n'
+        'rm -rf "$adb_source_cache_root"\ntransport_status=2\n'
+        'if [[ "$KLOGG_ADB_SOURCE_EVENT" == "pull_request" || "$KLOGG_ADB_SOURCE_EVENT" == "push" ]]; then\n'
+        'if python3 scripts/ci_adb_source_transport.py \\\n'
+        '--lock packaging/adb/adb-helper.lock.json \\\n'
+        '--repo-root "$GITHUB_WORKSPACE" \\\n'
+        '--download-root "$adb_source_cache_root"; then\n'
+        'transport_status=0\nelse\ntransport_status=$?\nfi\n'
+        'elif [[ "$KLOGG_ADB_SOURCE_EVENT" != "workflow_dispatch" ]]; then\n'
+        'echo "::error::Unsupported ADB source prefetch event: $KLOGG_ADB_SOURCE_EVENT"\n'
+        'exit 1\nfi\n'
+        'if [[ "$transport_status" -eq 2 ]]; then\n'
+        'python3 scripts/prefetch_adb_source_closure.py \\\n'
+        '--lock packaging/adb/adb-helper.lock.json \\\n'
+        '--download-root "$adb_source_cache_root" \\\n'
+        '--workers 2 \\\n'
+        '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"\n'
+        'elif [[ "$transport_status" -eq 0 ]]; then\n'
+        'python3 scripts/prefetch_adb_helper_sources.py \\\n'
+        '--lock packaging/adb/adb-helper.lock.json \\\n'
+        '--download-root "$adb_source_cache_root" \\\n'
+        '--offline \\\n'
+        '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"\n'
+        'else\nexit "$transport_status"\nfi\nfi',
+    )
+    if (any(fragment not in script for fragment in required)
+            or script.count("python3 scripts/ci_adb_source_transport.py") != 1
+            or script.count("python3 scripts/prefetch_adb_helper_sources.py") != 2
+            or script.count("python3 scripts/prefetch_adb_source_closure.py") != 1):
+        return [issue]
+    return []
+
+
 def ci_build_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
     active = active_script_content(text)
@@ -1058,8 +1934,9 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     if re.search(r"(?m)^\s*push:\s*\{[^}]*paths-ignore", trigger_prefix):
         issues.append("master pushes must not skip CI Build by path")
     needs = workflow_job_needs(text)
-    missing_jobs = CI_BUILD_REQUIRED_JOBS - set(needs)
-    unexpected_jobs = set(needs) - CI_BUILD_REQUIRED_JOBS
+    expected_jobs = CI_BUILD_REQUIRED_JOBS | CI_BUILD_PRODUCER_JOBS
+    missing_jobs = expected_jobs - set(needs)
+    unexpected_jobs = set(needs) - expected_jobs
     for job in sorted(missing_jobs):
         issues.append(f"CI build workflow must define job {job}")
     if unexpected_jobs:
@@ -1120,13 +1997,15 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             for other in direct_dependencies - {dependency}:
                 other_ancestors.add(other)
                 other_ancestors.update(ancestors.get(other, set()))
-            if dependency in other_ancestors:
+            if dependency in other_ancestors and job != "DependencyGate":
                 issues.append(
                     f"CI build job {job} directly needs transitive ancestor {dependency}"
                 )
 
     gate = "ci-gate"
-    validation_jobs = set(needs) - {gate} - CI_BUILD_POST_GATE_JOBS
+    # The producer is an explicitly modeled alternate event branch, never an
+    # ordinary validation ancestor or a replacement for its required gate.
+    validation_jobs = set(needs) - {gate} - CI_BUILD_POST_GATE_JOBS - CI_BUILD_PRODUCER_JOBS
     if gate in needs:
         consumed_before_gate = {
             dependency
@@ -1214,8 +2093,10 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             )
 
     job_blocks = workflow_job_blocks(text)
-    if workflow_job_direct_value(job_blocks.get("ci-gate", []), "if") != "always()":
-        issues.append("CI gate must run with if: always()")
+    if workflow_job_direct_value(job_blocks.get("ci-gate", []), "if") != CI_BUILD_ORDINARY_GATE_IF:
+        issues.append("CI gate must run with if: always() for ordinary events only")
+    issues.extend(ci_build_environment_mode_issues(text))
+    issues.extend(ci_build_adb_source_transport_issues(text))
     for job in (
         "LinuxPackages",
         "LinuxSanitizers",
@@ -1259,6 +2140,8 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     )
     windows_block = job_blocks.get("WindowsPackages", [])
     windows_job_condition = workflow_job_direct_value(windows_block, "if") or ""
+    if windows_job_condition == CI_BUILD_ORDINARY_IF:
+        windows_job_condition = "!contains(github.event.head_commit.message, '[skip ci]')"
     windows_steps = workflow_job_steps(text).get("WindowsPackages", [])
     # Any of event_name / github.ref / inputs.qualification-mode in the
     # condition can suppress pull-request validation runs, so all three count
@@ -1366,9 +2249,9 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         if (entry := KEY_VALUE_RE.match(line)) is not None
         and entry.group("key") == "cache-to"
     ]
-    if not cache_to_values:
-        issues.append("BuildKit cache exports must run only on default-branch pushes")
-    elif any(
+    # Ordinary CI consumes locked GHCR environments instead of building images,
+    # so no BuildKit cache exports remain; any that reappear must be push-only.
+    if any(
         re.match(
             r"^\$\{\{ github\.event_name == 'push' && "
             r"(?:env\.KLOGG_CACHE_WRITE == 'true'|matrix\.config\.cache_write) && ",
@@ -2185,8 +3068,9 @@ def workflow_shape_issues(path: Path, text: str) -> list[str]:
                 and entry.group("key") == "name"
                 and len(entry.group("indent")) == expected_indent
             ]
-            if gate_names != ["ci-gate"]:
-                issues.append('CI Build job ci-gate must set name: "ci-gate"')
+            expected_gate_name = CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate" if "EnvironmentProducer" in blocks else "ci-gate"
+            if gate_names != [expected_gate_name]:
+                issues.append('CI Build job ci-gate must preserve its ordinary name and isolate producer-mode skips')
     return issues
 
 
@@ -2554,8 +3438,32 @@ def codeql_workflow_issues(text: str) -> list[str]:
             )
             break
 
-    if "uses: ./.github/actions/agent-setup" not in job_active:
+    if (
+        "name: Restore CPM cache" not in job_active
+        or "uses: ./.github/actions/prefetch-cpm-cache" not in job_active
+    ):
         issues.append("CodeQL manual build must restore the shared dependency closure")
+
+    # The CodeQL CLI license forbids redistribution, so the locked environment
+    # image cannot carry it. The job must instead feed init the official
+    # bundle verified against the reviewed ci/environments/role-materials.json
+    # pin; a default (floating) tool download is not acceptable.
+    if "python3 scripts/fetch_codeql_bundle.py" not in job_active:
+        issues.append("CodeQL init must consume the verified pinned official bundle")
+
+    init_tools: list[str] = []
+    if len(init_steps) == 1:
+        init_step, with_indent = init_steps[0]
+        for line in init_step:
+            entry = KEY_VALUE_RE.match(line)
+            if (
+                entry is not None
+                and entry.group("key") == "tools"
+                and len(entry.group("indent")) == with_indent + 2
+            ):
+                init_tools.append(scalar(entry.group("value")))
+    if init_tools != ["${{ steps.codeql-bundle.outputs.bundle }}"]:
+        issues.append("CodeQL init must consume the verified pinned official bundle")
 
     cmake_configures = []
     has_application_build = False
@@ -3243,7 +4151,7 @@ RELEASE_BODY_MESSAGE = (
     "release body must be rendered from the verified publication manifest"
 )
 RELEASE_INVENTORY_MESSAGE = (
-    "release publication must upload exactly 23 consolidated assets"
+    "release publication must upload exactly 25 consolidated assets"
 )
 RELEASE_CANDIDATE_MESSAGE = "public promoted release name must not contain Candidate"
 CONTINUOUS_CRITICAL_MESSAGE = (
@@ -3339,7 +4247,7 @@ def stable_release_run_projection_issues(text: str) -> list[str]:
     required_download = (
         '/releases/${KLOGG_SOURCE_RELEASE_ID}/assets?per_page=100',
         "/releases/assets/${asset_id}",
-        "len(records) != 23",
+        "len(records) != 25",
         '"metadata_kind": "klogg-continuous-publication-source"',
         '"source_release_id": release_id',
         '"source_tag_sha": tag_sha',
@@ -3456,7 +4364,7 @@ def release_download_workflow_issues(
                 or public_name != "Continuous Build ${{ env.KLOGG_VERSION }}"
             ):
                 issues.append(RELEASE_CANDIDATE_MESSAGE)
-    if len(renderer_matches) != 1 or 'test "$asset_count" -eq 23' not in (
+    if len(renderer_matches) != 1 or 'test "$asset_count" -eq 25' not in (
         renderer_matches[0][2] if renderer_matches else ""
     ):
         if RELEASE_INVENTORY_MESSAGE not in issues:
@@ -3658,6 +4566,8 @@ PLATFORM_FRAGILE_COMMAND = "python3 scripts/lint_platform_fragile.py"
 SCOPED_PLATFORM_FRAGILE_COMMAND = "python3 scripts/lint_platform_fragile.py --paths src tests"
 PLATFORM_FRAGILE_EVENTS = {"pull_request", "push", "workflow_dispatch"}
 PLATFORM_FRAGILE_PREFLIGHT = "PlatformFragilePreflight"
+RESOLVE_LINUX_ENVIRONMENT = "ResolveLinuxEnvironment"
+ANALYSIS_ENVIRONMENT_FAMILY = "noble-qt693-analysis"
 RELEASE_QUALIFICATION_PREFLIGHT = "ReleaseQualificationPreflight"
 CI_PLATFORM_PREFLIGHT_MESSAGE = (
     "CI Build platform-fragile preflight must run in parallel with "
@@ -3665,7 +4575,11 @@ CI_PLATFORM_PREFLIGHT_MESSAGE = (
 )
 EXPENSIVE_PLATFORM_PREFLIGHT_MESSAGE = (
     "CodeQL, Coverage, and Static analysis expensive jobs must depend on "
-    "an exact scoped platform-fragile preflight"
+    "an exact scoped platform-fragile preflight and the locked environment resolver"
+)
+LOCKED_ANALYSIS_ENVIRONMENT_MESSAGE = (
+    "CodeQL, Coverage, and Static analysis expensive jobs must run inside the "
+    "verified locked analysis environment image"
 )
 CI_PLATFORM_PARALLEL_ROOTS = CI_BUILD_ROOT_JOBS
 CI_PLATFORM_PREFLIGHT_APPLICATION_JOBS = set(CI_BUILD_PACKAGE_ENABLEMENT)
@@ -3837,7 +4751,7 @@ def platform_fragile_preflight_issues(
         return [message]
 
     expected_name = (
-        "Release and platform-fragile preflight"
+        CI_BUILD_PRODUCER_NAME_PREFIX + "Release and platform-fragile preflight"
         if ci_build
         else "Platform-fragile preflight"
     )
@@ -3854,7 +4768,7 @@ def platform_fragile_preflight_issues(
 
     condition = workflow_job_direct_value(block, "if")
     if ci_build:
-        if condition != "!contains(github.event.head_commit.message, '[skip ci]')":
+        if condition != CI_BUILD_ORDINARY_IF:
             return [message]
     elif condition is not None:
         return [message]
@@ -3869,14 +4783,18 @@ def platform_fragile_preflight_issues(
 
     if ci_build:
         protected_jobs = CI_PLATFORM_PREFLIGHT_APPLICATION_JOBS
-        if roots != {preflight} | CI_PLATFORM_PARALLEL_ROOTS:
+        if roots != ({preflight, "EnvironmentModePreflight", "DependencyModePreflight"} | CI_PLATFORM_PARALLEL_ROOTS):
             return [message]
         if any(
             preflight not in ancestors.get(job, set()) for job in protected_jobs
         ):
             return [message]
     else:
-        protected_jobs = {expensive_job} if expensive_job is not None else set()
+        protected_jobs = (
+            {expensive_job, RESOLVE_LINUX_ENVIRONMENT}
+            if expensive_job is not None
+            else set()
+        )
 
     if any(
         (condition := workflow_job_direct_value(blocks[job], "if")) is not None
@@ -3888,12 +4806,136 @@ def platform_fragile_preflight_issues(
 
     if not ci_build and (
         expensive_job is None
-        or set(needs) != {preflight, expensive_job}
-        or roots != {preflight}
-        or needs.get(expensive_job) != {preflight}
+        or set(needs) != {preflight, RESOLVE_LINUX_ENVIRONMENT, expensive_job}
+        or roots != {preflight, RESOLVE_LINUX_ENVIRONMENT}
+        or needs.get(expensive_job) != {preflight, RESOLVE_LINUX_ENVIRONMENT}
         or preflight not in ancestors[expensive_job]
     ):
         return [message]
+
+    return []
+
+
+def locked_analysis_environment_issues(text: str, *, expensive_job: str) -> list[str]:
+    """Require analysis jobs to run inside the verified locked image.
+
+    The resolver job verifies the reviewed lock, signed provenance and public
+    registry identity before the expensive job starts; the expensive job then
+    runs as a whole-job container on exactly that digest. Host provisioning
+    (apt, agent-setup, floating tool downloads) must not reappear inside it.
+    """
+    message = LOCKED_ANALYSIS_ENVIRONMENT_MESSAGE
+    blocks = workflow_job_blocks(text)
+    resolver = blocks.get(RESOLVE_LINUX_ENVIRONMENT)
+    job_block = blocks.get(expensive_job)
+    if resolver is None or job_block is None:
+        return [message]
+
+    header = KEY_VALUE_RE.match(resolver[0])
+    if header is None:
+        return [message]
+    resolver_indent = len(header.group("indent"))
+    if (
+        workflow_job_direct_value(resolver, "name") != "Resolve locked analysis environment"
+        or workflow_job_direct_value(resolver, "runs-on") != "ubuntu-24.04"
+        or workflow_job_direct_value(resolver, "if") is not None
+    ):
+        return [message]
+
+    resolver_fields = {
+        entry.group("key")
+        for line in resolver[1:]
+        if (entry := KEY_VALUE_RE.match(line)) is not None
+        and len(entry.group("indent")) == resolver_indent + 2
+    }
+    if resolver_fields != {"name", "runs-on", "outputs", "steps"}:
+        return [message]
+
+    resolver_active = "\n".join(
+        active for line in resolver if (active := strip_yaml_comment(line))
+    )
+    if (
+        "outputs:" not in resolver_active
+        or "image: ${{ steps.prepare.outputs.image }}" not in resolver_active
+    ):
+        return [message]
+
+    steps = list(workflow_step_blocks(resolver))
+    if len(steps) != 2:
+        return [message]
+    checkout_fields, checkout_with = workflow_step_fields(steps[0])
+    if (
+        checkout_fields.get("uses")
+        != f"actions/checkout@{REVIEWED_ACTION_REVISIONS['actions/checkout']}"
+        or checkout_with.get("with", {}).get("persist-credentials") != "false"
+    ):
+        return [message]
+    prepare_fields, prepare_with = workflow_step_fields(steps[1])
+    prepare_inputs = prepare_with.get("with", {})
+    if (
+        prepare_fields.get("id") != "prepare"
+        or prepare_fields.get("uses") != "./.github/actions/prepare-linux-environment"
+        or prepare_inputs.get("family") != ANALYSIS_ENVIRONMENT_FAMILY
+        or prepare_inputs.get("pull") != "false"
+        or prepare_inputs.get("retag") != "false"
+    ):
+        return [message]
+
+    job_header = KEY_VALUE_RE.match(job_block[0])
+    if job_header is None:
+        return [message]
+    job_indent = len(job_header.group("indent"))
+    container_image = None
+    for index, line in enumerate(job_block[1:]):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == "container"
+            and len(entry.group("indent")) == job_indent + 2
+        ):
+            for child in job_block[index + 2 :]:
+                active = strip_yaml_comment(child)
+                if not active:
+                    continue
+                child_indent = len(child) - len(child.lstrip())
+                if child_indent <= job_indent + 2:
+                    break
+                child_entry = KEY_VALUE_RE.match(child)
+                if (
+                    child_entry is not None
+                    and child_entry.group("key") == "image"
+                    and child_indent == job_indent + 4
+                ):
+                    container_image = scalar(child_entry.group("value"))
+            break
+    if container_image != "${{ needs.ResolveLinuxEnvironment.outputs.image }}":
+        return [message]
+
+    job_active = "\n".join(
+        active for line in job_block if (active := strip_yaml_comment(line))
+    )
+    if (
+        "apt-get" in job_active
+        or "agent-setup" in job_active
+        or "install-qt" in job_active
+    ):
+        return [message]
+    if (
+        "name: Restore CPM cache" not in job_active
+        or "uses: ./.github/actions/prefetch-cpm-cache" not in job_active
+    ):
+        return [message]
+    # Whole-job containers run as root while the mounted workspace stays owned
+    # by the runner user; raw git commands fail closed (exit 128) without the
+    # explicit safe.directory exception.
+    if 'git config --global --add safe.directory "$GITHUB_WORKSPACE"' not in job_active:
+        return [message]
+    # Run steps without an explicit shell resolve to sh (not bash) in
+    # whole-job containers, so bash-only scripts must declare shell: bash.
+    for step in workflow_step_blocks(job_block):
+        fields, _ = workflow_step_fields(step)
+        if "run" in fields and fields.get("shell") != "bash":
+            return [message]
 
     return []
 
@@ -3905,6 +4947,47 @@ def ci_manifests(root: Path) -> list[Path]:
     for pattern in ("action.yml", "action.yaml"):
         paths.update((root / ".github" / "actions").glob(f"**/{pattern}"))
     return sorted(paths)
+
+
+def native_macos_identity_issues(workflow: str, catalog: dict, adb_lock: dict,
+                                 ios_toolchain_script: str) -> list[str]:
+    """Keep selected Xcode and both native producer locks in one reviewed state."""
+    issues = []
+    developer_dir = "/Applications/Xcode_26.6.app/Contents/Developer"
+    xcode = ["Xcode 26.6", "Build version 17F113"]
+    sdk_path = developer_dir + "/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    if (f"export DEVELOPER_DIR={developer_dir}" not in workflow
+            or "Build version 17F113" not in workflow
+            or f'DEVELOPER_DIR = "{developer_dir}"' not in ios_toolchain_script):
+        issues.append("native macOS Xcode selection differs from the reviewed 26.6 build")
+    jobs = workflow_job_blocks(workflow)
+    try:
+        targets = catalog["targets"]
+        toolchains = adb_lock["toolchains"]
+        for arch, runner, suffix in (("x86_64", "macos-26-intel", "X64"),
+                                     ("arm64", "macos-26", "Arm64")):
+            for job in ("BuildAdbMac" + suffix, "BuildIosNative" + suffix):
+                if workflow_job_direct_value(jobs.get(job, []), "runs-on") != runner:
+                    issues.append(f"{job}: native macOS runner differs from the reviewed lock")
+            ios = targets["ios-" + arch]
+            adb_target = targets["adb-macos-" + arch]
+            adb = toolchains["macos-" + arch]
+            if ios["runner"] != runner or adb_target["runner"] != runner:
+                issues.append(f"{arch}: native catalog runner differs from the workflow")
+            observed = ios["toolchain"]
+            if (observed["xcode"] != xcode or observed["sdk_version"] != "26.5"
+                    or observed["sdk_path"] != sdk_path):
+                issues.append(f"{arch}: iOS Xcode/SDK lock differs from the selected toolchain")
+            if (adb.get("runner_image") != runner or adb.get("hosted_image_family") != "macos26"
+                    or adb.get("developer_dir") != developer_dir or adb.get("xcode") != xcode
+                    or adb.get("sdk_version") != observed["sdk_version"]
+                    or adb.get("sdk_path") != observed["sdk_path"]
+                    or adb.get("clang_identity") != observed["clang"]
+                    or adb.get("compiler_version") not in observed["clang"]):
+                issues.append(f"{arch}: ADB Xcode/SDK/clang lock differs from the iOS producer")
+    except (KeyError, TypeError, ValueError):
+        issues.append("native macOS toolchain locks are missing required target identities")
+    return issues
 
 
 def check_repo(root: Path) -> list[str]:
@@ -3940,6 +5023,12 @@ def check_repo(root: Path) -> list[str]:
             coverage_text, ci_build=False, expensive_job="coverage"
         )
     )
+    issues.extend(
+        f".github/workflows/coverage.yml: {issue}"
+        for issue in locked_analysis_environment_issues(
+            coverage_text, expensive_job="coverage"
+        )
+    )
     if "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" not in coverage_text:
         issues.append(
             ".github/workflows/coverage.yml: coverage artifact upload must use a reviewed commit SHA"
@@ -3954,6 +5043,12 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/codeql-analysis.yml: {issue}"
         for issue in platform_fragile_preflight_issues(
             codeql_text, ci_build=False, expensive_job="analyze"
+        )
+    )
+    issues.extend(
+        f".github/workflows/codeql-analysis.yml: {issue}"
+        for issue in locked_analysis_environment_issues(
+            codeql_text, expensive_job="analyze"
         )
     )
     thirdparty_text = (root / "3rdparty" / "CMakeLists.txt").read_text()
@@ -3985,6 +5080,12 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/static-analysis.yml: {issue}"
         for issue in platform_fragile_preflight_issues(
             static_text, ci_build=False, expensive_job="static-analysis"
+        )
+    )
+    issues.extend(
+        f".github/workflows/static-analysis.yml: {issue}"
+        for issue in locked_analysis_environment_issues(
+            static_text, expensive_job="static-analysis"
         )
     )
     if (
@@ -4033,7 +5134,37 @@ def check_repo(root: Path) -> list[str]:
         for issue in continuous_release_workflow_issues(continuous_release_text)
     )
 
+    producer_path = workflows / "ci-environments.yml"
+    if not producer_path.is_file():
+        issues.append(".github/workflows/ci-environments.yml: explicit environment producer workflow is missing")
+    else:
+        issues.extend(f".github/workflows/ci-environments.yml: {issue}"
+                      for issue in ci_environment_workflow_issues(producer_path.read_text()))
+
+    ios_evidence_path = workflows / "ci-ios-host-evidence.yml"
+    if not ios_evidence_path.is_file():
+        issues.append(".github/workflows/ci-ios-host-evidence.yml: isolated iOS host diagnostic workflow is missing")
+    else:
+        issues.extend(f".github/workflows/ci-ios-host-evidence.yml: {issue}"
+                      for issue in ci_ios_host_evidence_workflow_issues(ios_evidence_path.read_text()))
+
+    dependency_path = workflows / "ci-dependencies.yml"
+    if not dependency_path.is_file():
+        issues.append(".github/workflows/ci-dependencies.yml: read-only native qualification workflow is missing")
+    else:
+        issues.extend(f".github/workflows/ci-dependencies.yml: {issue}"
+                      for issue in ci_dependency_workflow_issues(dependency_path.read_text()))
+
     ci_text = (workflows / "ci-build.yml").read_text()
+    issues.extend(
+        f".github/workflows/ci-build.yml: {issue}"
+        for issue in native_macos_identity_issues(
+            ci_text,
+            json.loads((root / "ci/dependencies/catalog.json").read_text()),
+            json.loads((root / "packaging/adb/adb-helper.lock.json").read_text()),
+            (root / "scripts/ci_dependency_toolchain.py").read_text(),
+        )
+    )
     issues.extend(
         f".github/workflows/ci-build.yml: {issue}"
         for issue in ci_build_workflow_issues(ci_text)

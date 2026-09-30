@@ -1,253 +1,144 @@
 # ADB Logcat Live Source Architecture
 
-This document describes the data flow for ADB logcat live sources in klogg,
-covering both the default memory/temp-file mode and the "Save Live Log As"
-persistent-file mode.
+This document describes current Android live capture and its shared capture,
+search, and save path. See the [documentation hub](README.md),
+[technical overview](TECHNICAL_DOCUMENTATION.md), and
+[dependency inventory](DEPENDENCIES.md) for related architecture and packaging.
 
-## Overview
+## Sources and Transport
 
-```
-adb logcat (QProcess stdout)
-  -> ProcessLiveSourceTransport::bytesReceived
-  -> AdbLogcatSource -> StreamingLogData::appendUtf8()
-  -> CaptureStore::appendUtf8() -> commitLine()
-    -> Memory segment (Segment.memoryData)
-    -> When memoryBytes_ > 32 MB: spillSegmentToDisk()
-    -> If bound output file: appendOutputBytes() with immediate flush
-  -> CrawlerWidget / LogFilteredData reads from CaptureStore
-  -> UI display (main view + filter view)
-```
+Fresh Android sessions use a managed ADB server and smart-socket transport,
+not a per-tab `adb logcat` stdout process. The packaged, source-built ADB helper
+supplies server infrastructure; `AdbSmartSocketTransport` supplies the stream.
+`AdbInfrastructureManager`, `AdbServerSupervisor`, and `AdbDeviceTracker` own
+infrastructure readiness and device discovery. This distinction matters:
+launching a helper server is not the same as using QProcess as the log data path.
 
-## Key Parameters
+Fresh iOS sessions are macOS-only and use native libimobiledevice through
+`IosNativeTransport` and the native adapters in `src/livecapture/`. They do not
+require Python or a Python log-stream process. The shared source controller
+retains the historical name `AdbLogcatSource` for both Android and iOS sources.
 
-| Parameter              | Value                   | Location                  |
-|------------------------|-------------------------|---------------------------|
-| Segment size limit     | 1 MB                    | `capturestore.h` Limits   |
-| Total memory budget    | 32 MB                   | `capturestore.h` Limits   |
-| Temp spill directory   | `QDir::tempPath()/klogg_live/{captureId}/` | `capturestore.cpp` |
-| Segment file format    | `segment_000000.log`    | `capturestore.cpp`        |
-| Bound file flush       | Immediate (every line)  | `appendOutputBytes()`     |
-| Active segment spill   | Never                   | `enforceMemoryBudget()`   |
-| UI notification signal | `fileChanged(DataAdded)` per `appendUtf8()` | `streaminglogdata.cpp` |
+Old process-backed sessions can be restored as compatibility read-only tabs.
+Their process transport classes are not the fresh-session product path, and
+klogg does not expose a generic arbitrary-process capture feature. The Android
+legacy *logcat format* retry is separate: it retries unsupported timestamp
+modifiers using threadtime format, without switching to a legacy process backend.
 
-## Mode A: Memory / Temp File (Default)
+## Capture and Presentation
 
-```mermaid
-sequenceDiagram
-    participant ADB as adb logcat<br/>(QProcess)
-    participant PLT as ProcessLiveSource<br/>Transport
-    participant ALS as AdbLogcatSource
-    participant SLD as StreamingLogData
-    participant CS as CaptureStore
-    participant Seg as Memory Segment<br/>(QByteArray)
-    participant Disk as Temp Spill File<br/>klogg_live/{captureId}/
-    participant CW as CrawlerWidget
-    participant UI as LogMainView
+1. A source adapter delivers bytes through the live transport contract.
+2. `AdbLogcatSource` settles accepted delivery and passes UTF-8 data to
+   `StreamingLogData::appendUtf8()`.
+3. `CaptureStore::appendUtf8()` normalizes records, commits complete lines to
+   segments, and retains a pending partial line until more bytes or end of input.
+   `finishInput()` finalizes an unterminated last record.
+4. `StreamingLogData` exposes the capture through `SearchableLogData`; the main
+   view reads it directly and `LogFilteredData` supplies the filtered view.
+   Search and presentation use the capture, not the optional output file.
+5. Live append publication is coalesced on a fixed 33 ms window (about 30 FPS).
+   Hidden/background/minimized views suspend expensive presentation, not
+   ingestion; becoming presentable consumes accumulated changes.
 
-    ADB->>PLT: readyReadStandardOutput
-    PLT->>PLT: readAllStandardOutput()
-    PLT-->>ALS: Q_EMIT bytesReceived(data)
-    ALS->>SLD: appendUtf8(data)
-    SLD->>CS: appendUtf8(data)
+The data store distinguishes accepted ingress, committed records, capture
+persistence, and optional output writes. A failure after partial acceptance is
+not permission to replay an entire byte batch. Likewise, an output-file error
+does not mean the capture append was rolled back.
 
-    Note over CS: partialLine_.append(data)<br/>scan for '\n', extract complete lines
+## Key Defaults
 
-    loop For each complete line
-        CS->>CS: commitLine(lineBytes, true)
-        CS->>Seg: memoryData->append(lineBytes + '\n')
-        Note over CS: Record lineOffsets / lineLengths
-        CS->>CS: appendOutputBytes()
-        Note over CS: No boundOutputHandle_<br/>-> return (NO-OP)
-        CS->>CS: rotateSegmentIfNeeded()
-        Note over CS: byteSize >= 1 MB -> create new Segment
+| Parameter | Default / behavior | Source |
+|-----------|--------------------|--------|
+| Segment target | 1 MiB | `CaptureStore::Limits::segmentTargetBytes` |
+| Resident payload budget | 256 MiB | `CaptureStore::Limits::memoryBudgetBytes` |
+| Ingress allowance | 16 MiB | `CaptureStore::Limits::ingressBudgetBytes` |
+| Capture root | `QDir::tempPath()/klogg_live/{captureId}/` | `capturestore.cpp` |
+| Segment name | `segment_000000.log` style | `capturestore.cpp` |
+| Bound output flush | 1 MiB or 1,000 lines, plus a 1-second timer | `capturestore.h`, `streaminglogdata.cpp` |
+| Rolling size / backups | Disabled by default (`0`) | `CaptureStore::Limits` |
+| Retained line limit | Unlimited by default (`0`) | `CaptureStore::Limits::maxTotalLines` |
 
-        CS->>CS: enforceMemoryBudget()
-        opt memoryBytes_ > 32 MB
-            CS->>Disk: spillSegmentToDisk(oldest_segment)
-            Note over Disk: Write segment_XXXXXX.log
-            CS->>Seg: memoryData.reset()<br/>release memory
-        end
-    end
+These are payload/retention controls, not a promise that total process RSS is
+limited to 256 MiB. Indexes, caches, snapshots, allocator overhead, and pending
+work have separate costs. The active segment and partial records also make a
+segment target different from a strict maximum record size.
 
-    SLD-->>CW: Q_EMIT fileChanged(DataAdded)
-    CW->>CW: fileChangedHandler()
-    CW->>UI: trigger view refresh
+## Default Mode: Memory and Capture Files
 
-    UI->>CS: lineAt(lineNumber)
-    CS->>CS: readSegmentLine(segment, localLine)
-    alt Segment in memory
-        CS->>Seg: memoryData->mid(offset, length)
-    else Segment spilled to disk
-        CS->>Disk: QFile::read(offset, length)
-    end
-    CS-->>UI: return line text
+CaptureStore keeps resident segment payload and spills data into its capture
+directory. Segment metadata records byte offsets and line lengths, so readers
+can address lines without loading the whole capture. Store synchronization,
+shared resident data, and leases on spilled files protect reads and snapshots
+against concurrent lifecycle changes.
 
-    Note over ADB,UI: On disconnect / error
-    ALS->>SLD: finishInput()
-    SLD->>CS: finishInput()
-    CS->>CS: commitLine(partialLine_, false)<br/>commit unterminated last line
-```
+Without a bound output file, the capture remains usable for viewing and search.
+Capture persistence and cleanup are separate from output-file flushing;
+`CaptureStore::flush()` flushes bound output, not capture segments. See
+`persistPending()` and the secure capture-directory implementation for persistence
+and cleanup details rather than assuming that each displayed line is durable.
 
-### Call Chain (Mode A)
+## Save Live Log As: Snapshot, Tail, and Future Output
 
-```
-QProcess::readyReadStandardOutput
-  -> ProcessLiveSourceTransport::lambda           [livesourcetransport.cpp:28]
-     -> readAllStandardOutput()
-     -> Q_EMIT bytesReceived(data)
-  -> AdbLogcatSource::lambda                      [adblogcatsource.cpp:61]
-     -> StreamingLogData::appendUtf8(data)        [streaminglogdata.cpp:16]
-        -> CaptureStore::appendUtf8(data)         [capturestore.cpp:110]
-           -> partialLine_.append(data)
-           -> for each '\n':
-              -> commitLine(lineBytes, true)       [capturestore.cpp:350]
-                 -> ensureActiveSegment()          [capturestore.cpp:384]
-                 -> segment.memoryData->append()
-                 -> appendOutputBytes()            [capturestore.cpp:568]
-                    -> return (no bound file)
-                 -> rotateSegmentIfNeeded()
-                 -> enforceMemoryBudget()          [capturestore.cpp:424]
-                    -> spillSegmentToDisk()         [capturestore.cpp:470]
-        -> Q_EMIT fileChanged(DataAdded)           [streaminglogdata.cpp:21]
-  -> CrawlerWidget::fileChangedHandler()
-     -> UI refresh
-        -> CaptureStore::lineAt()                  [capturestore.cpp:280]
-           -> readSegmentLine()                    [capturestore.cpp:503]
-              -> memory read or disk read
-```
+The UI uses `LiveLogExportService`, not a synchronous whole-capture write on the
+UI thread. An export job pins a `CaptureStore::Snapshot`, writes it to staged
+output on a worker, and drains a bounded tail of data accepted while the
+snapshot is being written. Successful publication and owner-thread cutover
+bind future output to the selected destination.
 
-## Mode B: Save Live Log As (Bound Persistent File)
+The intended contents are the **current capture snapshot, its in-flight tail,
+and future output**. Save As does not concatenate an older rolling-file family.
+A stopped source can still export its retained capture. Cancellation, tail
+overflow, snapshot-read errors, publication failures, and cutover failures are
+explicit job results; they must not be reported as a successful save.
 
-```mermaid
-sequenceDiagram
-    participant User as User
-    participant MW as MainWindow
-    participant ALS as AdbLogcatSource
-    participant SLD as StreamingLogData
-    participant CS as CaptureStore
-    participant Seg as Memory Segment
-    participant BF as Persistent File<br/>(boundOutputHandle_)
-    participant Disk as Temp Spill File
+Once bound, future records also go to persistent output. Flushing is batched
+(1 MiB / 1,000 lines / 1 second), not performed for every line. These flushes
+are not an fsync-style power-loss durability guarantee. Capture memory/spill
+storage continues independently so the views do not need to reopen the saved
+file for normal display.
 
-    User->>MW: Save Live Log As -> select path
-    MW->>ALS: bindOutputFile(outputPath)
-    ALS->>SLD: bindOutputFile(outputPath)
-    SLD->>CS: bindOutputFile(outputPath)
-    CS->>BF: QFile::open(WriteOnly | Truncate)
-    CS->>CS: writeCaptureToDevice(file)
-    Note over CS,BF: Write ALL existing segments<br/>to persistent file
-    CS->>BF: flush()
-    Note over CS: boundOutputHandle_ = file
+### Rolling Output and Restore
 
-    Note over CS,BF: -- Every subsequent line writes to both --
+Rolling output uses the configured maximum file size and backup count. The
+optional retained-line window is a separate capture-store concern; saved-file
+history and currently retained searchable history need not be identical.
 
-    par Subsequent data arrives
-        Note over CS: commitLine(lineBytes, true)
-        CS->>Seg: memoryData->append(lineBytes)
-        CS->>BF: write(lineBytes + '\n')
-        CS->>BF: flush()
-        Note over BF: Immediate flush per line
+Session persistence records stopped run intent. Restoring a tab loads its
+capture and configuration without starting device capture automatically.
+Restoring an output binding uses `OutputBindMode::Restore`: it resumes an
+existing output rather than truncating it or exporting the snapshot again.
+Compatibility process sessions remain read-only; a supported stopped session
+requires an explicit user start/reconnect to resume capture.
 
-        opt memoryBytes_ > 32 MB
-            CS->>Disk: spillSegmentToDisk()
-            Note over Disk: Temp files + persistent file<br/>coexist independently
-        end
-    end
+## Lifecycle and Search Invariants
 
-    Note over CS,BF: On disconnect
-    CS->>CS: finishInput()
-    CS->>Seg: commitLine(partial, false)
-    CS->>BF: write(partial_line), flush()
-```
+- Connection state, user run intent, and transport completion are distinct.
+  A request to stop is not proof that all queued bytes have settled.
+- Generation-tagged callbacks prevent a previous transport attempt from
+  updating a newer session. Final input handling follows delivery settlement.
+- Searches share the file/live `LogFilteredDataWorker` pipeline. Live targets
+  coalesce rather than restarting a worker for every arriving batch.
+- Search results publish at 33 ms cadence, independently of 100 ms
+  progress/status publication; terminal results precede terminal status.
+- There is no guaranteed one-event-loop or 16 ms end-to-end latency. Device,
+  transport, ingestion, search, and presentation scheduling all contribute.
 
-### Binding Call Chain (Mode B)
+See [Incremental / Streaming Search Architecture](INCREMENTAL_SEARCH_ARCHITECTURE.md)
+for dispatch, watermarks, and presentation rules.
 
-```
-User: "Save Live Log As" -> outputPath
-  -> AdbLogcatSource::bindOutputFile(outputPath)   [adblogcatsource.cpp:148]
-     -> StreamingLogData::bindOutputFile()          [streaminglogdata.cpp:45]
-        -> CaptureStore::bindOutputFile()           [capturestore.cpp:186]
-           -> QFile::open(WriteOnly | Truncate)
-           -> writeCaptureToDevice(file)            [capturestore.cpp:557]
-              -> writeSegmentToDevice() for each segment
-           -> flush()
-           -> boundOutputHandle_ = file
+## Implementation References
 
-Subsequent lines:
-  -> CaptureStore::commitLine()                     [capturestore.cpp:350]
-     -> appendOutputBytes(lineBytes + '\n')         [capturestore.cpp:568]
-        -> boundOutputHandle_->write(bytes)
-        -> boundOutputHandle_->flush()              [immediate!]
-```
-
-## Mode Comparison
-
-```
-Mode A (default):
-  adb stdout -> CaptureStore -> [memory segments] --spill--> [temp files]
-                                       |
-                                    UI reads
-
-Mode B (bound file):
-  adb stdout -> CaptureStore -> [memory segments] --spill--> [temp files]
-                    |                      |
-                    +----------> [persistent file]   UI reads
-                              (flush per line)
-```
-
-The persistent file and the memory/spill mechanism are fully independent.
-The persistent file receives an immediate copy of every line. Even if klogg
-crashes, data already flushed to the persistent file is preserved.
-
-## Latency Analysis
-
-**Can adb logcat output be delayed in klogg display?** Yes, but typically negligible:
-
-- QProcess buffers stdout data until the event loop processes `readyReadStandardOutput`
-- If the main thread blocks (large search, file loading), pipe buffers accumulate
-- Normal latency: < 1 event loop cycle (~16 ms)
-- Worst case: during CPU-intensive operations (regex search on large data), display may lag
-
-## Lifecycle
-
-### Connect
-
-```
-AdbLogcatSource::connectSource()
-  -> ProcessLiveSourceTransport::connectTransport()
-     -> QProcess::start("adb", ["-s", serial, "logcat", ...])
-     -> waitForStarted(3000)
-     -> grace period polling (250 ms)
-     -> setState(Connected)
-```
-
-### Disconnect (intentional)
-
-```
-AdbLogcatSource::disconnectSource()
-  -> ProcessLiveSourceTransport::disconnectTransport()
-     -> disconnectRequested_ = true
-     -> process_->terminate()
-     -> waitForFinished(1500), fallback kill()
-     -> setState(Disconnected)
-  -> StreamingLogData::finishInput()
-     -> CaptureStore::finishInput()  [commit partial line]
-```
-
-### Disconnect (unexpected -- USB unplug, device sleep, adb kill-server)
-
-```
-QProcess::errorOccurred / finished
-  -> if disconnectRequested_: suppress error (Task 3 fix)
-  -> otherwise: setState(Error), emit errorOccurred(message)
-  -> Tab shows [error] suffix + error in tooltip (Task 4)
-```
-
-### Reconnect
-
-```
-AdbLogcatSource::reconnectSource()
-  -> disconnectSource()
-  -> append "----- reconnected {timestamp} -----" marker
-  -> connectSource()
-```
+| File / area | Responsibility |
+|-------------|----------------|
+| `src/livecapture/src/adbinfrastructuremanager.cpp` | Managed ADB infrastructure |
+| `src/livecapture/src/adbserversupervisor.cpp` | Helper/server lifecycle |
+| `src/livecapture/src/adbdevicetracker.cpp` | Device tracking |
+| `src/livecapture/src/adbsmartsocketclient.cpp` | ADB protocol client |
+| `src/ui/src/adbsmartsockettransport.cpp` | Android stream transport |
+| `src/ui/src/iosnativetransport.cpp`, `src/livecapture/src/iosnativeadapter.cpp` | Native iOS transport/adaptation |
+| `src/ui/src/adblogcatsource.cpp` | Shared source delivery and lifecycle |
+| `src/logdata/src/streaminglogdata.cpp` | Searchable live data, publication, output timer |
+| `src/logdata/include/capturestore.h`, `src/logdata/src/capturestore.cpp` | Limits, records, snapshots, spill, output and rolling |
+| `src/ui/src/livelogexportservice.cpp` | Asynchronous staged export and cutover |
+| `src/ui/src/session.cpp` | Capture/session restore and compatibility gate |
+| `packaging/adb/`, `packaging/ios-native/` | Source-built helper/library packaging |

@@ -402,6 +402,8 @@ MainWindow::MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
 
     connect( &mainTabWidget_, &TabbedCrawlerWidget::tabCloseRequested, this,
              [ this ]( int index ) { this->closeTab( index, ActionInitiator::User ); } );
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::tabsCloseRequested, this,
+             &MainWindow::closeTabs );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::currentChanged, this,
              &MainWindow::currentTabChanged );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerAdded, this,
@@ -1697,27 +1699,76 @@ void MainWindow::closeTab( ActionInitiator initiator )
 // Close all tabs
 void MainWindow::closeAll( ActionInitiator initiator )
 {
-    if ( closeAllInProgress_ || liveCloseTransaction_ ) {
+    if ( tabCloseBatchInProgress_ || liveCloseTransaction_ ) {
         return;
     }
-    closeAllInProgress_ = true;
-    closeAllInitiator_ = initiator;
-    continueCloseAll();
+    tabCloseBatchInProgress_ = true;
+    tabCloseBatchInitiator_ = initiator;
+    pendingTabCloseTargets_.reset();
+    continueTabCloseBatch();
 }
 
-void MainWindow::continueCloseAll()
+void MainWindow::closeTabs( const QList<QWidget*>& tabs )
 {
-    if ( !closeAllInProgress_ || liveCloseTransaction_ ) {
+    if ( tabs.isEmpty() || tabCloseBatchInProgress_ || liveCloseTransaction_ || shutdownInProgress_ ) {
         return;
     }
-    if ( mainTabWidget_.count() == 0 ) {
-        closeAllInProgress_ = false;
-        if ( shutdownReadyToAccept_ ) {
+    pendingTabCloseTargets_.emplace();
+    for ( auto* tab : tabs ) {
+        pendingTabCloseTargets_->append( QPointer<QWidget>( tab ) );
+    }
+    tabCloseBatchInProgress_ = true;
+    tabCloseBatchInitiator_ = ActionInitiator::User;
+    continueTabCloseBatch();
+}
+
+void MainWindow::continueTabCloseBatch()
+{
+    if ( !tabCloseBatchInProgress_ || liveCloseTransaction_ ) {
+        return;
+    }
+    int index = mainTabWidget_.count() > 0 ? 0 : -1;
+    if ( pendingTabCloseTargets_ ) {
+        index = -1;
+        while ( !pendingTabCloseTargets_->isEmpty() ) {
+            const auto tab = pendingTabCloseTargets_->takeFirst();
+            if ( tab ) {
+                index = mainTabWidget_.indexOf( tab );
+                if ( index >= 0 ) {
+                    break;
+                }
+            }
+        }
+    }
+    if ( index < 0 ) {
+        tabCloseBatchInProgress_ = false;
+        pendingTabCloseTargets_.reset();
+        if ( shutdownReadyToAccept_ && mainTabWidget_.count() == 0 ) {
             QTimer::singleShot( 0, Qt::PreciseTimer, this, [ this ] { close(); } );
+        }
+        else {
+            resumeDeferredWindowClose();
         }
         return;
     }
-    closeTab( 0, closeAllInitiator_ );
+    closeTab( index, tabCloseBatchInitiator_, CloseRequestScope::Batch );
+}
+
+void MainWindow::cancelTabCloseBatch()
+{
+    tabCloseBatchInProgress_ = false;
+    pendingTabCloseTargets_.reset();
+    resumeDeferredWindowClose();
+}
+
+void MainWindow::resumeDeferredWindowClose()
+{
+    if ( !deferredWindowClose_ || tabCloseBatchInProgress_ || liveCloseTransaction_
+         || shutdownInProgress_ ) {
+        return;
+    }
+    deferredWindowClose_ = false;
+    QTimer::singleShot( 0, Qt::PreciseTimer, this, [ this ] { close(); } );
 }
 
 // Select all the text in the currently selected view
@@ -2468,14 +2519,21 @@ void MainWindow::handleFilteredViewChanged()
     }
 }
 
-void MainWindow::closeTab( int index, ActionInitiator initiator )
+void MainWindow::closeTab( int index, ActionInitiator initiator, CloseRequestScope scope )
 {
+    if ( tabCloseBatchInProgress_ && scope != CloseRequestScope::Batch ) {
+        return;
+    }
+    if ( index < 0 || index >= mainTabWidget_.count() ) {
+        return;
+    }
     // Folder tab close path. FolderCrawlerWidget is NOT a CrawlerWidget (it has
     // no stopLoading / ADB source / file-index semantics), so it must be
     // handled BEFORE the CrawlerWidget assert below, which would otherwise
     // abort in debug and null-deref in release.
     auto* folder_widget = qobject_cast<FolderCrawlerWidget*>( mainTabWidget_.widget( index ) );
     if ( folder_widget != nullptr ) {
+        const QPointer<FolderCrawlerWidget> folderGuard( folder_widget );
         const auto documentId = session_.getDocumentId( folder_widget );
         const auto displayName = session_.getDisplayName( folder_widget );
 
@@ -2492,7 +2550,9 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
                 msgBox.setCheckBox( dontAskCheckBox );
 
                 if ( klogg::ui::execDialog( msgBox ) != QMessageBox::Yes ) {
-                    closeAllInProgress_ = false;
+                    if ( scope == CloseRequestScope::Batch ) {
+                        cancelTabCloseBatch();
+                    }
                     return;
                 }
 
@@ -2503,10 +2563,17 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
             }
         }
 
+        if ( !folderGuard ) {
+            return;
+        }
+        const auto currentIndex = mainTabWidget_.indexOf( folderGuard );
+        if ( currentIndex < 0 ) {
+            return;
+        }
         // removeCrawler fires currentTabChanged for the NEW current tab
         // (synchronously). That queries Session for the new tab, not this
         // folder, so it is safe to run before session_.close below.
-        mainTabWidget_.removeCrawler( index );
+        mainTabWidget_.removeCrawler( currentIndex );
 
         if ( !shutdownInProgress_ ) {
             auto& groupManager = TabGroupManager::get();
@@ -2525,18 +2592,22 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
         }
 
         folder_widget->deleteLater();
-        if ( closeAllInProgress_ ) {
-            QTimer::singleShot( 0, Qt::PreciseTimer, this, &MainWindow::continueCloseAll );
+        if ( tabCloseBatchInProgress_ ) {
+            QTimer::singleShot( 0, Qt::PreciseTimer, this, &MainWindow::continueTabCloseBatch );
         }
         return;
     }
 
-    auto widget = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( index ) );
-
-    assert( widget );
-
+    auto* widget = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( index ) );
+    if ( widget == nullptr ) {
+        return;
+    }
+    const QPointer<CrawlerWidget> widgetGuard( widget );
     const auto displayName = session_.getDisplayName( widget );
     const auto documentKind = session_.getDocumentKind( widget );
+    if ( documentKind == DocumentKind::AdbLogcat && liveCloseTransaction_ ) {
+        return;
+    }
 
     // Show confirmation dialog for user-initiated closes if enabled
     if ( initiator == ActionInitiator::User ) {
@@ -2552,7 +2623,9 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
             msgBox.setCheckBox( dontAskCheckBox );
 
             if ( klogg::ui::execDialog( msgBox ) != QMessageBox::Yes ) {
-                closeAllInProgress_ = false;
+                if ( scope == CloseRequestScope::Batch ) {
+                    cancelTabCloseBatch();
+                }
                 return;
             }
 
@@ -2563,6 +2636,9 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
         }
     }
 
+    if ( !widgetGuard || mainTabWidget_.indexOf( widgetGuard ) < 0 ) {
+        return;
+    }
     if ( documentKind == DocumentKind::AdbLogcat && !shutdownReadyToAccept_ ) {
         if ( liveCloseTransaction_ ) {
             return;
@@ -2571,12 +2647,12 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
                               ? klogg::livelog::LiveLogCloseTransaction::Mode::Preserve
                               : klogg::livelog::LiveLogCloseTransaction::Mode::Discard;
         startLiveCloseTransaction( widget, mode, DiscardCommit::PerTab,
-                                   [ this, widget, initiator ]( bool proceed ) {
+                                   [ this, widget, initiator, scope ]( bool proceed ) {
             if ( proceed ) {
                 finalizeCrawlerClose( widget, initiator );
             }
-            else {
-                closeAllInProgress_ = false;
+            else if ( scope == CloseRequestScope::Batch ) {
+                cancelTabCloseBatch();
             }
         } );
         return;
@@ -2617,8 +2693,8 @@ void MainWindow::finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator in
         scheduleSessionPersistence();
     }
     widget->deleteLater();
-    if ( closeAllInProgress_ ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, this, &MainWindow::continueCloseAll );
+    if ( tabCloseBatchInProgress_ ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, this, &MainWindow::continueTabCloseBatch );
     }
 }
 
@@ -2678,6 +2754,7 @@ void MainWindow::startLiveCloseTransaction(
                         source->deleteCaptureFiles();
                     }
                     completion( proceed );
+                    resumeDeferredWindowClose();
                 } );
         } );
     liveCloseTransaction_->start();
@@ -3078,10 +3155,10 @@ void MainWindow::finalizeWindowShutdown()
     session_.close( closeDisposition );
     shutdownCloseDisposition_.reset();
     shutdownReadyToAccept_ = true;
-    closeAllInProgress_ = true;
-    closeAllInitiator_ = shutdownPreserveWindowSession_ ? ActionInitiator::App
+    tabCloseBatchInProgress_ = true;
+    tabCloseBatchInitiator_ = shutdownPreserveWindowSession_ ? ActionInitiator::App
                                                          : ActionInitiator::WindowDiscard;
-    continueCloseAll();
+    continueTabCloseBatch();
 }
 
 // Closes the application
@@ -3094,6 +3171,11 @@ void MainWindow::closeEvent( QCloseEvent* event )
         return;
     }
     if ( shutdownInProgress_ ) {
+        event->ignore();
+        return;
+    }
+    if ( tabCloseBatchInProgress_ || liveCloseTransaction_ ) {
+        deferredWindowClose_ = true;
         event->ignore();
         return;
     }

@@ -161,7 +161,7 @@ class PromoteReleasePublicationTest(unittest.TestCase):
 
         document = self.promote_successfully()
 
-        self.assertEqual(len(list(self.output.iterdir())), 23)
+        self.assertEqual(len(list(self.output.iterdir())), 25)
         self.assertEqual(document["schema_version"], 3)
         self.assertEqual(document["channel"], "stable")
         self.assertEqual(document["evidence_level"], "validation")

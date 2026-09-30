@@ -25,6 +25,9 @@ from source_publication_identity import (
 RAW_ARCHIVE_IDENTITY = "raw-sha256"
 CANONICAL_TAR_GZ_IDENTITY = "canonical-tar-gz-v1"
 SUPPORTED_ARCHIVE_IDENTITIES = {RAW_ARCHIVE_IDENTITY, CANONICAL_TAR_GZ_IDENTITY}
+# Assets whose bytes embed the application version or publication URLs. They
+# are generated per release, never referenced by the core source-set receipt.
+OVERLAY_KINDS = {"source-offer", "overlay-receipt"}
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -130,6 +133,17 @@ def release_asset_plan(lock: dict) -> list[dict]:
         if asset.get("required") is not True:
             raise RuntimeError(f"ADB release asset must be required: {kind}")
 
+        # Core assets are deterministic functions of the lock; overlay assets
+        # are the only ones allowed to embed the application version or
+        # publication URLs, so version bumps never invalidate the core
+        # identity that binary-build receipts bind.
+        ownership = asset.get("ownership")
+        if ownership not in ("core", "overlay"):
+            raise RuntimeError(f"invalid ADB release asset ownership: {kind}")
+        expected_ownership = "overlay" if kind in OVERLAY_KINDS else "core"
+        if ownership != expected_ownership:
+            raise RuntimeError(f"unexpected ADB release asset ownership: {kind}")
+
         distribution = asset.get("distribution")
         if not isinstance(distribution, dict) or set(distribution) != {
             "package_required",
@@ -225,23 +239,176 @@ def spdx_package(item: dict) -> dict:
     return package
 
 
+def write_source_offer(
+    path: pathlib.Path, version: str, base_url: str, source_archive_hash: str
+) -> None:
+    published_archive = published_source_name(version, "adb-helper", source_archive_hash)
+    versioned_releases_page = f"{base_url}/releases"
+    continuous_release_page = f"{base_url}/releases/tag/continuous"
+    path.write_text(
+        "Klogg ADB Helper Corresponding Source Offer\n"
+        "==========================================\n\n"
+        "The complete, source-built ADB helper distributed with klogg is built from the immutable\n"
+        "source closure recorded in adb-helper-source-manifest.json. The corresponding-source\n"
+        "archive is not included in the installer; it is a separate GitHub Release asset. No\n"
+        "Google Platform-Tools binary is redistributed.\n\n"
+        f"Published archive: {published_archive}\n"
+        f"SHA-256: {source_archive_hash}\n"
+        f"Versioned releases page: {versioned_releases_page}\n"
+        f"Rolling continuous release page: {continuous_release_page}\n\n"
+        "Stable versioned releases retain their matching source asset for at least three years.\n"
+        "The continuous endpoint is rolling and mutable: each successful continuous publication\n"
+        "replaces its packages and source assets together and does not provide archival retention.\n"
+        "Use the release page above to locate the content-addressed source asset included in the\n"
+        "current rolling publication; a stable-only asset is not promised under the mutable tag.\n"
+        "The release-level SHA256SUMS file covers every published asset, and the publication\n"
+        "manifest binds this source archive to its source-set receipt and release identity. Verify\n"
+        "downloaded bytes with:\n"
+        f"  shasum -a 256 {published_archive}\n"
+        "and compare the result with both SHA256SUMS and the SHA-256 above. Build instructions are included in the\n"
+        "archive at packaging/adb/README.md.\n\n"
+        "Linux packages place the LGPL-2.1-or-later libusb shared library beside adb and resolve it\n"
+        "through the relative $ORIGIN runpath. You may replace that libusb file with a modified,\n"
+        "ABI-compatible version. The source archive also contains the material needed to rebuild\n"
+        "and relink adb against a modified libusb. No libusb library is shipped on macOS.\n",
+        encoding="utf-8",
+    )
+
+
+def write_overlay_receipt(
+    output: pathlib.Path, release_assets: list[dict], version: str, base_url: str
+) -> None:
+    by_kind = {asset["kind"]: asset for asset in release_assets}
+    source_set_path = output / by_kind["source-set-receipt"]["file_name"]
+    source_archive = output / by_kind["source-archive"]["file_name"]
+    write_source_offer(
+        output / by_kind["source-offer"]["file_name"],
+        version, base_url, sha256(source_archive),
+    )
+    overlay_records = []
+    for asset in release_assets:
+        if asset["ownership"] != "overlay" or asset["kind"] == "overlay-receipt":
+            continue
+        path = output / asset["file_name"]
+        if not path.is_file():
+            raise RuntimeError(f"required ADB overlay asset was not generated: {path}")
+        overlay_records.append(
+            {"kind": asset["kind"], "file_name": path.name, "sha256": sha256(path)}
+        )
+    overlay_receipt = {
+        "schema_version": 1,
+        "receipt_kind": "component-source-overlay",
+        "component": "adb-helper",
+        "version": version,
+        "base_url": base_url,
+        "source_set_receipt_sha256": sha256(source_set_path),
+        "assets": overlay_records,
+        "distribution": {"package_required": True, "release_required": True},
+    }
+    overlay_path = output / by_kind["overlay-receipt"]["file_name"]
+    overlay_path.write_text(
+        json.dumps(overlay_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def write_release_hashes(output: pathlib.Path, release_assets: list[dict]) -> None:
+    receipt_assets = []
+    for asset in release_assets:
+        path = output / asset["file_name"]
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"required ADB release asset was not generated: {path}")
+        write_hash(path)
+        receipt_assets.append({"kind": asset["kind"], "path": path.name, "sha256": sha256(path)})
+    (output / "adb-helper-release-assets.json").write_text(
+        json.dumps(receipt_assets, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def materialize_overlay_from_core(
+    lock_path: pathlib.Path, lock: dict, release_assets: list[dict],
+    core_root: pathlib.Path, output: pathlib.Path,
+    package_support_output: pathlib.Path | None, version: str, base_url: str,
+) -> None:
+    from verify_adb_helper_artifact import (
+        VerificationError, require_regular_file, validate_source_set_receipt,
+        verify_hash_sidecar,
+    )
+
+    # The consumer may reassemble the overlay from a published core, but may
+    # not trust a marker file or a source-set receipt without checking its
+    # lock, asset hashes, and corresponding-source archive.
+    output_path = output.resolve()
+    core_path = core_root.resolve()
+    if (
+        output_path == core_path
+        or output_path in core_path.parents
+        or core_path in output_path.parents
+        or any(output.iterdir())
+    ):
+        raise RuntimeError("ADB overlay output must be empty and separate from its core")
+    core_assets = [asset for asset in release_assets if asset["ownership"] == "core"]
+    try:
+        source_set_asset = next(asset for asset in core_assets if asset["kind"] == "source-set-receipt")
+        source_set_path = core_root / source_set_asset["file_name"]
+        require_regular_file(source_set_path, "ADB core source-set receipt")
+        validate_source_set_receipt(
+            lock, lock_path, {"source_set_receipt_sha256": sha256(source_set_path)},
+            core_root, "release",
+        )
+        for asset in core_assets:
+            path = core_root / asset["file_name"]
+            sidecar = core_root / asset["sha256_file"]
+            require_regular_file(path, f"ADB core asset {asset['kind']}")
+            verify_hash_sidecar(sidecar, sha256(path), path.name)
+            shutil.copyfile(path, output / path.name)
+    except VerificationError as error:
+        raise RuntimeError(f"ADB core asset verification failed: {error}") from error
+    write_overlay_receipt(output, release_assets, version, base_url)
+    write_release_hashes(output, release_assets)
+    if package_support_output is not None:
+        materialize_package_support(output, package_support_output, release_assets)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", required=True, type=pathlib.Path)
-    parser.add_argument("--archive-root", required=True, type=pathlib.Path)
-    parser.add_argument("--repository-root", required=True, type=pathlib.Path)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--base-url", required=True)
+    parser.add_argument("--archive-root", type=pathlib.Path)
+    parser.add_argument("--repository-root", type=pathlib.Path)
+    parser.add_argument("--version")
+    parser.add_argument("--base-url")
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument("--package-support-output", type=pathlib.Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--core-only", action="store_true")
+    mode.add_argument("--overlay-only", action="store_true")
+    parser.add_argument("--core-root", type=pathlib.Path)
     args = parser.parse_args()
 
-    version = validate_version(args.version)
-    base_url = normalize_base_url(args.base_url)
+    if args.core_only:
+        if args.version or args.base_url or args.core_root or args.package_support_output:
+            parser.error("core-only accepts neither version, publication URL, nor overlay outputs")
+    elif not args.version or not args.base_url:
+        parser.error("version and base-url are required when generating an overlay")
+    if args.overlay_only:
+        if not args.core_root or args.archive_root or args.repository_root:
+            parser.error("overlay-only requires core-root and forbids source acquisition inputs")
+    elif not args.archive_root or not args.repository_root or args.core_root:
+        parser.error("core generation requires archive-root and repository-root, not core-root")
+
+    version = validate_version(args.version) if not args.core_only else None
+    base_url = normalize_base_url(args.base_url) if not args.core_only else None
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
     release_assets = release_asset_plan(lock)
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.core_only and any(args.output.iterdir()):
+        raise RuntimeError("ADB core output must be empty; stale overlay assets are forbidden")
     by_kind = {asset["kind"]: asset for asset in release_assets}
+    if args.overlay_only:
+        materialize_overlay_from_core(
+            args.lock, lock, release_assets, args.core_root, args.output,
+            args.package_support_output, version, base_url,
+        )
+        return 0
 
     source_manifest = {
         "schema_version": 1,
@@ -266,6 +433,11 @@ def main() -> int:
             "packaging/adb/README.md",
             "packaging/adb/superbuild/CMakeLists.txt",
             "scripts/prefetch_adb_helper_sources.py",
+            "scripts/prefetch_adb_manifest_fallback.py",
+            "scripts/prefetch_adb_source_context.py",
+            "scripts/prefetch_adb_libusb_fallback.py",
+            "scripts/prefetch_adb_source_closure.py",
+            "scripts/ci_adb_source_transport.py",
             "scripts/build_adb_helper.py",
             "scripts/build_adb_helper_legal_assets.py",
             "scripts/source_publication_identity.py",
@@ -360,39 +532,6 @@ def main() -> int:
     sbom_path = args.output / by_kind["sbom"]["file_name"]
     sbom_path.write_text(json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    source_offer = args.output / by_kind["source-offer"]["file_name"]
-    source_archive_hash = sha256(source_archive)
-    published_archive = published_source_name(version, "adb-helper", source_archive_hash)
-    versioned_releases_page = f"{base_url}/releases"
-    continuous_release_page = f"{base_url}/releases/tag/continuous"
-    source_offer.write_text(
-        "Klogg ADB Helper Corresponding Source Offer\n"
-        "==========================================\n\n"
-        "The complete, source-built ADB helper distributed with klogg is built from the immutable\n"
-        "source closure recorded in adb-helper-source-manifest.json. The corresponding-source\n"
-        "archive is not included in the installer; it is a separate GitHub Release asset. No\n"
-        "Google Platform-Tools binary is redistributed.\n\n"
-        f"Published archive: {published_archive}\n"
-        f"SHA-256: {source_archive_hash}\n"
-        f"Versioned releases page: {versioned_releases_page}\n"
-        f"Rolling continuous release page: {continuous_release_page}\n\n"
-        "Stable versioned releases retain their matching source asset for at least three years.\n"
-        "The continuous endpoint is rolling and mutable: each successful continuous publication\n"
-        "replaces its packages and source assets together and does not provide archival retention.\n"
-        "Use the release page above to locate the content-addressed source asset included in the\n"
-        "current rolling publication; a stable-only asset is not promised under the mutable tag.\n"
-        "The release-level SHA256SUMS file covers every published asset, and the publication\n"
-        "manifest binds this source archive to its source-set receipt and release identity. Verify\n"
-        "downloaded bytes with:\n"
-        f"  shasum -a 256 {published_archive}\n"
-        "and compare the result with both SHA256SUMS and the SHA-256 above. Build instructions are included in the\n"
-        "archive at packaging/adb/README.md.\n\n"
-        "Linux packages place the LGPL-2.1-or-later libusb shared library beside adb and resolve it\n"
-        "through the relative $ORIGIN runpath. You may replace that libusb file with a modified,\n"
-        "ABI-compatible version. The source archive also contains the material needed to rebuild\n"
-        "and relink adb against a modified libusb. No libusb library is shipped on macOS.\n",
-        encoding="utf-8",
-    )
 
     source_set_asset = by_kind["source-set-receipt"]
     package_support_assets = []
@@ -400,6 +539,7 @@ def main() -> int:
         distribution = asset["distribution"]
         if (
             asset["kind"] == "source-set-receipt"
+            or asset["ownership"] == "overlay"
             or distribution.get("package_required") is not True
         ):
             continue
@@ -449,20 +589,16 @@ def main() -> int:
         json.dumps(source_set_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
-    receipt_assets = []
-    for asset in release_assets:
-        path = args.output / asset["file_name"]
-        if not path.is_file():
-            raise RuntimeError(f"required ADB release asset was not generated: {path}")
-        write_hash(path)
-        receipt_assets.append({"kind": asset["kind"], "path": path.name, "sha256": sha256(path)})
-    (args.output / "adb-helper-release-assets.json").write_text(
-        json.dumps(receipt_assets, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    if args.package_support_output is not None:
-        materialize_package_support(
-            args.output, args.package_support_output, release_assets
+    if args.core_only:
+        write_release_hashes(
+            args.output, [asset for asset in release_assets if asset["ownership"] == "core"]
         )
+        return 0
+
+    write_overlay_receipt(args.output, release_assets, version, base_url)
+    write_release_hashes(args.output, release_assets)
+    if args.package_support_output is not None:
+        materialize_package_support(args.output, args.package_support_output, release_assets)
     return 0
 
 

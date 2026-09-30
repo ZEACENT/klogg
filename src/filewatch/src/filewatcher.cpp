@@ -178,6 +178,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
     void enableWatch( bool enable )
     {
         ScopedRecursiveLock lock( mutex_ );
+        recordOperationThread();
 
         if ( nativeWatchEnabled_ == enable ) {
             return;
@@ -202,6 +203,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
     void addFile( const QString& fullFileName )
     {
         ScopedRecursiveLock lock( mutex_ );
+        recordOperationThread();
 
         LOG_DEBUG << fullFileName.toStdString();
 
@@ -257,6 +259,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
     void removeFile( const QString& fullFileName )
     {
         ScopedRecursiveLock lock( mutex_ );
+        recordOperationThread();
 
         LOG_DEBUG << fullFileName.toStdString();
 
@@ -299,6 +302,11 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
 
     void checkWatches()
     {
+        {
+            ScopedRecursiveLock lock( mutex_ );
+            recordOperationThread();
+        }
+
         const auto collectChangedFiles = [ this ]() {
             ScopedRecursiveLock lock( mutex_ );
 
@@ -349,6 +357,12 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
     {
         ScopedRecursiveLock lock( mutex_ );
         return watcher_.directories().size();
+    }
+
+    std::thread::id lastOperationThread()
+    {
+        ScopedRecursiveLock lock( mutex_ );
+        return lastOperationThread_;
     }
 
     void handleFileAction( efsw::WatchID watchid, const std::string& dir,
@@ -441,6 +455,14 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
     }
 
   private:
+    // Records which thread ran the last efsw operation so tests can assert the
+    // dispatch-only entry points never execute efsw work on the caller's
+    // thread. Guarded by mutex_ like every other mutable member.
+    void recordOperationThread()
+    {
+        lastOperationThread_ = std::this_thread::get_id();
+    }
+
     efsw::FileWatcher watcher_;
     std::vector<WatchedDirecotry> watchedPaths_;
     FileWatcher* parent_;
@@ -449,6 +471,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
     bool nativeWatchEnabled_ = true;
 
     RecursiveMutex mutex_;
+    std::thread::id lastOperationThread_;
 };
 
 void EfswFileWatcherDeleter::operator()( EfswFileWatcher* watcher ) const
@@ -533,6 +556,11 @@ std::size_t FileWatcher::watchedFileCount()
 std::size_t FileWatcher::watchedDirectoryCount()
 {
     return efswWatcher_->watchedDirectoryCount();
+}
+
+std::thread::id FileWatcher::efswOperationThread() const
+{
+    return efswWatcher_->lastOperationThread();
 }
 
 void FileWatcher::fileChangedOnDisk( const QString& fileName )

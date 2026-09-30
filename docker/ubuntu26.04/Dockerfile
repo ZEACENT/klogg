@@ -1,11 +1,10 @@
-FROM ubuntu:26.04
+ARG UBUNTU_IMAGE=ubuntu:26.04
+ARG KLOGG_APT_STAGE=online
 
-# CCACHE_DIR lives under the workspace mount (/usr/local) so the cache can be
-# persisted across CI runs via actions/cache; keep it bounded and compressed.
-ENV DEBIAN_FRONTEND=noninteractive \
-    CCACHE_DIR=/usr/local/.ccache \
-    CCACHE_MAXSIZE=2G \
-    CCACHE_COMPRESS=1
+# Explicit online source builds remain available locally. Qualified producers
+# fix KLOGG_APT_STAGE=locked in the catalog and never fall back to this stage.
+FROM ${UBUNTU_IMAGE} AS online-apt
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Retry apt operations: CI docker builds hit archive.ubuntu.com network
 # flakes; retrying the whole apt invocation makes the base-image build
@@ -30,3 +29,21 @@ RUN set -eux; \
                 ragel ninja-build cmake zlib1g-dev git pkg-config cppcheck \
                 wget ca-certificates fuse file && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+FROM ${UBUNTU_IMAGE} AS locked-apt
+ARG APT_RUNTIME_LOCK_SHA256
+COPY ci_install_locked_apt.sh /opt/klogg-ci/ci_install_locked_apt.sh
+COPY inputs/apt/ /opt/klogg-ci-inputs/apt/
+RUN --network=none set -eu; \
+    sh /opt/klogg-ci/ci_install_locked_apt.sh /opt/klogg-ci-inputs/apt \
+      "${APT_RUNTIME_LOCK_SHA256:?a verified APT lock is required}"; \
+    mkdir -p /usr/share/klogg-ci; \
+    cp /opt/klogg-ci-inputs/apt/manifest.json /usr/share/klogg-ci/apt-inputs.json; \
+    rm -rf /opt/klogg-ci-inputs/apt
+
+FROM ${KLOGG_APT_STAGE}-apt AS build-environment
+# The workspace mount carries the optional, bounded compiler cache.
+ENV DEBIAN_FRONTEND=noninteractive \
+    CCACHE_DIR=/usr/local/.ccache \
+    CCACHE_MAXSIZE=2G \
+    CCACHE_COMPRESS=1

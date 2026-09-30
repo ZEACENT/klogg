@@ -59,6 +59,9 @@ int main( int argc, char* argv[] )
 {
     QApplication a( argc, argv );
 
+#ifdef _WIN32
+    qputenv( "KLOGG_TEST_TRACE_SEARCH_TERMINALS", "1" );
+#endif
     klogg::testing::installFirstChanceCrashTrace();
     logging::enableLogging( true, logging::LogLevel::Warning );
     configureTestTempDir();

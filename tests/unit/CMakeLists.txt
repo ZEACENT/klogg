@@ -239,6 +239,6 @@ target_compile_definitions(
 target_include_directories(klogg_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/app")
 target_include_directories(klogg_tests PRIVATE "${CMAKE_BINARY_DIR}/src/ui/klogg_ui_autogen/include")
 set_target_properties(klogg_tests PROPERTIES AUTOMOC ON)
-klogg_configure_test_target(klogg_tests)
+klogg_configure_test_target(klogg_tests KEEP_DEBUG_SYMBOLS)
 
 klogg_add_runtime_test(klogg_tests klogg_tests)

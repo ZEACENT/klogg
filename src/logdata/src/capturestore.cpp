@@ -214,6 +214,34 @@ bool isProcessRunning( qint64 processId )
 
 std::atomic<int> capturePathGateTimeoutMs{ 5000 };
 std::atomic<int> capturePathNamespaceTransitionsForTesting{ 0 };
+
+// Observation hook for the configured gate wait path. A functional contract
+// such as "deleteCaptureFiles() honours the configured gate timeout instead of
+// a hardcoded default" cannot be asserted with a wall-clock bound in CI:
+// KLOGG_PERF_GATES is unset there, so a KLOGG_CHECK_PERF_BUDGET expression is
+// never evaluated. Recording the timeout that actually reached the gate keeps
+// that check deterministic and active on every CI leg.
+//
+// Explicit overrides are deliberately not recorded: the background retry
+// thread probes the gate with lock( 0 ), which would pollute the record with
+// values unrelated to the configured timeout. The cap keeps the buffer bounded
+// in production processes, where nothing ever clears it; tests clear it before
+// the operation they assert on, so they always observe a fresh record.
+// Function-local statics keep construction order independent of other
+// translation units.
+constexpr std::size_t CapturePathGateWaitsCapacity = 256;
+
+std::mutex& capturePathGateWaitsMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::vector<int>& capturePathGateWaits()
+{
+    static std::vector<int> waits;
+    return waits;
+}
 constexpr int CaptureRetryAttemptLimit = 8;
 constexpr auto CaptureRetryInitialDelay = std::chrono::milliseconds( 25 );
 constexpr auto CaptureRetryMaximumDelay = std::chrono::milliseconds( 400 );
@@ -240,6 +268,14 @@ class CapturePathGate {
             = timeoutOverrideMs >= 0
                   ? timeoutOverrideMs
                   : capturePathGateTimeoutMs.load( std::memory_order_acquire );
+        if ( timeoutOverrideMs < 0 ) {
+            const std::lock_guard<std::mutex> observation(
+                capturePathGateWaitsMutex() );
+            auto& waits = capturePathGateWaits();
+            if ( waits.size() < CapturePathGateWaitsCapacity ) {
+                waits.push_back( timeout );
+            }
+        }
         if ( lock_.tryLock( timeout ) ) {
             return true;
         }
@@ -2089,6 +2125,18 @@ int CaptureStore::setCapturePathGateTimeoutForTesting( int timeoutMs )
 {
     return capturePathGateTimeoutMs.exchange( timeoutMs,
                                               std::memory_order_acq_rel );
+}
+
+std::vector<int> CaptureStore::capturePathGateWaitsForTesting()
+{
+    const std::lock_guard<std::mutex> lock( capturePathGateWaitsMutex() );
+    return capturePathGateWaits();
+}
+
+void CaptureStore::clearCapturePathGateWaitsForTesting()
+{
+    const std::lock_guard<std::mutex> lock( capturePathGateWaitsMutex() );
+    capturePathGateWaits().clear();
 }
 
 void CaptureStore::failNextCapturePathNamespaceTransitionForTesting()

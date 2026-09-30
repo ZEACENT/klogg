@@ -175,6 +175,7 @@ runs:
           ios-native-build-receipt.json \
           ios-native-source-set-receipt.json \
           ios-native-legal-receipt.json \
+          ios-native-overlay-receipt.json \
           ios-native-sbom.spdx.json; do
           test -f "$KLOGG_IOS_NATIVE_STACK_ROOT/$receipt" || {
             echo "::error::missing required iOS native release receipt: $receipt"

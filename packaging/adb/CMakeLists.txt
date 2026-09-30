@@ -16,6 +16,7 @@ set(_klogg_adb_package_asset_names
   ADB-HELPER-SOURCE-OFFER.txt
   adb-helper-source-manifest.json
   adb-helper-source-set-receipt.json
+  adb-helper-overlay-receipt.json
 )
 
 if(WIN32)

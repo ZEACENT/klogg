@@ -22,6 +22,55 @@ on:
         options:
           - validation
           - release
+      environment-mode:
+        description: Run ordinary application CI, qualify environments, or qualify and publish environments
+        required: true
+        default: "off"
+        type: choice
+        options:
+          - "off"
+          - qualify
+          - publish
+      dependency-mode:
+        description: Isolated native qualification, host evidence observation, or fail-closed publish validation
+        required: true
+        default: "off"
+        type: choice
+        options:
+          - "off"
+          - qualify
+          - publish
+          - observe-ios-host
+      expected-source-sha:
+        description: Exact dispatched commit required for producer modes
+        required: false
+        default: ""
+        type: string
+      analysis-base-sha:
+        description: Explicit ancestor commit for environment static-analysis qualification
+        required: false
+        default: ""
+        type: string
+      prior-source-run-id:
+        description: Explicit earlier source-cache run ID for environment fixture only
+        required: false
+        default: ""
+        type: string
+      prior-source-artifact-id:
+        description: Exact earlier source-cache artifact ID for environment fixture only
+        required: false
+        default: ""
+        type: string
+      prior-source-run-attempt:
+        description: Explicit earlier source-cache run attempt for environment fixture only
+        required: false
+        default: ""
+        type: string
+      prior-source-sha:
+        description: Explicit earlier source-cache commit SHA for environment fixture only
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -29,15 +78,188 @@ permissions:
 concurrency:
   # Release qualification must not share a queue with ordinary master pushes.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'validation') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'validation' && inputs.environment-mode == 'off' && inputs.dependency-mode == 'off') }}
 
 env:
   KLOGG_CI_IMAGE_PREFIX: zeacent/klogg
 
 jobs:
+  DependencyModePreflight:
+    name: "Native dependency dispatch preflight"
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # A skipped ancestor makes ordinary descendants skip even when their direct needs pass.
+      - name: Reject prior environment source inputs outside producer dispatch
+        shell: bash
+        env:
+          KLOGG_ENVIRONMENT_MODE: ${{ inputs.environment-mode }}
+          KLOGG_DEPENDENCY_MODE: ${{ inputs.dependency-mode }}
+          KLOGG_PRIOR_SOURCE_RUN_ID: ${{ inputs.prior-source-run-id }}
+          KLOGG_PRIOR_SOURCE_ARTIFACT_ID: ${{ inputs.prior-source-artifact-id }}
+          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior-source-run-attempt }}
+          KLOGG_PRIOR_SOURCE_SHA: ${{ inputs.prior-source-sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          prior = ('KLOGG_PRIOR_SOURCE_RUN_ID', 'KLOGG_PRIOR_SOURCE_ARTIFACT_ID',
+                   'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_SHA')
+          producer = (os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+                      and os.environ['KLOGG_ENVIRONMENT_MODE'] in ('qualify', 'publish')
+                      and os.environ['KLOGG_DEPENDENCY_MODE'] == 'off')
+          if not producer and any(os.environ[name] for name in prior):
+              raise SystemExit('prior source inputs are restricted to environment producer dispatch')
+          PY
+      - name: Inactive native dependency preflight
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dependency-mode == 'off' }}
+        run: ':'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate isolated dependency mode and exact source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}
+        shell: bash
+        env:
+          KLOGG_DEPENDENCY_MODE: ${{ inputs.dependency-mode }}
+          KLOGG_ENVIRONMENT_MODE: ${{ inputs.environment-mode }}
+          KLOGG_QUALIFICATION_MODE: ${{ inputs.qualification-mode }}
+          KLOGG_EXPECTED_SOURCE_SHA: ${{ inputs.expected-source-sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          if os.environ['KLOGG_DEPENDENCY_MODE'] not in ('qualify', 'publish', 'observe-ios-host'):
+              raise SystemExit('unsupported native dependency dispatch mode')
+          if (os.environ['KLOGG_DEPENDENCY_MODE'] == 'observe-ios-host'
+                  and os.environ['GITHUB_REF'] in ('refs/heads/master', 'refs/heads/main')):
+              raise SystemExit('iOS host observation requires a non-default branch')
+          if os.environ['KLOGG_ENVIRONMENT_MODE'] != 'off':
+              raise SystemExit('dependency-mode cannot combine with environment-mode')
+          if os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation':
+              raise SystemExit('dependency-mode cannot combine with release qualification')
+          if os.environ['GITHUB_REPOSITORY'] != 'ZEACENT/klogg' or not os.environ['GITHUB_REF'].startswith('refs/heads/'):
+              raise SystemExit('dependency production requires a canonical repository branch')
+          source = os.environ['KLOGG_EXPECTED_SOURCE_SHA']
+          if not re.fullmatch('[0-9a-f]{40}', source) or source == '0' * 40:
+              raise SystemExit('expected-source-sha must be an explicit nonzero full commit SHA')
+          if source != os.environ['GITHUB_SHA']:
+              raise SystemExit('dispatched source does not match expected-source-sha')
+          PY
+          test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"
+
+  IosHostEvidence:
+    name: Unreviewed iOS host evidence
+    needs: [DependencyModePreflight]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode == 'observe-ios-host' && needs.DependencyModePreflight.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ci-ios-host-evidence.yml
+    with:
+      expected-source-sha: ${{ inputs.expected-source-sha }}
+
+  EnvironmentModePreflight:
+    name: "Environment producer dispatch preflight"
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && inputs.dependency-mode == 'off' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate isolated producer mode and exact source
+        shell: bash
+        env:
+          KLOGG_ENVIRONMENT_MODE: ${{ inputs.environment-mode }}
+          KLOGG_QUALIFICATION_MODE: ${{ inputs.qualification-mode }}
+          KLOGG_EXPECTED_SOURCE_SHA: ${{ inputs.expected-source-sha }}
+          KLOGG_ANALYSIS_BASE_SHA: ${{ inputs.analysis-base-sha }}
+          KLOGG_PRIOR_SOURCE_RUN_ID: ${{ inputs.prior-source-run-id }}
+          KLOGG_PRIOR_SOURCE_ARTIFACT_ID: ${{ inputs.prior-source-artifact-id }}
+          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior-source-run-attempt }}
+          KLOGG_PRIOR_SOURCE_SHA: ${{ inputs.prior-source-sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          if os.environ['KLOGG_ENVIRONMENT_MODE'] not in ('qualify', 'publish'):
+              raise SystemExit('environment-mode must be off, qualify, or publish')
+          if os.environ['KLOGG_QUALIFICATION_MODE'] != 'validation':
+              raise SystemExit('environment producer modes cannot combine with release qualification')
+          if os.environ['GITHUB_REPOSITORY'] != 'ZEACENT/klogg' or not os.environ['GITHUB_REF'].startswith('refs/heads/'):
+              raise SystemExit('environment production requires a canonical repository branch')
+          for key in ('KLOGG_EXPECTED_SOURCE_SHA', 'KLOGG_ANALYSIS_BASE_SHA'):
+              value = os.environ[key]
+              if not re.fullmatch('[0-9a-f]{40}', value) or value == '0' * 40:
+                  raise SystemExit(key + ' must be an explicit nonzero full commit SHA')
+          if os.environ['KLOGG_EXPECTED_SOURCE_SHA'] != os.environ['GITHUB_SHA']:
+              raise SystemExit('dispatched source does not match expected-source-sha')
+          if os.environ['KLOGG_ANALYSIS_BASE_SHA'] == os.environ['GITHUB_SHA']:
+              raise SystemExit('analysis base must precede the qualification source')
+          prior = ('KLOGG_PRIOR_SOURCE_RUN_ID', 'KLOGG_PRIOR_SOURCE_ARTIFACT_ID',
+                   'KLOGG_PRIOR_SOURCE_RUN_ATTEMPT', 'KLOGG_PRIOR_SOURCE_SHA')
+          values = [os.environ[key] for key in prior]
+          if any(values) and not all(values):
+              raise SystemExit('prior source inputs must be all-or-none')
+          if all(values):
+              if any(not re.fullmatch('[1-9][0-9]*', value) for value in values[:3]):
+                  raise SystemExit('prior source run, artifact and attempt IDs must be positive decimal strings')
+              if not re.fullmatch('[0-9a-f]{40}', values[3]) or values[3] in ('0' * 40, os.environ['GITHUB_SHA']):
+                  raise SystemExit('prior source SHA must be an earlier nonzero full commit SHA')
+          PY
+          test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"
+          git cat-file -e "$KLOGG_ANALYSIS_BASE_SHA^{commit}"
+          git merge-base --is-ancestor "$KLOGG_ANALYSIS_BASE_SHA" "$KLOGG_EXPECTED_SOURCE_SHA"
+
+  EnvironmentProducer:
+    name: "Environment producer pipeline"
+    needs: [EnvironmentModePreflight]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode == 'off' && (inputs.environment-mode == 'qualify' || inputs.environment-mode == 'publish') }}
+    # This is a reusable-workflow permission ceiling, not an executable build job.
+    # The child grants writes only to isolated SARIF upload and protected publish.
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+    uses: ./.github/workflows/ci-environments.yml
+    with:
+      mode: ${{ inputs.environment-mode }}
+      expected-source-sha: ${{ inputs.expected-source-sha }}
+      analysis-base-sha: ${{ inputs.analysis-base-sha }}
+      prior-source-run-id: ${{ inputs.prior-source-run-id }}
+      prior-source-artifact-id: ${{ inputs.prior-source-artifact-id }}
+      prior-source-run-attempt: ${{ inputs.prior-source-run-attempt }}
+      prior-source-sha: ${{ inputs.prior-source-sha }}
+
+  DependencyGate:
+    name: "Native dependency qualification gate"
+    needs: [DependencyModePreflight, BuildAdbHelperLegalAssets, BuildAdbLinuxX64, BuildAdbLinuxArm64, BuildAdbWindowsX64, BuildAdbMacX64, BuildAdbMacArm64, BuildIosNativeX64, BuildIosNativeArm64]
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    uses: ./.github/workflows/ci-dependencies.yml
+    with:
+      mode: ${{ inputs.dependency-mode }}
+      expected-source-sha: ${{ inputs.expected-source-sha }}
+      needs-json: ${{ toJSON(needs) }}
+
   ReleaseQualificationPreflight:
-    name: "Release and platform-fragile preflight"
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Release and platform-fragile preflight"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,8 +302,9 @@ jobs:
           test "$missing" -eq 0
 
   SaveVersion:
-    name: "Resolve build version"
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    needs: [DependencyModePreflight]
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Resolve build version"
+    if: ${{ !cancelled() && ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') && needs.DependencyModePreflight.result == 'success')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-22.04
     outputs:
       klogg_version: ${{ steps.save-version.outputs.klogg_version }}
@@ -108,8 +331,8 @@ jobs:
           if-no-files-found: error
 
   PrefetchCpmCache:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch CPM cache"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch CPM cache"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
@@ -140,73 +363,38 @@ jobs:
           compression-level: 0
 
   PrefetchBoost:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch Boost"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Boost"
     runs-on: ubuntu-22.04
-    env:
-      KLOGG_WORKSPACE: ${{ github.workspace }}
-      BOOST_URL: https://sourceforge.net/projects/boost/files/boost/1.86.0/boost_1_86_0.tar.bz2/download
     steps:
-      - name: Restore Boost prefetch cache
-        id: cache-boost-prefetch
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: ${{ github.workspace }}/prefetch_artifacts/boost
-          key: boost-prefetch-1-86-0
+          persist-credentials: false
 
-      - name: Prefetch Boost artifact
-        if: ${{ steps.cache-boost-prefetch.outputs.cache-hit != 'true' }}
+      - name: Restore Boost source archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/boost_1_86_0.tar.bz2
+          key: boost-source-${{ hashFiles('ci/environments/materials.json') }}
+
+      - name: Prefetch and verify Boost source archive
         shell: bash
         run: |
-          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
-          BOOST_ROOT="$PREFETCH_ROOT/boost"
-          BOOST_ARCHIVE="$PREFETCH_ROOT/boost.tar.bz2"
+          set -euo pipefail
+          python3 scripts/materialize_boost.py \
+            --archive "$GITHUB_WORKSPACE/prefetch_artifacts/boost_1_86_0.tar.bz2" \
+            --verify-only
 
-          mkdir -p "$BOOST_ROOT"
-
-          attempt=1
-          max_attempts=3
-          while [ $attempt -le $max_attempts ]; do
-            rm -rf "$BOOST_ROOT"
-            mkdir -p "$BOOST_ROOT"
-
-            if curl --progress-bar --location --output "$BOOST_ARCHIVE" "$BOOST_URL"; then
-              tar -xjf "$BOOST_ARCHIVE" -C "$PREFETCH_ROOT"
-              cp -r "$PREFETCH_ROOT"/boost_*/* "$BOOST_ROOT"/
-              rm -rf "$PREFETCH_ROOT"/boost_* "$BOOST_ARCHIVE"
-              exit 0
-            fi
-
-            rm -f "$BOOST_ARCHIVE"
-
-            if [ $attempt -eq $max_attempts ]; then
-              exit 1
-            fi
-
-            echo "Boost prefetch attempt $attempt failed, retrying after backoff..."
-            attempt=$((attempt + 1))
-            sleep $((attempt * 10))
-          done
-
-      - name: Package Boost artifact
-        shell: bash
-        run: |
-          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
-          # Store boost as a single tarball rather than the ~200k-file tree:
-          # download-artifact@v4 intermittently fails to extract zip64
-          # archives with many tiny files. A single-file artifact extracts
-          # reliably and tar is deterministic.
-          tar -czf "$PREFETCH_ROOT/boost.tar.gz" -C "$PREFETCH_ROOT/boost" .
-
+      # A single original archive avoids the ~200k-file zip64 artifact flake.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: boost-root
-          path: prefetch_artifacts/boost.tar.gz
+          path: prefetch_artifacts/boost_1_86_0.tar.bz2
           if-no-files-found: error
 
   PrefetchOpenSsl:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch Windows Qt 5 OpenSSL"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Windows Qt 5 OpenSSL"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
@@ -253,8 +441,8 @@ jobs:
           if-no-files-found: error
 
   PrefetchLinuxDeployQt:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch linuxdeployqt"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch linuxdeployqt"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
@@ -299,171 +487,48 @@ jobs:
           path: prefetch_artifacts/linuxdeployqt-continuous-x86_64.AppImage
           if-no-files-found: error
 
-  PrefetchCmakeInstaller:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch Linux CMake installer"
-    runs-on: ubuntu-22.04
-    env:
-      KLOGG_WORKSPACE: ${{ github.workspace }}
-      CMAKE_INSTALLER_URL: https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
-    steps:
-      - name: Prefetch CMake installer
-        shell: sh
-        run: |
-          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
-          CMAKE_INSTALLER="$PREFETCH_ROOT/cmake-3.20.2-linux-x86_64.sh"
-
-          mkdir -p "$PREFETCH_ROOT"
-
-          attempt=1
-          max_attempts=3
-          while [ $attempt -le $max_attempts ]; do
-            rm -f "$CMAKE_INSTALLER"
-
-            if curl --fail --retry 3 --retry-delay 10 --progress-bar --location \
-              --output "$CMAKE_INSTALLER" "$CMAKE_INSTALLER_URL"; then
-              if printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$CMAKE_INSTALLER" \
-                | sha256sum --check --strict \
-                && head -1 "$CMAKE_INSTALLER" | grep -q '#!/'; then
-                chmod +x "$CMAKE_INSTALLER"
-                exit 0
-              fi
-              echo "Downloaded CMake installer failed integrity validation, retrying..."
-              rm -f "$CMAKE_INSTALLER"
-            fi
-
-            if [ $attempt -eq $max_attempts ]; then
-              echo "::error::Failed to download CMake installer after $max_attempts attempts"
-              exit 1
-            fi
-
-            echo "CMake installer prefetch attempt $attempt failed, retrying after backoff..."
-            attempt=$((attempt + 1))
-            sleep $((attempt * 10))
-          done
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cmake-installer
-          path: prefetch_artifacts/cmake-3.20.2-linux-x86_64.sh
-          if-no-files-found: error
-
   PrefetchWindowsTools:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch Windows MSYS2 tools"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Windows MSYS2 tools"
     runs-on: windows-2022
     steps:
-      - name: Restore MSYS2 tools cache
-        id: cache-msys2-tools
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore pinned MSYS2 package archives
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          path: prefetch_artifacts/msys2-tools.zip
-          key: msys2-tools-mingw64-ragel-pkgconf-v1
+          path: prefetch_artifacts/msys2-packages
+          key: msys2-mingw64-tools-${{ hashFiles('ci/tools/msys2-tools.json') }}
 
-      - name: Setup MSYS2 and install tools (attempt 1)
-        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' }}
-        id: msys2-attempt-1
-        continue-on-error: true
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-ragel
-            mingw-w64-x86_64-pkgconf
+      - name: Download, validate and bundle pinned MSYS2 tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_windows_tools.py \
+            --lock ci/tools/msys2-tools.json \
+            --cache prefetch_artifacts/msys2-packages \
+            --archive prefetch_artifacts/msys2-tools.zip
 
-      - name: Clean failed MSYS2 setup
-        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' && steps.msys2-attempt-1.outcome == 'failure' }}
+      - name: Verify bundled native Windows tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_windows_tools.py \
+            --lock ci/tools/msys2-tools.json \
+            --extract-artifact --require-prefetched \
+            --archive prefetch_artifacts/msys2-tools.zip \
+            --destination "$RUNNER_TEMP/verified-msys2-tools"
+
+      - name: Smoke-test locked Windows executables
         shell: pwsh
         run: |
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
-            (Join-Path $env:RUNNER_TEMP "setup-msys2"), `
-            (Join-Path $env:RUNNER_TEMP "msys64")
-
-      - name: Setup MSYS2 and install tools (attempt 2)
-        id: msys2-attempt-2
-        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' && steps.msys2-attempt-1.outcome == 'failure' }}
-        continue-on-error: true
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-ragel
-            mingw-w64-x86_64-pkgconf
-
-      - name: Clean failed MSYS2 setup
-        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' && steps.msys2-attempt-1.outcome == 'failure' && steps.msys2-attempt-2.outcome == 'failure' }}
-        shell: pwsh
-        run: |
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
-            (Join-Path $env:RUNNER_TEMP "setup-msys2"), `
-            (Join-Path $env:RUNNER_TEMP "msys64")
-
-      - name: Setup MSYS2 and install tools (attempt 3)
-        id: msys2-attempt-3
-        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' && steps.msys2-attempt-1.outcome == 'failure' && steps.msys2-attempt-2.outcome == 'failure' }}
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-ragel
-            mingw-w64-x86_64-pkgconf
-
-      - name: Package MSYS2 tools
-        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' }}
-        shell: pwsh
-        run: |
-          $msysBinCandidates = @(
-            (Join-Path $env:RUNNER_TEMP "setup-msys2\mingw64\bin"),
-            (Join-Path $env:RUNNER_TEMP "setup-msys2\msys64\mingw64\bin"),
-            (Join-Path $env:RUNNER_TEMP "msys64\mingw64\bin"),
-            "C:\msys64\mingw64\bin"
-          )
-
-          $msysBin = $msysBinCandidates |
-            Where-Object {
-              (Test-Path (Join-Path $_ "ragel.exe")) -and
-              (Test-Path (Join-Path $_ "pkg-config.exe"))
-            } |
-            Select-Object -First 1
-          if ( !$msysBin ) {
-            Write-Error "ragel/pkg-config binaries not found in MSYS2 mingw64 bin candidates: $($msysBinCandidates -join ', ')"
-            exit 1
-          }
-
-          $msysRoot = Split-Path (Split-Path $msysBin -Parent) -Parent
-          $artifactRoot = Join-Path $env:GITHUB_WORKSPACE "prefetch_artifacts\msys2-tools"
-          $artifactZip = Join-Path $env:GITHUB_WORKSPACE "prefetch_artifacts\msys2-tools.zip"
-          New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-          Copy-Item -Path $msysRoot -Destination (Join-Path $artifactRoot "msys64") -Recurse -Force
-
-          Push-Location $artifactRoot
-          Compress-Archive -Path "msys64" -DestinationPath $artifactZip -Force
-          Pop-Location
-
-      - name: Verify MSYS2 tools archive
-        shell: pwsh
-        run: |
-          $artifactZip = Join-Path $env:GITHUB_WORKSPACE "prefetch_artifacts\msys2-tools.zip"
-          if ( !(Test-Path $artifactZip) ) {
-            Write-Error "MSYS2 tools archive missing at $artifactZip"
-            exit 1
-          }
-
-          $verifyRoot = Join-Path $env:RUNNER_TEMP "verify-msys2-tools"
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $verifyRoot
-          New-Item -ItemType Directory -Force -Path $verifyRoot | Out-Null
-          Expand-Archive -Path $artifactZip -DestinationPath $verifyRoot -Force
-
-          $msysBin = Join-Path $verifyRoot "msys64\mingw64\bin"
-          if ( !(Test-Path (Join-Path $msysBin "ragel.exe")) -or
-               !(Test-Path (Join-Path $msysBin "pkg-config.exe")) ) {
-            Write-Error "MSYS2 archive does not contain ragel.exe and pkg-config.exe under msys64\mingw64\bin"
-            exit 1
-          }
+          $bin = Join-Path $env:RUNNER_TEMP "verified-msys2-tools\msys64\mingw64\bin"
+          & (Join-Path $bin "ragel.exe") -v
+          if ($LASTEXITCODE -ne 0) { throw "Ragel failed to run from the locked tool closure" }
+          & (Join-Path $bin "pkg-config.exe") --version
+          if ($LASTEXITCODE -ne 0) { throw "pkg-config failed to run from the locked tool closure" }
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -472,21 +537,26 @@ jobs:
           if-no-files-found: error
 
   PrefetchAdbHelperSources:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch locked ADB helper source closure"
+    needs: [DependencyModePreflight]
+    if: ${{ !cancelled() && ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') && needs.DependencyModePreflight.result == 'success')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Prefetch locked ADB helper source closure"
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     env:
       KLOGG_ADB_SOURCE_CACHE_MAX_BYTES: 536870912
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Compute exact ADB source cache key
         id: adb-cache-key
         shell: bash
         run: >-
-          echo "key=adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py') }}"
+          echo "key=adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py', 'scripts/prefetch_adb_manifest_fallback.py', 'scripts/prefetch_adb_libusb_fallback.py', 'scripts/prefetch_adb_source_closure.py') }}"
           >> "$GITHUB_OUTPUT"
 
       - name: Restore exact locked ADB source closure
@@ -499,11 +569,14 @@ jobs:
           restore-keys: adb-helper-sources-v1-
 
       - name: Prefetch and hash immutable ADB sources
+        timeout-minutes: 45
         shell: bash
         env:
           KLOGG_ADB_SOURCE_CACHE_EXACT_KEY: ${{ steps.adb-cache-key.outputs.key }}
           KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY: ${{ steps.cache-adb-sources.outputs.cache-matched-key }}
           KLOGG_ADB_SOURCE_CACHE_RESTORE_OUTCOME: ${{ steps.cache-adb-sources.outcome }}
+          KLOGG_ADB_SOURCE_EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           adb_source_cache_root="prefetch_artifacts/adb-helper-sources"
@@ -530,10 +603,35 @@ jobs:
 
           if [[ "$cache_usable" != "true" ]]; then
             rm -rf "$adb_source_cache_root"
-            python3 scripts/prefetch_adb_helper_sources.py \
-              --lock packaging/adb/adb-helper.lock.json \
-              --download-root "$adb_source_cache_root" \
-              --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"
+            transport_status=2
+            if [[ "$KLOGG_ADB_SOURCE_EVENT" == "pull_request" || "$KLOGG_ADB_SOURCE_EVENT" == "push" ]]; then
+              if python3 scripts/ci_adb_source_transport.py \
+                --lock packaging/adb/adb-helper.lock.json \
+                --repo-root "$GITHUB_WORKSPACE" \
+                --download-root "$adb_source_cache_root"; then
+                transport_status=0
+              else
+                transport_status=$?
+              fi
+            elif [[ "$KLOGG_ADB_SOURCE_EVENT" != "workflow_dispatch" ]]; then
+              echo "::error::Unsupported ADB source prefetch event: $KLOGG_ADB_SOURCE_EVENT"
+              exit 1
+            fi
+            if [[ "$transport_status" -eq 2 ]]; then
+              python3 scripts/prefetch_adb_source_closure.py \
+                --lock packaging/adb/adb-helper.lock.json \
+                --download-root "$adb_source_cache_root" \
+                --workers 2 \
+                --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"
+            elif [[ "$transport_status" -eq 0 ]]; then
+              python3 scripts/prefetch_adb_helper_sources.py \
+                --lock packaging/adb/adb-helper.lock.json \
+                --download-root "$adb_source_cache_root" \
+                --offline \
+                --max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"
+            else
+              exit "$transport_status"
+            fi
           fi
 
       - name: Save exact locked ADB source closure
@@ -553,9 +651,12 @@ jobs:
 
   BuildAdbHelperLegalAssets:
     needs: [SaveVersion, PrefetchAdbHelperSources]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Build ADB helper legal assets"
+    if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Build ADB helper legal assets"
     runs-on: ubuntu-24.04
+    outputs:
+      support_artifact_id: ${{ steps.upload_adb_support.outputs.artifact-id }}
+      full_release_artifact_id: ${{ steps.upload_adb_release.outputs.artifact-id }}
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     steps:
@@ -586,6 +687,7 @@ jobs:
             --package-support-output prefetch_artifacts/adb-helper-package-support
 
       - name: Upload package-required ADB support assets
+        id: upload_adb_support
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: adb-helper-package-support
@@ -594,7 +696,8 @@ jobs:
           compression-level: 0
 
       - name: Upload full ADB release closure for trusted publication
-        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release') }}
+        id: upload_adb_release
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release') || (github.repository == 'ZEACENT/klogg' && github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish')))) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: adb-helper-legal-assets
@@ -608,9 +711,14 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper linux-x86_64"
+    if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Source-built ADB helper linux-x86_64"
     runs-on: ubuntu-24.04
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
+      archive_sha256: ${{ steps.candidate.outputs.archive-sha256 }}
+      full_artifact_id: ${{ steps.upload_full.outputs.artifact-id }}
     env:
       KLOGG_ADB_HELPER_TARGET: linux-x86_64
       KLOGG_ADB_CONTAINER_IMAGE: quay.io/pypa/manylinux2014_x86_64@sha256:95440e0e72dd3a81dc8d2cf59a84d57af661456620f5bc821ff92048d0e54ff9
@@ -618,6 +726,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Select verified Xcode 26.6
+        if: ${{ startsWith(env.KLOGG_ADB_HELPER_TARGET, 'macos-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          version=$(xcodebuild -version)
+          if [[ "$version" != $'Xcode 26.6\nBuild version 17F113' ]]; then
+            echo "::error::Expected Xcode 26.6 build 17F113, got: $version" >&2
+            exit 1
+          fi
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
 
       - name: Install locked native CMake toolchain
         if: ${{ !startsWith(env.KLOGG_ADB_HELPER_TARGET, 'linux-') }}
@@ -708,6 +830,7 @@ jobs:
           tar -czf "$archive" -C "$artifact_root" .
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload_full
         with:
           name: adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}
           path: ${{ runner.temp }}/adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}.tar.gz
@@ -719,12 +842,60 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/adb-helper-artifact/SHA256SUMS
 
+      - name: Attest exact full native tar provenance
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}.tar.gz
+
+      - name: Produce offline native-core candidate
+        id: candidate
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_dir="$RUNNER_TEMP/native-core-candidate"
+          mkdir -p "$candidate_dir"
+          archive="$candidate_dir/adb-helper-${KLOGG_ADB_HELPER_TARGET}.tar.gz"
+          receipt="$candidate_dir/candidate.json"
+          python3 scripts/ci_dependency_producer.py \
+            --target-id "adb-${KLOGG_ADB_HELPER_TARGET}" \
+            --artifact-root "$RUNNER_TEMP/adb-helper-artifact" \
+            --source-assets-root "$RUNNER_TEMP/adb-helper-package-support" \
+            --archive "$candidate_dir/adb-helper-${KLOGG_ADB_HELPER_TARGET}.tar.gz" \
+            --candidate-receipt "$candidate_dir/candidate.json"
+          python3 - "$archive" "$receipt" <<'PY' >> "$GITHUB_OUTPUT"
+          import hashlib
+          import pathlib
+          import sys
+          archive, receipt = (pathlib.Path(value) for value in sys.argv[1:])
+          print(f"archive-sha256={hashlib.sha256(archive.read_bytes()).hexdigest()}")
+          print(f"candidate-sha256={hashlib.sha256(receipt.read_bytes()).hexdigest()}")
+          PY
+
+      - name: Upload immutable native-core candidate
+        id: upload_candidate
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-core-candidate-adb-${{ env.KLOGG_ADB_HELPER_TARGET }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-core-candidate/adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}.tar.gz
+            ${{ runner.temp }}/native-core-candidate/candidate.json
+          if-no-files-found: error
+          compression-level: 0
+
   BuildAdbLinuxArm64:
     needs: [BuildAdbHelperLegalAssets]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper linux-arm64"
+    if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Source-built ADB helper linux-arm64"
     runs-on: ubuntu-24.04-arm
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
+      archive_sha256: ${{ steps.candidate.outputs.archive-sha256 }}
+      full_artifact_id: ${{ steps.upload_full.outputs.artifact-id }}
     env:
       KLOGG_ADB_HELPER_TARGET: linux-arm64
       KLOGG_ADB_CONTAINER_IMAGE: quay.io/pypa/manylinux2014_aarch64@sha256:b63ff749fee6f3f2a6b67ed3101a073db3211df1791da19e9acf96f43c0dd6ff
@@ -733,9 +904,14 @@ jobs:
   BuildAdbWindowsX64:
     needs: [BuildAdbHelperLegalAssets]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper windows-x86_64"
+    if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Source-built ADB helper windows-x86_64"
     runs-on: windows-2022
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
+      archive_sha256: ${{ steps.candidate.outputs.archive-sha256 }}
+      full_artifact_id: ${{ steps.upload_full.outputs.artifact-id }}
     env:
       KLOGG_ADB_HELPER_TARGET: windows-x86_64
       KLOGG_ADB_CONTAINER_IMAGE: ""
@@ -744,9 +920,14 @@ jobs:
   BuildAdbMacX64:
     needs: [BuildAdbHelperLegalAssets]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper macos-x86_64"
-    runs-on: macos-15-intel
+    if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Source-built ADB helper macos-x86_64"
+    runs-on: macos-26-intel
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
+      archive_sha256: ${{ steps.candidate.outputs.archive-sha256 }}
+      full_artifact_id: ${{ steps.upload_full.outputs.artifact-id }}
     env:
       KLOGG_ADB_HELPER_TARGET: macos-x86_64
       KLOGG_ADB_CONTAINER_IMAGE: ""
@@ -755,29 +936,34 @@ jobs:
   BuildAdbMacArm64:
     needs: [BuildAdbHelperLegalAssets]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Source-built ADB helper macos-arm64"
-    runs-on: macos-15
+    if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Source-built ADB helper macos-arm64"
+    runs-on: macos-26
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
+      archive_sha256: ${{ steps.candidate.outputs.archive-sha256 }}
+      full_artifact_id: ${{ steps.upload_full.outputs.artifact-id }}
     env:
       KLOGG_ADB_HELPER_TARGET: macos-arm64
       KLOGG_ADB_CONTAINER_IMAGE: ""
     steps: *adb_helper_steps
 
   LinuxPackages:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, PrefetchCmakeInstaller, BuildAdbLinuxX64, ReleaseQualificationPreflight]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, BuildAdbLinuxX64, ReleaseQualificationPreflight]
     permissions: &artifact_verification_permissions
       contents: read
       attestations: read
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
       KLOGG_CONFIG_ARCH: ${{ matrix.config.arch }}
       KLOGG_CONFIG_PACKAGE_TAG: ${{ matrix.config.package_tag }}
       KLOGG_CONFIG_CMAKE_OPTS: ${{ matrix.config.cmake_opts }}
       KLOGG_CONTAINER_SUFFIX: ${{ matrix.config.container_suffix }}
       KLOGG_CONTAINER_ROOT: ${{ matrix.config.container_root }}
+      KLOGG_ENV_FAMILY: ${{ matrix.config.family }}
       KLOGG_PACKAGE_ENABLED: true
       KLOGG_CPACK_GEN: ${{ matrix.config.cpack_gen }}
       KLOGG_PACKAGE_SUFFIX: ${{ matrix.config.package_suffix }}
@@ -797,6 +983,7 @@ jobs:
             os_version: 22.04
             arch: x64
             label: ubuntu-22.04-deb
+            family: jammy-qt5
             cache_write: true
             cache_scope: klogg-linux-ubuntu22.04
             package_tag: vs-gen
@@ -814,6 +1001,7 @@ jobs:
             os_version: 24.04
             arch: x64
             label: ubuntu-24.04-deb
+            family: noble-qt6
             cache_write: true
             cache_scope: klogg-linux-ubuntu24.04
             package_tag: vs-gen
@@ -831,6 +1019,7 @@ jobs:
             os_version: 26.04
             arch: x64
             label: ubuntu-26.04-deb
+            family: resolute-qt6
             cache_write: true
             cache_scope: klogg-linux-ubuntu26.04
             package_tag: vs-gen
@@ -852,6 +1041,7 @@ jobs:
             os_version: 20.04
             arch: x64
             label: ubuntu-20.04-appimage
+            family: focal-qt5-gcc13
             cache_write: true
             cache_scope: klogg-linux-ubuntu20.04
             package_tag: vs-gen
@@ -928,66 +1118,10 @@ jobs:
           name: linuxdeployqt
           path: ${{ github.workspace }}/tools
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
+      - name: Verify and prepare the locked Linux environment
+        uses: ./.github/actions/prepare-linux-environment
         with:
-          name: cmake-installer
-          path: ${{ github.workspace }}/tools
-
-      - name: Verify and copy CMake installer to Docker context
-        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
-        shell: sh
-        run: |
-          installer="${{ github.workspace }}/tools/cmake-3.20.2-linux-x86_64.sh"
-          printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$installer" \
-            | sha256sum --check --strict
-          cp "$installer" "${{ env.KLOGG_CONTAINER_ROOT }}/"
-
-      - name: Set up Buildx for the TSan Qt image
-        if: ${{ env.KLOGG_SANITIZER == 'thread' }}
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      # DOCKER_BUILD_SUMMARY=0 (env on both build-push steps below) stops
-      # docker/build-push-action from uploading the per-leg
-      # "<owner>~<repo>~<id>.dockerbuild" build-record/provenance artifact.
-      # Those records are never consumed here, and because they are not zips
-      # they broke the unfiltered cross-run download in ci-release (run
-      # 31241902650, "No END header found"). The ci-release download is now
-      # name-filtered as well; this removes the useless artifact at the source.
-      - name: Build cached TSan Qt container
-        if: ${{ env.KLOGG_SANITIZER == 'thread' }}
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        env:
-          DOCKER_BUILD_SUMMARY: "0"
-        with:
-          context: ${{ env.KLOGG_CONTAINER_ROOT }}
-          load: true
-          tags: ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}
-          cache-from: type=gha,scope=klogg-qt5-tsan
-          cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && 'type=gha,mode=max,scope=klogg-qt5-tsan' || '' }}
-
-      - name: Set up Buildx for the Linux build images
-        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Build cached Linux container
-        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        env:
-          DOCKER_BUILD_SUMMARY: "0"
-        with:
-          context: ${{ env.KLOGG_CONTAINER_ROOT }}
-          load: true
-          tags: ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}
-          # Same type=gha layer cache pattern as the TSan image. The scope is
-          # the container image name, so legs sharing an image (e.g. the deb
-          # and asan legs both build the _ubuntu22.04 image) share one cache.
-          # mode=min (final image only) instead of mode=max: these are
-          # single-stage images, so no intermediate stages are lost, and the
-          # smaller footprint keeps the shared 10GB repo cache budget from
-          # evicting the per-leg ccache entries that the restore step relies on.
-          cache-from: type=gha,scope=${{ env.KLOGG_CACHE_SCOPE }}
-          cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && format('type=gha,mode=min,scope={0}', env.KLOGG_CACHE_SCOPE) || '' }}
+          family: ${{ env.KLOGG_ENV_FAMILY }}
 
       - name: Compute bounded ccache generation
         id: ccache-generation
@@ -1064,7 +1198,7 @@ jobs:
             echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
           fi
           if [ "${{ env.KLOGG_SANITIZER }}" = "thread" ]; then
-            docker run --rm "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" /bin/bash -c '
+            docker run --pull=never --rm "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" /bin/bash -c '
               test -x /usr/bin/llvm-symbolizer-14 &&
               test -f /opt/qt5-tsan/plugins/platforms/libqoffscreen.so &&
               llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep -q __tsan_acquire &&
@@ -1077,13 +1211,23 @@ jobs:
         with:
           container-suffix: ${{ env.KLOGG_CONTAINER_SUFFIX }}
 
+      - name: Upload current-run build metrics
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
+          path: ${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
       - name: Show ccache statistics
         if: ${{ env.KLOGG_SANITIZER != 'thread' }}
         shell: bash
         run: |
           # Exposes the hit/miss ratio so a warm-cache regression is visible in
           # the job log instead of silently costing a full rebuild every run.
-          docker run --rm -v "$KLOGG_WORKSPACE":/usr/local \
+          docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
             /bin/bash -c 'ccache -s 2>&1 || echo "ccache stats unavailable"'
 
@@ -1091,7 +1235,7 @@ jobs:
         if: ${{ env.KLOGG_SANITIZER == 'address' }}
         shell: bash
         run: |
-          docker run --rm \
+          docker run --pull=never --rm \
             --env KLOGG_BUILD_ROOT \
             -v "$KLOGG_WORKSPACE:/usr/local" \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
@@ -1114,7 +1258,7 @@ jobs:
         if: ${{ env.KLOGG_SANITIZER == 'undefined' }}
         shell: bash
         run: |
-          docker run --rm \
+          docker run --pull=never --rm \
             --env KLOGG_BUILD_ROOT \
             -v "$KLOGG_WORKSPACE:/usr/local" \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
@@ -1137,7 +1281,7 @@ jobs:
         if: ${{ env.KLOGG_SANITIZER == 'thread' }}
         shell: bash
         run: |
-          docker run --rm \
+          docker run --pull=never --rm \
             --env TSAN_OPTIONS \
             -v "$KLOGG_WORKSPACE:/usr/local" \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
@@ -1185,7 +1329,7 @@ jobs:
         if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}
         shell: bash
         run: |
-          docker run --rm -v "$KLOGG_WORKSPACE":/usr/local \
+          docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
             /bin/bash -c 'ccache --set-config=compression=true && ccache --set-config=compression_level=6 && ccache --max-size=250M && ccache --cleanup'
 
@@ -1201,17 +1345,17 @@ jobs:
           key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
 
   LinuxSanitizers:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchCmakeInstaller, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
       KLOGG_CONFIG_ARCH: ${{ matrix.config.arch }}
       KLOGG_CONFIG_PACKAGE_TAG: ${{ matrix.config.package_tag }}
       KLOGG_CONFIG_CMAKE_OPTS: ${{ matrix.config.cmake_opts }}
       KLOGG_CONTAINER_SUFFIX: ${{ matrix.config.container_suffix }}
       KLOGG_CONTAINER_ROOT: ${{ matrix.config.container_root }}
+      KLOGG_ENV_FAMILY: ${{ matrix.config.family }}
       KLOGG_PACKAGE_ENABLED: false
       KLOGG_CONFIG_OS: ${{ matrix.config.os }}
       KLOGG_SANITIZER: ${{ matrix.config.sanitizer }}
@@ -1227,6 +1371,7 @@ jobs:
             os_version: 22.04
             arch: x64
             label: ubuntu-22.04-asan-lsan
+            family: jammy-qt5
             cache_write: false
             cache_scope: klogg-linux-ubuntu22.04
             package_tag: asan
@@ -1247,6 +1392,7 @@ jobs:
             os_version: 22.04
             arch: x64
             label: ubuntu-22.04-ubsan
+            family: jammy-qt5
             cache_write: false
             cache_scope: klogg-linux-ubuntu22.04
             package_tag: ubsan
@@ -1267,8 +1413,8 @@ jobs:
 
   LinuxTsan:
     needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Linux ubuntu-22.04-tsan [tsan]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Linux ubuntu-22.04-tsan [tsan]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_ARCH: x64
@@ -1276,20 +1422,21 @@ jobs:
       KLOGG_CONFIG_CMAKE_OPTS: -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 -DCMAKE_PREFIX_PATH=/opt/qt5-tsan -DQt5_DIR=/opt/qt5-tsan/lib/cmake/Qt5 -DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan -DKLOGG_TSAN_QT_VERSION=5.15.19 -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
       KLOGG_CONTAINER_SUFFIX: _ubuntu22.04-tsan
       KLOGG_CONTAINER_ROOT: docker/ubuntu22.04-tsan
+      KLOGG_ENV_FAMILY: jammy-qt5-tsan
       KLOGG_PACKAGE_ENABLED: false
       KLOGG_CONFIG_OS: ubuntu_jammy
       KLOGG_SANITIZER: thread
       KLOGG_CACHE_WRITE: true
       KLOGG_CACHE_SCOPE: klogg-qt5-tsan
       KLOGG_LABEL: ubuntu-22.04-tsan
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps: *linux_steps
 
   PrefetchIosNativeSources:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch locked iOS native sources"
+    needs: [DependencyModePreflight]
+    if: ${{ !cancelled() && ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') && needs.DependencyModePreflight.result == 'success')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}Prefetch locked iOS native sources"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1320,9 +1467,14 @@ jobs:
   BuildIosNativeX64:
     needs: [SaveVersion, PrefetchIosNativeSources]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "iOS native stack x86_64"
-    runs-on: macos-15-intel
+    if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}iOS native stack x86_64"
+    runs-on: macos-26-intel
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
+      archive_sha256: ${{ steps.candidate.outputs.archive-sha256 }}
+      full_artifact_id: ${{ steps.resolve_full_artifact.outputs.artifact-id }}
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_IOS_ARCHITECTURE: x86_64
@@ -1332,6 +1484,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Select verified Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          version=$(xcodebuild -version)
+          if [[ "$version" != $'Xcode 26.6\nBuild version 17F113' ]]; then
+            echo "::error::Expected Xcode 26.6 build 17F113, got: $version" >&2
+            exit 1
+          fi
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
 
       - name: Install iOS native source-build tools
         shell: bash
@@ -1346,7 +1511,29 @@ jobs:
           if brew tap | grep -Fx aws/tap >/dev/null; then
             brew untap aws/tap
           fi
-          brew install autoconf automake libtool pkg-config cmake ninja
+          brew install autoconf automake libtool pkg-config
+
+      - name: Install pinned CMake and Ninja
+        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
+        with:
+          cmakeVersion: 3.31.6
+          ninjaVersion: 1.12.1
+
+      - name: Verify pinned iOS producer toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_dependency_toolchain.py \
+            --target-id "ios-${KLOGG_IOS_ARCHITECTURE}"
+
+      - name: Observe unreviewed iOS host tool inputs
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_dependency_toolchain.py \
+            --target-id "ios-${KLOGG_IOS_ARCHITECTURE}" \
+            --probe-unreviewed-host-tools
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1430,6 +1617,7 @@ jobs:
           if-no-files-found: error
 
       - name: Retry iOS native stack upload after artifact-service failure
+        id: retry_ios_stack
         if: ${{ steps.upload_ios_stack.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -1437,6 +1625,31 @@ jobs:
           path: ${{ runner.temp }}/${{ env.KLOGG_IOS_ARTIFACT }}.tar.gz
           if-no-files-found: error
           overwrite: true
+
+      - name: Resolve effective full iOS artifact ID
+        id: resolve_full_artifact
+        if: ${{ always() && (steps.upload_ios_stack.outcome == 'success' || steps.upload_ios_stack.outcome == 'failure') }}
+        shell: bash
+        env:
+          KLOGG_PRIMARY_OUTCOME: ${{ steps.upload_ios_stack.outcome }}
+          KLOGG_PRIMARY_ID: ${{ steps.upload_ios_stack.outputs.artifact-id }}
+          KLOGG_RETRY_OUTCOME: ${{ steps.retry_ios_stack.outcome }}
+          KLOGG_RETRY_ID: ${{ steps.retry_ios_stack.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          if [[ "$KLOGG_PRIMARY_OUTCOME" == success && "$KLOGG_RETRY_OUTCOME" == skipped && -z "$KLOGG_RETRY_ID" ]]; then
+            artifact_id="$KLOGG_PRIMARY_ID"
+          elif [[ "$KLOGG_PRIMARY_OUTCOME" == failure && -z "$KLOGG_PRIMARY_ID" && "$KLOGG_RETRY_OUTCOME" == success ]]; then
+            artifact_id="$KLOGG_RETRY_ID"
+          else
+            echo '::error::No unambiguous successful original iOS artifact upload'
+            exit 1
+          fi
+          if [[ ! "$artifact_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::Original iOS artifact ID must be a positive decimal number'
+            exit 1
+          fi
+          printf 'artifact-id=%s\n' "$artifact_id" >> "$GITHUB_OUTPUT"
 
       - name: Upload architecture-independent iOS source set
         if: ${{ env.KLOGG_IOS_ARCHITECTURE == 'arm64' }}
@@ -1446,6 +1659,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ios-native-stack/ios-native-corresponding-source.tar.gz
             ${{ runner.temp }}/ios-native-stack/ios-native-source-set-receipt.json
+            ${{ runner.temp }}/ios-native-stack/ios-native-overlay-receipt.json
             ${{ runner.temp }}/ios-native-stack/ios-native-source-offer.txt
             ${{ runner.temp }}/ios-native-stack/ios-native-lgpl-replacement.txt
             ${{ runner.temp }}/ios-native-stack/NOTICE-ios-native.txt
@@ -1458,12 +1672,60 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/ios-native-stack/SHA256SUMS
 
+      - name: Attest exact full native tar provenance
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/${{ env.KLOGG_IOS_ARTIFACT }}.tar.gz
+
+      - name: Produce offline native-core candidate
+        id: candidate
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_dir="$RUNNER_TEMP/native-core-candidate"
+          mkdir -p "$candidate_dir"
+          archive="$candidate_dir/ios-native-${KLOGG_IOS_ARCHITECTURE}.tar.gz"
+          receipt="$candidate_dir/candidate.json"
+          python3 scripts/ci_dependency_producer.py \
+            --target-id "ios-${KLOGG_IOS_ARCHITECTURE}" \
+            --artifact-root "$RUNNER_TEMP/ios-native-stack" \
+            --source-assets-root "$RUNNER_TEMP/ios-native-stack" \
+            --archive "$candidate_dir/ios-native-${KLOGG_IOS_ARCHITECTURE}.tar.gz" \
+            --candidate-receipt "$candidate_dir/candidate.json"
+          python3 - "$archive" "$receipt" <<'PY' >> "$GITHUB_OUTPUT"
+          import hashlib
+          import pathlib
+          import sys
+          archive, receipt = (pathlib.Path(value) for value in sys.argv[1:])
+          print(f"archive-sha256={hashlib.sha256(archive.read_bytes()).hexdigest()}")
+          print(f"candidate-sha256={hashlib.sha256(receipt.read_bytes()).hexdigest()}")
+          PY
+
+      - name: Upload immutable native-core candidate
+        id: upload_candidate
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-core-candidate-ios-${{ env.KLOGG_IOS_ARCHITECTURE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-core-candidate/ios-native-${{ env.KLOGG_IOS_ARCHITECTURE }}.tar.gz
+            ${{ runner.temp }}/native-core-candidate/candidate.json
+          if-no-files-found: error
+          compression-level: 0
+
   BuildIosNativeArm64:
     needs: [SaveVersion, PrefetchIosNativeSources]
     permissions: *artifact_attestation_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "iOS native stack arm64"
-    runs-on: macos-15
+    if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && inputs.environment-mode != 'off' && '[producer-mode skipped] ' || '' }}iOS native stack arm64"
+    runs-on: macos-26
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      candidate_sha256: ${{ steps.candidate.outputs.candidate-sha256 }}
+      archive_sha256: ${{ steps.candidate.outputs.archive-sha256 }}
+      full_artifact_id: ${{ steps.resolve_full_artifact.outputs.artifact-id }}
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_IOS_ARCHITECTURE: arm64
@@ -1474,11 +1736,11 @@ jobs:
   MacPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacX64, BuildIosNativeX64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "macOS intel-qt6 [vs-gen]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}macOS intel-qt6 [vs-gen]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      KLOGG_CONFIG_OS: macos-15-intel
+      KLOGG_CONFIG_OS: macos-26-intel
       KLOGG_QT_VERSION: 6.9.3
       KLOGG_QT_MODULES: qt5compat qtimageformats
       KLOGG_QT_ARCHIVES: qtbase icu qtsvg qttools qttranslations
@@ -1493,12 +1755,25 @@ jobs:
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0
       KLOGG_PACKAGE_ENABLED: true
       KLOGG_SANITIZER: ""
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     timeout-minutes: 60
     steps: &mac_steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Select verified Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer
+          test -d "$DEVELOPER_DIR"
+          version=$(xcodebuild -version)
+          if [[ "$version" != $'Xcode 26.6\nBuild version 17F113' ]]; then
+            echo "::error::Expected Xcode 26.6 build 17F113, got: $version" >&2
+            exit 1
+          fi
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
@@ -1597,14 +1872,6 @@ jobs:
               --repo "$GITHUB_REPOSITORY"
           fi
 
-      - name: List available Xcode versions
-        shell: sh
-        run: ls /Applications | grep Xcode
-      
-      - name: Setup Xcode
-        shell: sh
-        run: sudo xcode-select -s /Applications/Xcode.app
-
 #Install build deps
       - name: Set brew env
         shell: sh
@@ -1654,15 +1921,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: boost-root
-          path: ${{ github.workspace }}
-
-      - name: Extract Boost artifact
-        shell: sh
-        run: |
-          BOOST_ROOT="${{ github.workspace }}/3rdparty/boost"
-          rm -rf "$BOOST_ROOT"
-          mkdir -p "$BOOST_ROOT"
-          tar -xzf "${{ github.workspace }}/boost.tar.gz" -C "$BOOST_ROOT"
+          path: ${{ github.workspace }}/prefetch_artifacts
 
       - name: Require prefetched dependency artifacts
         shell: sh
@@ -1723,6 +1982,16 @@ jobs:
           echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-build
+
+      - name: Upload current-run build metrics
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
+          path: ${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
       - name: Show ccache statistics
         shell: sh
@@ -1801,11 +2070,11 @@ jobs:
   MacArmPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacArm64, BuildIosNativeArm64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "macOS arm64-qt6 [vs-arm64]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}macOS arm64-qt6 [vs-arm64]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      KLOGG_CONFIG_OS: macos-latest
+      KLOGG_CONFIG_OS: macos-26
       KLOGG_QT_VERSION: 6.9.3
       KLOGG_QT_MODULES: qt5compat qtimageformats
       KLOGG_QT_ARCHIVES: qtbase icu qtsvg qttools qttranslations
@@ -1820,14 +2089,14 @@ jobs:
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_OSX_DEPLOYMENT_TARGET=14.0
       KLOGG_PACKAGE_ENABLED: true
       KLOGG_SANITIZER: ""
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
     steps: *mac_steps
 
   MacSanitizers:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: ${{ matrix.config.os }}
@@ -1851,7 +2120,7 @@ jobs:
           # The Linux source-built Qt TSan leg is authoritative for Qt-internal races.
           # Run on the Intel runner so TSan's
           # threading overhead stays stable.
-          - os: macos-15-intel
+          - os: macos-26-intel
             qt_version: 6.9.3
             qt_modules: qt5compat qtimageformats
             qt_archives: qtbase icu qtsvg qttools qttranslations
@@ -1861,7 +2130,7 @@ jobs:
             package_tag: asan-ubsan
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
             sanitizer: address-undefined
-          - os: macos-15-intel
+          - os: macos-26-intel
             qt_version: 6.9.3
             qt_modules: qt5compat qtimageformats
             qt_archives: qtbase icu qtsvg qttools qttranslations
@@ -1883,8 +2152,8 @@ jobs:
   WindowsPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, BuildAdbWindowsX64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Windows x64-qt6 [vs-avx2]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Windows x64-qt6 [vs-avx2]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: windows
@@ -1972,18 +2241,15 @@ jobs:
           name: msys2-tools
           path: ${{ github.workspace }}
 
-      - name: Unpack prefetched MSYS2 tools
-        shell: pwsh
+      - name: Verify and extract locked MSYS2 tools artifact
+        shell: bash
         run: |
-          $archive = Join-Path $env:GITHUB_WORKSPACE "msys2-tools.zip"
-          if ( !(Test-Path $archive) ) {
-            Write-Error "Prefetched MSYS2 tools artifact is required but msys2-tools.zip is missing"
-            exit 1
-          }
-
-          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE "msys2-tools"
-          New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
-          Expand-Archive -Path $archive -DestinationPath $toolsRoot -Force
+          set -euo pipefail
+          python3 scripts/materialize_windows_tools.py \
+            --lock ci/tools/msys2-tools.json \
+            --extract-artifact --require-prefetched \
+            --archive "$GITHUB_WORKSPACE/msys2-tools.zip" \
+            --destination "$GITHUB_WORKSPACE/msys2-tools"
 
       - name: Set openssl paths
         if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
@@ -1995,17 +2261,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: boost-root
-          path: ${{ github.workspace }}
-
-      - name: Extract Boost artifact
-        shell: pwsh
-        run: |
-          # Forward slashes keep bsdtar's -C handling unambiguous on Windows.
-          $boostArchive = (Join-Path $env:GITHUB_WORKSPACE "boost.tar.gz").Replace("\", "/")
-          $boostRoot = (Join-Path $env:GITHUB_WORKSPACE "3rdparty/boost").Replace("\", "/")
-          if (Test-Path $boostRoot) { Remove-Item -Recurse -Force $boostRoot }
-          New-Item -ItemType Directory -Force -Path $boostRoot | Out-Null
-          tar -xzf $boostArchive -C $boostRoot
+          path: ${{ github.workspace }}/prefetch_artifacts
 
       - name: Require prefetched dependency artifacts
         shell: bash
@@ -2048,30 +2304,14 @@ jobs:
         with:
           arch: ${{ env.KLOGG_CONFIG_ARCH }}
 
-      - name: Add MSYS2 toolchain to PATH
+      - name: Add verified MSYS2 tools to PATH
         shell: pwsh
         run: |
-          $msysBinCandidates = @(
-            (Join-Path $env:GITHUB_WORKSPACE "msys2-tools\msys64\mingw64\bin"),
-            (Join-Path $env:RUNNER_TEMP "setup-msys2\mingw64\bin"),
-            (Join-Path $env:RUNNER_TEMP "setup-msys2\msys64\mingw64\bin"),
-            (Join-Path $env:RUNNER_TEMP "msys64\mingw64\bin"),
-            "C:\msys64\mingw64\bin"
-          )
-
-          $msysBin = $msysBinCandidates |
-            Where-Object {
-              (Test-Path (Join-Path $_ "ragel.exe")) -and
-              (Test-Path (Join-Path $_ "pkg-config.exe"))
-            } |
-            Select-Object -First 1
-          if ( !$msysBin ) {
-            Write-Error "ragel/pkg-config binaries not found in MSYS2 mingw64 bin candidates: $($msysBinCandidates -join ', ')"
-            exit 1
+          $msysBin = Join-Path $env:GITHUB_WORKSPACE "msys2-tools\msys64\mingw64\bin"
+          if ( !(Test-Path (Join-Path $msysBin "ragel.exe")) -or
+               !(Test-Path (Join-Path $msysBin "pkg-config.exe")) ) {
+            throw "Verified MSYS2 ragel/pkg-config executables are missing"
           }
-
-          $ragelPath = Join-Path $msysBin "ragel.exe"
-          Write-Host "Using ragel from $ragelPath"
           $msysBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Verify Ragel
@@ -2106,6 +2346,16 @@ jobs:
           fi
 
       - uses: ./.github/actions/agent-build
+
+      - name: Upload current-run build metrics
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
+          path: ${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
       - name: Verify vectorscan config in CMake cache (x64)
         if: ${{ env.KLOGG_CONFIG_ARCH == 'x64' }}
@@ -2152,6 +2402,8 @@ jobs:
           # dumps; the dump directory is only uploaded on test failure below.
           $dumpDir = Join-Path $env:GITHUB_WORKSPACE "build_root\crash_dumps"
           New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+          "KLOGG_TEST_MINIDUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "KLOGG_TEST_TRACE_SEARCH_STARTS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
           foreach ($exe in @("klogg_itests.exe", "klogg_tests.exe")) {
             $regPath = "HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\$exe"
@@ -2223,10 +2475,12 @@ jobs:
             Copy-Item $dumpDir -Destination (Join-Path $diagRoot "crash_dumps") -Recurse -Force
           }
 
-          foreach ($name in @("klogg_itests.pdb", "klogg_tests.pdb")) {
-            $pdb = Join-Path $workspace "build_root\output\$name"
-            if ( Test-Path $pdb ) {
-              Copy-Item $pdb -Destination $diagRoot -Force
+          foreach ($name in @("klogg_itests.exe", "klogg_itests.pdb", "klogg_tests.exe", "klogg_tests.pdb")) {
+            $binary = Join-Path $workspace "build_root\output\$name"
+            if ( Test-Path $binary ) {
+              Copy-Item $binary -Destination $diagRoot -Force
+            } else {
+              "Missing test diagnostic file: $name" | Add-Content -Path (Join-Path $diagRoot "missing-files.txt")
             }
           }
 
@@ -2317,8 +2571,8 @@ jobs:
 
   WindowsX86:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Windows x86-qt5 [QTRegex]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Windows x86-qt5 [QTRegex]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: windows
@@ -2340,8 +2594,8 @@ jobs:
 
   WindowsAsan:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, ReleaseQualificationPreflight]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Windows x64-qt6 ASan [asan]"
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Windows x64-qt6 ASan [asan]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
       KLOGG_CONFIG_OS: windows
@@ -2362,8 +2616,8 @@ jobs:
     steps: *windows_steps
 
   ci-gate:
-    name: "ci-gate"
-    if: always()
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}ci-gate"
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) }}
     needs: [BuildAdbLinuxArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsX86, WindowsAsan]
     runs-on: ubuntu-22.04
     steps:
@@ -2379,7 +2633,7 @@ jobs:
           echo "CI passed: $results"
 
   DispatchContinuous:
-    name: "Dispatch Continuous publisher"
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Dispatch Continuous publisher"
     needs: [ci-gate]
     if: >-
       ${{

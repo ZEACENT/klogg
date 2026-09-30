@@ -39,8 +39,10 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <QList>
 #include <QMainWindow>
 #include <QMenu>
+#include <QPointer>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -132,6 +134,7 @@ class MainWindow : public QMainWindow {
     friend struct MainWindowLiveSaveTestAccess;
 
     enum class ActionInitiator : std::uint8_t { User, WindowDiscard, App };
+    enum class CloseRequestScope : std::uint8_t { Single, Batch };
     enum class DiscardCommit : std::uint8_t { PerTab, WindowShutdown };
 
   private Q_SLOTS:
@@ -211,7 +214,8 @@ class MainWindow : public QMainWindow {
     void handleFilteredViewChanged();
 
     // Close the tab with the passed index
-    void closeTab( int index, ActionInitiator initiator );
+    void closeTab( int index, ActionInitiator initiator,
+                   CloseRequestScope scope = CloseRequestScope::Single );
     // Setup the tab with current index for view
     void currentTabChanged( int index );
 
@@ -317,7 +321,10 @@ class MainWindow : public QMainWindow {
     void showLiveCloseFailureDialog(
         const klogg::livelog::LiveLogCloseTransaction::Failure& failure );
     void finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator initiator );
-    void continueCloseAll();
+    void closeTabs( const QList<QWidget*>& tabs );
+    void continueTabCloseBatch();
+    void cancelTabCloseBatch();
+    void resumeDeferredWindowClose();
     void beginWindowShutdown();
     void advanceWindowShutdown();
     void abortWindowShutdown();
@@ -451,8 +458,10 @@ class MainWindow : public QMainWindow {
     bool shutdownReadyToAccept_ = false;
     bool shutdownPreserveWindowSession_ = false;
     std::optional<WindowSession::CloseDisposition> shutdownCloseDisposition_;
-    bool closeAllInProgress_ = false;
-    ActionInitiator closeAllInitiator_{ ActionInitiator::User };
+    bool tabCloseBatchInProgress_ = false;
+    ActionInitiator tabCloseBatchInitiator_{ ActionInitiator::User };
+    std::optional<QList<QPointer<QWidget>>> pendingTabCloseTargets_;
+    bool deferredWindowClose_ = false;
     std::unique_ptr<klogg::livelog::LiveLogCloseTransaction> liveCloseTransaction_;
     std::vector<CrawlerWidget*> shutdownLiveTabs_;
     std::vector<CrawlerWidget*> shutdownResumeTabs_;

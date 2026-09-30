@@ -23,6 +23,13 @@ endif()
 include(CPM)
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MsvcAsanDependencies.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/verify_pinned_source.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/verify_cpm_cache_hermetic.cmake)
+
+# Snapshot the shared CPM source cache before any dependency is processed;
+# klogg_require_hermetic_cpm_cache() at the end of this file fails the configure
+# if a dependency downloaded its own package-manager bootstrap instead of using
+# the prefetched cache.
+klogg_cpm_bootstrap_artifacts(_klogg_cpm_bootstrap_artifacts)
 
 set(_TMP_CPM_USE_LOCAL_PACKAGES ${CPM_USE_LOCAL_PACKAGES})
 
@@ -247,7 +254,17 @@ cpmaddpackage(
   GITHUB_REPOSITORY RoaringBitmap/CRoaring
   # v4.2.1
   GIT_TAG 3ef7b44a4f74af09fe19bb84d30bc35cab130561
-  OPTIONS "ENABLE_ROARING_TESTS OFF"
+  # ROARING_USE_CPM ON (the upstream default) makes CRoaring include its
+  # vendored cmake/CPM.cmake, which fetches the CPM bootstrap from a GitHub
+  # release asset whenever the shared CPM source cache does not already hold it.
+  # That URL is neither prefetched nor retried, so a cold cache - for example
+  # right after a dependency edit rotated the CI cache key - let an HTTP error
+  # from the release CDN kill the whole configure ("file DOWNLOAD cannot compute
+  # hash on failed download", Static analysis master run 35614385003).
+  # CRoaring uses CPM only to fetch the dependencies of its own tests and
+  # benchmarks (cmocka, google/benchmark), which this build disables, so nothing
+  # calls CPM once the option is off.
+  OPTIONS "ENABLE_ROARING_TESTS OFF" "ROARING_USE_CPM OFF"
 )
 
 # Patched dependencies must always use their pinned source trees, never a
@@ -884,3 +901,5 @@ foreach(target IN LISTS klogg_codeql_thirdparty_targets)
     add_dependencies(klogg_codeql_thirdparty ${target})
   endif()
 endforeach()
+
+klogg_require_hermetic_cpm_cache("${_klogg_cpm_bootstrap_artifacts}")

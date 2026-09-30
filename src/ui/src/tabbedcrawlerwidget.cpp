@@ -861,35 +861,63 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
     auto renameTab = menu.addAction( tr( "Rename Tab..." ) );
     auto resetTabName = menu.addAction( tr( "Reset Tab Name" ) );
 
-    connect( closeThis, &QAction::triggered, [ tab, this ] { Q_EMIT tabCloseRequested( tab ); } );
+    connect( closeThis, &QAction::triggered, this,
+             [ tabWidget = QPointer<QWidget>( widget( tab ) ), this ] {
+                 if ( !tabWidget ) {
+                     return;
+                 }
+                 const auto index = indexOf( tabWidget );
+                 if ( index >= 0 ) {
+                     Q_EMIT tabCloseRequested( index );
+                 }
+             } );
 
-    connect( closeOthers, &QAction::triggered, [ tabWidget = widget( tab ), this ] {
-        while ( count() != 1 ) {
-            for ( int i = 0; i < count(); ++i ) {
-                if ( i != indexOf( tabWidget ) ) {
-                    Q_EMIT tabCloseRequested( i );
-                    break;
-                }
-            }
-        }
-    } );
+    connect( closeOthers, &QAction::triggered, this,
+             [ tabWidget = QPointer<QWidget>( widget( tab ) ), this ] {
+                 if ( !tabWidget || indexOf( tabWidget ) < 0 ) {
+                     return;
+                 }
+                 QList<QWidget*> tabs;
+                 for ( int i = 0; i < count(); ++i ) {
+                     if ( widget( i ) != tabWidget ) {
+                         tabs.append( widget( i ) );
+                     }
+                 }
+                 Q_EMIT tabsCloseRequested( tabs );
+             } );
 
-    connect( closeLeft, &QAction::triggered, [ tabWidget = widget( tab ), this ] {
-        while ( indexOf( tabWidget ) != 0 ) {
-            Q_EMIT tabCloseRequested( 0 );
-        }
-    } );
+    connect( closeLeft, &QAction::triggered, this,
+             [ tabWidget = QPointer<QWidget>( widget( tab ) ), this ] {
+                 const auto index = indexOf( tabWidget );
+                 if ( index < 0 ) {
+                     return;
+                 }
+                 QList<QWidget*> tabs;
+                 for ( int i = 0; i < index; ++i ) {
+                     tabs.append( widget( i ) );
+                 }
+                 Q_EMIT tabsCloseRequested( tabs );
+             } );
 
-    connect( closeRight, &QAction::triggered, [ tab, this ] {
-        while ( count() > tab + 1 ) {
-            Q_EMIT tabCloseRequested( tab + 1 );
-        }
-    } );
+    connect( closeRight, &QAction::triggered, this,
+             [ tabWidget = QPointer<QWidget>( widget( tab ) ), this ] {
+                 const auto index = indexOf( tabWidget );
+                 if ( index < 0 ) {
+                     return;
+                 }
+                 QList<QWidget*> tabs;
+                 for ( int i = index + 1; i < count(); ++i ) {
+                     tabs.append( widget( i ) );
+                 }
+                 Q_EMIT tabsCloseRequested( tabs );
+             } );
 
-    connect( closeAll, &QAction::triggered, [ this ] {
-        while ( count() ) {
-            Q_EMIT tabCloseRequested( 0 );
+    connect( closeAll, &QAction::triggered, this, [ this ] {
+        QList<QWidget*> tabs;
+        for ( int i = 0; i < count(); ++i ) {
+            tabs.append( widget( i ) );
         }
+        Q_EMIT tabsCloseRequested( tabs );
     } );
 
     if ( tab == 0 ) {
@@ -1410,16 +1438,13 @@ void TabbedCrawlerWidget::populateGroupActions( QMenu* menu, const QString& grou
     connect( closeAllAction, &QAction::triggered, this, [ this, groupId, &groupManager ] {
         const auto* targetGroup = groupManager.groupById( groupId );
         if ( targetGroup ) {
-            // Collect tabs to close
-            QList<int> tabsToClose;
+            QList<QWidget*> tabsToClose;
             for ( int i = 0; i < count(); ++i ) {
                 if ( targetGroup->tabPaths.contains( tabPathAt( i ) ) ) {
-                    tabsToClose.prepend( i ); // Prepend to close from end
+                    tabsToClose.prepend( widget( i ) );
                 }
             }
-            for ( int tabIndex : tabsToClose ) {
-                Q_EMIT tabCloseRequested( tabIndex );
-            }
+            Q_EMIT tabsCloseRequested( tabsToClose );
         }
     } );
 }

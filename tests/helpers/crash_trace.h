@@ -26,10 +26,11 @@ namespace klogg::testing {
 // Windows: registers a vectored exception handler that prints the faulting
 // thread's stack to stderr for fatal exception codes (access violation,
 // heap corruption, stack overflow, illegal instruction) before Catch2's own
-// SEH handling reports the failure. Catch2's handler swallows the exception
-// for reporting, so WER LocalDumps never sees an unhandled crash and no dump
-// is produced; the printed trace is the only stack we get on CI (the
-// Windows-x86 heap-corruption flake on PR #76 was undiagnosable without it).
+// SEH handling reports the failure. Catch2 can consume the exception before
+// WER sees it, so the reporter also attempts one minimal dump when the explicit
+// KLOGG_TEST_MINIDUMP_DIR environment variable names a precreated directory.
+// Dump capture and symbolization are best-effort; normal exception handling
+// continues regardless of diagnostic success.
 //
 // Other platforms: no-op.
 void installFirstChanceCrashTrace();

@@ -16,7 +16,6 @@ jobs:
     permissions:
       contents: write
     env:
-      KLOGG_HAS_DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK != '' && 'true' || 'false' }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Reject non-master stable dispatch
@@ -77,8 +76,8 @@ jobs:
           import sys
 
           records = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          if not isinstance(records, list) or len(records) != 23:
-              raise SystemExit("live Continuous release must contain exactly 23 assets")
+          if not isinstance(records, list) or len(records) != 25:
+              raise SystemExit("live Continuous release must contain exactly 25 assets")
           ids = set()
           names = set()
           normalized = []
@@ -246,7 +245,7 @@ jobs:
             --expected-commit "${KLOGG_SOURCE_COMMIT}" \
             --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
           asset_count="$(find packages-publication -maxdepth 1 -type f | wc -l)"
-          test "$asset_count" -eq 23
+          test "$asset_count" -eq 25
           python3 scripts/render_release_downloads.py \
             --manifest packages-publication/klogg-source-publication-manifest.json \
             --assets-root packages-publication \
@@ -513,13 +512,3 @@ jobs:
             delete_ref_if_present "$final_tag"
           fi
           delete_ref_if_present "$candidate_tag"
-
-      - name: Discord notification
-        if: success() && env.KLOGG_HAS_DISCORD_WEBHOOK == 'true'
-        continue-on-error: true
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
-          DISCORD_EMBEDS: '[{"title": "Release v${{ env.KLOGG_VERSION }}", "url": "https://github.com/ZEACENT/klogg/releases/tag/v${{ env.KLOGG_VERSION }}"}]'
-        uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
-        with:
-          args: 'New release v${{ env.KLOGG_VERSION }} has been published!'

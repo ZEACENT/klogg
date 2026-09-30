@@ -1689,7 +1689,9 @@ TEST_CASE( "ProcessLiveSourceTransport treats unexpected clean process exit as e
     const auto failedCapturePath = transport.stderrFilePathForTest();
     REQUIRE( QFileInfo::exists( failedCapturePath ) );
 
-    REQUIRE( errorSpy.safeWait( 3000 ) );
+    // On Windows the finite ping process itself takes about three seconds;
+    // this is an outer completion bound, not a latency assertion.
+    REQUIRE( errorSpy.safeWait() );
     REQUIRE_FALSE( transport.lastError().isEmpty() );
     REQUIRE( transport.stderrFilePathForTest() != failedCapturePath );
     REQUIRE( QFileInfo::exists( transport.stderrFilePathForTest() ) );
@@ -1719,8 +1721,10 @@ TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
     transport.stopCurrent();
     const auto elapsed = timer.elapsed();
 
-    // Disconnect should complete in well under 100ms (no blocking waitForFinished)
-    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );
+    // Disconnect should complete in well under 100ms (no blocking
+    // waitForFinished). Local-only budget: CI covers the non-blocking contract
+    // through the deferred-cleanup drain and state assertions below.
+    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );  // lint-allow: perf-budget -- Local disconnect speed; CI still drains deferred cleanup.
 
     // Drain async cleanup deterministically (fixpoint DeferredDelete delivery).
     drainLiveSourceEvents( 200 );
@@ -2395,7 +2399,9 @@ TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for 
     QElapsedTimer clearTimer;
     clearTimer.start();
     REQUIRE( source.clearAndRestart() );
-    KLOGG_CHECK_PERF_BUDGET( clearTimer.elapsed() < 2000 );
+    // Local-only latency budget for the async clear/restart: CI covers the
+    // contract through the line-count and state assertions around it.
+    KLOGG_CHECK_PERF_BUDGET( clearTimer.elapsed() < 2000 );  // lint-allow: perf-budget -- Local restart speed; CI checks cleared line count.
     REQUIRE( waitForLineCount( logData, 0 ) );
 
     source.disconnectSource();
