@@ -17,6 +17,41 @@ add_test(NAME klogg_ios_protocol_tests COMMAND klogg_ios_protocol_tests)
 set_tests_properties(klogg_ios_protocol_tests PROPERTIES TIMEOUT 120)
 klogg_set_test_isolation(klogg_ios_protocol_tests)
 
+# The Win32 backend shares this operation-lifetime coordinator with the
+# deterministic native-I/O fake, so cancellation needs no kernel or timing.
+get_target_property(_klogg_efsw_source_dir efsw SOURCE_DIR)
+# efsw declares C++11. The runnable test uses project_options (C++17), so
+# compile the same coverage separately at the dependency's language boundary.
+add_library(
+  klogg_directory_io_lifetime_cxx11 OBJECT win32_directory_io_lifetime_test.cpp
+)
+set_target_properties(
+  klogg_directory_io_lifetime_cxx11
+  PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO
+)
+target_include_directories(
+  klogg_directory_io_lifetime_cxx11 PRIVATE "${_klogg_efsw_source_dir}/src"
+)
+target_link_libraries(
+  klogg_directory_io_lifetime_cxx11 PRIVATE Catch2 project_warnings
+)
+add_executable(
+  klogg_directory_io_lifetime_tests
+  win32_directory_io_lifetime_test.cpp
+  pure_catch_main.cpp
+)
+add_dependencies(klogg_directory_io_lifetime_tests klogg_directory_io_lifetime_cxx11)
+target_include_directories(
+  klogg_directory_io_lifetime_tests PRIVATE "${_klogg_efsw_source_dir}/src"
+)
+target_link_libraries(
+  klogg_directory_io_lifetime_tests PRIVATE Catch2 project_options project_warnings
+)
+klogg_configure_test_target(klogg_directory_io_lifetime_tests)
+add_test(NAME klogg_directory_io_lifetime_tests COMMAND klogg_directory_io_lifetime_tests)
+set_tests_properties(klogg_directory_io_lifetime_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_directory_io_lifetime_tests)
+
 # Configuration loads before KloggApp in production, so migrations must not
 # require a QGuiApplication or a platform plugin.
 add_executable(

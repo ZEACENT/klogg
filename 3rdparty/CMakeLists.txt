@@ -660,14 +660,35 @@ cpmaddpackage(
   DOWNLOAD_ONLY
   YES
 )
+# The shared cache retains its approved bytes; this build alone owns the
+# checkout that the patch transaction may modify or recover.
+set(KLOGG_EFSW_PATCHED_TREE_SHA256 9918e5cf36c7e6030770785f31f56495ab2d63812d6f6801bccf0078be9e4124)
+set(KLOGG_EFSW_PREPARED_SOURCE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/klogg-prepared/efsw-${KLOGG_EFSW_PATCHED_TREE_SHA256}")
+execute_process(
+  COMMAND "${CMAKE_COMMAND}"
+          "-DDEPENDENCY=efsw"
+          "-DCACHE_SOURCE=${efsw_SOURCE_DIR}"
+          "-DDESTINATION=${KLOGG_EFSW_PREPARED_SOURCE_DIR}"
+          "-DEXPECTED_REVISION=62f785c56b7a34f035193d4cb831921347b586b8"
+          "-DCLEAN_TREE_HASH=c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677"
+          "-DAPPROVED_CACHE_TREE_HASHES=c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677;dd0fac8dd03bee124f4b780ad131019590dd49e7ae7ce75f812e280e50c039f3"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/prepare_efsw_source.cmake"
+  RESULT_VARIABLE _efsw_prepare_result
+)
+if(NOT _efsw_prepare_result EQUAL 0)
+  message(FATAL_ERROR "Failed to prepare build-private pinned efsw source")
+endif()
+
 klogg_apply_pinned_patch_series(
   efsw
-  ${efsw_SOURCE_DIR}
+  ${KLOGG_EFSW_PREPARED_SOURCE_DIR}
   62f785c56b7a34f035193d4cb831921347b586b8
   c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677
-  dd0fac8dd03bee124f4b780ad131019590dd49e7ae7ce75f812e280e50c039f3
+  ${KLOGG_EFSW_PATCHED_TREE_SHA256}
   ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_efsw_inotify_watcher_uaf.patch
   ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_efsw_kqueue_watcher_races.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_efsw_win32_iocp_retirement.patch
 )
 
 # The target used by klogg must always come from the pinned, patched source.
@@ -676,7 +697,7 @@ klogg_apply_pinned_patch_series(
 
 if(TARGET efsw)
   get_target_property(_efsw_target_source_dir efsw SOURCE_DIR)
-  get_filename_component(_efsw_expected_source_dir "${efsw_SOURCE_DIR}" REALPATH)
+  get_filename_component(_efsw_expected_source_dir "${KLOGG_EFSW_PREPARED_SOURCE_DIR}" REALPATH)
   get_filename_component(_efsw_actual_source_dir "${_efsw_target_source_dir}" REALPATH)
   if(NOT "${_efsw_actual_source_dir}" STREQUAL "${_efsw_expected_source_dir}")
     message(
@@ -686,7 +707,7 @@ if(TARGET efsw)
   endif()
 else()
   set(BUILD_TEST_APP OFF CACHE BOOL "" FORCE)
-  add_subdirectory(${efsw_SOURCE_DIR} ${efsw_BINARY_DIR} EXCLUDE_FROM_ALL)
+  add_subdirectory(${KLOGG_EFSW_PREPARED_SOURCE_DIR} ${efsw_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()
 target_compile_definitions(efsw PRIVATE EFSW_FSEVENTS_NOT_SUPPORTED)
 set(CPM_USE_LOCAL_PACKAGES ${_TMP_CPM_USE_LOCAL_PACKAGES})
