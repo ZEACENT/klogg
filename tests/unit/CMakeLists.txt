@@ -17,6 +17,21 @@ add_test(NAME klogg_ios_protocol_tests COMMAND klogg_ios_protocol_tests)
 set_tests_properties(klogg_ios_protocol_tests PROPERTIES TIMEOUT 120)
 klogg_set_test_isolation(klogg_ios_protocol_tests)
 
+# The private crash collector shares protocol and reap ordering with these
+# deterministic fakes; this target runs without Windows or intentional faults.
+add_executable(
+  klogg_crash_collector_protocol_tests
+  crash_collector_protocol_test.cpp
+  pure_catch_main.cpp
+)
+target_link_libraries(
+  klogg_crash_collector_protocol_tests PRIVATE test_utils Catch2 project_options project_warnings
+)
+klogg_configure_test_target(klogg_crash_collector_protocol_tests)
+add_test(NAME klogg_crash_collector_protocol_tests COMMAND klogg_crash_collector_protocol_tests)
+set_tests_properties(klogg_crash_collector_protocol_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_crash_collector_protocol_tests)
+
 # The Win32 backend shares this operation-lifetime coordinator with the
 # deterministic native-I/O fake, so cancellation needs no kernel or timing.
 get_target_property(_klogg_efsw_source_dir efsw SOURCE_DIR)

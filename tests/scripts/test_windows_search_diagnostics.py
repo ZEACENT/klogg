@@ -2,6 +2,7 @@
 
 import os
 import pathlib
+import re
 import struct
 import subprocess
 import tempfile
@@ -36,19 +37,53 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
     def test_first_chance_evidence_precedes_stackwalk_and_preserves_exception(self):
         source = (ROOT / "tests/helpers/crash_trace.cpp").read_text()
         handler = source[source.index("LONG CALLBACK firstChanceCrashTrace"):]
-        self.assertIn("ExceptionAddress", handler)
-        self.assertIn("ExceptionInformation", handler)
-        self.assertIn("MINIDUMP_EXCEPTION_INFORMATION", handler)
-        self.assertIn("MiniDumpNormal", handler)
+        trace = source[source.index("void reportFirstChance"):source.index("LONG CALLBACK firstChanceCrashTrace")]
+        self.assertRegex(handler, r"reportFirstChance\s*\(\s*info\s*\)")
+        self.assertIn("ExceptionAddress", trace)
+        self.assertIn("ExceptionInformation", trace)
         self.assertNotIn("MiniDumpWithFullMemory", source)
         self.assertIn("InterlockedCompareExchange", handler)
-        self.assertIn("InterlockedExchange( &crashTraceActive, 0 )", handler)
-        self.assertIn("&dumpCaptureStarted", handler)
-        self.assertLess(handler.index("ExceptionAddress"), handler.index("StackWalk64"))
-        self.assertLess(handler.index("MiniDumpWriteDump"), handler.index("SymInitialize"))
+        self.assertRegex(handler, r"InterlockedExchange\s*\(\s*&crashTraceActive\s*,\s*0\s*\)")
+        self.assertIn("&dumpCaptureStarted", trace)
+        self.assertLess(trace.index("ExceptionAddress"), trace.index("captureOnce"))
+        self.assertLess(trace.index("captureOnce"), trace.index("SymInitialize"))
         self.assertIn("return EXCEPTION_CONTINUE_SEARCH;", handler)
         self.assertIn('L"KLOGG_TEST_MINIDUMP_DIR"', source)
         self.assertIn("CREATE_NEW", source)
+
+    def test_dump_writer_runs_in_a_separate_restricted_collector(self):
+        source = (ROOT / "tests/helpers/crash_trace.cpp").read_text()
+        self.assertNotRegex(source, r"\bMiniDumpWriteDump\s*\(",
+                            "the faulting process must not write its own dump")
+        collector = (ROOT / "tests/helpers/collector.cpp").read_text()
+        self.assertEqual(len(re.findall(r"\bMiniDumpWriteDump\s*\(", collector)), 1)
+        self.assertRegex(collector, r"\.ClientPointers\s*=\s*TRUE\b")
+        self.assertIn("MiniDumpNormal", collector)
+        self.assertNotIn("MiniDumpWithFullMemory", collector)
+        self.assertNotIn("ContextFlags", collector)
+        self.assertIn("PROC_THREAD_ATTRIBUTE_HANDLE_LIST", source)
+        self.assertIn("STARTUPINFOEXW", source)
+        self.assertIn("PROCESS_VM_READ", source)
+        self.assertNotIn("PROCESS_ALL_ACCESS", source)
+        self.assertIn('L"NUL"', source)
+        self.assertIn("AcquireSRWLockShared", source)
+        self.assertIn("AcquireSRWLockExclusive", source)
+        self.assertIn("RemoveVectoredExceptionHandler", source)
+        self.assertIn("__finally", source)
+
+    def test_collector_and_shared_protocol_are_in_the_test_build(self):
+        helpers = (ROOT / "tests/helpers/CMakeLists.txt").read_text()
+        self.assertIn("add_executable(crash_trace_collector", helpers)
+        self.assertIn("add_dependencies(test_crash_trace crash_trace_collector)", helpers)
+        self.assertIn("collector.cpp", helpers)
+        units = (ROOT / "tests/unit/CMakeLists.txt").read_text()
+        self.assertIn("crash_collector_protocol_test.cpp", units)
+        self.assertIn("klogg_configure_test_target(klogg_crash_collector_protocol_tests)", units)
+        self.assertIn("klogg_set_test_isolation(klogg_crash_collector_protocol_tests)", units)
+        target = units.split("  klogg_crash_collector_protocol_tests\n", 1)[1].split("\n)", 1)[0]
+        self.assertIn("pure_catch_main.cpp", target)
+        protocol_test = (ROOT / "tests/unit/crash_collector_protocol_test.cpp").read_text()
+        self.assertNotRegex(protocol_test, r"#\s*define\s+CATCH_CONFIG_(?:MAIN|RUNNER)\b")
 
     def test_only_unit_and_ui_test_targets_keep_debug_symbols(self):
         for relative, target in (("tests/unit/CMakeLists.txt", "klogg_tests"),
@@ -182,16 +217,60 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                 def capture(command, **kwargs):
                     output = pathlib.Path(kwargs["cwd"])
                     cases.append(output.name)
+                    if output.name == "idle":
+                        self.assertEqual(command, [str(helper), "--idle"])
+                        self.assertEqual(kwargs["env"]["KLOGG_TEST_MINIDUMP_DIR"], str(output))
+                        return subprocess.CompletedProcess(command, 0, "", "Test minidump collector ready\nTest minidump collector stopped\n")
+                    self.assertEqual(command, [str(helper)])
+                    if output.name == "non-directory":
+                        self.assertTrue(pathlib.Path(kwargs["env"]["KLOGG_TEST_MINIDUMP_DIR"]).is_file())
                     stderr = ("Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n" * 2)
                     if output.name == "enabled":
                         self.write_extended_context_dump(output / "synthetic.dmp", architecture)
-                        stderr += "Test minidump captured 1 error 0\n"
+                        stderr += "Test minidump collector ready\nTest minidump captured 1 error 0\n"
                     return subprocess.CompletedProcess(command, 67, "", stderr)
 
                 with mock.patch.dict(os.environ, {}, clear=True), \
                         mock.patch("windows_crash_trace_smoke.subprocess.run", side_effect=capture):
                     run_smoke(helper)
-                self.assertEqual(cases, ["enabled", "absent", "invalid"])
+                self.assertEqual(cases, ["enabled", "absent", "invalid", "non-directory", "idle"])
+
+    def test_disabled_capture_rejects_collector_launch_without_a_dump(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            result = subprocess.CompletedProcess([], 67, "", "Exception address abc thread 42\n" * 2 + "Test minidump collector ready\n")
+            with mock.patch("windows_crash_trace_smoke.subprocess.run", return_value=result):
+                with self.assertRaisesRegex(ValueError, "disabled capture.*collector"):
+                    crash_smoke.run_smoke_case(output / "helper.exe", output, "absent", "x64")
+
+    def test_idle_collector_rejects_output_and_incomplete_cleanup(self):
+        for failure in ("dump", "ready", "stopped", "captured", "returncode", "exception"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                output = pathlib.Path(directory)
+                stderr = "Test minidump collector ready\nTest minidump collector stopped\n"
+                if failure == "dump":
+                    (output / "empty.dmp").write_bytes(b"")
+                elif failure in ("ready", "stopped"):
+                    stderr = stderr.replace("Test minidump collector " + failure + "\n", "")
+                elif failure == "captured":
+                    stderr += "Test minidump captured 1 error 0\n"
+                elif failure == "exception":
+                    stderr += "Exception address abc thread 42\n"
+                result = subprocess.CompletedProcess([], 67 if failure == "returncode" else 0, "", stderr)
+                with mock.patch("windows_crash_trace_smoke.subprocess.run", return_value=result):
+                    with self.assertRaisesRegex(ValueError, "idle collector"):
+                        crash_smoke.run_smoke_case(output / "helper.exe", output, "idle", "x64")
+
+    def test_capture_rejects_duplicate_success_reports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            self.write_extended_context_dump(output / "synthetic.dmp", "x64")
+            stderr = "Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n" * 2
+            stderr += "Test minidump collector ready\n" + "Test minidump captured 1 error 0\n" * 2
+            result = subprocess.CompletedProcess([], 67, "", stderr)
+            with mock.patch("windows_crash_trace_smoke.subprocess.run", return_value=result):
+                with self.assertRaisesRegex(ValueError, "one minimal test dump"):
+                    crash_smoke.run_smoke_case(output / "helper.exe", output, "enabled", "x64")
 
     def test_extended_context_does_not_weaken_original_exception_or_register_parity(self):
         valid = "Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n"
@@ -204,7 +283,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
 
                 def capture(command, **kwargs):
                     self.write_extended_context_dump(pathlib.Path(kwargs["cwd"]) / "synthetic.dmp", "x64")
-                    stderr = valid.replace(original, altered) + valid + "Test minidump captured 1 error 0\n"
+                    stderr = valid.replace(original, altered) + valid + "Test minidump collector ready\nTest minidump captured 1 error 0\n"
                     return subprocess.CompletedProcess(command, 67, "", stderr)
 
                 with mock.patch.dict(os.environ, {}, clear=True), \
@@ -233,7 +312,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
 
     def test_failed_synthetic_dump_survives_only_in_explicit_existing_parent(self):
         stderr = ("Exception address abc thread 42\n" * 2
-                  + "Test minidump captured 1 error 0\n")
+                  + "Test minidump collector ready\nTest minidump captured 1 error 0\n")
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             self.write_pe(root / "helper.exe")
@@ -268,7 +347,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                 self.write_unsupported_context_dump(pathlib.Path(kwargs["cwd"]) / "synthetic.dmp")
                 return subprocess.CompletedProcess(
                     command, 67, "", "Exception address abc thread 42\n" * 2
-                    + "Test minidump captured 1 error 0\n")
+                    + "Test minidump collector ready\nTest minidump captured 1 error 0\n")
 
             for environment in ({}, {"KLOGG_TEST_MINIDUMP_DIR": str(missing)}):
                 with mock.patch.dict(os.environ, environment, clear=True), \

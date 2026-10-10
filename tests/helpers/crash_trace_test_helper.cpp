@@ -2,6 +2,9 @@
 
 #include <windows.h>
 
+#include <cstdio>
+#include <cstring>
+
 #include "crash_trace.h"
 
 namespace {
@@ -16,10 +19,18 @@ void raiseSyntheticAccessViolation()
 }
 } // namespace
 
-int main()
+int main( int argc, char* argv[] )
 {
+    const bool idle = argc == 2 && std::strcmp( argv[ 1 ], "--idle" ) == 0;
+    if ( argc != 1 && !idle ) {
+        std::fprintf( stderr, "Unknown synthetic crash probe mode\n" );
+        return 64;
+    }
     SetErrorMode( SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX );
     klogg::testing::installFirstChanceCrashTrace();
+    if ( idle ) {
+        return 0;
+    }
     raiseSyntheticAccessViolation();
     raiseSyntheticAccessViolation();
     return 67;

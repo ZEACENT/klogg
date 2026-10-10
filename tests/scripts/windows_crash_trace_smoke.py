@@ -117,13 +117,26 @@ def run_smoke_case(helper: pathlib.Path, output: pathlib.Path, case: str,
                    architecture: str) -> None:
     environment = {key: value for key, value in os.environ.items()
                    if key not in ("KLOGG_TEST_MINIDUMP_DIR", "_NT_SYMBOL_PATH")}
-    if case == "enabled":
+    if case in ("enabled", "idle"):
         environment["KLOGG_TEST_MINIDUMP_DIR"] = str(output)
     elif case == "invalid":
         environment["KLOGG_TEST_MINIDUMP_DIR"] = str(output / "missing")
-    result = subprocess.run([str(helper)], env=environment, cwd=output,
+    elif case == "non-directory":
+        non_directory = output / "not-directory.txt"
+        non_directory.write_bytes(b"Not a directory\n")
+        environment["KLOGG_TEST_MINIDUMP_DIR"] = str(non_directory)
+    command = [str(helper)] + (["--idle"] if case == "idle" else [])
+    result = subprocess.run(command, env=environment, cwd=output,
                             capture_output=True, text=True, timeout=30)
     (output / "helper-stderr.txt").write_bytes(result.stderr.encode("utf-8")[:MAX_EVIDENCE_TEXT_BYTES])
+    if case == "idle":
+        if (result.returncode != 0 or list(output.glob("*.dmp"))
+                or result.stderr.count("Test minidump collector ready") != 1
+                or result.stderr.count("Test minidump collector stopped") != 1
+                or "Test minidump captured " in result.stderr
+                or "Exception address " in result.stderr):
+            raise ValueError("idle collector did not complete startup and cleanup: " + result.stderr)
+        return
     if result.returncode != 67:
         raise ValueError("crash probe failed to preserve exception handling: " + result.stderr)
     if result.stderr.count("Exception address ") != 2:
@@ -132,8 +145,16 @@ def run_smoke_case(helper: pathlib.Path, output: pathlib.Path, case: str,
     if case != "enabled":
         if dumps:
             raise ValueError("disabled capture unexpectedly wrote a dump")
+        if "Test minidump collector ready" in result.stderr or "Test minidump captured " in result.stderr:
+            raise ValueError("disabled capture unexpectedly launched a collector: " + result.stderr)
+        if case == "invalid" and (output / "missing").exists():
+            raise ValueError("invalid opt-in unexpectedly created a directory")
+        if case == "non-directory" and non_directory.read_bytes() != b"Not a directory\n":
+            raise ValueError("invalid opt-in changed an existing non-directory file")
         return
-    if len(dumps) != 1 or "Test minidump captured 1 error 0" not in result.stderr:
+    if (len(dumps) != 1 or "Test minidump captured 1 error 0" not in result.stderr
+            or result.stderr.count("Test minidump captured ") != 1
+            or result.stderr.count("Test minidump collector ready") != 1):
         raise ValueError("one minimal test dump was not captured: " + result.stderr)
     exception = exception_from_dump(dumps[0], architecture)
     first = re.search(r"Exception address ([0-9a-fA-Fx]+) thread ([0-9]+)", result.stderr)
@@ -156,7 +177,7 @@ def run_smoke(helper: pathlib.Path) -> None:
     parent = os.environ.get("KLOGG_TEST_MINIDUMP_DIR")
     with tempfile.TemporaryDirectory(prefix="klogg-crash-probe-") as directory:
         root = pathlib.Path(directory)
-        for case in ("enabled", "absent", "invalid"):
+        for case in ("enabled", "absent", "invalid", "non-directory", "idle"):
             output = root / case
             output.mkdir()
             try:
