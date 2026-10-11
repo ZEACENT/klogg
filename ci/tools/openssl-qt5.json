@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "archive": {
+    "file_name": "openssl.zip",
+    "size_bytes": 15897774,
+    "sha256": "1870b15bf6749e65ffbbadf52cdff3ee0e9f02943550bf4395574bb432af3eb8"
+  },
+  "version": {
+    "vendor": "OpenSSL 1.1.1w",
+    "version_txt": "OpenSSL_1_1_1w-0-ge04bd3433f\n",
+    "number": "0x1010117fL",
+    "text": "OpenSSL 1.1.1w  11 Sep 2023"
+  },
+  "limits": {
+    "entries": 261,
+    "expanded_bytes": 67108864,
+    "member_bytes": 16777216,
+    "marker_bytes": 65536
+  },
+  "runtime": {
+    "x86": {
+      "openssl-1.1/x86/bin/libcrypto-1_1.dll": {
+        "size_bytes": 2358184,
+        "sha256": "86370ce5d4aee6f4e50fdccd410178ae96b79492d19b585f184f761788cc6bab"
+      },
+      "openssl-1.1/x86/bin/libssl-1_1.dll": {
+        "size_bytes": 619432,
+        "sha256": "ebffa1376ccb878e1bb4e3f5cd0ad204d7ef746cb7a90f75f88b4a96d5b83fb1"
+      }
+    },
+    "x64": {
+      "openssl-1.1/x64/bin/libcrypto-1_1-x64.dll": {
+        "size_bytes": 3015592,
+        "sha256": "ba485625776661186e664cc1fb5b5b460a96406fe05ac2f17ead060eabdd7f84"
+      },
+      "openssl-1.1/x64/bin/libssl-1_1-x64.dll": {
+        "size_bytes": 804776,
+        "sha256": "a2a8ca61ed7490251332e9792f797e76fbcd3afda51d8fed6cc8e7165faae295"
+      }
+    }
+  },
+  "transport": {
+    "repository": "ZEACENT/klogg",
+    "repository_id": 1094649085,
+    "workflow": ".github/workflows/ci-build.yml",
+    "event": "pull_request",
+    "branch": "worktree-master-ci-fail",
+    "run_id": 36309613109,
+    "attempt": 1,
+    "head_sha": "3078e13d9c397def2db804c6a2154f11ad5fcd8b",
+    "producer_id": 108592990081,
+    "producer_name": "Prefetch Windows Qt 5 OpenSSL",
+    "producer_started_at": "2026-09-27T09:31:33Z",
+    "producer_completed_at": "2026-09-27T09:31:38Z",
+    "upload_started_at": "2026-09-27T09:31:35Z",
+    "upload_completed_at": "2026-09-27T09:31:37Z",
+    "artifact_id": 10928159537,
+    "artifact_name": "openssl-archive",
+    "artifact_created_at": "2026-09-27T09:31:37Z",
+    "artifact_expires_at": "2026-12-26T09:30:51Z",
+    "artifact_metadata_size": 15795726,
+    "artifact_digest": "sha256:828b44a92e7f2547bf098969ab7bc8a6270a3ea994a8c2f5a44820c851382b7a"
+  }
+}

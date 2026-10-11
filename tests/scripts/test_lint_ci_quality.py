@@ -65,10 +65,275 @@ jobs:
 """
 
 
+# This is the escaped producer, including its unchecked cache-hit/upload path.
+LEGACY_OPENSSL_JOB = '''  PrefetchOpenSsl:
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Windows Qt 5 OpenSSL"
+    runs-on: ubuntu-22.04
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
+    steps:
+      - name: Restore OpenSSL prefetch cache
+        id: cache-openssl-prefetch
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-prefetch-1-1-1w
+
+      - name: Prefetch OpenSSL artifact
+        if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
+        shell: sh
+        run: |
+          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
+          OPENSSL_ARCHIVE="$PREFETCH_ROOT/openssl.zip"
+
+          mkdir -p "$PREFETCH_ROOT"
+
+          attempt=1
+          max_attempts=3
+          while [ $attempt -le $max_attempts ]; do
+            if curl --progress-bar --location --output "$OPENSSL_ARCHIVE" "$OPENSSL_URL"; then
+              exit 0
+            fi
+
+            rm -f "$OPENSSL_ARCHIVE"
+
+            if [ $attempt -eq $max_attempts ]; then
+              exit 1
+            fi
+
+            echo "OpenSSL prefetch attempt $attempt failed, retrying after backoff..."
+            attempt=$((attempt + 1))
+            sleep $((attempt * 10))
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openssl-archive
+          path: prefetch_artifacts/openssl.zip
+          if-no-files-found: error
+
+'''
+LEGACY_OPENSSL_CONSUMER = '''      - name: Unpack prefetched openssl
+        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
+        shell: pwsh
+        run: |
+          if ( !(Test-Path openssl.zip) ) {
+            Write-Error "Prefetched OpenSSL artifact is required but openssl.zip is missing"
+            exit 1
+          }
+          7z x openssl.zip
+
+'''
+
+
+VERIFIED_OPENSSL_JOB = '''  PrefetchOpenSsl:
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Windows Qt 5 OpenSSL"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore OpenSSL prefetch cache
+        id: cache-openssl-prefetch
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}
+
+      - name: Validate restored OpenSSL archive or genuine absence
+        id: verify-openssl-cache
+        shell: bash
+        env:
+          KLOGG_OPENSSL_CACHE_HIT: ${{ steps.cache-openssl-prefetch.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          archive="$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip"
+          case "$KLOGG_OPENSSL_CACHE_HIT" in
+            true|false|"") ;;
+            *) echo "::error::Unexpected OpenSSL cache-hit value"; exit 1 ;;
+          esac
+          if [[ "$KLOGG_OPENSSL_CACHE_HIT" == "true" || -e "$archive" || -L "$archive" ]]; then
+            python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$archive" --verify-only
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Acquire locked OpenSSL archive on genuine miss
+        if: ${{ steps.verify-openssl-cache.outputs.missing == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --acquire
+
+      - name: Verify complete OpenSSL archive before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --verify-only
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openssl-archive
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          if-no-files-found: error
+
+      - name: Save verified OpenSSL prefetch cache
+        if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}
+
+'''
+VERIFIED_OPENSSL_CONSUMER = '''      - name: Verify and materialize locked Qt 5 OpenSSL
+        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/openssl.zip" --materialize --architecture "${{ env.KLOGG_CONFIG_ARCH }}" --destination "$GITHUB_WORKSPACE/openssl-1.1"
+
+'''
+
+
+def verified_openssl_workflow():
+    return legacy_openssl_workflow().replace(LEGACY_OPENSSL_JOB.rstrip("\n"), VERIFIED_OPENSSL_JOB.rstrip("\n"), 1).replace(
+        LEGACY_OPENSSL_CONSUMER.rstrip("\n"), VERIFIED_OPENSSL_CONSUMER.rstrip("\n"), 1)
+
+
+def legacy_openssl_workflow():
+    workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+    block = "\n".join(MODULE.workflow_job_blocks(workflow)["PrefetchOpenSsl"])
+    workflow = workflow.replace(block, LEGACY_OPENSSL_JOB.rstrip("\n"), 1)
+    for step in MODULE.workflow_job_steps(workflow)["WindowsPackages"]:
+        fields, _ = MODULE.workflow_step_fields(step)
+        if fields.get("name") in ("Unpack prefetched openssl", "Verify and materialize locked Qt 5 OpenSSL"):
+            workflow = workflow.replace("\n".join(step), LEGACY_OPENSSL_CONSUMER.rstrip("\n"), 1)
+            break
+    return workflow
+
+
+class OpenSslPolicyTest(unittest.TestCase):
+    def test_exact_escaped_workflow_is_rejected_by_existing_public_route(self):
+        workflow = legacy_openssl_workflow()
+        self.assertIn('if curl --progress-bar --location', workflow)
+        self.assertIn('7z x openssl.zip', workflow)
+        issues = MODULE.ci_build_workflow_issues(workflow)
+        self.assertTrue(any("OpenSSL" in issue for issue in issues), issues)
+
+    def test_new_rule_rejects_unchecked_cache_upload_and_consumer(self):
+        self.assertTrue(MODULE.ci_build_openssl_issues(legacy_openssl_workflow()))
+
+    def test_verified_neighbor_and_real_workflow_are_accepted(self):
+        self.assertEqual(MODULE.ci_build_openssl_issues(verified_openssl_workflow()), [])
+        self.assertEqual(MODULE.ci_build_openssl_issues(
+            (ROOT / ".github/workflows/ci-build.yml").read_text()), [])
+
+    def test_producer_mutations_fail_closed(self):
+        workflow = verified_openssl_workflow()
+        producer = "\n".join(MODULE.workflow_job_blocks(workflow)["PrefetchOpenSsl"])
+        mutations = {
+            "old key": ("openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}", "openssl-prefetch-1-1-1w"),
+            "prefix restore": ("          key: openssl-qt5", "          restore-keys: openssl-\n          key: openssl-qt5"),
+            "mutable action": ("actions/cache/restore@" + CACHE_PINNED, "actions/cache/restore@v6"),
+            "unchecked auto-save": ("actions/cache/restore@", "actions/cache@"),
+            "skip hit validation": ('"true" || -e "$archive" || -L "$archive"', '"false" || -e "$archive" || -L "$archive"'),
+            "missing hit fetch": ('"true" || -e "$archive" || -L "$archive"', '"true" && -e "$archive"'),
+            "dangling symlink": (' || -L "$archive"', ''),
+            "unknown hit accepted": ('exit 1 ;;', 'true ;;'),
+            "ignore verification exit": ('--archive "$archive" --verify-only', '--archive "$archive" --verify-only || true'),
+            "comment spoof": ('            python3 scripts/materialize_openssl.py', '            # python3 scripts/materialize_openssl.py'),
+            "string spoof": ('            python3 scripts/materialize_openssl.py', '            printf "%s\\n" "python3 scripts/materialize_openssl.py'),
+            "fetch on ordinary miss not absence": ("steps.verify-openssl-cache.outputs.missing == 'true'", "steps.cache-openssl-prefetch.outputs.cache-hit != 'true'"),
+            "wrong missing output": ('echo "missing=false"', 'echo "missing=true"'),
+            "wrong lock": ('--lock ci/tools/openssl-qt5.json', '--lock ci/tools/msys2-tools.json'),
+            "wrong archive": ('--archive "$archive"', '--archive "$RUNNER_TEMP/openssl.zip"'),
+            "wrong mode": ('--verify-only', '--acquire'),
+            "no fatal shell": ('set -euo pipefail', 'set -uo pipefail'),
+            "wrong token": ('GH_TOKEN: ${{ github.token }}', "GH_TOKEN: ${{ secrets.PAT }}"),
+            "write permission": ('actions: read', 'actions: write'),
+            "credentials persisted": ('persist-credentials: false', 'persist-credentials: true'),
+            "no timeout": ('timeout-minutes: 20', 'timeout-minutes: 120'),
+            "disable validator": ('id: verify-openssl-cache', "id: verify-openssl-cache\n        if: ${{ false }}"),
+            "continue validation error": ('id: verify-openssl-cache', 'id: verify-openssl-cache\n        continue-on-error: true'),
+            "continue job error": ('timeout-minutes: 20', 'timeout-minutes: 20\n    continue-on-error: true'),
+            "duplicate direct key": ('id: verify-openssl-cache', 'id: verify-openssl-cache\n        id: bypass'),
+            "token at job scope": ('    steps:', '    env:\n      GH_TOKEN: ${{ github.token }}\n    steps:'),
+            "token at offline step": ('id: verify-openssl-cache', 'id: verify-openssl-cache\n        env:\n          GH_TOKEN: ${{ github.token }}'),
+            "save before validation": ('      - name: Save verified OpenSSL prefetch cache', '      - name: Save verified OpenSSL prefetch cache\n        continue-on-error: true'),
+        }
+        for label, (before, after) in mutations.items():
+            with self.subTest(label=label):
+                self.assertIn(before, producer)
+                changed = workflow.replace(producer, producer.replace(before, after, 1), 1)
+                self.assertTrue(MODULE.ci_build_openssl_issues(changed), label)
+
+    def test_upload_and_save_cannot_precede_unconditional_verification(self):
+        workflow = verified_openssl_workflow()
+        steps = MODULE.workflow_job_steps(workflow)["PrefetchOpenSsl"]
+        verify = "\n".join(steps[4])
+        for index in (5, 6):
+            with self.subTest(index=index):
+                publish = "\n".join(steps[index])
+                # Swap by placeholders so replacement never swaps itself back.
+                changed = workflow.replace(verify, "OPENSSL_SWAP", 1).replace(publish, verify, 1).replace("OPENSSL_SWAP", publish, 1)
+                self.assertTrue(MODULE.ci_build_openssl_issues(changed))
+        for addition in ("        if: ${{ always() }}\n", "        if: ${{ false }}\n", "        continue-on-error: true\n"):
+            changed = workflow.replace('      - name: Verify complete OpenSSL archive before publication\n',
+                                       '      - name: Verify complete OpenSSL archive before publication\n' + addition)
+            self.assertTrue(MODULE.ci_build_openssl_issues(changed))
+
+    def test_consumer_aliases_and_qt5_only_materialization_are_enforced(self):
+        workflow = verified_openssl_workflow()
+        consumer = VERIFIED_OPENSSL_CONSUMER.rstrip("\n")
+        mutations = {
+            "unchecked 7z": LEGACY_OPENSSL_CONSUMER.rstrip("\n"),
+            "Qt6": consumer.replace("'5'", "'6'"),
+            "all Qt versions": consumer.replace("        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}\n", ""),
+            "wrong architecture": consumer.replace('${{ env.KLOGG_CONFIG_ARCH }}', 'x64'),
+            "wrong destination": consumer.replace('openssl-1.1', 'openssl-runtime'),
+            "network mode": consumer.replace('--materialize', '--acquire'),
+            "ignored failure": consumer.replace('--destination "$GITHUB_WORKSPACE/openssl-1.1"', '--destination "$GITHUB_WORKSPACE/openssl-1.1" || true'),
+            "comment spoof": consumer.replace('          python3 ', '          # python3 '),
+            "continued failure": consumer.replace('        shell: bash', '        continue-on-error: true\n        shell: bash'),
+        }
+        for label, changed in mutations.items():
+            with self.subTest(label=label):
+                self.assertTrue(MODULE.ci_build_openssl_issues(workflow.replace(consumer, changed, 1)), label)
+        self.assertTrue(MODULE.ci_build_openssl_issues(workflow.replace('steps: *windows_steps', 'steps: *unknown_windows', 1)))
+        self.assertTrue(MODULE.ci_build_openssl_issues(workflow.replace("if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}", "if: ${{ startsWith(env.KLOGG_QT_VERSION, '6') }}", 1)))
+
+    def test_duplicate_job_mapping_and_inherited_token_fail_closed(self):
+        workflow = verified_openssl_workflow()
+        for changed in (
+            workflow.replace("jobs:\n", "jobs:\n  PrefetchOpenSsl: {}\n", 1),
+            workflow + "\njobs:\n  HiddenProducer: {}\n",
+            workflow.replace("jobs:\n", "env:\n  GH_TOKEN: ${{ github.token }}\njobs:\n", 1),
+        ):
+            with self.subTest(changed=changed[-70:]):
+                self.assertTrue(MODULE.ci_build_openssl_issues(changed))
+
+    def test_rule_fails_closed_on_missing_or_malformed_structure(self):
+        for workflow in ("", "jobs:\n  PrefetchOpenSsl: {}\n", "jobs:\n  WindowsX86:\n    steps: *unknown\n"):
+            with self.subTest(workflow=workflow):
+                self.assertTrue(MODULE.ci_build_openssl_issues(workflow))
+
+
 class AdbSourceTransportPolicyTest(unittest.TestCase):
     def test_transport_lint_rejects_unsafe_real_workflow_mutations(self):
         workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
         self.assertEqual(MODULE.ci_build_adb_source_transport_issues(workflow), [])
+        producer = "\n".join(MODULE.workflow_job_blocks(workflow)["PrefetchAdbHelperSources"])
         mutations = {
             "missing invocation": ("python3 scripts/ci_adb_source_transport.py",
                                    "python3 scripts/prefetch_adb_source_closure.py"),
@@ -94,9 +359,9 @@ class AdbSourceTransportPolicyTest(unittest.TestCase):
         }
         for label, (before, after) in mutations.items():
             with self.subTest(label=label):
-                self.assertIn(before, workflow, label)
+                self.assertIn(before, producer, label)
                 self.assertTrue(MODULE.ci_build_adb_source_transport_issues(
-                    workflow.replace(before, after, 1)), label)
+                    workflow.replace(producer, producer.replace(before, after, 1), 1)), label)
 
     def test_transport_lint_requires_post_import_validation(self):
         workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()

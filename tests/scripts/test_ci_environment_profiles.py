@@ -108,6 +108,21 @@ class EnvironmentProfilesTest(unittest.TestCase):
             self.assertNotIn(".github/actions/agent-setup/action.yml", files)
             self.assertFalse(any(path.startswith(".github/workflows/") for path in files))
 
+    def test_extracted_source_transport_remains_bound_by_package_policies(self):
+        relative = "scripts/ci_actions_transport.py"
+        transport = self.root / relative
+        transport.write_bytes(b"original transport fixture\n")
+        targets = (("focal-qt5-gcc13", "appimage"), ("jammy-qt5", "deb"),
+                   ("noble-qt6", "deb"), ("resolute-qt6", "deb"))
+        before = {family: self.policy(family) for family, _ in targets}
+        transport.write_bytes(b"changed transport fixture\n")
+        for family, role in targets:
+            with self.subTest(family=family):
+                after = self.policy(family)
+                self.assertTrue(before[family] != after,
+                                "extracted transport bytes must affect qualification identity")
+                self.assertIn(relative, after["profiles"][role]["verification_files"])
+
     def test_missing_recipe_is_an_explicit_prerequisite_not_a_fake_identity(self):
         missing = self.root / "docker/ubuntu24.04-analysis/Dockerfile"
         missing.unlink()

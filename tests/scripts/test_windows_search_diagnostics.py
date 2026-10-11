@@ -155,6 +155,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             for architecture in ("x86", "x64"):
                 content = self.write_pe(helper, architecture)
                 self.assertEqual(crash_smoke.architecture_from_pe(helper), architecture)
+                self.assertEqual(crash_smoke.pe_identity.architecture_from_pe(helper), architecture)
                 mutations = ("short", "dos", "offset", "signature", "machine", "magic")
                 for mutation in mutations:
                     changed = bytearray(content)
@@ -172,8 +173,10 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                         struct.pack_into("<H", changed, 152, 0x10B if architecture == "x64" else 0x20B)
                     helper.write_bytes(changed)
                     with self.subTest(architecture=architecture, mutation=mutation):
-                        with self.assertRaisesRegex(ValueError, "PE"):
+                        with self.assertRaisesRegex(ValueError, "^test helper PE"):
                             crash_smoke.architecture_from_pe(helper)
+                        with self.assertRaisesRegex(ValueError, "^PE"):
+                            crash_smoke.pe_identity.architecture_from_pe(helper)
 
     def test_native_context_requires_control_and_x64_integer_register_flags(self):
         for architecture, size, flag_offset, flags in (("x86", 716, 0, 0x10000),

@@ -396,49 +396,68 @@ jobs:
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Windows Qt 5 OpenSSL"
     runs-on: ubuntu-22.04
-    env:
-      KLOGG_WORKSPACE: ${{ github.workspace }}
-      OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Restore OpenSSL prefetch cache
         id: cache-openssl-prefetch
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
-          key: openssl-prefetch-1-1-1w
+          key: openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}
 
-      - name: Prefetch OpenSSL artifact
-        if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
-        shell: sh
+      - name: Validate restored OpenSSL archive or genuine absence
+        id: verify-openssl-cache
+        shell: bash
+        env:
+          KLOGG_OPENSSL_CACHE_HIT: ${{ steps.cache-openssl-prefetch.outputs.cache-hit }}
         run: |
-          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
-          OPENSSL_ARCHIVE="$PREFETCH_ROOT/openssl.zip"
+          set -euo pipefail
+          archive="$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip"
+          case "$KLOGG_OPENSSL_CACHE_HIT" in
+            true|false|"") ;;
+            *) echo "::error::Unexpected OpenSSL cache-hit value"; exit 1 ;;
+          esac
+          if [[ "$KLOGG_OPENSSL_CACHE_HIT" == "true" || -e "$archive" || -L "$archive" ]]; then
+            python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$archive" --verify-only
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
 
-          mkdir -p "$PREFETCH_ROOT"
+      - name: Acquire locked OpenSSL archive on genuine miss
+        if: ${{ steps.verify-openssl-cache.outputs.missing == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --acquire
 
-          attempt=1
-          max_attempts=3
-          while [ $attempt -le $max_attempts ]; do
-            if curl --progress-bar --location --output "$OPENSSL_ARCHIVE" "$OPENSSL_URL"; then
-              exit 0
-            fi
-
-            rm -f "$OPENSSL_ARCHIVE"
-
-            if [ $attempt -eq $max_attempts ]; then
-              exit 1
-            fi
-
-            echo "OpenSSL prefetch attempt $attempt failed, retrying after backoff..."
-            attempt=$((attempt + 1))
-            sleep $((attempt * 10))
-          done
+      - name: Verify complete OpenSSL archive before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --verify-only
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: openssl-archive
-          path: prefetch_artifacts/openssl.zip
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
           if-no-files-found: error
+
+      - name: Save verified OpenSSL prefetch cache
+        if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}
 
   PrefetchLinuxDeployQt:
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
@@ -2226,15 +2245,12 @@ jobs:
           name: openssl-archive
           path: ${{ github.workspace }}
 
-      - name: Unpack prefetched openssl
+      - name: Verify and materialize locked Qt 5 OpenSSL
         if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
-        shell: pwsh
+        shell: bash
         run: |
-          if ( !(Test-Path openssl.zip) ) {
-            Write-Error "Prefetched OpenSSL artifact is required but openssl.zip is missing"
-            exit 1
-          }
-          7z x openssl.zip
+          set -euo pipefail
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/openssl.zip" --materialize --architecture "${{ env.KLOGG_CONFIG_ARCH }}" --destination "$GITHUB_WORKSPACE/openssl-1.1"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

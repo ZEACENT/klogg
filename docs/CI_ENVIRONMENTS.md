@@ -89,6 +89,58 @@ policy identities. Keep the Intel 15.0/ARM
 Do not create placeholder locks, substitute mutable tags, or fall back to
 building an environment or native core when verified consumption fails.
 
+## Windows Qt 5 runtime input
+
+The OpenSSL runtime is a separate Windows Qt 5 input, not a seventh Linux
+compiler environment or one of the native dependency cores. The old vendor URL
+returned HTTP 400 HTML while curl reported transport success. Existence-only
+upload and cache-hit bypass let that response reach unchecked consumer
+extraction; adding `curl --fail` alone cannot recover a discontinued download.
+
+[`ci/tools/openssl-qt5.json`](../ci/tools/openssl-qt5.json) binds the original
+OpenSSL 1.1.1w ZIP and four runtime DLL identities. Producer acquisition, restored
+cache validation, and Windows consumption share
+[`scripts/materialize_openssl.py`](../scripts/materialize_openssl.py). Every
+accepted input must satisfy bounded ZIP/member/CRC/version/PE checks before
+upload, save, or runtime materialization. A lock-digest cache key has no old-key
+restore prefix; a corrupt exact hit, including a reported hit with no archive,
+fails instead of acquiring another source. Existing destinations are never
+silently overwritten. Consumers remain offline and Qt 5-only.
+
+Cold recovery reads fixed artifact `10928159537` from run `36309613109`, head
+`3078e13d9c397def2db804c6a2154f11ad5fcd8b`, original **attempt 1**, producer
+`108592990081`. That successful upload created the artifact at
+`2026-09-27T09:31:37Z`. Attempt 2's carried-forward job record and successful
+historical x86 consumer do not substitute for original production or qualify
+current code. The outer Actions artifact digest and inner vendor ZIP digest
+are different byte layers and are checked separately. Only job-local read
+permissions and an acquisition-step token are used; fork restrictions are not
+bypassed. The ordinary transient input upload is not a durable publication.
+The shared Actions transport remains a declared verification-file dependency
+of every Linux package role that binds the ADB source-cache wrapper. Moving
+code into a shared module must not remove its bytes from qualification policy;
+existing signed evidence remains stale rather than being relabeled.
+
+The retained artifact expires at **2026-12-26T09:30:51Z**. Expiry limits cold
+retrieval, not offline verification of already pinned bytes. Cache eviction or
+artifact removal can still prevent a cold build; maintainers must separately
+approve a licensed durable source before losing availability. No automatic
+version/vendor change, permanent SDK mirror, receipt relabeling, or protected
+publication is authorized by this recovery.
+
+Run the fast offline regression guard from the repository root:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/scripts -p 'test_materialize_openssl.py'
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/lint_ci_quality.py
+```
+
+These guards cover the producer/consumer boundary absent from local macOS
+application builds. They do not replace fresh Windows x86 compilation, actual
+native dump/unit/UI execution, six-environment qualification, or independent
+native-core qualification. The x86 CI leg currently disables packaging, so its
+passing tests must not be described as TLS package qualification.
+
 ## Ownership
 
 Application CI should build and test the current application, not repeatedly

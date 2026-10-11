@@ -10,14 +10,13 @@ import json
 import os
 import pathlib
 import re
-import selectors
 import stat
 import subprocess
 import sys
 import tempfile
-import time
 import zipfile
 
+import ci_actions_transport as transport
 import ci_environment as core
 from prefetch_adb_helper_sources import PREFETCH_MANIFEST_NAME, validated_records
 
@@ -56,17 +55,9 @@ def _timestamp(value: object) -> datetime.datetime:
 
 def _metadata(path: str) -> dict:
     try:
-        result = subprocess.run(["gh", "api", path], check=True, capture_output=True,
-                                timeout=30)
-    except (OSError, subprocess.SubprocessError) as error:
-        raise SourceCacheError("authenticated Actions metadata request failed") from error
-    require(len(result.stdout) <= core.MAX_METADATA_BYTES, "oversized Actions metadata")
-    try:
-        document = core._parse_json(result.stdout, "source cache Actions metadata")
-    except ValueError as error:
-        raise SourceCacheError("invalid Actions metadata") from error
-    require(isinstance(document, dict), "Actions metadata must be an object")
-    return document
+        return transport.metadata(path)
+    except transport.TransportError as error:
+        raise SourceCacheError(str(error)) from error
 
 
 def _git(command: list[str], *, cwd: pathlib.Path) -> str:
@@ -164,42 +155,11 @@ def authenticate_artifact(repo_root: pathlib.Path, source_sha: str, prior_sha: s
 
 def download_artifact_zip(artifact_id: int, archive: pathlib.Path, *,
                           limit: int, timeout: int) -> None:
-    """Stream an authenticated GitHub ZIP with a byte and wall-clock bound."""
-    require(isinstance(os.environ.get("GH_TOKEN"), str) and os.environ["GH_TOKEN"],
-            "Actions read token is missing")
-    command = ["gh", "api", "--allow-escape-sequences",
-               "repos/" + REPOSITORY + "/actions/artifacts/{}/zip".format(artifact_id)]
-    deadline = time.monotonic() + timeout
-    with tempfile.TemporaryFile() as errors, pathlib.Path(archive).open("xb") as output:
-        try:
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)
-        except OSError as error:
-            raise SourceCacheError("could not start authenticated artifact download") from error
-        try:
-            total = 0
-            with selectors.DefaultSelector() as watcher:
-                watcher.register(process.stdout, selectors.EVENT_READ)
-                while True:
-                    remaining = deadline - time.monotonic()
-                    require(remaining > 0, "source cache ZIP download exceeded deadline")
-                    require(watcher.select(remaining), "source cache ZIP download exceeded deadline")
-                    chunk = os.read(process.stdout.fileno(), 65536)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    require(total <= limit, "source cache ZIP download exceeds byte limit")
-                    output.write(chunk)
-            remaining = deadline - time.monotonic()
-            require(remaining > 0, "source cache ZIP download exceeded deadline")
-            require(process.wait(timeout=remaining) == 0 and total > 0,
-                    "authenticated source cache ZIP download failed")
-        except (OSError, subprocess.SubprocessError) as error:
-            raise SourceCacheError("authenticated source cache ZIP download failed") from error
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            process.stdout.close()
+    """Preserve the ADB error contract around shared authenticated transport."""
+    try:
+        transport.download_artifact_zip(artifact_id, archive, limit=limit, timeout=timeout)
+    except transport.TransportError as error:
+        raise SourceCacheError(str(error)) from error
 
 
 def extract_verified_zip(archive: pathlib.Path, output_root: pathlib.Path,

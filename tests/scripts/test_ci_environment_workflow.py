@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -65,6 +66,103 @@ def event_expression(expression, event, environment_mode, dependency_mode="off",
     if not all(isinstance(node, allowed) for node in ast.walk(parsed)):
         raise AssertionError("unmodeled event expression")
     return eval(compile(parsed, "<event projection>", "eval"), {"__builtins__": {}})
+
+
+class OpenSslWorkflowBoundaryTest(unittest.TestCase):
+    def test_actual_cache_validation_only_allows_genuine_absence_to_acquire(self):
+        rows = [QUALITY.workflow_step_fields(step) for step in
+                QUALITY.workflow_job_steps(CI_BUILD.read_text())["PrefetchOpenSsl"]]
+        fields, children = next(row for row in rows if row[0].get("id") == "verify-openssl-cache")
+        self.assertEqual(children["env"], {
+            "KLOGG_OPENSSL_CACHE_HIT": "${{ steps.cache-openssl-prefetch.outputs.cache-hit }}"})
+        self.assertEqual(fields["shell"], "bash")
+        script = fields["run"]
+        # Stub only the verifier process, not the actual cache state/control flow.
+        verifier = '''python3() {
+          test -z "${GH_TOKEN+x}" || return 99
+          printf '%s\\n' "$*" >> "$VERIFY_CALLS"
+          return "$FAKE_VERIFY_STATUS"
+        }
+'''
+        cases = (
+            ("", "absent", 0, True, "missing=true\n", False),
+            ("false", "absent", 0, True, "missing=true\n", False),
+            ("true", "absent", 19, False, "", True),
+            ("true", "file", 0, True, "missing=false\n", True),
+            ("false", "file", 0, True, "missing=false\n", True),
+            ("", "file", 0, True, "missing=false\n", True),
+            ("true", "file", 19, False, "", True),
+            ("false", "file", 19, False, "", True),
+            ("false", "symlink", 19, False, "", True),
+            ("", "symlink", 19, False, "", True),
+            ("unexpected", "absent", 0, False, "", False),
+            ("unexpected", "file", 0, False, "", False),
+        )
+        for hit, state, status, succeeds, expected_output, called in cases:
+            with self.subTest(hit=hit, state=state, status=status), tempfile.TemporaryDirectory() as scratch:
+                root = pathlib.Path(scratch)
+                archive = root / "prefetch_artifacts/openssl.zip"
+                archive.parent.mkdir()
+                if state == "file":
+                    archive.write_bytes(b"verifier fixture")
+                elif state == "symlink":
+                    archive.symlink_to(root / "missing-target.zip")
+                output, calls = root / "output", root / "calls"
+                output.touch()
+                calls.touch()
+                env = {name: value for name, value in os.environ.items() if name not in {"GH_TOKEN", "GITHUB_TOKEN"}}
+                env.update(GITHUB_WORKSPACE=str(root), GITHUB_OUTPUT=str(output), VERIFY_CALLS=str(calls),
+                           KLOGG_OPENSSL_CACHE_HIT=hit, FAKE_VERIFY_STATUS=str(status))
+                result = subprocess.run(["bash", "-c", verifier + script], env=env,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                self.assertEqual(output.read_text(), expected_output)
+                self.assertEqual(bool(calls.read_text()), called)
+                if called:
+                    self.assertEqual(calls.read_text(), "scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "
+                                     + str(archive) + " --verify-only\n")
+                if state == "file":
+                    self.assertEqual(archive.read_bytes(), b"verifier fixture")
+                elif state == "symlink":
+                    self.assertTrue(archive.is_symlink())
+
+    def test_effective_openssl_event_and_qt_projections_preserve_existing_modes(self):
+        text = CI_BUILD.read_text()
+        triggers = QUALITY.workflow_trigger_mapping(text)
+        self.assertEqual(set(triggers), {"pull_request", "push", "workflow_dispatch"})
+        blocks = QUALITY.workflow_job_blocks(text)
+        condition = QUALITY.workflow_job_direct_value(blocks["PrefetchOpenSsl"], "if")
+        for event, environment, dependency, selected in (
+            ("pull_request", "off", "off", True), ("push", "off", "off", True),
+            ("workflow_dispatch", "off", "off", True),
+            ("workflow_dispatch", "qualify", "off", False),
+            ("workflow_dispatch", "publish", "off", False),
+            ("workflow_dispatch", "off", "qualify", False),
+            ("workflow_dispatch", "off", "publish", False),
+            ("workflow_dispatch", "off", "observe-ios-host", False),
+            ("workflow_dispatch", "qualify", "publish", False),
+            ("schedule", "off", "off", False),
+        ):
+            with self.subTest(event=event, environment=environment, dependency=dependency):
+                actual = event in triggers and event_expression(condition, event, environment, dependency)
+                self.assertEqual(bool(actual), selected)
+                self.assertFalse(event in triggers and event_expression(condition, event, environment, dependency, skipped=True))
+        jobs = QUALITY.workflow_job_steps(text)
+        for job in QUALITY.WINDOWS_TEST_JOBS:
+            openssl = [QUALITY.workflow_step_fields(step)[0] for step in jobs[job]
+                       if "openssl" in QUALITY.active_script_content("\n".join(step)).lower()]
+            self.assertEqual(len(openssl), 3)
+            for qt_version in ("5.15.2", "6.10.2"):
+                with self.subTest(job=job, qt_version=qt_version):
+                    for fields in openssl:
+                        self.assertEqual(fields["if"], "${{ startsWith(env.KLOGG_QT_VERSION, '5') }}")
+                    enabled = [not QUALITY.artifact_condition_is_statically_false(
+                        fields["if"].lower(), {"klogg_qt_version": {qt_version}}) for fields in openssl]
+                    self.assertEqual(enabled, [qt_version == "5.15.2"] * 3)
+        self.assertEqual(QUALITY.workflow_job_direct_value(blocks["WindowsX86"], "steps"), "*windows_steps")
+        env = QUALITY.workflow_mapping_block(blocks["WindowsX86"], "env", 4)
+        self.assertEqual(env["KLOGG_PACKAGE_ENABLED"][0], "false")
+        self.assertEqual(QUALITY.ci_build_openssl_issues(text), [])
 
 
 class EnvironmentBootstrapTest(unittest.TestCase):

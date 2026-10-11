@@ -1853,6 +1853,131 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
     return issues
 
 
+def ci_build_openssl_issues(text: str) -> list[str]:
+    """Check the reviewed fail-closed recipe, including effective Windows aliases.
+
+    Exact active command sequences intentionally reject shell control-flow changes:
+    merely finding a verifier name cannot prove it runs or propagates its status.
+    """
+    issue = "OpenSSL Qt 5 input must be locked, verified before upload/save, read-only, and fail closed"
+    lines = text.splitlines()
+    if (not direct_mapping_fields_are_unique(lines, 0, {0})
+            or workflow_mapping_block(lines, "jobs", 0) is None):
+        return [issue]
+    root_env = workflow_mapping_block(lines, "env", 0)
+    if root_env and any(name in {"GH_TOKEN", "GITHUB_TOKEN"} or "github.token" in value
+                        for name, (value, _) in root_env.items()):
+        return [issue]
+    blocks = workflow_job_blocks(text)
+    producer = blocks.get("PrefetchOpenSsl", [])
+    try:
+        jobs = workflow_job_steps(text)
+    except ValueError:
+        return [issue]
+    permissions = workflow_mapping_block(producer, "permissions", 4)
+    if (not workflow_job_direct_fields_are_unique(producer)
+            or permissions is None
+            or {key: value for key, (value, _) in permissions.items()} != {"contents": "read", "actions": "read"}
+            or workflow_job_direct_value(producer, "if") != CI_BUILD_ORDINARY_IF
+            or workflow_job_direct_value(producer, "runs-on") != "ubuntu-22.04"
+            or workflow_job_direct_value(producer, "timeout-minutes") != "20"
+            or any(workflow_job_direct_value(producer, key) is not None
+                   for key in ("env", "continue-on-error", "defaults"))):
+        return [issue]
+
+    helper = "python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json"
+    archive = '${{ github.workspace }}/prefetch_artifacts/openssl.zip'
+    key = "openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}"
+    cache_inputs = {"path": archive, "key": key}
+    command = helper + ' --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip"'
+    validation = '\n'.join((
+        'set -euo pipefail',
+        'archive="$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip"',
+        'case "$KLOGG_OPENSSL_CACHE_HIT" in',
+        'true|false|"") ;;',
+        '*) echo "::error::Unexpected OpenSSL cache-hit value"; exit 1 ;;',
+        'esac',
+        'if [[ "$KLOGG_OPENSSL_CACHE_HIT" == "true" || -e "$archive" || -L "$archive" ]]; then',
+        helper + ' --archive "$archive" --verify-only',
+        'echo "missing=false" >> "$GITHUB_OUTPUT"',
+        'else',
+        'echo "missing=true" >> "$GITHUB_OUTPUT"',
+        'fi',
+    ))
+    expected = [
+        ({"uses": "actions/checkout@" + REVIEWED_ACTION_REVISIONS["actions/checkout"]},
+         {"with": {"persist-credentials": "false"}}),
+        ({"name": "Restore OpenSSL prefetch cache", "id": "cache-openssl-prefetch",
+          "uses": "actions/cache/restore@" + REVIEWED_ACTION_REVISIONS["actions/cache"]},
+         {"with": cache_inputs}),
+        ({"name": "Validate restored OpenSSL archive or genuine absence", "id": "verify-openssl-cache",
+          "shell": "bash", "run": validation},
+         {"env": {"KLOGG_OPENSSL_CACHE_HIT": "${{ steps.cache-openssl-prefetch.outputs.cache-hit }}"}}),
+        ({"name": "Acquire locked OpenSSL archive on genuine miss", "shell": "bash",
+          "if": "${{ steps.verify-openssl-cache.outputs.missing == 'true' }}",
+          "run": "set -euo pipefail\n" + command + " --acquire"},
+         {"env": {"GH_TOKEN": "${{ github.token }}"}}),
+        ({"name": "Verify complete OpenSSL archive before publication", "shell": "bash",
+          "run": "set -euo pipefail\n" + command + " --verify-only"}, {}),
+        ({"uses": "actions/upload-artifact@" + REVIEWED_ACTION_REVISIONS["actions/upload-artifact"]},
+         {"with": {"name": "openssl-archive", "path": archive, "if-no-files-found": "error"}}),
+        ({"name": "Save verified OpenSSL prefetch cache",
+          "if": "${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}",
+          "uses": "actions/cache/save@" + REVIEWED_ACTION_REVISIONS["actions/cache"]},
+         {"with": cache_inputs}),
+    ]
+
+    def matches(step: list[str], fields: dict[str, str], children: dict[str, dict[str, str]]) -> bool:
+        if not workflow_step_direct_fields_are_unique(step):
+            return False
+        actual_fields, actual_children = workflow_step_fields(step)
+        for parent in ("env", "with"):
+            if parent in actual_fields:
+                # Reuse the strict mapping reader to reject duplicate child keys.
+                mapping = workflow_mapping_block(step, parent, 8)
+                if mapping is None:
+                    return False
+                actual_children[parent] = {name: value for name, (value, _) in mapping.items()}
+                actual_fields.pop(parent)
+        if "run" in actual_fields:
+            actual_fields["run"] = active_script_content(actual_fields["run"])
+        return actual_fields == fields and actual_children == children
+
+    steps = jobs.get("PrefetchOpenSsl", [])
+    if len(steps) != len(expected) or not all(matches(step, fields, children)
+                                            for step, (fields, children) in zip(steps, expected)):
+        return [issue]
+
+    qt5 = "${{ startsWith(env.KLOGG_QT_VERSION, '5') }}"
+    consumer_expected = [
+        ({"uses": "actions/download-artifact@" + REVIEWED_ACTION_REVISIONS["actions/download-artifact"], "if": qt5},
+         {"with": {"name": "openssl-archive", "path": "${{ github.workspace }}"}}),
+        ({"name": "Verify and materialize locked Qt 5 OpenSSL", "if": qt5, "shell": "bash",
+          "run": 'set -euo pipefail\n' + helper + ' --archive "$GITHUB_WORKSPACE/openssl.zip" --materialize '
+                 '--architecture "${{ env.KLOGG_CONFIG_ARCH }}" --destination "$GITHUB_WORKSPACE/openssl-1.1"'}, {}),
+        ({"name": "Set openssl paths", "if": qt5, "shell": "bash",
+          "run": r'echo "SSL_DIR=${{ github.workspace }}\openssl-1.1\${{ env.KLOGG_CONFIG_ARCH }}\bin" >> $GITHUB_ENV'
+                 '\n' + r'echo "SSL_ARCH=${{ env.KLOGG_SSL_ARCH }}" >> $GITHUB_ENV'}, {}),
+    ]
+    for job in WINDOWS_TEST_JOBS:
+        job_steps = jobs.get(job, [])
+        selected = [(index, step) for index, step in enumerate(job_steps)
+                    if "openssl" in active_script_content("\n".join(step)).lower()]
+        if (len(selected) != len(consumer_expected)
+                or not all(matches(step, fields, children) for (_, step), (fields, children)
+                           in zip(selected, consumer_expected))):
+            return [issue]
+        setup = [index for index, step in enumerate(job_steps)
+                 if workflow_step_fields(step)[0].get("uses") == "./.github/actions/agent-setup"]
+        if len(setup) != 1 or selected[-1][0] >= setup[0]:
+            return [issue]
+    for job, job_steps in jobs.items():
+        if job not in {"PrefetchOpenSsl", *WINDOWS_TEST_JOBS} and any(
+                "openssl" in active_script_content("\n".join(step)).lower() for step in job_steps):
+            return [issue]
+    return []
+
+
 def ci_build_adb_source_transport_issues(text: str) -> list[str]:
     """Keep ordinary CI source imports isolated from dispatch and failed cache hits."""
     issue = "ADB ordinary source transport must be read-only, ancestry-aware, and fail closed"
@@ -2097,6 +2222,7 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         issues.append("CI gate must run with if: always() for ordinary events only")
     issues.extend(ci_build_environment_mode_issues(text))
     issues.extend(ci_build_adb_source_transport_issues(text))
+    issues.extend(ci_build_openssl_issues(text))
     for job in (
         "LinuxPackages",
         "LinuxSanitizers",
