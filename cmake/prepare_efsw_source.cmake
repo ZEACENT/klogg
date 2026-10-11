@@ -39,6 +39,16 @@ klogg_require_pinned_source(
 )
 get_filename_component(CACHE_SOURCE "${CACHE_SOURCE}" REALPATH)
 
+# Trust only the verified cache's own Git directory for the local clone.
+# Never resolve a gitfile, symlink, or common-directory redirect into an
+# ownership exception for metadata outside this source tree.
+if(NOT IS_DIRECTORY "${CACHE_SOURCE}/.git" OR IS_SYMLINK "${CACHE_SOURCE}/.git"
+   OR EXISTS "${CACHE_SOURCE}/.git/commondir"
+   OR IS_SYMLINK "${CACHE_SOURCE}/.git/commondir")
+  message(FATAL_ERROR
+          "${DEPENDENCY} cache source does not retain ordinary Git metadata: '${CACHE_SOURCE}'")
+endif()
+
 # Resolve the destination through its nearest existing ancestor. This handles
 # a destination below a symlink while retaining CMake 3.14 compatibility.
 set(_destination_existing_ancestor "${DESTINATION}")
@@ -188,26 +198,73 @@ endif()
 
 set(_staging_attempt 0)
 set(_staging_directory "")
+set(_clone_config_context "")
 while(_staging_attempt LESS 16)
   string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _staging_suffix)
   set(_staging_directory
       "${_destination_parent}/.${_destination_name}.prepare-${_staging_suffix}")
-  if(NOT EXISTS "${_staging_directory}")
+  set(_clone_config_context
+      "${_destination_parent}/.${_destination_name}.clone-config-${_staging_suffix}")
+  if(EXISTS "${_staging_directory}" OR IS_SYMLINK "${_staging_directory}"
+     OR EXISTS "${_clone_config_context}" OR IS_SYMLINK "${_clone_config_context}")
+    math(EXPR _staging_attempt "${_staging_attempt} + 1")
+  else()
     break()
   endif()
-  math(EXPR _staging_attempt "${_staging_attempt} + 1")
 endwhile()
-if(EXISTS "${_staging_directory}")
-  message(FATAL_ERROR "Failed to allocate unique ${DEPENDENCY} private source staging directory")
+if(EXISTS "${_staging_directory}" OR IS_SYMLINK "${_staging_directory}"
+   OR EXISTS "${_clone_config_context}" OR IS_SYMLINK "${_clone_config_context}")
+  message(FATAL_ERROR
+          "Failed to allocate unique ${DEPENDENCY} private source staging/config context")
+endif()
+
+# Local transports can discard command-scope configuration before upload-pack.
+# Select an owned, temporary GLOBAL-scope protected input only for the clone
+# and its children. Do not modify the caller's global file or CMake environment.
+file(MAKE_DIRECTORY "${_clone_config_context}")
+set(_clone_config_file "${_clone_config_context}/gitconfig")
+# Even --file config operations discover repositories. Construct the file in
+# its owned context, with discovery bounded before any caller repository and
+# without inherited Git-directory redirects; preserve the caller elsewhere.
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E env --unset=GIT_DIR --unset=GIT_WORK_TREE --unset=GIT_COMMON_DIR
+          "GIT_CEILING_DIRECTORIES=${_destination_parent}"
+          git config --file "${_clone_config_file}" --add safe.directory ""
+  WORKING_DIRECTORY "${_clone_config_context}"
+  RESULT_VARIABLE _config_result
+  ERROR_VARIABLE _config_error
+  TIMEOUT ${GIT_TIMEOUT}
+)
+if(NOT _config_result EQUAL 0)
+  file(REMOVE_RECURSE "${_clone_config_context}" "${_staging_directory}")
+  message(FATAL_ERROR "Failed to configure ${DEPENDENCY} cache clone trust reset: ${_config_error}")
+endif()
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E env --unset=GIT_DIR --unset=GIT_WORK_TREE --unset=GIT_COMMON_DIR
+          "GIT_CEILING_DIRECTORIES=${_destination_parent}"
+          git config --file "${_clone_config_file}" --add safe.directory "${CACHE_SOURCE}/.git"
+  WORKING_DIRECTORY "${_clone_config_context}"
+  RESULT_VARIABLE _config_result
+  ERROR_VARIABLE _config_error
+  TIMEOUT ${GIT_TIMEOUT}
+)
+if(NOT _config_result EQUAL 0)
+  file(REMOVE_RECURSE "${_clone_config_context}" "${_staging_directory}")
+  message(FATAL_ERROR "Failed to configure ${DEPENDENCY} cache clone trust path: ${_config_error}")
 endif()
 
 execute_process(
-  COMMAND git -c core.autocrlf=false clone --config core.autocrlf=false
+  COMMAND "${CMAKE_COMMAND}" -E env --unset=GIT_CONFIG_PARAMETERS --unset=GIT_CONFIG_COUNT
+          "GIT_CONFIG_GLOBAL=${_clone_config_file}"
+          git -c core.autocrlf=false clone --config core.autocrlf=false
           --no-hardlinks --no-checkout "${CACHE_SOURCE}" "${_staging_directory}"
   RESULT_VARIABLE _clone_result
   ERROR_VARIABLE _clone_error
   TIMEOUT ${GIT_TIMEOUT}
 )
+# Also remove a Git config lock left by a handled failure. Abrupt termination
+# can leave private residue; allocation above never reuses an occupied context.
+file(REMOVE_RECURSE "${_clone_config_context}")
 if(NOT _clone_result EQUAL 0)
   file(REMOVE_RECURSE "${_staging_directory}")
   message(FATAL_ERROR

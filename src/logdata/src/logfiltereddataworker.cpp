@@ -36,12 +36,15 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <QtGlobal>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <exception>
+#include <iostream>
+#include <locale>
+#include <mutex>
 #include <qsemaphore.h>
-#include <QtGlobal>
+#include <sstream>
 #include <utility>
 
 #include <robin_hood.h>
@@ -74,11 +77,34 @@ bool traceSearchTerminals()
 void traceSearchStart( const char* phase, quint64 generation, quint64 operationId, int type = -1 )
 {
     static const bool enabled = qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" );
-    if ( enabled ) {
-        std::fprintf( stderr, "Search start %s generation %llu operation %llu type %d\n", phase,
-                      static_cast<unsigned long long>( generation ),
-                      static_cast<unsigned long long>( operationId ), type );
-        std::fflush( stderr );
+    if ( !enabled ) {
+        return;
+    }
+
+    try {
+        std::ostringstream record;
+        record.imbue( std::locale::classic() );
+        record.exceptions( std::ios::badbit | std::ios::failbit );
+        record << "Search start " << phase << " generation " << generation << " operation "
+               << operationId << " type " << type << '\n';
+        const auto text = record.str();
+        const auto size = static_cast<std::streamsize>( text.size() );
+
+        static std::mutex traceMutex;
+        std::lock_guard<std::mutex> lock( traceMutex );
+        auto* buffer = std::cerr.rdbuf();
+        if ( !buffer ) {
+            return;
+        }
+        if ( buffer->sputn( text.data(), size ) != size ) {
+            return;
+        }
+        if ( buffer->pubsync() != 0 ) {
+            return;
+        }
+    } catch ( ... ) {
+        // Optional diagnostics must not interrupt the primary search request.
+        return;
     }
 }
 

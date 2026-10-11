@@ -283,6 +283,7 @@ add_executable(klogg_tests
 
 target_link_libraries(klogg_tests klogg_ui klogg_utils klogg_logging klogg_versioncheck klogg_livecapture klogg_adb_smartsocket Catch2 Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Test test_utils test_crash_trace)
 add_dependencies(klogg_tests adb_server_test_helper)
+add_dependencies(klogg_tests search_start_empty_env_launcher)
 target_compile_definitions(
   klogg_tests PRIVATE KLOGG_ADB_SERVER_TEST_HELPER_PATH="$<TARGET_FILE:adb_server_test_helper>"
 )
@@ -292,3 +293,40 @@ set_target_properties(klogg_tests PROPERTIES AUTOMOC ON)
 klogg_configure_test_target(klogg_tests KEEP_DEBUG_SYMBOLS)
 
 klogg_add_runtime_test(klogg_tests klogg_tests)
+
+# The opt-in is cached on first use, so absence, an empty value, and "0" each
+# need a fresh process. Hidden tags keep these out of the main run.
+foreach(_klogg_trace_mode enabled empty absent)
+  set(_klogg_trace_tag "[.search-start-enabled]")
+  if(_klogg_trace_mode STREQUAL "absent")
+    set(_klogg_trace_env "--unset=KLOGG_TEST_TRACE_SEARCH_STARTS")
+    set(_klogg_trace_tag "[.search-start-absent]")
+  elseif(_klogg_trace_mode STREQUAL "empty")
+    set(_klogg_trace_tag "[.search-start-enabled],[.search-start-empty]")
+  else()
+    set(_klogg_trace_env "KLOGG_TEST_TRACE_SEARCH_STARTS=0")
+  endif()
+  set(_klogg_trace_runtime_env)
+  if(WIN32)
+    list(APPEND _klogg_trace_runtime_env
+      "PATH=$<TARGET_FILE_DIR:klogg_tests>$<SEMICOLON>$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>$<SEMICOLON>$ENV{PATH}"
+    )
+  endif()
+  set(_klogg_trace_test "klogg_search_start_trace_${_klogg_trace_mode}")
+  if(_klogg_trace_mode STREQUAL "empty")
+    add_test(
+      NAME ${_klogg_trace_test}
+      COMMAND ${CMAKE_COMMAND} -E env ${_klogg_trace_runtime_env}
+              $<TARGET_FILE:search_start_empty_env_launcher>
+              $<TARGET_FILE:klogg_tests> "${_klogg_trace_tag}"
+    )
+  else()
+    add_test(
+      NAME ${_klogg_trace_test}
+      COMMAND ${CMAKE_COMMAND} -E env ${_klogg_trace_runtime_env} "${_klogg_trace_env}"
+              $<TARGET_FILE:klogg_tests> -platform offscreen "${_klogg_trace_tag}"
+    )
+  endif()
+  set_tests_properties(${_klogg_trace_test} PROPERTIES TIMEOUT 120)
+  klogg_set_test_isolation(${_klogg_trace_test})
+endforeach()

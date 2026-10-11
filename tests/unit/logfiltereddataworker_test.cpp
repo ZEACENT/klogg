@@ -29,9 +29,15 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <iostream>
+#include <limits>
+#include <locale>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
+#include <streambuf>
+#include <string>
 #include <thread>
 
 #ifndef Q_MOC_RUN
@@ -43,49 +49,227 @@
 #include "abstractlogdata.h"
 #include "atomicflag.h"
 #include "linetypes.h"
+#include "logfiltereddata.h"
+#include "logfiltereddataworker.h"
 #include "matchercache.h"
 #include "regularexpression.h"
 #include "searchablelogdata.h"
 #include "synchronization.h"
-#include "logfiltereddataworker.h"
-#include "logfiltereddata.h"
 
 namespace {
 class TestSearchableLogData : public SearchableLogData {
-  public:
+public:
     void interruptLoading() override {}
-    std::unique_ptr<LogFilteredData> getNewFilteredData() const override { return nullptr; }
-    qint64 getFileSize() const override { return 0; }
-    QDateTime getLastModifiedDate() const override { return {}; }
+    std::unique_ptr<LogFilteredData> getNewFilteredData() const override
+    {
+        return nullptr;
+    }
+    qint64 getFileSize() const override
+    {
+        return 0;
+    }
+    QDateTime getLastModifiedDate() const override
+    {
+        return {};
+    }
     void reload( QTextCodec* = nullptr ) override {}
-    QTextCodec* getDetectedEncoding() const override { return QTextCodec::codecForName( "UTF-8" ); }
+    QTextCodec* getDetectedEncoding() const override
+    {
+        return QTextCodec::codecForName( "UTF-8" );
+    }
     void setPrefilter( const QString& ) override {}
     void setAnsiProcessingMode( AnsiProcessingMode ) override {}
-    RawLines getLinesRaw( LineNumber, LinesCount ) const override { return {}; }
-    bool isLiveSource() const override { return true; }
+    RawLines getLinesRaw( LineNumber, LinesCount ) const override
+    {
+        return {};
+    }
+    bool isLiveSource() const override
+    {
+        return true;
+    }
 
-  protected:
-    QString doGetLineString( LineNumber ) const override { return {}; }
-    QString doGetExpandedLineString( LineNumber ) const override { return {}; }
-    klogg::vector<QString> doGetLines( LineNumber, LinesCount ) const override { return {}; }
+protected:
+    QString doGetLineString( LineNumber ) const override
+    {
+        return {};
+    }
+    QString doGetExpandedLineString( LineNumber ) const override
+    {
+        return {};
+    }
+    klogg::vector<QString> doGetLines( LineNumber, LinesCount ) const override
+    {
+        return {};
+    }
     klogg::vector<QString> doGetExpandedLines( LineNumber, LinesCount ) const override
     {
         return {};
     }
-    LineNumber doGetLineNumber( LineNumber index ) const override { return index; }
-    LinesCount doGetNbLine() const override { return 0_lcount; }
-    LineLength doGetMaxLength() const override { return 0_length; }
-    LineLength doGetLineLength( LineNumber ) const override { return 0_length; }
+    LineNumber doGetLineNumber( LineNumber index ) const override
+    {
+        return index;
+    }
+    LinesCount doGetNbLine() const override
+    {
+        return 0_lcount;
+    }
+    LineLength doGetMaxLength() const override
+    {
+        return 0_length;
+    }
+    LineLength doGetLineLength( LineNumber ) const override
+    {
+        return 0_length;
+    }
     void doSetDisplayEncoding( const char* ) override {}
-    QTextCodec* doGetDisplayEncoding() const override { return QTextCodec::codecForName( "UTF-8" ); }
+    QTextCodec* doGetDisplayEncoding() const override
+    {
+        return QTextCodec::codecForName( "UTF-8" );
+    }
     void doAttachReader() const override {}
     void doDetachReader() const override {}
 };
 
+// Unlike stringbuf, this sink exposes bytes only after the writer explicitly syncs.
+class SearchTraceBuffer : public std::streambuf {
+public:
+    enum class Failure : std::uint8_t {
+        None,
+        ShortWrite,
+        RejectWrite,
+        FailedSync,
+        ThrowWrite,
+        ThrowSync
+    };
+
+    explicit SearchTraceBuffer( Failure failure = Failure::None )
+        : failure_( failure )
+    {
+    }
+
+    std::string committed;
+    std::string pending;
+    int writes = 0;
+    int syncs = 0;
+
+protected:
+    std::streamsize xsputn( const char* bytes, std::streamsize count ) override
+    {
+        ++writes;
+        if ( failure_ == Failure::ThrowWrite ) {
+            throw std::runtime_error( "trace write failed" );
+        }
+        if ( failure_ == Failure::RejectWrite ) {
+            return 0;
+        }
+        const auto accepted = failure_ == Failure::ShortWrite ? count - 1 : count;
+        pending.append( bytes, static_cast<std::size_t>( accepted ) );
+        return accepted;
+    }
+
+    int sync() override
+    {
+        ++syncs;
+        if ( failure_ == Failure::ThrowSync ) {
+            throw std::runtime_error( "trace sync failed" );
+        }
+        if ( failure_ == Failure::FailedSync ) {
+            return -1;
+        }
+        committed += pending;
+        pending.clear();
+        return 0;
+    }
+
+private:
+    Failure failure_;
+};
+
+class StderrCapture {
+public:
+    explicit StderrCapture( std::streambuf* buffer )
+        : oldState_( std::cerr.rdstate() )
+        , oldExceptions_( std::cerr.exceptions() )
+        , oldBuffer_( std::cerr.rdbuf() )
+    {
+        std::cerr.exceptions( std::ios::goodbit );
+        std::cerr.rdbuf( buffer );
+    }
+
+    ~StderrCapture()
+    {
+        std::cerr.exceptions( std::ios::goodbit );
+        std::cerr.rdbuf( oldBuffer_ );
+        std::cerr.clear( oldState_ );
+        std::cerr.exceptions( oldExceptions_ );
+    }
+
+private:
+    std::ios::iostate oldState_;
+    std::ios::iostate oldExceptions_;
+    std::streambuf* oldBuffer_ = nullptr;
+};
+
+class GroupedNumbers : public std::numpunct<char> {
+protected:
+    char do_thousands_sep() const override
+    {
+        return '_';
+    }
+    std::string do_grouping() const override
+    {
+        return "\3";
+    }
+};
+
+class StderrFormatGuard {
+public:
+    StderrFormatGuard()
+        : flags_( std::cerr.flags() )
+        , precision_( std::cerr.precision() )
+        , width_( std::cerr.width() )
+        , fill_( std::cerr.fill() )
+        , locale_( std::cerr.getloc() )
+        , globalLocale_( std::locale() )
+        , exceptions_( std::cerr.exceptions() )
+        , tie_( std::cerr.tie() )
+    {
+    }
+
+    ~StderrFormatGuard()
+    {
+        std::cerr.exceptions( std::ios::goodbit );
+        std::cerr.flags( flags_ );
+        std::cerr.precision( precision_ );
+        std::cerr.width( width_ );
+        std::cerr.fill( fill_ );
+        std::cerr.imbue( locale_ );
+        std::locale::global( globalLocale_ );
+        std::cerr.tie( tie_ );
+        std::cerr.exceptions( exceptions_ );
+    }
+
+private:
+    std::ios::fmtflags flags_;
+    std::streamsize precision_;
+    std::streamsize width_;
+    char fill_;
+    std::locale locale_;
+    std::locale globalLocale_;
+    std::ios::iostate exceptions_;
+    std::ostream* tie_;
+};
+
+constexpr auto MaxTraceRecord = "Search start compile.begin generation 18446744073709551615 "
+                                "operation 18446744073709551615 type -1\n"
+                                "Search start compile.end generation 18446744073709551615 "
+                                "operation 18446744073709551615 type -1\n"
+                                "Search start enqueue.request generation 18446744073709551615 "
+                                "operation 18446744073709551615 type -1\n";
+
 } // namespace
 
-struct LogFilteredDataWorkerPrivate {
-};
+struct LogFilteredDataWorkerPrivate {};
 
 template <>
 struct LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate> {
@@ -126,14 +310,24 @@ struct LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate> {
         worker->operationId_.store( operationId );
     }
 
+    static bool hasExpectedFullRequest( LogFilteredDataWorker* worker, quint64 identity )
+    {
+        std::lock_guard<std::mutex> lock( worker->requestMutex_ );
+        const auto& request = worker->pendingRequest_;
+        return request && request->type == SearchRequest::Type::Full
+               && request->generation == identity && request->operationId == identity
+               && request->startLine == 0_lnum && request->endLine == 10_lnum
+               && request->regExp.pattern == QStringLiteral( "ERROR" ) && request->compiled
+               && request->compiled == worker->compiledExpression_;
+    }
+
     static void queueTerminalProgress( LogFilteredDataWorker* worker, quint64 generation,
                                        quint64 operationId )
     {
-        worker->emitSearchProgressedOnOwnerThread( 2_lcount, 100, 1_lnum, generation,
-                                                   operationId );
+        worker->emitSearchProgressedOnOwnerThread( 2_lcount, 100, 1_lnum, generation, operationId );
     }
 
-  private:
+private:
     static SearchRequest makeLiveRequest( quint64 operationId, LineNumber endLine )
     {
         return SearchRequest{ SearchRequest::Type::LiveUpdate,
@@ -147,7 +341,166 @@ struct LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate> {
     }
 };
 
-TEST_CASE( "LogFilteredDataWorker clears deferred live update when immediate live dispatch supersedes it" )
+TEST_CASE( "Search start trace empty-mode child receives a present empty opt-in",
+           "[.search-start-empty]" )
+{
+    REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
+    REQUIRE( qgetenv( "KLOGG_TEST_TRACE_SEARCH_STARTS" ).isEmpty() );
+}
+
+TEST_CASE( "Search start trace emits and flushes the real maximum-identity request",
+           "[.search-start-enabled]" )
+{
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+    REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
+    TestSearchableLogData sourceLogData;
+    LogFilteredDataWorker worker( sourceLogData );
+    worker.shutdownAndWait();
+    const auto maximum = std::numeric_limits<quint64>::max();
+    WorkerVisitor::setActiveOperation( &worker, maximum - 1, maximum - 1 );
+
+    SearchTraceBuffer buffer;
+    bool flushedBeforeReturn = false;
+    {
+        StderrCapture capture( &buffer );
+        worker.search( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum, 10_lnum );
+        flushedBeforeReturn = buffer.pending.empty() && buffer.committed == MaxTraceRecord;
+    }
+    CHECK( flushedBeforeReturn );
+    CHECK( buffer.committed == MaxTraceRecord );
+    CHECK( buffer.writes == 3 );
+    CHECK( buffer.syncs == 3 );
+    CHECK( worker.currentGeneration() == maximum );
+    CHECK( WorkerVisitor::hasExpectedFullRequest( &worker, maximum ) );
+    CHECK( worker.performanceCounters().operationStarts == 0 );
+}
+
+TEST_CASE( "Search start trace ignores and preserves hostile stderr formatting",
+           "[.search-start-enabled]" )
+{
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+    REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
+    TestSearchableLogData sourceLogData;
+    LogFilteredDataWorker worker( sourceLogData );
+    worker.shutdownAndWait();
+    const auto maximum = std::numeric_limits<quint64>::max();
+    WorkerVisitor::setActiveOperation( &worker, maximum - 1, maximum - 1 );
+
+    SearchTraceBuffer buffer;
+    SearchTraceBuffer tiedBuffer( SearchTraceBuffer::Failure::ThrowSync );
+    std::ostream tiedStream( &tiedBuffer );
+    tiedStream.exceptions( std::ios::badbit );
+    bool flushedBeforeReturn = false;
+    bool stateUnchanged = false;
+    {
+        StderrCapture capture( &buffer );
+        StderrFormatGuard formatGuard;
+        const std::locale hostileLocale( std::locale::classic(), new GroupedNumbers );
+        std::locale::global( hostileLocale );
+        std::cerr.imbue( hostileLocale );
+        std::cerr.setf( std::ios::hex, std::ios::basefield );
+        std::cerr.setf( std::ios::showbase | std::ios::showpos | std::ios::uppercase
+                        | std::ios::unitbuf );
+        std::cerr.precision( 2 );
+        std::cerr.width( 120 );
+        std::cerr.fill( '#' );
+        std::cerr.exceptions( std::ios::badbit | std::ios::failbit );
+        std::cerr.tie( &tiedStream );
+        const auto hostileFlags = std::cerr.flags();
+        worker.search( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum, 10_lnum );
+        flushedBeforeReturn = buffer.pending.empty() && buffer.committed == MaxTraceRecord;
+        stateUnchanged = std::cerr.flags() == hostileFlags && std::cerr.precision() == 2
+                         && std::cerr.width() == 120 && std::cerr.fill() == '#'
+                         && std::cerr.getloc() == hostileLocale && std::locale() == hostileLocale
+                         && std::cerr.exceptions() == ( std::ios::badbit | std::ios::failbit )
+                         && std::cerr.tie() == &tiedStream && std::cerr.good();
+    }
+    CHECK( flushedBeforeReturn );
+    CHECK( stateUnchanged );
+    CHECK( tiedBuffer.syncs == 0 );
+    CHECK( buffer.writes == 3 );
+    CHECK( buffer.syncs == 3 );
+    CHECK( WorkerVisitor::hasExpectedFullRequest( &worker, maximum ) );
+}
+
+TEST_CASE( "Search start trace failures cannot change the primary request or escape",
+           "[.search-start-enabled]" )
+{
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+    REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
+    const auto failure
+        = GENERATE( SearchTraceBuffer::Failure::ShortWrite, SearchTraceBuffer::Failure::RejectWrite,
+                    SearchTraceBuffer::Failure::FailedSync, SearchTraceBuffer::Failure::ThrowWrite,
+                    SearchTraceBuffer::Failure::ThrowSync );
+    TestSearchableLogData sourceLogData;
+    LogFilteredDataWorker worker( sourceLogData );
+    worker.shutdownAndWait();
+    const auto maximum = std::numeric_limits<quint64>::max();
+    WorkerVisitor::setActiveOperation( &worker, maximum - 1, maximum - 1 );
+    SearchTraceBuffer buffer( failure );
+    bool escaped = false;
+    {
+        StderrCapture capture( &buffer );
+        StderrFormatGuard formatGuard;
+        std::cerr.exceptions( std::ios::badbit | std::ios::failbit );
+        try {
+            worker.search( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum, 10_lnum );
+        } catch ( ... ) {
+            escaped = true;
+        }
+    }
+    CHECK_FALSE( escaped );
+    CHECK( worker.currentGeneration() == maximum );
+    CHECK( WorkerVisitor::hasExpectedFullRequest( &worker, maximum ) );
+    CHECK( worker.performanceCounters().operationStarts == 0 );
+    CHECK( buffer.committed.empty() );
+    CHECK( buffer.writes == 3 );
+    const bool syncExpected = failure == SearchTraceBuffer::Failure::FailedSync
+                              || failure == SearchTraceBuffer::Failure::ThrowSync;
+    CHECK( buffer.syncs == ( syncExpected ? 3 : 0 ) );
+}
+
+TEST_CASE( "Search start trace tolerates a missing stderr buffer", "[.search-start-enabled]" )
+{
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+    REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
+    TestSearchableLogData sourceLogData;
+    LogFilteredDataWorker worker( sourceLogData );
+    worker.shutdownAndWait();
+    bool escaped = false;
+    {
+        StderrCapture capture( nullptr );
+        try {
+            worker.search( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum, 10_lnum );
+        } catch ( ... ) {
+            escaped = true;
+        }
+    }
+    CHECK_FALSE( escaped );
+    CHECK( WorkerVisitor::hasExpectedFullRequest( &worker, 1 ) );
+}
+
+TEST_CASE( "Search start trace is silent when the opt-in is absent", "[.search-start-absent]" )
+{
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+    REQUIRE_FALSE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
+    TestSearchableLogData sourceLogData;
+    LogFilteredDataWorker worker( sourceLogData );
+    worker.shutdownAndWait();
+    SearchTraceBuffer buffer;
+    {
+        StderrCapture capture( &buffer );
+        worker.search( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum, 10_lnum );
+    }
+    CHECK( buffer.writes == 0 );
+    CHECK( buffer.syncs == 0 );
+    CHECK( buffer.committed.empty() );
+    CHECK( buffer.pending.empty() );
+    CHECK( WorkerVisitor::hasExpectedFullRequest( &worker, 1 ) );
+}
+
+TEST_CASE(
+    "LogFilteredDataWorker clears deferred live update when immediate live dispatch supersedes it" )
 {
     using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
 

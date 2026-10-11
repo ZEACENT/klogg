@@ -5,6 +5,14 @@ add_executable(file_write_helper
 
 target_link_libraries(file_write_helper klogg_utils tbb)
 
+# QProcess's explicit child environment preserves empty values on Windows even
+# when the CMake runtime predates its empty-value environment projection fix.
+add_executable(search_start_empty_env_launcher search_start_empty_env_launcher.cpp)
+target_link_libraries(
+  search_start_empty_env_launcher PRIVATE Qt${QT_VERSION_MAJOR}::Core project_options project_warnings
+)
+klogg_configure_test_target(search_start_empty_env_launcher)
+
 add_library(test_utils INTERFACE)
 target_include_directories(test_utils SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 

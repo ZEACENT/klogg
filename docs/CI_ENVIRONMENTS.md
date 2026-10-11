@@ -27,9 +27,17 @@ motivates a separate, optional already-verified cache seam. Environment run
 `36447989583` imported source bytes and reached the offline prefetch validator,
 which generated a manifest, but the run failed and issued no qualification
 receipt. Follow-up correction `41c06eb7` keeps the imported cache archive-only
-after offline verification; that change still needs new-head hosted qualification.
-None of these attempts produced replacement environment evidence. The reviewed signed
-analysis-image recipe bytes and existing evidence status are unchanged.
+after offline verification. Later read-only run `36659032071` qualified all six
+families at source `789de777`, attempt 1; that evidence remains bound to that
+source and does not qualify later changes. Fresh run `38123062934` at `45daf916`,
+attempt 1, completed with 13 successful, nine failed and 33 skipped checks. Its
+six candidates and Linux fixture succeeded, but all seven Linux qualification
+roles failed before compilation when build-private efsw cloning rejected the
+host-restored cache Git directory for dubious ownership. Static analysis
+independently rejected C varargs and ignored C output results in the optional
+search-start trace. Coverage and CodeQL profile receipts cannot replace those
+failed roles; the aggregate Gate stopped before artifact downloads and issued
+no six-family qualification. Production signed pins remain unchanged and stale.
 
 Ordinary ADB source transport is a separate, automatic **bounded bytes-only**
 path for ordinary `pull_request` and canonical `master` push (including a squash
@@ -376,6 +384,31 @@ Ordinary CI never builds an environment image. Two consumption shapes exist:
   closed without it. Host provisioning (apt installs, agent-setup) must not
   reappear in these jobs; the image already carries the compilers, analysis
   tools, Qt, and Boost, and only the shared CPM source cache is restored on top.
+
+Build-private efsw preparation has a distinct Git ownership boundary. It first
+verifies the approved shared-cache source digest, canonicalizes the cache path,
+and requires ordinary, non-redirected Git metadata. The clone trusts only that
+cache's exact `.git` directory, not its worktree, parent, or a wildcard. A plain
+command-line `-c` exception is insufficient on older Git transports: their
+`upload-pack` child can lose command configuration and reject the source again.
+
+Preparation writes an owned temporary protected configuration beside its private
+staging checkout: an empty `safe.directory` reset followed by the exact verified
+Git-directory entry. Bounded config-writing commands run inside that owned
+context with a private-parent discovery ceiling and repository-selector variables
+unset, so an unrelated or unmapped caller worktree cannot affect file creation.
+Only the clone process selects this file through
+`GIT_CONFIG_GLOBAL`; inherited command-configuration parameters/count are unset
+for that invocation. This is process-scoped selection of a **GLOBAL-scope input
+file**, not an in-memory exception or modification of the user's/system's
+persistent configuration. It replaces user-global settings for the offline local
+clone and its children, without persisting trust in the cloned repository.
+
+The temporary context is removed before checkout on normal clone completion or
+handled failure. Abrupt process termination can leave uniquely named private
+residue; later preparation must not reuse or overwrite it. The shared cache stays
+unchanged, and the detached private checkout must still match the pinned revision
+and clean tree digest before private patching and final-tree verification.
 
 The CodeQL job additionally fetches the official CLI bundle pinned in
 `ci/environments/role-materials.json` via `scripts/fetch_codeql_bundle.py`,

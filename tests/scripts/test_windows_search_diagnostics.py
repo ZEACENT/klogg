@@ -34,6 +34,96 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                 self.assertIn('"' + phase + '"', source)
         self.assertNotIn('qputenv( "KLOGG_TEST_TRACE_SEARCH_STARTS"', source)
 
+    def test_search_start_writer_is_typed_checked_immediate_and_exception_contained(self):
+        source = (ROOT / "src/logdata/src/logfiltereddataworker.cpp").read_text()
+        start = source.index("void traceSearchStart(")
+        trace = source[start:source.index("\nstruct PartialSearchResults", start)]
+        self.assertRegex(trace, r"static const bool enabled\s*=\s*qEnvironmentVariableIsSet")
+        self.assertRegex(trace, r"if\s*\(\s*!enabled\s*\)\s*\{\s*return;\s*\}")
+        disabled_return = trace.index("return;")
+        formatting = trace.index("std::ostringstream")
+        locking = trace.index("std::lock_guard<std::mutex>")
+        self.assertLess(disabled_return, formatting)
+        self.assertLess(disabled_return, locking)
+        self.assertLess(trace.index("try {"), formatting)
+        self.assertIn("std::locale::classic()", trace)
+        self.assertRegex(trace, r'<<\s*"Search start "\s*<<\s*phase\s*<<\s*" generation "\s*<<\s*generation')
+        self.assertRegex(trace, r'<<\s*" operation "\s*<<\s*operationId\s*<<\s*" type "\s*<<\s*type\s*<<\s*\'\\n\'')
+        self.assertIn("static std::mutex", trace)
+        self.assertIn("std::cerr.rdbuf()", trace)
+        self.assertRegex(trace, r"if\s*\(\s*!buffer\s*\)\s*\{\s*return;\s*\}")
+        self.assertRegex(trace, r"if\s*\(\s*buffer->sputn\([^;]+\)\s*!=\s*size\s*\)\s*\{\s*return;\s*\}")
+        self.assertRegex(trace, r"if\s*\(\s*buffer->pubsync\(\)\s*!=\s*0\s*\)\s*\{\s*return;\s*\}")
+        self.assertEqual(trace.count("sputn("), 1)
+        self.assertEqual(trace.count("pubsync()"), 1)
+        self.assertLess(locking, trace.index("sputn("))
+        self.assertRegex(trace, r"catch\s*\(\s*\.\.\.\s*\)\s*\{[^}]*\}")
+        self.assertNotRegex(trace, r"\b(?:fprintf|fflush|printf|fputs|sync_with_stdio)\s*\(")
+        self.assertNotRegex(trace, r"std::cerr\s*<<|std::cerr\.(?:flags|imbue|exceptions|tie|setf)\s*\(")
+        self.assertNotIn("NOLINT", trace)
+
+    def test_search_start_behavior_has_isolated_fresh_process_native_coverage(self):
+        units = (ROOT / "tests/unit/CMakeLists.txt").read_text()
+        self.assertIn("foreach(_klogg_trace_mode enabled empty absent)", units)
+        self.assertIn('"--unset=KLOGG_TEST_TRACE_SEARCH_STARTS"', units)
+        self.assertFalse('"KLOGG_TEST_TRACE_SEARCH_STARTS="' in units,
+                         "empty mode must not use the old CMake Windows _wputenv projection")
+        self.assertIn('"KLOGG_TEST_TRACE_SEARCH_STARTS=0"', units)
+        self.assertIn('"[.search-start-enabled]"', units)
+        self.assertIn('"[.search-start-absent]"', units)
+        self.assertIn("klogg_set_test_isolation(${_klogg_trace_test})", units)
+        native = (ROOT / "tests/unit/logfiltereddataworker_test.cpp").read_text()
+        self.assertIn("std::numeric_limits<quint64>::max()", native)
+        self.assertIn("worker.shutdownAndWait()", native)
+        self.assertIn("worker.search(", native)
+        self.assertIn("flushedBeforeReturn", native)
+        self.assertIn("hasExpectedFullRequest", native)
+        for failure in ("ShortWrite", "RejectWrite", "FailedSync", "ThrowWrite", "ThrowSync"):
+            with self.subTest(failure=failure):
+                self.assertIn("SearchTraceBuffer::Failure::" + failure, native)
+
+    def test_empty_search_start_environment_uses_explicit_qt_child_block(self):
+        units = (ROOT / "tests/unit/CMakeLists.txt").read_text()
+        # Windows CMake before 4.2 removes NAME= through _wputenv. This contract
+        # checks the source-based defect; it is not an executed Windows ABI test.
+        self.assertFalse('"KLOGG_TEST_TRACE_SEARCH_STARTS="' in units,
+                         "empty mode must not use the old CMake Windows _wputenv projection")
+        empty_branch = units.split('  if(_klogg_trace_mode STREQUAL "empty")', 1)[1].split(
+            "  else()", 1)[0]
+        self.assertIn("$<TARGET_FILE:search_start_empty_env_launcher>", empty_branch)
+        self.assertIn("$<TARGET_FILE:klogg_tests>", empty_branch)
+        self.assertIn("${_klogg_trace_runtime_env}", empty_branch)
+        self.assertIn('"[.search-start-enabled],[.search-start-empty]"', units)
+        helpers = (ROOT / "tests/helpers/CMakeLists.txt").read_text()
+        helper_start = helpers.index("add_executable(search_start_empty_env_launcher")
+        self.assertLess(helper_start, helpers.index("if(WIN32)"))
+        self.assertIn("Qt${QT_VERSION_MAJOR}::Core project_options project_warnings", helpers)
+        self.assertIn("klogg_configure_test_target(search_start_empty_env_launcher)", helpers)
+        self.assertIn("add_dependencies(klogg_tests search_start_empty_env_launcher)", units)
+        launcher = (ROOT / "tests/helpers/search_start_empty_env_launcher.cpp").read_text()
+        self.assertIn("QProcessEnvironment::systemEnvironment()", launcher)
+        self.assertRegex(launcher, r'environment\.insert\(\s*QStringLiteral\(\s*"KLOGG_TEST_TRACE_SEARCH_STARTS"\s*\),\s*QStringLiteral\(\s*""\s*\)\s*\)')
+        self.assertEqual(launcher.count("environment.insert("), 1)
+        self.assertIn("child.setProcessEnvironment( environment )", launcher)
+        self.assertIn("QProcess::ForwardedChannels", launcher)
+        self.assertIn("child.setWorkingDirectory( QDir::currentPath() )", launcher)
+        self.assertIn("constexpr int StartTimeoutMs = 5000;", launcher)
+        self.assertIn("constexpr int RunTimeoutMs = 60000;", launcher)
+        self.assertIn("constexpr int CleanupTimeoutMs = 2000;", launcher)
+        self.assertIn("child.waitForStarted( StartTimeoutMs )", launcher)
+        self.assertIn("child.waitForFinished( RunTimeoutMs )", launcher)
+        self.assertIn("child.terminate()", launcher)
+        self.assertIn("child.kill()", launcher)
+        self.assertIn("child.waitForFinished( CleanupTimeoutMs )", launcher)
+        self.assertIn("child.exitStatus() != QProcess::NormalExit", launcher)
+        self.assertIn("return child.exitCode()", launcher)
+        self.assertNotRegex(launcher, r"\b(?:qputenv|setenv|_wputenv|SetEnvironmentVariableW)\s*\(")
+        self.assertNotIn("QT_VERSION", launcher)
+        native = (ROOT / "tests/unit/logfiltereddataworker_test.cpp").read_text()
+        precondition = native.split('"[.search-start-empty]"', 1)[1].split("\n}", 1)[0]
+        self.assertIn('REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) )', precondition)
+        self.assertIn('REQUIRE( qgetenv( "KLOGG_TEST_TRACE_SEARCH_STARTS" ).isEmpty() )', precondition)
+
     def test_first_chance_evidence_precedes_stackwalk_and_preserves_exception(self):
         source = (ROOT / "tests/helpers/crash_trace.cpp").read_text()
         handler = source[source.index("LONG CALLBACK firstChanceCrashTrace"):]
