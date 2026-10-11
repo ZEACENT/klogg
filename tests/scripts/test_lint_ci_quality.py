@@ -174,6 +174,7 @@ VERIFIED_OPENSSL_JOB = '''  PrefetchOpenSsl:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/prefetch_artifacts"
           python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --acquire
 
       - name: Verify complete OpenSSL archive before publication
@@ -238,6 +239,19 @@ class OpenSslPolicyTest(unittest.TestCase):
         self.assertEqual(MODULE.ci_build_openssl_issues(verified_openssl_workflow()), [])
         self.assertEqual(MODULE.ci_build_openssl_issues(
             (ROOT / ".github/workflows/ci-build.yml").read_text()), [])
+
+    def test_acquisition_requires_existing_archive_parent_before_helper(self):
+        workflow = verified_openssl_workflow()
+        command = '          mkdir -p "$GITHUB_WORKSPACE/prefetch_artifacts"\n'
+        self.assertIn(command, workflow)
+        for changed in (
+            workflow.replace(command, "", 1),
+            workflow.replace(command, command.replace("mkdir", "# mkdir"), 1),
+            workflow.replace(command, command.replace("prefetch_artifacts", "wrong-parent"), 1),
+            workflow.replace(command, command.rstrip("\n") + " || true\n", 1),
+        ):
+            with self.subTest(changed=changed[:70]):
+                self.assertTrue(MODULE.ci_build_openssl_issues(changed))
 
     def test_producer_mutations_fail_closed(self):
         workflow = verified_openssl_workflow()

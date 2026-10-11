@@ -44,6 +44,15 @@ missing compatible cache or invalid older v1 artifact can fall back to the
 normal bounded locked-source acquisition path. Master squash reuse may cross
 branches, but conveys only archive bytes, never older receipts or policy.
 
+Producer-event eligibility is separate from canonical provenance. A PR consumer
+accepts only PR producers; a canonical master push accepts PR or push producers.
+After canonical metadata validation, discovery skips excluded producer events
+such as `workflow_dispatch` without downloading their ZIPs. It can then try an
+older eligible artifact or return the existing no-compatible-source status to
+reach locked-source acquisition. Missing/malformed canonical metadata and an
+eligible producer's attempt, digest, or ZIP corruption remain fatal. Dispatch
+artifacts are not admitted by this exclusion rule, and no old receipt is reused.
+
 Every accepted archive must match the current lock's exact file name and **raw**
 SHA-256, within the 536870912-byte aggregate limit, before the original prefetch
 validator checks the closure again with `--offline --max-cache-bytes 536870912`.

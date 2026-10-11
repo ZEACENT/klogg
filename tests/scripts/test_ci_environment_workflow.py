@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -68,7 +69,193 @@ def event_expression(expression, event, environment_mode, dependency_mode="off",
     return eval(compile(parsed, "<event projection>", "eval"), {"__builtins__": {}})
 
 
+def adb_prefetch_fixture_adapter(arguments):
+    """Inject local bytes and Actions seams while executing the real transport CLI."""
+    import test_ci_adb_source_transport as fixtures
+    import prefetch_adb_helper_sources as prefetch
+
+    fixture = fixtures.OrdinarySourceTransportTest()
+    fixture.setUp()
+    try:
+        workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+        fixture.repo = workspace
+        fixture.lock = workspace / "packaging/adb/adb-helper.lock.json"
+        fixture.env = dict(os.environ)
+        scenario = os.environ["KLOGG_ADB_TEST_SCENARIO"]
+        fixture.artifacts.insert(0, fixture.artifact(102, 202, fixture.prior))
+        fixture.producer_events({202: "workflow_dispatch", 201:
+                                "push" if scenario == "no-eligible" else "pull_request"})
+        if scenario == "corrupt-dispatch":
+            original = fixture.metadata
+            def metadata(path):
+                result = original(path)
+                return {**result, "path": "substituted.yml"} if path.endswith("/runs/202") else result
+            fixture.metadata = metadata
+        elif scenario not in {"older-pr", "no-eligible"}:
+            raise AssertionError("unexpected fixture scenario")
+
+        source_root = workspace / "prefetch_artifacts/adb-helper-sources"
+        common = ["--lock", "packaging/adb/adb-helper.lock.json",
+                  "--download-root", "prefetch_artifacts/adb-helper-sources"]
+        budget = ["--max-cache-bytes", "536870912"]
+        calls = workspace / "helper-calls.jsonl"
+        with calls.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(arguments) + "\n")
+
+        def offline(lock, directory):
+            fixture.validate(lock, directory)
+            with mock.patch.object(sys, "argv", ["prefetch_adb_helper_sources.py", "--lock", str(lock),
+                                   "--download-root", str(directory), "--offline", *budget]):
+                fixture.assertEqual(prefetch.main(), 0)
+
+        if arguments[0] == "scripts/ci_adb_source_transport.py":
+            fixture.assertEqual(arguments[1:], ["--lock", common[1], "--repo-root", str(workspace),
+                                               "--download-root", common[3]])
+            discover = fixtures.transport.discover
+            def injected_discover(lock, repo, output):
+                fixture.assertEqual(pathlib.Path(lock).resolve(), fixture.lock)
+                fixture.assertEqual(pathlib.Path(repo).resolve(), fixture.repo)
+                fixture.assertEqual(pathlib.Path(output).resolve(), source_root)
+                return discover(lock, repo, output, environ=fixture.env, metadata=fixture.metadata,
+                                git_runner=fixture.git, download=fixture.download, validator=offline)
+            with mock.patch.object(sys, "argv", arguments), mock.patch.object(
+                    fixtures.transport, "discover", side_effect=injected_discover):
+                status = fixtures.transport.main()
+            (workspace / "transport-result.json").write_text(json.dumps({
+                "status": status, "queries": fixture.queries, "downloads": fixture.downloaded}),
+                encoding="utf-8")
+            return status
+        if arguments[0] == "scripts/prefetch_adb_source_closure.py":
+            fixture.assertEqual(arguments[1:], common + ["--workers", "2"] + budget)
+            fixture.assertFalse(source_root.exists())
+            records = prefetch.validated_records(json.loads(fixture.lock.read_text()),
+                                                 require_download_urls=False)
+            fixture.assertEqual([record["archive_file"] for record in records], ["src.tar.gz"])
+            source_root.mkdir(parents=True)
+            (source_root / records[0]["archive_file"]).write_bytes(fixture.data)
+        elif arguments[0] == "scripts/prefetch_adb_helper_sources.py":
+            fixture.assertEqual(arguments[1:], common + ["--offline"] + budget)
+            fixture.assertTrue(source_root.is_dir())
+        else:
+            raise AssertionError("unexpected helper invocation")
+        offline(fixture.lock, source_root)
+        return 0
+    finally:
+        fixture.doCleanups()
+
+
+class AdbPrefetchWorkflowBoundaryTest(unittest.TestCase):
+    def test_actual_cold_prefetch_chain_classifies_mixed_event_inventory(self):
+        import test_ci_adb_source_transport as fixtures
+
+        rows = [QUALITY.workflow_step_fields(step) for step in
+                QUALITY.workflow_job_steps(CI_BUILD.read_text())["PrefetchAdbHelperSources"]]
+        fields, _ = next(row for row in rows if row[0].get("name") == "Prefetch and hash immutable ADB sources")
+        self.assertEqual(fields["shell"], "bash")
+        adapter = '''python3() {
+          "$KLOGG_TEST_PYTHON" -c 'import sys; from test_ci_environment_workflow import adb_prefetch_fixture_adapter; sys.exit(adb_prefetch_fixture_adapter(sys.argv[1:]))' "$@"
+        }
+'''
+        for scenario, status, helper, downloads in (
+            ("older-pr", 0, "scripts/prefetch_adb_helper_sources.py", [101]),
+            ("no-eligible", 2, "scripts/prefetch_adb_source_closure.py", []),
+            ("corrupt-dispatch", 1, None, []),
+        ):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="adb cold workspace ") as scratch:
+                workspace = pathlib.Path(scratch).resolve()
+                fixture = fixtures.OrdinarySourceTransportTest()
+                fixture.setUp()
+                try:
+                    lock = workspace / "packaging/adb/adb-helper.lock.json"
+                    lock.parent.mkdir(parents=True)
+                    lock.write_bytes(fixture.lock.read_bytes())
+                    env = {name: value for name, value in os.environ.items()
+                           if name not in {"GH_TOKEN", "GITHUB_TOKEN"}}
+                    env.update(fixture.env)
+                    env.update(GITHUB_WORKSPACE=str(workspace), KLOGG_TEST_PYTHON=sys.executable,
+                               PYTHONPATH=str(ROOT / "tests/scripts"), KLOGG_ADB_TEST_SCENARIO=scenario,
+                               KLOGG_ADB_SOURCE_EVENT="pull_request", KLOGG_ADB_SOURCE_CACHE_EXACT_KEY="fixture-key",
+                               KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY="", KLOGG_ADB_SOURCE_CACHE_RESTORE_OUTCOME="success",
+                               KLOGG_ADB_SOURCE_CACHE_MAX_BYTES="536870912")
+                    self.assertFalse((workspace / "prefetch_artifacts").exists())
+                    result = subprocess.run(["bash", "-c", adapter + fields["run"]], env=env, cwd=workspace,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 0 if helper else 1, result.stderr)
+                    evidence = json.loads((workspace / "transport-result.json").read_text())
+                    self.assertEqual(evidence["status"], status)
+                    self.assertEqual(evidence["downloads"], downloads)
+                    excluded = (201, 202) if scenario == "no-eligible" else (202,)
+                    for run_id in excluded:
+                        self.assertFalse(any("/runs/{}/attempts/".format(run_id) in query
+                                             for query in evidence["queries"]), evidence)
+                    calls = [json.loads(line) for line in (workspace / "helper-calls.jsonl").read_text().splitlines()]
+                    self.assertEqual([call[0] for call in calls], ["scripts/ci_adb_source_transport.py"]
+                                     + ([helper] if helper else []))
+                    source_root = workspace / "prefetch_artifacts/adb-helper-sources"
+                    if helper:
+                        self.assertEqual((source_root / "src.tar.gz").read_bytes(), fixture.data)
+                        manifest = json.loads((source_root / "adb-helper-prefetch-manifest.json").read_text())
+                        self.assertEqual(manifest["archives"], [{"id": "src", "file": "src.tar.gz",
+                            "sha256": json.loads(lock.read_text())["sources"][0]["archive_sha256"],
+                            "archive_identity": "raw-sha256"}])
+                    else:
+                        self.assertFalse(source_root.exists())
+                        self.assertIn("source artifact lacks canonical run provenance", result.stderr)
+                finally:
+                    fixture.doCleanups()
+
+
 class OpenSslWorkflowBoundaryTest(unittest.TestCase):
+    def test_actual_genuine_miss_chain_acquires_from_a_cold_workspace(self):
+        rows = [QUALITY.workflow_step_fields(step) for step in
+                QUALITY.workflow_job_steps(CI_BUILD.read_text())["PrefetchOpenSsl"]]
+        validation = next(fields for fields, _ in rows if fields.get("id") == "verify-openssl-cache")
+        acquisition = next(fields for fields, _ in rows
+                           if fields.get("name") == "Acquire locked OpenSSL archive on genuine miss")
+        verification = next(fields for fields, _ in rows
+                            if fields.get("name") == "Verify complete OpenSSL archive before publication")
+        self.assertEqual(acquisition["if"], "${{ steps.verify-openssl-cache.outputs.missing == 'true' }}")
+        # Model the helper's existing-parent/no-overwrite acquisition contract.
+        # Execute the actual shell steps; do not precreate their archive parent.
+        helper = '''python3() {
+          "$KLOGG_TEST_PYTHON" -c '
+import pathlib
+import sys
+arguments = sys.argv[1:]
+archive = pathlib.Path(arguments[arguments.index("--archive") + 1])
+if "--acquire" in arguments:
+    if not archive.parent.is_dir():
+        raise SystemExit("archive parent directory does not exist")
+    with archive.open("xb") as output:
+        output.write(b"verified acquisition fixture")
+elif "--verify-only" in arguments:
+    if archive.read_bytes() != b"verified acquisition fixture":
+        raise SystemExit("archive verification failed")
+else:
+    raise SystemExit("unexpected helper mode")
+' "$@"
+        }
+'''
+        for hit in ("", "false"):
+            with self.subTest(cache_hit=hit), tempfile.TemporaryDirectory(prefix="openssl cold workspace ") as scratch:
+                root = pathlib.Path(scratch)
+                archive = root / "prefetch_artifacts/openssl.zip"
+                output = root / "output"
+                output.touch()
+                self.assertFalse(archive.parent.exists())
+                env = {name: value for name, value in os.environ.items() if name not in {"GH_TOKEN", "GITHUB_TOKEN"}}
+                env.update(GITHUB_WORKSPACE=str(root), GITHUB_OUTPUT=str(output),
+                           KLOGG_OPENSSL_CACHE_HIT=hit, KLOGG_TEST_PYTHON=sys.executable)
+                for stage, fields in (("cache validation", validation), ("acquisition", acquisition),
+                                      ("offline verification", verification)):
+                    if stage == "acquisition":
+                        self.assertEqual(output.read_text(), "missing=true\n")
+                        self.assertFalse(archive.parent.exists())
+                    result = subprocess.run(["bash", "-c", helper + fields["run"]], env=env,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, stage + ": " + result.stderr)
+                self.assertEqual(archive.read_bytes(), b"verified acquisition fixture")
+
     def test_actual_cache_validation_only_allows_genuine_absence_to_acquire(self):
         rows = [QUALITY.workflow_step_fields(step) for step in
                 QUALITY.workflow_job_steps(CI_BUILD.read_text())["PrefetchOpenSsl"]]

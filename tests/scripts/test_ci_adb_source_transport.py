@@ -165,6 +165,123 @@ class OrdinarySourceTransportTest(unittest.TestCase):
         self.assertEqual(self.discover(), 0)
         self.assertEqual(self.downloaded, [101])
 
+    def producer_events(self, events):
+        original = self.metadata
+        endpoints = {"/runs/" + str(run_id): event for run_id, event in events.items()}
+        def metadata(path):
+            result = original(path)
+            for endpoint, event in endpoints.items():
+                if path.endswith(endpoint):
+                    return {**result, "event": event}
+            return result
+        self.metadata = metadata
+
+    def assert_no_producer_queries(self, run_ids):
+        for run_id in run_ids:
+            self.assertFalse(any("/runs/{}/attempts/".format(run_id) in path
+                                 for path in self.queries), self.queries)
+
+    def test_newest_dispatch_skips_to_older_pr_without_consuming_download_slots(self):
+        self.artifacts.extend(self.artifact(102 + n, 202 + n, self.prior)
+                              for n in range(3))
+        self.producer_events({202 + n: "workflow_dispatch" for n in range(3)})
+        with mock.patch.object(transport, "MAX_ZIP_DOWNLOADS", 1):
+            self.assertEqual(self.discover(), 0)
+        self.assertEqual(self.downloaded, [101])
+        self.assert_no_producer_queries((202, 203, 204))
+        self.assertEqual((self.root / "download/src.tar.gz").read_bytes(), self.data)
+
+    def test_dispatch_only_returns_two_without_output_or_attempt_queries(self):
+        self.producer_events({201: "workflow_dispatch"})
+        self.assertEqual(self.discover(), 2)
+        self.assert_no_producer_queries((201,))
+        self.assertEqual(self.downloaded, [])
+        self.assertFalse((self.root / "download").exists())
+
+    def test_pr_consumer_skips_push_producer(self):
+        self.producer_events({201: "push"})
+        self.assertEqual(self.discover(), 2)
+        self.assert_no_producer_queries((201,))
+        self.assertEqual(self.downloaded, [])
+        self.assertFalse((self.root / "download").exists())
+
+    def test_excluded_dispatch_canonical_corruption_remains_fatal_before_skip(self):
+        original = self.metadata
+        self.artifacts.append(self.artifact(100, 202, self.prior))
+        mutations = ({"id": 999}, {"head_sha": "d" * 40}, {"head_branch": "other"},
+                     {"path": ".github/workflows/other.yml"}, {"run_attempt": 0},
+                     {"run_attempt": True}, {"run_attempt": "1"},
+                     {"repository": {"id": 12, "full_name": cache.REPOSITORY}},
+                     {"repository": {"id": 11, "full_name": "fork/klogg"}},
+                     {"head_repository": {"id": 12, "full_name": cache.REPOSITORY}},
+                     {"head_repository": {"id": 11, "full_name": "fork/klogg"}})
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                def metadata(path):
+                    result = original(path)
+                    if path.endswith("/runs/201"):
+                        return {**result, "event": "workflow_dispatch", **mutation}
+                    return result
+                self.metadata = metadata
+                with self.assertRaisesRegex(cache.SourceCacheError, "canonical run provenance"):
+                    self.discover()
+                self.assert_no_producer_queries((201, 202))
+                self.assertNotIn("repos/" + cache.REPOSITORY + "/actions/runs/202", self.queries)
+                self.assertEqual(self.downloaded, [])
+                self.assertFalse((self.root / "download").exists())
+
+    def test_malformed_producer_events_are_fatal_without_older_fallback(self):
+        original = self.metadata
+        self.artifacts.append(self.artifact(100, 202, self.prior))
+        for event in (None, 1, True, [], "", " ", "\t", " pull_request", "workflow_dispatch "):
+            with self.subTest(event=event):
+                def metadata(path):
+                    result = original(path)
+                    return {**result, "event": event} if path.endswith("/runs/201") else result
+                self.metadata = metadata
+                with self.assertRaisesRegex(cache.SourceCacheError, "producer event is malformed"):
+                    self.discover()
+                self.assert_no_producer_queries((201, 202))
+                self.assertNotIn("repos/" + cache.REPOSITORY + "/actions/runs/202", self.queries)
+                self.assertEqual(self.downloaded, [])
+                self.assertFalse((self.root / "download").exists())
+        def missing_event(path):
+            result = original(path)
+            if path.endswith("/runs/201"):
+                result.pop("event")
+            return result
+        self.metadata = missing_event
+        with self.assertRaisesRegex(cache.SourceCacheError, "producer event is malformed"):
+            self.discover()
+        self.assert_no_producer_queries((201, 202))
+        self.assertNotIn("repos/" + cache.REPOSITORY + "/actions/runs/202", self.queries)
+        self.assertEqual(self.downloaded, [])
+        self.assertFalse((self.root / "download").exists())
+
+    def test_eligible_incomplete_attempt_is_fatal_without_older_fallback(self):
+        self.artifacts.append(self.artifact(100, 202, self.prior))
+        original = self.metadata
+        def metadata(path):
+            result = original(path)
+            return {**result, "head_sha": "d" * 40} if path.endswith("/runs/201/attempts/1") else result
+        self.metadata = metadata
+        with self.assertRaisesRegex(cache.SourceCacheError, "attempt provenance"):
+            self.discover()
+        self.assertEqual(self.downloaded, [])
+        self.assert_no_producer_queries((202,))
+        self.assertNotIn("repos/" + cache.REPOSITORY + "/actions/runs/202", self.queries)
+        self.assertFalse((self.root / "download").exists())
+
+    def test_eligible_raw_zip_hash_mismatch_is_fatal_without_older_fallback(self):
+        self.artifacts.append(self.artifact(100, 202, self.prior))
+        self.artifacts[0]["digest"] = "sha256:" + "0" * 64
+        with self.assertRaises(cache.SourceCacheError):
+            self.discover()
+        self.assertEqual(self.downloaded, [101])
+        self.assert_no_producer_queries((202,))
+        self.assertNotIn("repos/" + cache.REPOSITORY + "/actions/runs/202", self.queries)
+        self.assertFalse((self.root / "download").exists())
+
     def test_branch_validation_matches_git_for_representative_safe_and_unsafe_refs(self):
         branches = ("feature+cache@v2", "topic/option+debug", "worktree-master-ci-fail",
                     "feature@id", "unrelated..invalid", "foo.lock", "foo/.bar",

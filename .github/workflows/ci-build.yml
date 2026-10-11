@@ -438,6 +438,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/prefetch_artifacts"
           python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --acquire
 
       - name: Verify complete OpenSSL archive before publication

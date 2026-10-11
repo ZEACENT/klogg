@@ -157,10 +157,15 @@ def _producer(artifact: dict, run: dict, run_id: int, prior: str,
             and origin.get("id") == run_id and origin.get("head_sha") == prior
             and origin.get("head_branch") == branch
             and run.get("head_sha") == prior and run.get("head_branch") == branch
-            and run.get("event") in ({"pull_request"} if event == "pull_request" else {"pull_request", "push"})
             and run.get("path") == cache.WORKFLOW
             and type(run.get("run_attempt")) is int and run["run_attempt"] > 0,
             "source artifact lacks canonical run provenance")
+    producer_event = run.get("event")
+    require(isinstance(producer_event, str) and bool(producer_event)
+            and producer_event == producer_event.strip(),
+            "source artifact producer event is malformed")
+    if producer_event not in ({"pull_request"} if event == "pull_request" else {"pull_request", "push"}):
+        return False
     prefix = "repos/" + cache.REPOSITORY + "/actions/runs/" + str(run_id)
     for number in range(run["run_attempt"], max(0, run["run_attempt"] - MAX_ATTEMPTS), -1):
         check_deadline()

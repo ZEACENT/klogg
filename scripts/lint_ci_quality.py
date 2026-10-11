@@ -1915,7 +1915,7 @@ def ci_build_openssl_issues(text: str) -> list[str]:
          {"env": {"KLOGG_OPENSSL_CACHE_HIT": "${{ steps.cache-openssl-prefetch.outputs.cache-hit }}"}}),
         ({"name": "Acquire locked OpenSSL archive on genuine miss", "shell": "bash",
           "if": "${{ steps.verify-openssl-cache.outputs.missing == 'true' }}",
-          "run": "set -euo pipefail\n" + command + " --acquire"},
+          "run": 'set -euo pipefail\nmkdir -p "$GITHUB_WORKSPACE/prefetch_artifacts"\n' + command + " --acquire"},
          {"env": {"GH_TOKEN": "${{ github.token }}"}}),
         ({"name": "Verify complete OpenSSL archive before publication", "shell": "bash",
           "run": "set -euo pipefail\n" + command + " --verify-only"}, {}),
