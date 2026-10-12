@@ -26,7 +26,45 @@ endif()
 get_filename_component(CACHE_SOURCE "${CACHE_SOURCE}" ABSOLUTE)
 get_filename_component(DESTINATION "${DESTINATION}" ABSOLUTE)
 
+# Standalone script mode does not inherit a sibling directory's interpreter.
+# Validate the explicit host prerequisite before starting any Git operation.
+if(NOT DEFINED PREPARE_PYTHON_EXECUTABLE OR "${PREPARE_PYTHON_EXECUTABLE}" STREQUAL "")
+  find_package(Python3 3.8 QUIET COMPONENTS Interpreter)
+  if(NOT Python3_Interpreter_FOUND)
+    message(FATAL_ERROR "efsw preparation requires a host Python interpreter >= 3.8")
+  endif()
+  set(PREPARE_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
+endif()
+if(NOT IS_ABSOLUTE "${PREPARE_PYTHON_EXECUTABLE}")
+  message(FATAL_ERROR "efsw preparation Python interpreter must be an absolute path")
+endif()
+if(NOT EXISTS "${PREPARE_PYTHON_EXECUTABLE}" OR IS_DIRECTORY "${PREPARE_PYTHON_EXECUTABLE}")
+  message(FATAL_ERROR "efsw preparation Python interpreter is unavailable: '${PREPARE_PYTHON_EXECUTABLE}'")
+endif()
+get_filename_component(_git_owner_script
+                       "${CMAKE_CURRENT_LIST_DIR}/../scripts/prepare_efsw_git.py" ABSOLUTE)
+execute_process(
+  COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}" --check-interpreter
+  RESULT_VARIABLE _interpreter_result
+  OUTPUT_QUIET
+  ERROR_VARIABLE _interpreter_error
+)
+if(NOT _interpreter_result EQUAL 0)
+  message(FATAL_ERROR
+          "efsw preparation Python interpreter check failed: ${_interpreter_error}")
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/verify_pinned_source.cmake")
+_klogg_owned_git_startup_arguments(_git_startup_arguments)
+
+# Status 5 means family quiescence was not established. Never delete or publish
+# private state that an incompletely contained command may still be using.
+function(_klogg_prepare_require_owned_completion result diagnostic)
+  if("${result}" STREQUAL "5")
+    message(FATAL_ERROR
+            "Owned ${DEPENDENCY} Git cleanup incomplete; preserving private source state: ${diagnostic}")
+  endif()
+endfunction()
 
 # A shared cache may be clean or contain a previously approved patch series.
 # The clone and detached checkout below intentionally use its pinned commit,
@@ -35,6 +73,9 @@ klogg_require_pinned_source(
   "${DEPENDENCY}"
   "${CACHE_SOURCE}"
   "${EXPECTED_REVISION}"
+  GIT_OWNER "${_git_owner_script}"
+  PYTHON_EXECUTABLE "${PREPARE_PYTHON_EXECUTABLE}"
+  GIT_TIMEOUT "${GIT_TIMEOUT}"
   ${APPROVED_CACHE_TREE_HASHES}
 )
 get_filename_component(CACHE_SOURCE "${CACHE_SOURCE}" REALPATH)
@@ -126,39 +167,45 @@ if(EXISTS "${DESTINATION}")
   endif()
   get_filename_component(_expected_git_dir "${DESTINATION}/.git" ABSOLUTE)
   execute_process(
-    COMMAND git -C "${DESTINATION}" rev-parse --show-toplevel
+    COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+            ${_git_startup_arguments}
+            --timeout "${GIT_TIMEOUT}" --operation inherit -- -C "${DESTINATION}" rev-parse --show-toplevel
     RESULT_VARIABLE _destination_top_level_result
     OUTPUT_VARIABLE _destination_top_level
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    TIMEOUT ${GIT_TIMEOUT}
+    ERROR_VARIABLE _destination_top_level_error
   )
+  _klogg_prepare_require_owned_completion("${_destination_top_level_result}" "${_destination_top_level_error}")
   if(NOT _destination_top_level_result EQUAL 0
      OR NOT "${_destination_top_level}" STREQUAL "${DESTINATION}")
     message(FATAL_ERROR
             "${DEPENDENCY} private destination Git worktree is not private: '${DESTINATION}'")
   endif()
   execute_process(
-    COMMAND git -C "${DESTINATION}" rev-parse --absolute-git-dir
+    COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+            ${_git_startup_arguments}
+            --timeout "${GIT_TIMEOUT}" --operation inherit -- -C "${DESTINATION}" rev-parse --absolute-git-dir
     RESULT_VARIABLE _destination_git_dir_result
     OUTPUT_VARIABLE _destination_git_dir
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    TIMEOUT ${GIT_TIMEOUT}
+    ERROR_VARIABLE _destination_git_dir_error
   )
+  _klogg_prepare_require_owned_completion("${_destination_git_dir_result}" "${_destination_git_dir_error}")
   if(NOT _destination_git_dir_result EQUAL 0
      OR NOT "${_destination_git_dir}" STREQUAL "${_expected_git_dir}")
     message(FATAL_ERROR
             "${DEPENDENCY} private destination Git metadata is not private: '${DESTINATION}'")
   endif()
   execute_process(
-    COMMAND git -C "${DESTINATION}" rev-parse HEAD
+    COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+            ${_git_startup_arguments}
+            --timeout "${GIT_TIMEOUT}" --operation inherit -- -C "${DESTINATION}" rev-parse HEAD
     RESULT_VARIABLE _destination_revision_result
     OUTPUT_VARIABLE _destination_revision
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    TIMEOUT ${GIT_TIMEOUT}
+    ERROR_VARIABLE _destination_revision_error
   )
+  _klogg_prepare_require_owned_completion("${_destination_revision_result}" "${_destination_revision_error}")
   if(NOT _destination_revision_result EQUAL 0)
     message(FATAL_ERROR
             "${DEPENDENCY} private destination does not retain usable Git metadata: '${DESTINATION}'")
@@ -185,6 +232,9 @@ if(EXISTS "${DESTINATION}")
     "${DEPENDENCY}"
     "${DESTINATION}"
     "${EXPECTED_REVISION}"
+    GIT_OWNER "${_git_owner_script}"
+    PYTHON_EXECUTABLE "${PREPARE_PYTHON_EXECUTABLE}"
+    GIT_TIMEOUT "${GIT_TIMEOUT}"
   )
   message(STATUS "${DEPENDENCY} private source already prepared for patch series")
   return()
@@ -227,41 +277,44 @@ set(_clone_config_file "${_clone_config_context}/gitconfig")
 # its owned context, with discovery bounded before any caller repository and
 # without inherited Git-directory redirects; preserve the caller elsewhere.
 execute_process(
-  COMMAND "${CMAKE_COMMAND}" -E env --unset=GIT_DIR --unset=GIT_WORK_TREE --unset=GIT_COMMON_DIR
-          "GIT_CEILING_DIRECTORIES=${_destination_parent}"
-          git config --file "${_clone_config_file}" --add safe.directory ""
+  COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+          ${_git_startup_arguments}
+          --timeout "${GIT_TIMEOUT}" --operation config --ceiling "${_destination_parent}"
+          -- config --file "${_clone_config_file}" --add safe.directory ""
   WORKING_DIRECTORY "${_clone_config_context}"
   RESULT_VARIABLE _config_result
   ERROR_VARIABLE _config_error
-  TIMEOUT ${GIT_TIMEOUT}
 )
+_klogg_prepare_require_owned_completion("${_config_result}" "${_config_error}")
 if(NOT _config_result EQUAL 0)
   file(REMOVE_RECURSE "${_clone_config_context}" "${_staging_directory}")
   message(FATAL_ERROR "Failed to configure ${DEPENDENCY} cache clone trust reset: ${_config_error}")
 endif()
 execute_process(
-  COMMAND "${CMAKE_COMMAND}" -E env --unset=GIT_DIR --unset=GIT_WORK_TREE --unset=GIT_COMMON_DIR
-          "GIT_CEILING_DIRECTORIES=${_destination_parent}"
-          git config --file "${_clone_config_file}" --add safe.directory "${CACHE_SOURCE}/.git"
+  COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+          ${_git_startup_arguments}
+          --timeout "${GIT_TIMEOUT}" --operation config --ceiling "${_destination_parent}"
+          -- config --file "${_clone_config_file}" --add safe.directory "${CACHE_SOURCE}/.git"
   WORKING_DIRECTORY "${_clone_config_context}"
   RESULT_VARIABLE _config_result
   ERROR_VARIABLE _config_error
-  TIMEOUT ${GIT_TIMEOUT}
 )
+_klogg_prepare_require_owned_completion("${_config_result}" "${_config_error}")
 if(NOT _config_result EQUAL 0)
   file(REMOVE_RECURSE "${_clone_config_context}" "${_staging_directory}")
   message(FATAL_ERROR "Failed to configure ${DEPENDENCY} cache clone trust path: ${_config_error}")
 endif()
 
 execute_process(
-  COMMAND "${CMAKE_COMMAND}" -E env --unset=GIT_CONFIG_PARAMETERS --unset=GIT_CONFIG_COUNT
-          "GIT_CONFIG_GLOBAL=${_clone_config_file}"
-          git -c core.autocrlf=false clone --config core.autocrlf=false
+  COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+          ${_git_startup_arguments}
+          --timeout "${GIT_TIMEOUT}" --operation clone --global-config "${_clone_config_file}"
+          -- -c core.autocrlf=false clone --config core.autocrlf=false
           --no-hardlinks --no-checkout "${CACHE_SOURCE}" "${_staging_directory}"
   RESULT_VARIABLE _clone_result
   ERROR_VARIABLE _clone_error
-  TIMEOUT ${GIT_TIMEOUT}
 )
+_klogg_prepare_require_owned_completion("${_clone_result}" "${_clone_error}")
 # Also remove a Git config lock left by a handled failure. Abrupt termination
 # can leave private residue; allocation above never reuses an occupied context.
 file(REMOVE_RECURSE "${_clone_config_context}")
@@ -272,12 +325,15 @@ if(NOT _clone_result EQUAL 0)
 endif()
 
 execute_process(
-  COMMAND git -c core.autocrlf=false -C "${_staging_directory}" checkout --detach
+  COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+          ${_git_startup_arguments}
+          --timeout "${GIT_TIMEOUT}" --operation inherit
+          -- -c core.autocrlf=false -C "${_staging_directory}" checkout --detach
           "${EXPECTED_REVISION}"
   RESULT_VARIABLE _checkout_result
   ERROR_VARIABLE _checkout_error
-  TIMEOUT ${GIT_TIMEOUT}
 )
+_klogg_prepare_require_owned_completion("${_checkout_result}" "${_checkout_error}")
 if(NOT _checkout_result EQUAL 0)
   file(REMOVE_RECURSE "${_staging_directory}")
   message(FATAL_ERROR
@@ -285,13 +341,15 @@ if(NOT _checkout_result EQUAL 0)
 endif()
 
 execute_process(
-  COMMAND git -C "${_staging_directory}" rev-parse HEAD
+  COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+          ${_git_startup_arguments}
+          --timeout "${GIT_TIMEOUT}" --operation inherit -- -C "${_staging_directory}" rev-parse HEAD
   RESULT_VARIABLE _staged_revision_result
   OUTPUT_VARIABLE _staged_revision
   OUTPUT_STRIP_TRAILING_WHITESPACE
-  ERROR_QUIET
-  TIMEOUT ${GIT_TIMEOUT}
+  ERROR_VARIABLE _staged_revision_error
 )
+_klogg_prepare_require_owned_completion("${_staged_revision_result}" "${_staged_revision_error}")
 if(NOT _staged_revision_result EQUAL 0
    OR NOT "${_staged_revision}" STREQUAL "${EXPECTED_REVISION}")
   file(REMOVE_RECURSE "${_staging_directory}")

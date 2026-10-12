@@ -25,7 +25,13 @@ To build Klogg:
 - CMake 3.14 or later to generate build files
 - A C++17 compiler compatible with the selected Qt and dependency versions;
   prefer the toolchains used by the current CI matrix over historical minimums.
-- Git and Python 3 for source/dependency and helper verification tooling.
+- Git and Python 3.8 or later for source/dependency and helper verification
+  tooling. Build-private source preparation passes the selected host interpreter
+  explicitly to its Git process owner; no interpreter is bundled or downloaded.
+- Native Windows source-build hosts need Windows 10 or Windows Server 2016 or
+  later for atomic Job Object assignment before Git can create descendants.
+  Unsupported containment fails closed. This build-time prerequisite does not
+  redefine the application's deployment target.
 - Qt 5 or Qt 6 development libraries. Regular downloaded-Qt CI jobs use Qt
   6.9.3; Windows x86 compatibility uses Qt 5.15.2, and Linux's instrumented-Qt
   ThreadSanitizer job uses Qt 5.15.19. Linux distribution builds use their

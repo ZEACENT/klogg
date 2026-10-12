@@ -23,7 +23,14 @@ add_dependencies(klogg_itests file_write_helper)
 # klogg_configure_test_target(), keeping CI and coverage build scope aligned.
 add_dependencies(ci_build klogg_test_build)
 
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
+find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+
+add_test(
+  NAME prepare_efsw_git_contract
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/scripts/test_prepare_efsw_git.py"
+)
+set_tests_properties(prepare_efsw_git_contract PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(prepare_efsw_git_contract)
 
 if(WIN32)
   add_test(

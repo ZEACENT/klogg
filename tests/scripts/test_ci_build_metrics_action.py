@@ -82,7 +82,7 @@ class NativeBuildMetricsActionTest(unittest.TestCase):
 
 
 class BuildMetricsUploadWorkflowTest(unittest.TestCase):
-    def test_every_native_and_linux_build_uploads_its_small_report_before_tests(self):
+    def test_every_native_and_linux_build_uploads_only_its_current_report_before_tests(self):
         steps = QUALITY.workflow_job_steps(CI_BUILD.read_text())
         for job in QUALITY.CI_BUILD_PACKAGE_ENABLEMENT:
             with self.subTest(job=job):
@@ -98,7 +98,9 @@ class BuildMetricsUploadWorkflowTest(unittest.TestCase):
                 self.assertEqual(index, builds[0] + 1)
                 self.assertEqual(fields.get("uses"), "actions/upload-artifact@" +
                                  QUALITY.REVIEWED_ACTION_REVISIONS["actions/upload-artifact"])
-                self.assertNotIn("if", fields)
+                self.assertEqual(fields.get("if"),
+                                 "${{ hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', "
+                                 "env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}")
                 self.assertEqual(fields.get("continue-on-error"), "true")
                 self.assertEqual(options, {
                     "name": "build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}",

@@ -123,6 +123,34 @@ class EnvironmentProfilesTest(unittest.TestCase):
                                 "extracted transport bytes must affect qualification identity")
                 self.assertIn(relative, after["profiles"][role]["verification_files"])
 
+    def test_preparation_security_bytes_change_every_policy_not_recipe(self):
+        paths = (
+            "cmake/prepare_efsw_source.cmake",
+            "cmake/verify_pinned_source.cmake",
+            "scripts/prepare_efsw_git.py",
+            "3rdparty/CMakeLists.txt",
+        )
+        materials = {"codeql": [self.codeql_material()]}
+        for relative in paths:
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            original = path.read_bytes() if path.is_file() else b"preparation fixture\n"
+            path.write_bytes(original)
+            before = {family: self.policy(family, materials if family == ANALYSIS else None)
+                      for family in EXPECTED}
+            recipes = {family: ci.recipe_identity(self.catalog, family, self.root)
+                       for family in EXPECTED}
+            path.write_bytes(original + b"\n# changed preparation security boundary\n")
+            for family in EXPECTED:
+                with self.subTest(path=relative, family=family):
+                    after = self.policy(family, materials if family == ANALYSIS else None)
+                    self.assertNotEqual(ci.policy_identity(before[family]), ci.policy_identity(after),
+                                        "preparation security bytes must invalidate qualification")
+                    self.assertEqual(recipes[family], ci.recipe_identity(self.catalog, family, self.root))
+                    for role in EXPECTED[family]:
+                        self.assertIn(relative, after["profiles"][role]["verification_files"])
+            path.write_bytes(original)
+
     def test_missing_recipe_is_an_explicit_prerequisite_not_a_fake_identity(self):
         missing = self.root / "docker/ubuntu24.04-analysis/Dockerfile"
         missing.unlink()

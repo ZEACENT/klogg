@@ -209,7 +209,8 @@ def measure(text: str, database: Any, repo: str, build: str,
     edges, records = log_edges(text, paths)
     last_end = max((edge["identity"][1] for edge in edges), default=0)
     if wall_ms is not None and (wall_ms < 0 or wall_ms < last_end):
-        raise ValueError("build wall-ms must be nonnegative and cover all observed Ninja intervals")
+        raise ValueError("build wall-ms must be nonnegative and cover all observed Ninja intervals "
+                         f"(build_wall_ms={wall_ms}, ninja_last_end_ms={last_end})")
     categories: dict[str, list[tuple[int, int]]] = {name: [] for name in CATEGORIES}
     unknown: set[str] = set()
     unmatched: set[str] = set()

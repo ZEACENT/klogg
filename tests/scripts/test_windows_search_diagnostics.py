@@ -1,10 +1,13 @@
 """Windows search failures retain diagnostics without altering test outcomes."""
 
+import json
 import os
 import pathlib
 import re
+import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -123,6 +126,111 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         precondition = native.split('"[.search-start-empty]"', 1)[1].split("\n}", 1)[0]
         self.assertIn('REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) )', precondition)
         self.assertIn('REQUIRE( qgetenv( "KLOGG_TEST_TRACE_SEARCH_STARTS" ).isEmpty() )', precondition)
+
+    def test_trace_runtime_path_escapes_the_complete_cmake_list_item(self):
+        units = (ROOT / "tests/unit/CMakeLists.txt").read_text()
+        wiring = units[units.index("foreach(_klogg_trace_mode enabled empty absent)"):]
+        escape = 'string(REPLACE ";" "\\\\;" _klogg_trace_runtime_path "${_klogg_trace_runtime_path}")'
+        self.assertTrue(escape in wiring,
+                        "escape every inherited PATH semicolon before unquoted list expansion")
+        self.assertIn('list(APPEND _klogg_trace_runtime_env "${_klogg_trace_runtime_path}")', wiring)
+        self.assertIn('$<TARGET_FILE_DIR:klogg_tests>$<SEMICOLON>', wiring)
+        self.assertIn('$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>$<SEMICOLON>$ENV{PATH}', wiring)
+        self.assertNotIn('"${_klogg_trace_runtime_env}"', wiring,
+                         "the empty POSIX environment list must disappear, not become an empty argument")
+
+    def test_trace_cmake_projection_preserves_windows_path_and_child_argv(self):
+        tools = {name: shutil.which(name) for name in ("cmake", "ctest", "ninja")}
+        if not all(tools.values()):
+            self.skipTest("CMake, CTest, and Ninja are required for argv projection")
+        units = (ROOT / "tests/unit/CMakeLists.txt").read_text()
+        wiring = units[units.index("foreach(_klogg_trace_mode enabled empty absent)"):]
+        inherited_path = (r"C:\Program Files\Git\ucrt64\bin;C:\Program Files\Git\usr\bin;"
+                          r"C:\Users\runneradmin\bin;C:\Program Files\CMake\bin;"
+                          r"C:\Program Files\Git\cmd;C:\Windows\system32")
+        observer = ("import json,os,sys; print(json.dumps({"
+                    "'argv':sys.argv[1:], 'path':os.environ.get('PATH'),"
+                    "'git':os.environ.get('GIT_CONFIG_PARAMETERS'),"
+                    "'present':'KLOGG_TEST_TRACE_SEARCH_STARTS' in os.environ,"
+                    "'value':os.environ.get('KLOGG_TEST_TRACE_SEARCH_STARTS')}))")
+        native = pathlib.Path(sys.executable).resolve().as_posix()
+        launcher = pathlib.Path(tools["cmake"]).resolve().as_posix()
+        modes = {
+            "enabled": ["-platform", "offscreen", "[.search-start-enabled]"],
+            "empty": [native, "[.search-start-enabled],[.search-start-empty]"],
+            "absent": ["-platform", "offscreen", "[.search-start-absent]"],
+        }
+        for windows_branch in (True, False):
+            with tempfile.TemporaryDirectory(prefix="trace-path-projection-") as directory:
+                source = pathlib.Path(directory) / "source with spaces"
+                build = pathlib.Path(directory) / "generated"
+                source.mkdir()
+                qt_core = source / "Qt SDK with spaces" / "bin" / "QtCore.dll"
+                project = (
+                    "cmake_minimum_required(VERSION 3.14)\n"
+                    "project(trace_argv_projection LANGUAGES NONE)\n"
+                    "enable_testing()\n"
+                    "set(WIN32 " + ("TRUE" if windows_branch else "FALSE") + ")\n"
+                    "set(QT_VERSION_MAJOR 6)\n"
+                    "add_executable(klogg_tests IMPORTED GLOBAL)\n"
+                    'set_target_properties(klogg_tests PROPERTIES IMPORTED_LOCATION "' + native + '")\n'
+                    "add_executable(search_start_empty_env_launcher IMPORTED GLOBAL)\n"
+                    'set_target_properties(search_start_empty_env_launcher PROPERTIES IMPORTED_LOCATION "'
+                    + launcher + '")\n'
+                    "add_library(Qt6::Core SHARED IMPORTED GLOBAL)\n"
+                    'set_target_properties(Qt6::Core PROPERTIES IMPORTED_LOCATION "'
+                    + qt_core.as_posix() + '")\n'
+                    "function(klogg_set_test_isolation test_name)\n"
+                    "endfunction()\n"
+                    + wiring
+                )
+                (source / "CMakeLists.txt").write_text(project)
+                environment = os.environ.copy()
+                environment["PATH"] = inherited_path
+                environment["GIT_CONFIG_PARAMETERS"] = "'probe.marker'='caller value with spaces'"
+                environment["KLOGG_TEST_TRACE_SEARCH_STARTS"] = "inherited-marker"
+                configured = subprocess.run(
+                    [tools["cmake"], "-S", str(source), "-B", str(build), "-G", "Ninja",
+                     "-DCMAKE_MAKE_PROGRAM=" + tools["ninja"]],
+                    env=environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+                listed = subprocess.run(
+                    [tools["ctest"], "--show-only=json-v1"], cwd=build,
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+                tests = json.loads(listed.stdout)["tests"]
+                self.assertEqual(len(tests), 3)
+                expected_path = inherited_path
+                if windows_branch:
+                    expected_path = (pathlib.Path(native).parent.as_posix() + ";"
+                                     + qt_core.parent.as_posix() + ";" + inherited_path)
+                for test in tests:
+                    mode = test["name"].rsplit("_", 1)[1]
+                    with self.subTest(windows_branch=windows_branch, mode=mode):
+                        command = test["command"]
+                        program = launcher if mode == "empty" else native
+                        program_index = command.index(program, 3)
+                        # Execute the generated cmake -E env prefix unchanged;
+                        # replace only the intended target with a portable observer.
+                        observed = subprocess.run(
+                            command[:program_index] + [sys.executable, "-c", observer]
+                            + command[program_index + 1:],
+                            cwd=build, env=environment, capture_output=True, text=True, timeout=30)
+                        self.assertEqual(observed.returncode, 0,
+                                         "generated argv: " + repr(command) + "\n"
+                                         + observed.stdout + observed.stderr)
+                        record = json.loads(observed.stdout)
+                        self.assertEqual(record["path"], expected_path)
+                        self.assertEqual(record["git"], environment["GIT_CONFIG_PARAMETERS"])
+                        self.assertEqual(record["argv"], modes[mode])
+                        path_arguments = [arg for arg in command if arg.startswith("PATH=")]
+                        self.assertEqual(path_arguments,
+                                         ["PATH=" + expected_path] if windows_branch else [])
+                        self.assertNotIn("", command)
+                        self.assertEqual(record["present"], mode != "absent")
+                        self.assertEqual(record["value"],
+                                         None if mode == "absent" else
+                                         "0" if mode == "enabled" else "inherited-marker")
 
     def test_first_chance_evidence_precedes_stackwalk_and_preserves_exception(self):
         source = (ROOT / "tests/helpers/crash_trace.cpp").read_text()

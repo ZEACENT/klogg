@@ -1232,6 +1232,7 @@ jobs:
           container-suffix: ${{ env.KLOGG_CONTAINER_SUFFIX }}
 
       - name: Upload current-run build metrics
+        if: ${{ hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -2004,6 +2005,7 @@ jobs:
       - uses: ./.github/actions/agent-build
 
       - name: Upload current-run build metrics
+        if: ${{ hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -2365,6 +2367,7 @@ jobs:
       - uses: ./.github/actions/agent-build
 
       - name: Upload current-run build metrics
+        if: ${{ hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

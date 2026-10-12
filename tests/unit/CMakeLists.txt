@@ -308,9 +308,11 @@ foreach(_klogg_trace_mode enabled empty absent)
   endif()
   set(_klogg_trace_runtime_env)
   if(WIN32)
-    list(APPEND _klogg_trace_runtime_env
+    set(_klogg_trace_runtime_path
       "PATH=$<TARGET_FILE_DIR:klogg_tests>$<SEMICOLON>$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>$<SEMICOLON>$ENV{PATH}"
     )
+    string(REPLACE ";" "\\;" _klogg_trace_runtime_path "${_klogg_trace_runtime_path}")
+    list(APPEND _klogg_trace_runtime_env "${_klogg_trace_runtime_path}")
   endif()
   set(_klogg_trace_test "klogg_search_start_trace_${_klogg_trace_mode}")
   if(_klogg_trace_mode STREQUAL "empty")

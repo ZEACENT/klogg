@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -209,6 +210,12 @@ class CiBuildMetricsTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("error:", result.stderr)
 
+    def test_wall_time_rejection_reports_both_conflicting_integer_measurements(self):
+        result = self.invoke(record(0, 10, "a.o"), [], extra=("--build-wall-ms", "9"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build_wall_ms=9", result.stderr)
+        self.assertIn("ninja_last_end_ms=10", result.stderr)
+
 
 class RunBuildTest(unittest.TestCase):
     """The wrapper measures one unchanged child build; it never alters it."""
@@ -387,6 +394,25 @@ class RunBuildTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("metrics", result.stderr)
         self.assertFalse(self.output.exists())
+
+    def test_ninja_end_beyond_measured_wall_keeps_successful_cli_build_non_gating(self):
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=self.runner), \
+                mock.patch.object(MODULE.time, "monotonic", side_effect=(10.0, 10.05)), \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as diagnostic:
+            status = MODULE.main([
+                "run-build", "--repo-root", str(self.repo),
+                "--build-root", str(self.build), "--output", str(self.output),
+                "--object-cache", "disabled", "--", "cmake", "--build",
+                str(self.build), "--target", "ci_build",
+            ])
+        self.assertEqual(status, 0)
+        self.assertFalse(self.output.exists())
+        self.assertIn("build succeeded but its metrics are unavailable", diagnostic.getvalue())
+        self.assertIn("build wall-ms must be nonnegative and cover all observed Ninja intervals",
+                      diagnostic.getvalue())
+        self.assertIn("build_wall_ms=50", diagnostic.getvalue())
+        self.assertIn("ninja_last_end_ms=100", diagnostic.getvalue())
+        self.assertEqual([command[0] for command, _ in self.calls], ["cmake"])
 
     def test_wall_time_is_monotonic_not_wall_clock(self):
         class Clock:

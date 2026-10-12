@@ -39,6 +39,27 @@ search-start trace. Coverage and CodeQL profile receipts cannot replace those
 failed roles; the aggregate Gate stopped before artifact downloads and issued
 no six-family qualification. Production signed pins remain unchanged and stale.
 
+The complete ordinary source `00f1e3e7` audit covers 48 checks across CI Build
+`38146809545`, its three analysis runs and lint: 25 passed, 15 failed and eight
+were skipped. All seven Linux consumers and three analysis resolvers independently
+rejected stale policy before application build or analysis. Hosted Python 3.8.18
+lint exposed a real Git-timeout descendant-lifetime gap. All three Windows lanes
+passed their pre-existing native suites but failed all three new trace invocations
+before their intended executables: inherited PATH semicolons became separate
+CMake command arguments. All four macOS lanes actually passed 38/38 CTest,
+including the three trace modes, with explicit Xcode 26.6 and the existing
+Intel 15.0/ARM 14.0 floors. Package checks remain unsigned validation, not release
+or native-core qualification. Replacement source needs fresh relevant acceptance
+and one complete same-source/same-attempt six-family qualification; old successful
+roles cannot be spliced into it.
+
+Optional build telemetry stays non-gating. A rejected report retains its producer
+notice, including conflicting wall/Ninja values when available, but is not
+uploaded if the exact current-run report is absent. This avoids treating missing
+optional evidence as an upload warning without weakening timing validation or
+inventing an explanation for the discrepancy. No older metrics file or candidate
+receipt substitutes for current qualification.
+
 Ordinary ADB source transport is a separate, automatic **bounded bytes-only**
 path for ordinary `pull_request` and canonical `master` push (including a squash
 merge). It imports only current-lock archive bytes from a prior Actions
@@ -404,11 +425,44 @@ file**, not an in-memory exception or modification of the user's/system's
 persistent configuration. It replaces user-global settings for the offline local
 clone and its children, without persisting trust in the cloned repository.
 
-The temporary context is removed before checkout on normal clone completion or
-handled failure. Abrupt process termination can leave uniquely named private
-residue; later preparation must not reuse or overwrite it. The shared cache stays
-unchanged, and the detached private checkout must still match the pinned revision
-and clean tree digest before private patching and final-tree verification.
+Preparation Git operations use a private Python 3.8-compatible process owner,
+not CMake's timeout cleanup. CMake 3.31's `execute_process(TIMEOUT)` can return
+without terminating its child, unlike the terminating implementations in older
+KWSys-based CMake and CMake 4.2. Removing an environment wrapper alone therefore
+does not repair lifetime ownership. The selected host interpreter is passed
+explicitly; standalone preparation discovers a compatible interpreter or fails
+before timed work. CMake 3.14 remains supported, without version-dependent paths.
+
+Each operation retains its existing deadline and a copied child environment.
+The trusted Python owner uses isolated standard-library imports, while Git still
+receives the original Python-related environment. CMake records the original
+`LC_CTYPE` presence/value before interpreter startup so Python's C-locale coercion
+cannot silently add or replace that variable in Git's environment. Anchor
+startup receives the restored environment through a private channel, not an
+argument containing the caller's environment or secrets.
+On POSIX, an owned session/group anchor remains live until signalling and reap,
+so cleanup cannot target a recycled group ID. On Windows, suspended creation
+atomically attaches an owned Job Object and restricts inherited standard handles
+before the command is resumed; completion-port active-process-zero observation
+precedes handled filesystem cleanup. Atomic job-list assignment requires Windows
+10 or Windows Server 2016 or later on the native build host; unavailable or denied
+containment fails closed, without a direct-child-only fallback. Ordinary Git
+family lifetime is covered, not arbitrary intentionally detached processes or
+an unbounded all-dependency transaction. Other callers of the shared source
+verifier keep their existing behavior; preparation explicitly selects the owned
+revision-query path.
+
+The supervisor finishes handled process cleanup before CMake removes its owned
+temporary context or partial staging. The context is removed before checkout on
+normal clone completion or a failure with confirmed cleanup. If cleanup cannot
+establish quiescence, preparation fails without deleting potentially live context
+or staging; these uniquely named residues must never be reused or overwritten.
+Abrupt process termination can likewise leave private residue.
+The shared cache stays unchanged, and the detached private checkout must still
+match the pinned revision and clean tree digest before private patching and
+final-tree verification. Preparation, its shared verification dependency, the
+process owner and interpreter wiring are explicitly included in qualification
+policy file digests; importing a sibling file alone does not bind its bytes.
 
 The CodeQL job additionally fetches the official CLI bundle pinned in
 `ci/environments/role-materials.json` via `scripts/fetch_codeql_bundle.py`,

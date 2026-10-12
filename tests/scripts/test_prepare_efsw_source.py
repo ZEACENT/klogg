@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import shutil
+import shlex
 import socket
 import subprocess
 import sys
@@ -145,6 +146,7 @@ class PrepareEfswSourceTest(unittest.TestCase):
         timeout=10,
         script=PREPARE_SCRIPT,
         cwd=None,
+        python=None,
     ):
         cache = cache or self.cache
         revision = revision or self.revision
@@ -164,19 +166,23 @@ class PrepareEfswSourceTest(unittest.TestCase):
             "-P",
             str(script),
         ]
-        return subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=self.environment,
-            timeout=timeout,
-            cwd=cwd,
-        )
+        if python is not None:
+            command.insert(1, f"-DPREPARE_PYTHON_EXECUTABLE={python}")
+        # Inherited pipes can hide CMake completion while an orphan remains.
+        # Owned files let the result and socket lifetime be observed separately.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as output, \
+                tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error:
+            result = subprocess.run(
+                command, check=False, stdout=output, stderr=error, text=True,
+                env=self.environment, timeout=timeout, cwd=cwd,
+            )
+            output.seek(0)
+            error.seek(0)
+            return subprocess.CompletedProcess(command, result.returncode, output.read(), error.read())
 
     def enable_different_owner_clone(
         self, scrub_upload_pack=False, fail_config_write=0, fail_clone=False,
-        timeout_address=None,
+        timeout_address=None, timeout_step="clone", timeout_query_path=None,
     ):
         # POSIX executable shim: only the local clone and its transport child
         # see the ownership flag. Ordinary forwarding replaces the shim process.
@@ -220,19 +226,26 @@ class PrepareEfswSourceTest(unittest.TestCase):
                     item['config_context_symlink'] = config.parent.is_symlink()
                     item['config_context_owner'] = config.parent.stat().st_uid
                     item['config_owner'] = config.stat().st_uid if config.exists() else None
+                    # Inspection must not discover a broken caller repository;
+                    # never mutate the command's recorded/forwarded environment
+                    # or its production cwd to make the test pass.
+                    inspection_environment = environment.copy()
+                    for selector in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'):
+                        inspection_environment.pop(selector, None)
+                    inspection_environment['GIT_CEILING_DIRECTORIES'] = str(config.parent.parent)
                     values = subprocess.check_output(
                         [real_git, 'config', '--file', str(config), '--null', '--get-all', 'safe.directory'],
-                        env=environment,
+                        env=inspection_environment, cwd=config.parent,
                     ) if config.exists() and config.stat().st_size else b''
                     item['trust_entries'] = values.decode().split('\\0')[:-1]
                     item['config_keys'] = subprocess.check_output(
                         [real_git, 'config', '--file', str(config), '--name-only', '--list'],
-                        env=environment,
+                        env=inspection_environment, cwd=config.parent,
                     ).decode().splitlines() if config.exists() else []
                     if kind == 'upload-pack':
                         effective = subprocess.run(
                             [real_git, 'config', '--null', '--get-all', 'safe.directory'],
-                            capture_output=True, env=environment,
+                            capture_output=True, env=inspection_environment, cwd=config.parent,
                         )
                         item['effective_trust'] = effective.stdout.decode().split('\\0')[:-1]
                 with open(log_path, 'a') as log:
@@ -259,6 +272,8 @@ class PrepareEfswSourceTest(unittest.TestCase):
             f"fail_config_write = {fail_config_write!r}\n"
             f"fail_clone = {fail_clone!r}\n"
             f"timeout_address = {timeout_address!r}\n"
+            f"timeout_step = {timeout_step!r}\n"
+            f"timeout_query_path = {str(timeout_query_path) if timeout_query_path else None!r}\n"
         ) + textwrap.dedent("""\
             arguments = sys.argv[1:]
             environment = os.environ.copy()
@@ -271,6 +286,44 @@ class PrepareEfswSourceTest(unittest.TestCase):
             elif '--file' in arguments and '--add' in arguments:
                 kind = 'config-write'
             record(kind, arguments, environment)
+            with open(log_path) as log:
+                previous = [json.loads(line) for line in log]
+            config_writes = sum(call['kind'] == 'config-write' for call in previous)
+            query_matches = (
+                arguments[-2:] == ['rev-parse', 'HEAD'] and '-C' in arguments
+                and timeout_query_path is not None
+                and pathlib.Path(arguments[arguments.index('-C') + 1]).resolve() == pathlib.Path(timeout_query_path)
+            )
+            query_count = sum(
+                call['arguments'][-2:] == ['rev-parse', 'HEAD']
+                and '-C' in call['arguments']
+                and pathlib.Path(call['arguments'][call['arguments'].index('-C') + 1]).resolve() == pathlib.Path(timeout_query_path)
+                for call in previous
+            ) if query_matches else 0
+            block = (
+                (kind == 'clone' and timeout_step == 'clone')
+                or (kind == 'config-write' and timeout_step == 'config-' + str(config_writes))
+                or (query_matches and timeout_step == 'initial-pin')
+                or (query_matches and timeout_step == 'reuse-pin' and query_count == 2)
+            )
+            if timeout_address and block:
+                child_code = (
+                    "import json, os, socket, sys; "
+                    "connection = socket.create_connection(tuple(json.loads(sys.argv[1])), timeout=8); "
+                    "connection.settimeout(None); "
+                    "connection.sendall((json.dumps({'role': 'child', 'pid': os.getpid(), 'ppid': os.getppid(), "
+                    "'group': os.getpgrp()}) + '\\\\n').encode()); "
+                    "connection.recv(1); connection.close()"
+                )
+                child = subprocess.Popen([sys.executable, '-c', child_code, json.dumps(timeout_address)])
+                with socket.create_connection(timeout_address, timeout=8) as connection:
+                    connection.settimeout(None)
+                    connection.sendall((json.dumps({
+                        'role': 'command', 'pid': os.getpid(), 'ppid': os.getppid(), 'group': os.getpgrp(),
+                    }) + '\\n').encode())
+                    connection.recv(1)
+                child.wait(timeout=8)
+                sys.exit(0)
             if kind == 'config-write' and fail_config_write:
                 with open(log_path) as log:
                     writes = sum(json.loads(line)['kind'] == 'config-write' for line in log)
@@ -284,11 +337,6 @@ class PrepareEfswSourceTest(unittest.TestCase):
                     staging.mkdir()
                     (staging / 'partial-clone').write_text('owned partial clone')
                     sys.exit('injected clone failure')
-                if timeout_address:
-                    with socket.create_connection(timeout_address, timeout=8) as connection:
-                        connection.settimeout(None)
-                        connection.recv(1)
-                    sys.exit(0)
                 if scrub_upload_pack:
                     prefix = arguments[:arguments.index('clone')]
                     alias = 'alias.fixture-upload-pack=!' + shlex.quote(upload_pack)
@@ -501,6 +549,23 @@ class PrepareEfswSourceTest(unittest.TestCase):
         self.assertEqual(foreign_gitfile.read_bytes(), foreign_bytes_before)
         self.assertEqual(list(destination.parent.glob(".efsw.clone-config-*")), [])
 
+    @unittest.skipIf(os.name == "nt", "The observational executable Git shim requires POSIX")
+    def test_logging_inspection_does_not_relocate_an_unavailable_caller(self):
+        caller = self.root / "foreign-observed-caller"
+        caller.mkdir()
+        gitfile = caller / ".git"
+        gitfile.write_text(f"gitdir: {self.root / 'unavailable-host-worktree'}\n")
+        original_gitfile = gitfile.read_bytes()
+        destination = caller / "build" / "private" / "efsw"
+        self.enable_different_owner_clone(scrub_upload_pack=True)
+
+        result = self.prepare(destination, cwd=caller)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_prepared_clean_checkout(destination)
+        self.assertEqual(self.clone_calls()[0]["working_directory"], str(caller.resolve()))
+        self.assertEqual(gitfile.read_bytes(), original_gitfile)
+
     def allocation_script(self, suffixes):
         # Intercept only random suffix allocation in a fixture entrypoint. The
         # production helper gets no test parameters or alternate allocation API.
@@ -517,16 +582,48 @@ class PrepareEfswSourceTest(unittest.TestCase):
             f"    file(WRITE [[{self.allocation_count.as_posix()}]] \"${{_count}}\")\n"
             "    list(GET ARGV -1 _output)\n"
             "    set(${_output} ${_suffix} PARENT_SCOPE)\n"
-            "  else()\n"
-            "    _string(${ARGV})\n"
-            "    if(\"${ARGV0}\" STREQUAL \"SHA256\")\n"
-            "      set(${ARGV1} \"${${ARGV1}}\" PARENT_SCOPE)\n"
+            "  elseif(\"${ARGV0}\" STREQUAL \"REPLACE\")\n"
+            "    if(NOT ARGC EQUAL 5)\n"
+            "      message(FATAL_ERROR \"allocation fixture expects one REPLACE input\")\n"
             "    endif()\n"
+            "    _string(REPLACE \"${ARGV1}\" \"${ARGV2}\" \"${ARGV3}\" \"${ARGV4}\")\n"
+            "    set(${ARGV3} \"${${ARGV3}}\" PARENT_SCOPE)\n"
+            "  elseif(\"${ARGV0}\" STREQUAL \"SHA256\")\n"
+            "    _string(SHA256 \"${ARGV1}\" \"${ARGV2}\")\n"
+            "    set(${ARGV1} \"${${ARGV1}}\" PARENT_SCOPE)\n"
+            "  else()\n"
+            "    message(FATAL_ERROR \"unexpected string operation in allocation fixture\")\n"
             "  endif()\n"
             "endfunction()\n"
             f"include([[{PREPARE_SCRIPT.as_posix()}]])\n"
         )
         return script
+
+    def test_allocation_forwards_present_locale_replace_and_its_output(self):
+        for index, locale in enumerate(("C.UTF-8", "present;locale=with space", "")):
+            with self.subTest(locale=locale):
+                self.environment["LC_CTYPE"] = locale
+                destination = self.root / f"allocation-locale-{index}" / "efsw"
+                destination.parent.mkdir()
+                sentinel = destination.parent / f".efsw.clone-config-{'a' * 16}"
+                sentinel.write_bytes(b"preserve locale collision")
+                script = self.allocation_script(["a" * 16, "b" * 16])
+                with script.open("a") as fixture:
+                    fixture.write(
+                        "_klogg_owned_git_startup_arguments(_observed_locale_arguments)\n"
+                        "list(GET _observed_locale_arguments 2 _observed_locale_value)\n"
+                        "if(NOT \"${_observed_locale_value}\" STREQUAL \"--startup-lc-ctype=$ENV{LC_CTYPE}\")\n"
+                        "  message(FATAL_ERROR \"allocation fixture lost the REPLACE output\")\n"
+                        "endif()\n"
+                    )
+
+                result = self.prepare(destination, script=script, python=sys.executable)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_prepared_clean_checkout(destination)
+                self.assertEqual(self.allocation_count.read_text(), "2")
+                self.assertEqual(sentinel.read_bytes(), b"preserve locale collision")
+                self.assertEqual(list(destination.parent.glob(".efsw.clone-config-*")), [sentinel])
 
     def test_allocation_preserves_staging_and_context_collision_sentinels(self):
         for prefix in ("prepare", "clone-config"):
@@ -544,7 +641,7 @@ class PrepareEfswSourceTest(unittest.TestCase):
                         sentinel.symlink_to(self.root / "nonexistent-sentinel-target")
                     script = self.allocation_script(["a" * 16, "b" * 16])
 
-                    result = self.prepare(destination, script=script)
+                    result = self.prepare(destination, script=script, python=sys.executable)
 
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assert_prepared_clean_checkout(destination)
@@ -568,7 +665,7 @@ class PrepareEfswSourceTest(unittest.TestCase):
                 sentinel.write_bytes(b"collision sentinel")
                 script = self.allocation_script(["a" * 16] * 16)
 
-                result = self.prepare(destination, script=script)
+                result = self.prepare(destination, script=script, python=sys.executable)
 
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("Failed to allocate unique", result.stdout + result.stderr)
@@ -629,34 +726,319 @@ class PrepareEfswSourceTest(unittest.TestCase):
         self.assert_clone_context(self.clone_calls()[0], destination)
         self.assert_no_private_source(destination)
 
-    @unittest.skipIf(os.name == "nt", "The socket lifetime and executable Git shim require POSIX")
-    def test_clone_timeout_closes_descendant_socket_and_cleans_context(self):
-        # EOF is the process-lifetime observation. Timeouts are outer safety
-        # deadlines, not sleeps, performance budgets or process polling.
+    def assert_owned_operation_timeout(self, step):
+        destination = self.root / "private" / "efsw"
+        if step == "reuse-pin":
+            first = self.prepare(destination)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        destination_before = directory_bytes(destination) if destination.exists() else None
+        cache_before = directory_bytes(self.cache)
+        query_path = destination if step == "reuse-pin" else self.cache
+        connections = []
+        ready = []
+        eof = []
+        result = None
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
-            listener.listen(1)
+            listener.listen(2)
             listener.settimeout(8)
-            self.enable_different_owner_clone(timeout_address=listener.getsockname())
-            destination = self.root / "private" / "efsw"
+            self.enable_different_owner_clone(
+                timeout_address=listener.getsockname(), timeout_step=step,
+                timeout_query_path=query_path.resolve(),
+            )
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self.prepare, destination, timeout=12)
-                connection, _ = listener.accept()
-                with connection:
-                    connection.settimeout(6)
+                future = executor.submit(self.prepare, destination, timeout=16)
+                try:
+                    for _ in range(2):
+                        connection, _ = listener.accept()
+                        connections.append(connection)
+                        connection.settimeout(8)
+                        frame = b""
+                        while b"\n" not in frame and len(frame) < 1024:
+                            chunk = connection.recv(256)
+                            if not chunk:
+                                break
+                            frame += chunk
+                        ready.append(json.loads(frame.decode()))
                     try:
-                        eof = connection.recv(1) == b""
-                    except socket.timeout:
-                        eof = False
-                    # Closing only this fixture's socket releases a descendant
-                    # if production failed to reap it; RED cannot leak it.
-                result = future.result(timeout=8)
+                        # Observe the operation failure WHILE both sockets are
+                        # held; inherited stdout pipes cannot obscure this.
+                        result = future.result(timeout=8)
+                    except concurrent.futures.TimeoutError:
+                        pass
+                    if result is not None:
+                        for connection in connections:
+                            connection.settimeout(4)
+                            try:
+                                eof.append(connection.recv(1) == b"")
+                            except socket.timeout:
+                                eof.append(False)
+                finally:
+                    # Release only fixture resources after the observation,
+                    # including on RED, so blocked ordinary children cannot leak.
+                    for connection in connections:
+                        connection.close()
+                    future.result(timeout=8)
 
-        self.assertTrue(eof, "clone descendant survived the internal Git timeout")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Failed to clone", result.stdout + result.stderr)
-        self.assert_clone_context(self.clone_calls()[0], destination)
+        self.assertIsNotNone(result, "operation did not report its deadline before fixture release")
+        roles = {item["role"]: item for item in ready}
+        self.assertEqual(set(roles), {"command", "child"})
+        self.assertEqual(roles["child"]["ppid"], roles["command"]["pid"])
+        self.assertEqual(roles["child"]["group"], roles["command"]["group"])
+        self.assertEqual(eof, [True, True], "owned command/descendant survived the internal Git timeout")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        diagnostic = " ".join((result.stdout + result.stderr).split())
+        if step in ("initial-pin", "reuse-pin"):
+            self.assertIn("owned Git revision verification failed", diagnostic)
+            self.assertIn("status 2", diagnostic)
+            self.assertNotIn("Git metadata is incomplete", diagnostic)
+        elif step.startswith("config-"):
+            self.assertIn("Failed to configure", diagnostic)
+        else:
+            self.assertIn("Failed to clone", diagnostic)
+            self.assert_clone_context(self.clone_calls()[0], destination)
+        self.assertEqual(directory_bytes(self.cache), cache_before)
+        if destination_before is None:
+            self.assert_no_private_source(destination)
+        else:
+            self.assertEqual(directory_bytes(destination), destination_before)
+            self.assertEqual(list(destination.parent.glob(".efsw.clone-config-*")), [])
+            self.assertEqual(list(destination.parent.glob(".efsw.prepare-*")), [])
+
+    @unittest.skipIf(os.name == "nt", "The socket lifetime and executable Git shim require POSIX")
+    def test_clone_timeout_closes_descendant_socket_and_cleans_context(self):
+        self.assert_owned_operation_timeout("clone")
+
+    @unittest.skipIf(os.name == "nt", "The socket lifetime and executable Git shim require POSIX")
+    def test_first_config_timeout_closes_real_child_and_cleans_context(self):
+        self.assert_owned_operation_timeout("config-1")
+
+    @unittest.skipIf(os.name == "nt", "The socket lifetime and executable Git shim require POSIX")
+    def test_second_config_timeout_closes_real_child_and_cleans_context(self):
+        self.assert_owned_operation_timeout("config-2")
+
+    @unittest.skipIf(os.name == "nt", "The socket lifetime and executable Git shim require POSIX")
+    def test_initial_pin_query_timeout_is_fatal_and_closes_real_child(self):
+        self.assert_owned_operation_timeout("initial-pin")
+
+    @unittest.skipIf(os.name == "nt", "The socket lifetime and executable Git shim require POSIX")
+    def test_reused_pin_query_timeout_is_fatal_and_preserves_destination(self):
+        self.assert_owned_operation_timeout("reuse-pin")
+
+    def test_missing_explicit_interpreter_fails_before_git_or_staging(self):
+        destination = self.root / "private" / "efsw"
+        cache_before = directory_bytes(self.cache)
+
+        result = self.prepare(destination, python=self.root / "missing-python")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Python interpreter", result.stdout + result.stderr)
+        self.assertEqual(directory_bytes(self.cache), cache_before)
         self.assert_no_private_source(destination)
+
+    def test_relative_explicit_interpreter_is_rejected(self):
+        destination = self.root / "private" / "efsw"
+
+        result = self.prepare(destination, python="python3")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("absolute", result.stdout + result.stderr)
+        self.assert_no_private_source(destination)
+
+    @unittest.skipIf(os.name == "nt", "The rejecting executable interpreter fixture requires POSIX")
+    def test_rejected_interpreter_check_fails_before_git_or_staging(self):
+        rejected = self.root / "rejected-python"
+        rejected.write_text(f"#!{sys.executable}\nimport sys\nsys.exit('incompatible interpreter fixture')\n")
+        rejected.chmod(0o755)
+        destination = self.root / "private" / "efsw"
+
+        result = self.prepare(destination, python=rejected)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Python interpreter", result.stdout + result.stderr)
+        self.assertIn("incompatible interpreter fixture", " ".join((result.stdout + result.stderr).split()))
+        self.assert_no_private_source(destination)
+
+    def test_explicit_host_interpreter_prepares_clean_private_source(self):
+        destination = self.root / "private" / "efsw"
+
+        result = self.prepare(destination, python=sys.executable)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_prepared_clean_checkout(destination)
+
+    def test_third_party_scope_discovers_and_passes_supported_absolute_interpreter(self):
+        source = (ROOT / "3rdparty" / "CMakeLists.txt").read_text()
+        self.assertIn("find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)", source)
+        self.assertIn('"-DPREPARE_PYTHON_EXECUTABLE=${Python3_EXECUTABLE}"', source)
+
+    @unittest.skipIf(os.name == "nt", "Pre-Python locale observation uses a POSIX shell shim")
+    def test_owned_git_receives_exact_prestartup_locale_state(self):
+        real_git = shutil.which("git", path=self.environment["PATH"])
+        shim_directory = self.root / "locale-git-shim"
+        shim_directory.mkdir()
+        observation = self.root / "locale-observation"
+        shim = shim_directory / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            f"if [ \"${{LC_CTYPE+x}}\" = x ]; then printf 'present\\000%s\\000' \"$LC_CTYPE\" >> {shlex.quote(str(observation))}; "
+            f"else printf 'absent\\000\\000' >> {shlex.quote(str(observation))}; fi\n"
+            f"exec {shlex.quote(real_git)} \"$@\"\n"
+        )
+        shim.chmod(0o755)
+        self.environment["PATH"] = str(shim_directory) + os.pathsep + self.environment["PATH"]
+        self.environment["LANG"] = "C"
+        self.environment.pop("LC_ALL", None)
+        cache_before = directory_bytes(self.cache)
+        values = (None, "", "C", "with space", "-dash=equals;semicolon", "back\\slash;tail")
+        for index, value in enumerate(values):
+            with self.subTest(value=value):
+                if value is None:
+                    self.environment.pop("LC_CTYPE", None)
+                    expected = [b"absent", b""]
+                else:
+                    self.environment["LC_CTYPE"] = value
+                    expected = [b"present", value.encode()]
+                observation.write_bytes(b"")
+                destination = self.root / f"locale-private-{index}" / "efsw"
+
+                result = self.prepare(destination, python=sys.executable)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                entries = observation.read_bytes().split(b"\0")[:-1]
+                self.assertGreaterEqual(len(entries), 12)
+                self.assertEqual(entries, expected * (len(entries) // 2))
+                self.assert_prepared_clean_checkout(destination)
+        self.assertEqual(directory_bytes(self.cache), cache_before)
+
+    def assert_cleanup_failure_preserves_owned_residue(self, failure_step):
+        interpreter = self.root / "cleanup-failure-python"
+        write_count = self.root / "cleanup-config-write-count"
+        interpreter.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            f"target = {failure_step!r}\n"
+            f"count_file = pathlib.Path({str(write_count)!r})\n"
+            "arguments = sys.argv[1:]\n"
+            "if '--operation' in arguments:\n"
+            "    operation = arguments[arguments.index('--operation') + 1]\n"
+            "    git_arguments = arguments[arguments.index('--') + 1:]\n"
+            "    step = operation\n"
+            "    config = None\n"
+            "    staging = None\n"
+            "    if operation == 'config':\n"
+            "        count = int(count_file.read_text()) + 1 if count_file.exists() else 1\n"
+            "        count_file.write_text(str(count))\n"
+            "        step = 'config-' + str(count)\n"
+            "        config = pathlib.Path(git_arguments[git_arguments.index('--file') + 1])\n"
+            "        staging = config.parent.with_name(config.parent.name.replace('.clone-config-', '.prepare-'))\n"
+            "    elif operation == 'clone':\n"
+            "        config = pathlib.Path(arguments[arguments.index('--global-config') + 1])\n"
+            "        staging = pathlib.Path(git_arguments[-1])\n"
+            "    elif 'checkout' in git_arguments:\n"
+            "        step = 'checkout'\n"
+            "        staging = pathlib.Path(git_arguments[git_arguments.index('-C') + 1])\n"
+            "    elif '-C' in git_arguments and git_arguments[-2:] == ['rev-parse', 'HEAD']:\n"
+            "        candidate = pathlib.Path(git_arguments[git_arguments.index('-C') + 1])\n"
+            "        if '.prepare-' in candidate.name:\n"
+            "            step = 'staged-revision'\n"
+            "            staging = candidate\n"
+            "    if step == target:\n"
+            "        staging.mkdir(exist_ok=True)\n"
+            "        (staging / 'uncertain-family').write_bytes(b'preserve while quiescence is unknown')\n"
+            "        if config is not None:\n"
+            "            pathlib.Path(str(config) + '.lock').write_bytes(b'preserve uncertain config lock')\n"
+            "        sys.stderr.write('primary fixture Git cause; cleanup incomplete\\n')\n"
+            "        sys.exit(5)\n"
+            f"os.execv({sys.executable!r}, [{sys.executable!r}] + arguments)\n"
+        )
+        interpreter.chmod(0o755)
+        destination = self.root / "private" / "efsw"
+        script = self.allocation_script(["a" * 16, "b" * 16])
+        cache_before = directory_bytes(self.cache)
+
+        result = self.prepare(destination, python=interpreter, script=script)
+
+        self.assertNotEqual(result.returncode, 0)
+        diagnostic = " ".join((result.stdout + result.stderr).split())
+        self.assertIn("primary fixture Git cause", diagnostic)
+        self.assertIn("cleanup incomplete", diagnostic)
+        self.assertFalse(destination.exists())
+        self.assertFalse(self.private_marker(destination).exists())
+        contexts = list(destination.parent.glob(".efsw.clone-config-*"))
+        stages = list(destination.parent.glob(".efsw.prepare-*"))
+        self.assertEqual(len(stages), 1)
+        self.assertEqual(len(contexts), 1 if failure_step.startswith("config-") or failure_step == "clone" else 0)
+        residue = {path: directory_bytes(path) for path in contexts + stages}
+        self.assertEqual(directory_bytes(self.cache), cache_before)
+
+        retry = self.prepare(destination, python=sys.executable, script=script)
+
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assert_prepared_clean_checkout(destination)
+        self.assertEqual(self.allocation_count.read_text(), "2")
+        for path, preserved in residue.items():
+            self.assertEqual(directory_bytes(path), preserved)
+
+    @unittest.skipIf(os.name == "nt", "The fake interpreter status protocol uses a POSIX executable")
+    def test_first_config_cleanup_failure_preserves_uncertain_owned_state(self):
+        self.assert_cleanup_failure_preserves_owned_residue("config-1")
+
+    @unittest.skipIf(os.name == "nt", "The fake interpreter status protocol uses a POSIX executable")
+    def test_second_config_cleanup_failure_preserves_uncertain_owned_state(self):
+        self.assert_cleanup_failure_preserves_owned_residue("config-2")
+
+    @unittest.skipIf(os.name == "nt", "The fake interpreter status protocol uses a POSIX executable")
+    def test_clone_cleanup_failure_preserves_uncertain_owned_state(self):
+        self.assert_cleanup_failure_preserves_owned_residue("clone")
+
+    @unittest.skipIf(os.name == "nt", "The fake interpreter status protocol uses a POSIX executable")
+    def test_checkout_cleanup_failure_preserves_uncertain_owned_state(self):
+        self.assert_cleanup_failure_preserves_owned_residue("checkout")
+
+    @unittest.skipIf(os.name == "nt", "The fake interpreter status protocol uses a POSIX executable")
+    def test_staged_query_cleanup_failure_preserves_uncertain_owned_state(self):
+        self.assert_cleanup_failure_preserves_owned_residue("staged-revision")
+
+    def test_preparation_has_one_owned_route_for_every_git_operation(self):
+        source = PREPARE_SCRIPT.read_text()
+        self.assertNotIn("COMMAND git", source)
+        self.assertNotIn("TIMEOUT ${GIT_TIMEOUT}", source)
+        self.assertNotIn("-E env", source)
+        self.assertEqual(source.count("--operation inherit"), 5)
+        self.assertEqual(source.count("--operation config"), 2)
+        self.assertEqual(source.count("--operation clone"), 1)
+        self.assertEqual(source.count('GIT_OWNER "${_git_owner_script}"'), 2)
+        self.assertIn("--check-interpreter", source)
+
+    def test_shared_verifier_falls_back_only_for_ordinary_owned_git_failure(self):
+        owner = self.root / "status-owner.py"
+        script = self.root / "supervised-verifier.cmake"
+        script.write_text(
+            f"include([[{(ROOT / 'cmake' / 'verify_pinned_source.cmake').as_posix()}]])\n"
+            f"klogg_require_pinned_source(efsw [[{self.cache.as_posix()}]] {self.revision}\n"
+            f"  GIT_OWNER [[{owner.as_posix()}]] PYTHON_EXECUTABLE [[{pathlib.Path(sys.executable).as_posix()}]]\n"
+            f"  GIT_TIMEOUT 2 {self.clean_digest})\n"
+        )
+        for status in (1, 2, 3, 4, 5):
+            with self.subTest(status=status):
+                owner.write_text(
+                    "import sys\nsys.stderr.write('original owner failure\\n')\n"
+                    f"sys.exit({status})\n"
+                )
+                result = subprocess.run(
+                    ["cmake", "-P", str(script)], capture_output=True, text=True,
+                    env=self.environment, check=False,
+                )
+                diagnostic = " ".join((result.stdout + result.stderr).split())
+                if status == 1:
+                    self.assertEqual(result.returncode, 0, diagnostic)
+                    self.assertIn("Git metadata is incomplete", diagnostic)
+                else:
+                    self.assertNotEqual(result.returncode, 0, diagnostic)
+                    self.assertIn(f"status {status}", diagnostic)
+                    self.assertIn("original owner failure", diagnostic)
+                    self.assertNotIn("Git metadata is incomplete", diagnostic)
 
     @unittest.skipIf(os.name == "nt", "The selective executable Git shim requires POSIX")
     def test_dirty_cache_is_rejected_before_different_owner_clone(self):

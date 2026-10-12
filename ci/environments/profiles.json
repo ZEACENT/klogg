@@ -5,7 +5,11 @@
     "scripts/ci_environment.py",
     "scripts/ci_environment_profiles.py",
     "scripts/ci_environment_pipeline.py",
-    ".github/workflows/ci-environments.yml"
+    ".github/workflows/ci-environments.yml",
+    "cmake/prepare_efsw_source.cmake",
+    "cmake/verify_pinned_source.cmake",
+    "scripts/prepare_efsw_git.py",
+    "3rdparty/CMakeLists.txt"
   ],
   "linux_defaults": {
     "cmake_options": [

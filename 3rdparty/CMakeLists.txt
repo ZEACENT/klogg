@@ -660,6 +660,9 @@ cpmaddpackage(
   DOWNLOAD_ONLY
   YES
 )
+# Script-mode preparation needs an explicit compatible host interpreter;
+# interpreter variables from sibling packaging scopes are not inherited here.
+find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 # The shared cache retains its approved bytes; this build alone owns the
 # checkout that the patch transaction may modify or recover.
 set(KLOGG_EFSW_PATCHED_TREE_SHA256 9918e5cf36c7e6030770785f31f56495ab2d63812d6f6801bccf0078be9e4124)
@@ -668,6 +671,7 @@ set(KLOGG_EFSW_PREPARED_SOURCE_DIR
 execute_process(
   COMMAND "${CMAKE_COMMAND}"
           "-DDEPENDENCY=efsw"
+          "-DPREPARE_PYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
           "-DCACHE_SOURCE=${efsw_SOURCE_DIR}"
           "-DDESTINATION=${KLOGG_EFSW_PREPARED_SOURCE_DIR}"
           "-DEXPECTED_REVISION=62f785c56b7a34f035193d4cb831921347b586b8"
