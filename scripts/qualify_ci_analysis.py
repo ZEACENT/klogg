@@ -429,7 +429,7 @@ def qualify(role, candidate_root, workspace, analysis_base_sha, role_materials, 
         work, result = private / "work", private / "result"
         work.mkdir()
         result.mkdir()
-        command = ["docker", "run", "--rm", "--pull=never", "--platform=linux/amd64", "--network=none",
+        command = ["docker", "run", "--rm", "--pull=never", "--init", "--platform=linux/amd64", "--network=none",
                    "--user", str(os.getuid()) + ":" + str(os.getgid()),
                    "--mount", _mount(workspace, workspace), "--mount", _mount(work, "/klogg-analysis-work"),
                    "--mount", _mount(result, "/klogg-analysis-result")]

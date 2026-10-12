@@ -16,6 +16,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
 import argparse
+import errno
 import json
 import math
 import os
@@ -28,6 +29,7 @@ import time
 from dataclasses import dataclass
 
 _CLEANUP_SECONDS = 5.0
+_GROUP_EXIT_RETRY_SECONDS = 0.01
 _EXIT_CODES = {"ok": 0, "git": 1, "timeout": 2, "spawn": 3, "containment": 4, "cleanup": 5}
 
 
@@ -133,21 +135,64 @@ class _PosixOwner:
         except (ValueError, KeyError, TypeError) as error:
             raise _Failure("containment", "Invalid Git group owner result: " + str(error))
 
+    @staticmethod
+    def _confirm_group_disappearance(pgid, deadline):
+        wake = threading.Event()
+        while True:
+            if time.monotonic() >= deadline:
+                raise OSError("Owned Git group disappearance was not confirmed before cleanup deadline")
+            try:
+                # The anchor has been reaped: this numeric ID is no longer
+                # reserved. Signal zero only observes; never terminate again.
+                os.killpg(pgid, 0)
+            except OSError as error:
+                if error.errno == errno.ESRCH:
+                    if time.monotonic() >= deadline:
+                        raise OSError("Owned Git group absence was observed after cleanup deadline")
+                    return
+                if error.errno != errno.EPERM:
+                    raise
+            # Present groups and EPERM (including XNU zombie-only groups) are
+            # not absence. Reaping hosts must remove zombies; PID reuse may
+            # conservatively fail cleanup, never signal an unrelated group.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OSError("Owned Git group disappearance was not confirmed before cleanup deadline")
+            wake.wait(min(_GROUP_EXIT_RETRY_SECONDS, remaining))
+
     def cleanup(self, deadline):
         errors = []
-        if self.process is not None:
-            # One owned-group operation, while the anchor is still unreaped.
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except OSError as error:
-                errors.append(str(error))
-            try:
-                self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except (OSError, subprocess.TimeoutExpired) as error:
-                errors.append(str(error))
-            self.process.stdin.close()
-        if self.status is not None:
-            self.status.close()
+        try:
+            if self.process is not None:
+                if self.process.returncode is not None:
+                    errors.append("Owned Git anchor was already reaped; refusing terminating group signal")
+                else:
+                    pgid = self.process.pid
+                    # Exactly one terminating signal while the live/unreaped
+                    # anchor reserves identity, then bounded direct-child reap.
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except OSError as error:
+                        errors.append(str(error))
+                    try:
+                        self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        errors.append(str(error))
+                    if not errors:
+                        try:
+                            self._confirm_group_disappearance(pgid, deadline)
+                        except OSError as error:
+                            errors.append(str(error))
+        finally:
+            # Probe/reap/close failures must not bypass another safe resource.
+            # Output readers retain their existing separate FD ownership.
+            streams = (self.process.stdin if self.process is not None else None, self.status)
+            for stream in streams:
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception as error:
+                        errors.append(str(error))
         if errors:
             raise OSError("; ".join(errors))
 

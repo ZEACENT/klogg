@@ -44,6 +44,7 @@ jobs:
     timeout-minutes: 30
     container:
       image: ${{ needs.ResolveLinuxEnvironment.outputs.image }}
+      options: --init
     permissions:
       contents: read
       security-events: write

@@ -393,14 +393,21 @@ Ordinary CI never builds an environment image. Two consumption shapes exist:
   signed provenance, and public registry identity, then pulls the exact digest
   and assigns the fixed local tag the existing build/test/package actions expect.
   All Docker invocations in these legs use `--pull=never`; a missing local image
-  is a consumption failure, not a reason to rebuild. The clean-distro DEB
-  installation smoke checks remain a narrow, deliberate exception because their
+  is a consumption failure, not a reason to rebuild. Shared configure, build and
+  test containers also use `--init` so orphaned Git descendants are reaped before
+  process-group disappearance is confirmed. The clean-distro DEB installation
+  smoke checks remain a narrow, deliberate pull exception because their
   package-manager use is the behavior under test.
 - The CodeQL, Coverage, and Static analysis workflows resolve the locked
   `noble-qt693-analysis` digest in an upstream `ResolveLinuxEnvironment` job
   (verification only, no pull) and run the expensive job as a whole-job
-  container on exactly that digest. Whole-job containers execute as root while
-  the mounted workspace stays owned by the runner user, so the first step after
+  container on exactly that digest with explicit `container.options: --init`.
+  The analysis qualifier likewise uses `docker run --init` for every role. Init
+  is supplied by the host Docker runtime, outside the image's OCI digest; no
+  init binary is bundled into the image or application, and its version is not
+  inferred from diagnostic hosts. An unavailable init is not silently bypassed.
+  Whole-job containers execute as root while the mounted workspace stays owned
+  by the runner user, so the first step after
   checkout grants git a `safe.directory` exception; raw git commands fail
   closed without it. Host provisioning (apt installs, agent-setup) must not
   reappear in these jobs; the image already carries the compilers, analysis
@@ -440,11 +447,28 @@ receives the original Python-related environment. CMake records the original
 cannot silently add or replace that variable in Git's environment. Anchor
 startup receives the restored environment through a private channel, not an
 argument containing the caller's environment or secrets.
-On POSIX, an owned session/group anchor remains live until signalling and reap,
-so cleanup cannot target a recycled group ID. On Windows, suspended creation
-atomically attaches an owned Job Object and restricts inherited standard handles
-before the command is resumed; completion-port active-process-zero observation
-precedes handled filesystem cleanup. Atomic job-list assignment requires Windows
+On POSIX, an owned session/group anchor remains unreaped until the single
+terminating group signal, so termination cannot target a recycled group ID.
+After bounded anchor reap, only signal-zero existence queries are permitted;
+cleanup requires `ESRCH`, not anchor exit or output EOF alone. Group presence and
+`EPERM` remain uncertain until the existing cleanup deadline; other query errors
+fail closed. Reuse of a numeric group ID can cause a conservative failure, but
+no terminating signal is sent after reap.
+
+This disappearance barrier requires orphan reaping by the surrounding host or
+container init. A nonreaping Python PID1 can retain zombie group members after
+their output and sockets close, preventing `ESRCH` throughout the cleanup budget.
+The explicit init prerequisite preserves normal success and timeout semantics
+without weakening the barrier. Native macOS can temporarily report `EPERM` for
+an exiting group before reporting `ESRCH`; permission failure alone never proves
+quiescence. CI lint and actual Docker-argument contracts guard the required init
+options on the configure/build/test and analysis routes, not unrelated package
+or ADB fixture launches.
+
+On Windows, suspended creation atomically attaches an owned Job Object and
+restricts inherited standard handles before the command is resumed;
+completion-port active-process-zero observation precedes handled filesystem
+cleanup. Atomic job-list assignment requires Windows
 10 or Windows Server 2016 or later on the native build host; unavailable or denied
 containment fails closed, without a direct-child-only fallback. Ordinary Git
 family lifetime is covered, not arbitrary intentionally detached processes or

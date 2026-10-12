@@ -2635,6 +2635,16 @@ def literal_shell_invocations(script: str) -> list[list[str]]:
                     quote = char if quote is None else None
                     index += 1
                     continue
+                if script.startswith("${{", index):
+                    # GitHub expressions are substituted before shell execution.
+                    # Keep their whitespace and operators opaque in one word.
+                    end = script.find("}}", index + 3)
+                    if end < 0:
+                        raise ValueError("unterminated GitHub expression")
+                    literal = False
+                    word.append(script[index : end + 2])
+                    index = end + 2
+                    continue
                 if quote != "'" and script.startswith("$(", index):
                     literal = False
                     index += 2
@@ -2674,6 +2684,130 @@ def literal_shell_invocations(script: str) -> list[list[str]]:
 
     scan()
     return invocations
+
+
+DOCKER_INIT_ACTION_STEPS = {
+    "docker-build": ("configure", "build"),
+    "docker-run-tests": ("test",),
+}
+DOCKER_INIT_MESSAGE = "Docker launch must have exactly one enabled --init before the image"
+
+
+def docker_init_option_issue(arguments: list[str]) -> str | None:
+    """Check only the run option prefix; values and container argv are not flags."""
+    value_options = {
+        "--pull", "--env", "--env-file", "--volume", "--mount", "--label",
+        "--label-file", "--network", "--user", "--workdir", "--entrypoint",
+        "--name", "--hostname", "--platform", "--security-opt", "--cap-add",
+        "--cap-drop", "--device", "--tmpfs", "--memory", "--cpus",
+        "-e", "-v", "-u", "-w", "-h",
+    }
+    boolean_options = {"--rm", "--privileged", "--read-only", "--interactive", "--tty", "--detach", "-i", "-t", "-d"}
+    image_expression = "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }}"
+    init_values: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            index += 1
+            break
+        if not argument.startswith("-"):
+            break
+        option, separator, value = argument.partition("=")
+        if option == "--init":
+            init_values.append(value if separator else "true")
+            if init_values[-1] != "true":
+                return "init must be literal --init or --init=true"
+        elif option in value_options:
+            if separator:
+                if not value:
+                    return f"empty Docker option value for {option}"
+            else:
+                index += 1
+                if index >= len(arguments) or not arguments[index]:
+                    return f"missing Docker option value for {option}"
+        elif argument[:2] in {"-e", "-v", "-u", "-w", "-h"} and len(argument) > 2:
+            # Docker's attached short-option values are opaque too.
+            pass
+        elif option in boolean_options:
+            if separator and value not in {"true", "false"}:
+                return f"dynamic or malformed Docker option {option}"
+        else:
+            return f"unknown Docker option binding {argument!r}"
+        index += 1
+    if index >= len(arguments):
+        return "missing Docker image after the option prefix"
+    image = arguments[index]
+    if image != image_expression:
+        return "expected the shared-action image expression at the Docker option boundary"
+    if init_values != ["true"]:
+        return "missing or duplicate init option in the Docker option prefix"
+    return None
+
+
+def docker_init_action_issues(text: str, expected_steps: tuple[str, ...]) -> list[str]:
+    """Bind the reaping prerequisite to every expected shared-action launch.
+
+    This deliberately fails closed on ambiguous scoped routes, rather than
+    growing a shell evaluator or policing unrelated packaging containers.
+    """
+    lines = text.splitlines()
+    scalar_body_lines = yaml_scalar_body_lines(lines)
+    quoted_control_key = re.compile(r'''^\s*(?:-\s*)?["'][^"']+["']\s*:''')
+    if any(
+        index not in scalar_body_lines and quoted_control_key.match(line)
+        for index, line in enumerate(lines)
+    ):
+        return [f"{name}: {DOCKER_INIT_MESSAGE} (ambiguous quoted action fields)" for name in expected_steps]
+    runs = workflow_mapping_block(lines, "runs", 0)
+    if runs is None or runs.get("using", ("", []))[0] != "composite" or "steps" not in runs:
+        return [f"{name}: {DOCKER_INIT_MESSAGE} (ambiguous composite runs/steps)" for name in expected_steps]
+    steps = workflow_step_blocks(["runs:"] + runs["steps"][1])
+    parsed = [(step, workflow_step_fields(step)[0]) for step in steps]
+    issues: list[str] = []
+    for name in expected_steps:
+        matching = [(step, fields) for step, fields in parsed if fields.get("name") == name]
+        reason = None
+        if len(matching) != 1:
+            reason = "missing or duplicate expected step"
+        else:
+            step, fields = matching[0]
+            if (
+                not workflow_step_direct_fields_are_unique(step)
+                or fields.get("shell") not in {"sh", "bash"}
+                or "run" not in fields
+                or "uses" in fields
+            ):
+                reason = "ambiguous step fields, direct run or shell"
+            else:
+                blocks = workflow_run_blocks("\n".join(step))
+                try:
+                    if len(blocks) != 1:
+                        raise ValueError("missing or ambiguous run block")
+                    # The existing lexical scanner is not a heredoc/backtick
+                    # evaluator. Such bindings cannot establish this contract.
+                    if "<<" in blocks[0] or "`" in blocks[0]:
+                        raise ValueError("unsupported heredoc/backtick launch binding")
+                    if re.search(r"\b(?:function\s+)?[A-Za-z_]\w*\s*\(\s*\)\s*\{", blocks[0]):
+                        raise ValueError("unsupported shell function launch binding")
+                    invocations = literal_shell_invocations(blocks[0])
+                    surrounding_commands = {"docker", "echo", "printf", "exit", "[", "test", "true", "false", "sleep", "nproc", "fi", "done"}
+                    for tokens in invocations:
+                        # The existing lexer also exposes the action's simple
+                        # $((attempt + 1)) / $((attempt * 10)) expressions.
+                        if tokens in (["attempt", "+", "1"], ["attempt", "*", "10"]):
+                            continue
+                        if tokens[0] not in surrounding_commands:
+                            raise ValueError(f"unsupported launch binding {tokens[0]!r}")
+                    docker = [tokens for tokens in invocations if tokens[0] == "docker"]
+                    if len(docker) != 1 or docker[0][:2] != ["docker", "run"]:
+                        raise ValueError("expected exactly one literal docker run invocation")
+                    reason = docker_init_option_issue(docker[0][2:])
+                except ValueError as error:
+                    reason = str(error)
+        if reason is not None:
+            issues.append(f"{name}: {DOCKER_INIT_MESSAGE} ({reason})")
+    return issues
 
 
 def github_api_has_incompatible_flags(arguments: list[str]) -> bool:
@@ -5011,31 +5145,29 @@ def locked_analysis_environment_issues(text: str, *, expensive_job: str) -> list
     if job_header is None:
         return [message]
     job_indent = len(job_header.group("indent"))
-    container_image = None
-    for index, line in enumerate(job_block[1:]):
-        entry = KEY_VALUE_RE.match(line)
-        if (
-            entry is not None
-            and entry.group("key") == "container"
-            and len(entry.group("indent")) == job_indent + 2
-        ):
-            for child in job_block[index + 2 :]:
-                active = strip_yaml_comment(child)
-                if not active:
-                    continue
-                child_indent = len(child) - len(child.lstrip())
-                if child_indent <= job_indent + 2:
-                    break
-                child_entry = KEY_VALUE_RE.match(child)
-                if (
-                    child_entry is not None
-                    and child_entry.group("key") == "image"
-                    and child_indent == job_indent + 4
-                ):
-                    container_image = scalar(child_entry.group("value"))
-            break
-    if container_image != "${{ needs.ResolveLinuxEnvironment.outputs.image }}":
+    if any(
+        len(line) - len(line.lstrip()) == job_indent + 2
+        and re.match(r'''^\s*["'][^"']+["']\s*:''', line)
+        for line in job_block[1:]
+    ):
         return [message]
+    container = workflow_mapping_block(job_block, "container", job_indent + 2)
+    if container is None:
+        return [message]
+    for key, expected in (
+        ("image", "${{ needs.ResolveLinuxEnvironment.outputs.image }}"),
+        ("options", "--init"),
+    ):
+        value, lines = container.get(key, ("", []))
+        entry = KEY_VALUE_RE.match(lines[0]) if lines else None
+        if (
+            value != expected
+            or entry is None
+            or len(entry.group("indent")) != job_indent + 4
+            or scalar(entry.group("value")) != expected
+            or any(strip_yaml_comment(line) for line in lines[1:])
+        ):
+            return [message]
 
     job_active = "\n".join(
         active for line in job_block if (active := strip_yaml_comment(line))
@@ -5125,6 +5257,15 @@ def check_repo(root: Path) -> list[str]:
         issues.extend(f"{path.relative_to(root)}: {issue}" for issue in github_api_flag_issues(text))
         if path.parent == workflows:
             issues.extend(f"{path.relative_to(root)}: {issue}" for issue in workflow_schedule_issues(text))
+    for action, expected_steps in DOCKER_INIT_ACTION_STEPS.items():
+        path = root / ".github" / "actions" / action / "action.yml"
+        if not path.is_file():
+            issues.append(f"{path.relative_to(root)}: {DOCKER_INIT_MESSAGE} (missing scoped action)")
+            continue
+        issues.extend(
+            f"{path.relative_to(root)}: {issue}"
+            for issue in docker_init_action_issues(path.read_text(), expected_steps)
+        )
     for path in sorted((root / "scripts").glob("*.sh")):
         # Reuse the same run-block shell scanner for sibling release helpers.
         shell_block = "steps:\n  - run: |\n" + "\n".join("      " + line for line in path.read_text().splitlines())

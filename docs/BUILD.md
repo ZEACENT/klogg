@@ -32,6 +32,11 @@ To build Klogg:
   later for atomic Job Object assignment before Git can create descendants.
   Unsupported containment fails closed. This build-time prerequisite does not
   redefine the application's deployment target.
+- Containerized POSIX builds need a functioning orphan reaper. Docker-based
+  configure, build, test and analysis runs use `--init`; a Python or shell PID1
+  must not be assumed to reap adopted descendants. Source preparation requires
+  confirmed process-group disappearance and preserves private state if cleanup
+  remains uncertain. Docker supplies init at runtime; it is not bundled by Klogg.
 - Qt 5 or Qt 6 development libraries. Regular downloaded-Qt CI jobs use Qt
   6.9.3; Windows x86 compatibility uses Qt 5.15.2, and Linux's instrumented-Qt
   ThreadSanitizer job uses Qt 5.15.19. Linux distribution builds use their

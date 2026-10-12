@@ -1,5 +1,6 @@
 """Behavioral tests for the private efsw Git process owner."""
 import contextlib
+import errno
 import importlib.util
 import json
 import os
@@ -53,6 +54,19 @@ import socket, sys
 s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))
 s.sendall(identity(b'R'))
 s.recv(1)
+"""
+CLOSED_OUTPUT_DESCENDANT = _FIXTURE_IDENTITY + """
+import socket, sys
+os.close(1)
+os.close(2)
+s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))
+s.sendall(identity(b'R'))
+while True:
+    command = s.recv(1)
+    if command == b'?':
+        s.sendall(b'A')
+    elif command == b'x' or not command:
+        break
 """
 
 
@@ -417,7 +431,7 @@ class PrepareEfswGitTest(unittest.TestCase):
             self.assertGreater(creation_stamp, 0)
         return pid, parent_pid, creation_stamp
 
-    def descendant_case(self, leader_exits):
+    def descendant_case(self, leader_exits, descendant_code=DESCENDANT):
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -456,7 +470,7 @@ class PrepareEfswGitTest(unittest.TestCase):
         def run():
             try:
                 owner_factory = CaptureGatedWindowsOwner if os.name == "nt" else None
-                box.append(self.run_python(code, DESCENDANT, port, str(control.getsockname()[1]),
+                box.append(self.run_python(code, descendant_code, port, str(control.getsockname()[1]),
                                            timeout=5, _owner_factory=owner_factory))
             except BaseException as error:
                 errors.append(error)
@@ -520,6 +534,300 @@ class PrepareEfswGitTest(unittest.TestCase):
 
     def test_leader_exit_terminates_inherited_output_holder(self):
         self.descendant_case(True)
+
+    def test_closed_output_descendant_requires_group_exit_before_worker_completion(self):
+        if os.name == "nt":
+            # Windows exercises the same real closed-output resource holder,
+            # with its existing pinned-process/job-quiescence oracle unchanged.
+            self.descendant_case(True, descendant_code=CLOSED_OUTPUT_DESCENDANT)
+            return
+        driver = self.driver
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(10)
+        control = socket.socket()
+        control.bind(("127.0.0.1", 0))
+        control.listen(1)
+        control.settimeout(10)
+        owners = []
+        anchor_reaped = threading.Event()
+        observation_ready = threading.Event()
+        cleanup_returned = threading.Event()
+        zero_query_seen = threading.Event()
+        worker_done = threading.Event()
+        box = []
+        errors = []
+        signal_calls = []
+        actual_killpg = os.killpg
+
+        class DeliveryObservedOwner(driver._PosixOwner):
+            def start(self, argv, env, cwd):
+                super().start(argv, env, cwd)
+                owners.append(self)
+                actual_wait = self.process.wait
+
+                def observe_reap(timeout=None):
+                    result = actual_wait(timeout=timeout)
+                    anchor_reaped.set()
+                    return result
+
+                self.process.wait = observe_reap
+
+            def cleanup(self, deadline):
+                try:
+                    super().cleanup(deadline)
+                finally:
+                    cleanup_returned.set()
+                    observation_ready.set()
+
+        def controlled_delivery(pgid, value):
+            self.assertEqual(len(owners), 1)
+            owner = owners[0]
+            self.assertEqual(pgid, owner.process.pid)
+            signal_calls.append(value)
+            if value == signal.SIGKILL:
+                self.assertEqual(owner.process.returncode, None)
+                # Model legal asynchronous group delivery: only the identified
+                # unreaped anchor receives SIGKILL immediately. The real child
+                # remains held until fixture ACK. This is not a native race.
+                os.kill(owner.process.pid, signal.SIGKILL)
+                return
+            self.assertEqual(value, 0, "no terminating signal may follow anchor reap")
+            self.assertTrue(anchor_reaped.is_set())
+            zero_query_seen.set()
+            observation_ready.set()
+            return actual_killpg(pgid, 0)
+
+        code = _FIXTURE_IDENTITY + (
+            "\nimport socket,subprocess,sys\n"
+            "c=socket.create_connection(('127.0.0.1',int(sys.argv[3])))\n"
+            "c.sendall(identity(b'L'))\n"
+            "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]])\n"
+            "c.recv(1)\n"
+        )
+
+        def run():
+            try:
+                box.append(self.run_python(
+                    code, CLOSED_OUTPUT_DESCENDANT, str(listener.getsockname()[1]),
+                    str(control.getsockname()[1]), timeout=5, _owner_factory=DeliveryObservedOwner,
+                ))
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                worker_done.set()
+
+        worker = threading.Thread(target=run, daemon=True)
+        leader = peer = None
+        with mock.patch.object(driver.os, "killpg", side_effect=controlled_delivery):
+            try:
+                worker.start()
+                leader, _ = control.accept()
+                leader.settimeout(10)
+                peer, _ = listener.accept()
+                peer.settimeout(10)
+                leader_pid, _, _ = self.read_fixture_identity(leader, b"L")
+                child_pid, child_parent, _ = self.read_fixture_identity(peer, b"R")
+                self.assertNotEqual(child_pid, leader_pid)
+                self.assertEqual(child_parent, leader_pid)
+                leader.sendall(b"x")
+                self.assertTrue(anchor_reaped.wait(10), "identified anchor was not reaped")
+                self.assertTrue(observation_ready.wait(10), "cleanup produced no group observation")
+                # A real challenge/ACK proves that the closed-output child is
+                # still executing in the original group after anchor exit.
+                peer.sendall(b"?")
+                self.assertEqual(peer.recv(1), b"A")
+                actual_killpg(owners[0].process.pid, 0)
+                if cleanup_returned.is_set():
+                    self.assertTrue(worker_done.wait(10), "old cleanup did not complete its worker")
+                self.assertFalse(worker_done.is_set(), "worker returned while owned closed-output child was alive")
+                self.assertFalse(cleanup_returned.is_set())
+                self.assertTrue(zero_query_seen.is_set())
+                peer.sendall(b"x")
+                self.assertTrue(worker_done.wait(15), "worker did not finish after real descendant exit")
+                worker.join(15)
+                self.assertEqual(errors, [])
+                self.assertEqual(len(box), 1)
+                self.assertEqual(box[0].kind, "ok", box[0].diagnostic)
+                self.assertEqual(box[0].returncode, 0)
+                self.assertEqual(peer.recv(1), b"")
+                self.assertEqual(signal_calls.count(signal.SIGKILL), 1)
+                self.assertTrue(all(value == 0 for value in signal_calls[1:]))
+            finally:
+                # Only fixture-owned IPC releases the live descendant; never
+                # deliver another terminating signal through the reaped PGID.
+                for connection in (peer, leader):
+                    if connection is not None:
+                        try:
+                            connection.sendall(b"x")
+                        except OSError:
+                            pass
+                        connection.close()
+                listener.close()
+                control.close()
+                worker.join(15)
+
+    @contextlib.contextmanager
+    def posix_cleanup_model(self, observations=(errno.ESRCH,), signal_error=None, wait_error=None):
+        # Portable fault model: no native POSIX API or real process is used.
+        # SIGKILL/killpg are injected even on Windows; native jobs stay separate.
+        driver = self.driver
+        clock = {"now": 0.0}
+        deadline = 0.025
+        events = []
+        owner = driver._PosixOwner()
+        process = mock.Mock()
+        process.pid = 12345
+        process.returncode = None
+        owner.process = process
+        owner.status = mock.Mock()
+        process.stdin.close.side_effect = lambda: events.append(("stdin_closed",))
+        owner.status.close.side_effect = lambda: events.append(("status_closed",))
+
+        def wait(timeout):
+            events.append(("reap", timeout))
+            self.assertGreaterEqual(timeout, 0)
+            if wait_error is not None:
+                raise wait_error
+            process.returncode = -9
+            return -9
+
+        process.wait.side_effect = wait
+        pending = list(observations)
+
+        def group_signal(pgid, value):
+            self.assertEqual(pgid, 12345)
+            events.append(("signal", value, clock["now"]))
+            if value == 9:
+                self.assertEqual(process.returncode, None, "terminating signal used a reaped anchor")
+                if signal_error is not None:
+                    raise signal_error
+                return
+            self.assertEqual(value, 0)
+            self.assertEqual(process.returncode, -9, "absence queried before anchor reap")
+            observation = pending.pop(0) if len(pending) > 1 else pending[0]
+            if observation == errno.ESRCH and "esrch_at" in clock:
+                clock["now"] = clock["esrch_at"]
+            if observation:
+                raise OSError(observation, errno.errorcode[observation])
+
+        def backoff(timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, max(0.0, deadline - clock["now"]))
+            events.append(("backoff", timeout))
+            clock["now"] += timeout
+
+        wake = mock.Mock()
+        wake.wait.side_effect = backoff
+        with contextlib.ExitStack() as patches:
+            patches.enter_context(mock.patch.object(driver.os, "killpg", side_effect=group_signal, create=True))
+            patches.enter_context(mock.patch.object(driver.signal, "SIGKILL", 9, create=True))
+            patches.enter_context(mock.patch.object(driver.time, "monotonic", side_effect=lambda: clock["now"]))
+            patches.enter_context(mock.patch.object(driver.threading, "Event", return_value=wake))
+            yield owner, process, events, clock, deadline
+
+    def test_posix_cleanup_orders_single_kill_reap_and_zero_only_absence(self):
+        for observations in ((errno.ESRCH,), (0, errno.ESRCH),
+                             (errno.EPERM, errno.ESRCH), (0, errno.EPERM, errno.ESRCH)):
+            with self.subTest(observations=observations):
+                with self.posix_cleanup_model(observations) as (owner, process, events, clock, deadline):
+                    owner.cleanup(deadline)
+                    signals = [event[1] for event in events if event[0] == "signal"]
+                    self.assertEqual(signals, [9] + [0] * len(observations))
+                    self.assertEqual(events[0][:2], ("signal", 9))
+                    self.assertEqual(events[1][0], "reap")
+                    self.assertTrue(all(event[2] < deadline for event in events if event[0] == "signal" and event[1] == 0))
+                    process.stdin.close.assert_called_once_with()
+                    owner.status.close.assert_called_once_with()
+
+    def test_posix_cleanup_rejects_persistent_group_or_eperm_at_original_deadline(self):
+        for observation in (0, errno.EPERM):
+            with self.subTest(observation=observation):
+                with self.posix_cleanup_model((observation,)) as (owner, process, events, clock, deadline):
+                    with self.assertRaises(OSError):
+                        owner.cleanup(deadline)
+                    signals = [event for event in events if event[0] == "signal"]
+                    self.assertEqual(signals[0][1], 9)
+                    self.assertTrue(all(event[1] == 0 for event in signals[1:]))
+                    self.assertTrue(all(event[2] < deadline for event in signals[1:]))
+                    self.assertEqual(clock["now"], deadline)
+                    self.assertTrue(any(event[0] == "backoff" for event in events))
+                    process.stdin.close.assert_called_once_with()
+                    owner.status.close.assert_called_once_with()
+        with self.posix_cleanup_model() as (owner, process, events, clock, deadline):
+            clock["esrch_at"] = deadline
+            with self.assertRaises(OSError):
+                owner.cleanup(deadline)
+            process.stdin.close.assert_called_once_with()
+            owner.status.close.assert_called_once_with()
+
+    def test_posix_cleanup_unexpected_probe_error_closes_every_safe_resource(self):
+        for unexpected in (errno.EINVAL, errno.EIO):
+            with self.subTest(unexpected=unexpected):
+                with self.posix_cleanup_model((unexpected,)) as (owner, process, events, clock, deadline):
+                    with self.assertRaises(OSError) as captured:
+                        owner.cleanup(deadline)
+                    self.assertIn(errno.errorcode[unexpected], str(captured.exception))
+                    self.assertEqual([event[1] for event in events if event[0] == "signal"], [9, 0])
+                    process.stdin.close.assert_called_once_with()
+                    owner.status.close.assert_called_once_with()
+
+    def test_posix_cleanup_signal_and_reap_errors_never_probe_or_resignal(self):
+        signal_error = OSError(errno.EPERM, "original group signal failed")
+        wait_error = subprocess.TimeoutExpired("owned anchor", 0.025)
+        for first, second in ((signal_error, None), (None, wait_error), (signal_error, wait_error)):
+            with self.subTest(signal_error=bool(first), wait_error=bool(second)):
+                with self.posix_cleanup_model(signal_error=first, wait_error=second) as (owner, process, events, clock, deadline):
+                    with self.assertRaises(OSError) as captured:
+                        owner.cleanup(deadline)
+                    if first is not None:
+                        self.assertIn("original group signal failed", str(captured.exception))
+                    if second is not None:
+                        self.assertIn("owned anchor", str(captured.exception))
+                    self.assertEqual([event[1] for event in events if event[0] == "signal"], [9])
+                    process.stdin.close.assert_called_once_with()
+                    owner.status.close.assert_called_once_with()
+
+    def test_posix_cleanup_already_reaped_anchor_never_sends_terminating_signal(self):
+        with self.posix_cleanup_model() as (owner, process, events, clock, deadline):
+            process.returncode = 0
+            with self.assertRaises(OSError):
+                owner.cleanup(deadline)
+            self.assertEqual([event for event in events if event[0] == "signal"], [])
+            process.wait.assert_not_called()
+            process.stdin.close.assert_called_once_with()
+            owner.status.close.assert_called_once_with()
+
+    def test_posix_cleanup_safe_close_failure_cannot_hide_probe_error_or_skip_status(self):
+        with self.posix_cleanup_model((errno.EINVAL,)) as (owner, process, events, clock, deadline):
+            process.stdin.close.side_effect = OSError(errno.EIO, "secondary stdin close failed")
+            with self.assertRaises(OSError) as captured:
+                owner.cleanup(deadline)
+            self.assertIn("EINVAL", str(captured.exception))
+            self.assertIn("secondary stdin close failed", str(captured.exception))
+            owner.status.close.assert_called_once_with()
+
+    def test_posix_probe_failure_retains_primary_git_or_timeout_diagnostic(self):
+        for primary in ("git", "timeout"):
+            with self.subTest(primary=primary):
+                with self.posix_cleanup_model((errno.EINVAL,)) as (owner, process, events, clock, deadline):
+                    owner.start = lambda argv, env, cwd: None
+
+                    def command_result(operation_deadline):
+                        if primary == "timeout":
+                            raise self.driver._Failure("timeout", "original operation timeout")
+                        return 17
+
+                    owner.wait = command_result
+                    result = self.driver._run(["fixture"], timeout=5, env={}, _owner_factory=lambda: owner)
+                    self.assertEqual(result.kind, "cleanup", result.diagnostic)
+                    self.assertEqual(self.driver._EXIT_CODES[result.kind], 5)
+                    self.assertIn("EINVAL", result.diagnostic)
+                    self.assertIn("original operation timeout" if primary == "timeout" else "Git exited with status 17", result.diagnostic)
+                    self.assertEqual(result.returncode, None if primary == "timeout" else 17)
+                    process.stdin.close.assert_called_once_with()
+                    owner.status.close.assert_called_once_with()
 
     def test_windows_fault_models_fail_closed_and_preserve_owned_handles(self):
         driver = self.driver

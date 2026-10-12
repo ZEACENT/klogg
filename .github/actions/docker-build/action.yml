@@ -25,7 +25,7 @@ runs:
         attempt=1
         max_attempts=3
         while [ $attempt -le $max_attempts ]; do
-          if docker run --pull=never \
+          if docker run --pull=never --init \
             --env KLOGG_VERSION="$KLOGG_VERSION" \
             --env KLOGG_BUILD_ROOT="$KLOGG_BUILD_ROOT" \
             --env ASAN_OPTIONS \
@@ -60,7 +60,7 @@ runs:
           thread) KLOGG_OBJECT_CACHE=disabled ;;
           *) KLOGG_OBJECT_CACHE=measured ;;
         esac
-        docker run --pull=never \
+        docker run --pull=never --init \
           --env KLOGG_BUILD_ROOT="$KLOGG_BUILD_ROOT" \
           --env KLOGG_OBJECT_CACHE="$KLOGG_OBJECT_CACHE" \
           --env ASAN_OPTIONS \

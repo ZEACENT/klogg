@@ -59,6 +59,7 @@ jobs:
     timeout-minutes: 45
     container:
       image: ${{ needs.ResolveLinuxEnvironment.outputs.image }}
+      options: --init
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
       KLOGG_BUILD_ROOT: build_root

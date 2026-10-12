@@ -1263,12 +1263,18 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
             for name in ("ci-build.yml", *cls.WORKFLOW_JOBS)
         }
 
-    def repository_issues(self, workflows: dict[str, str]) -> list[str]:
+    def repository_issues(
+        self, workflows: dict[str, str], actions: dict[str, str] | None = None
+    ) -> list[str]:
         original_read = pathlib.Path.read_text
         replacements = {
             ROOT / ".github" / "workflows" / name: text
             for name, text in workflows.items()
         }
+        replacements.update({
+            ROOT / ".github" / "actions" / name / "action.yml": text
+            for name, text in (actions or {}).items()
+        })
 
         def read(path, *args, **kwargs):
             if path in replacements:
@@ -1604,6 +1610,185 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                         self.repository_issues(candidate),
                     )
 
+    def test_repository_rejects_missing_init_in_actual_build_launch(self):
+        path = ROOT / ".github" / "actions" / "docker-build" / "action.yml"
+        action = path.read_text()
+        # Freeze an owned fixture independently of concurrent launcher edits.
+        action = action.replace("docker run --pull=never --init", "docker run --pull=never")
+        self.assertIn("docker run --pull=never", action)
+        issues = self.repository_issues({}, {"docker-build": action})
+        self.assert_policy_issue(
+            "configure: Docker launch must have exactly one enabled --init before the image",
+            issues,
+        )
+
+    def test_repository_rejects_missing_analysis_container_init(self):
+        for name in self.WORKFLOW_JOBS:
+            workflow = self.repository_workflows()[name]
+            workflow = workflow.replace("      options: --init\n", "")
+            with self.subTest(workflow=name):
+                self.assert_policy_issue(
+                    self.LOCKED_ENVIRONMENT_MESSAGE,
+                    self.repository_issues({name: workflow}),
+                )
+
+    DOCKER_INIT_MESSAGE = "Docker launch must have exactly one enabled --init before the image"
+    DOCKER_INIT_ROUTES = {
+        "docker-build": ("configure", "build"),
+        "docker-run-tests": ("test",),
+    }
+    DOCKER_IMAGE = "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }}"
+
+    @classmethod
+    def init_action_fixture(cls, action: str) -> str:
+        text = (ROOT / ".github" / "actions" / action / "action.yml").read_text()
+        return re.sub(
+            r"docker run --pull=never(?: --init)?",
+            "docker run --pull=never --init",
+            text,
+        )
+
+    @staticmethod
+    def replace_action_step(text: str, name: str, script: str) -> str:
+        runs = MODULE.workflow_mapping_block(text.splitlines(), "runs", 0)
+        assert runs is not None
+        step = next(
+            step for step in MODULE.workflow_step_blocks(["runs:"] + runs["steps"][1])
+            if MODULE.workflow_step_fields(step)[0].get("name") == name
+        )
+        replacement = (
+            f"    - name: {name}\n      shell: sh\n      run: |\n"
+            + "\n".join("        " + line for line in script.splitlines())
+        )
+        return text.replace("\n".join(step), replacement, 1)
+
+    def test_repository_requires_all_scoped_steps_and_actual_launches(self):
+        for action, names in self.DOCKER_INIT_ROUTES.items():
+            valid = self.init_action_fixture(action)
+            self.assert_policy_clean(
+                self.DOCKER_INIT_MESSAGE, self.repository_issues({}, {action: valid})
+            )
+            for name in names:
+                for script in (
+                    f"docker run --pull=never {self.DOCKER_IMAGE} /bin/true --init",
+                    f"# docker run --init {self.DOCKER_IMAGE} /bin/true\ntrue",
+                    f"echo 'docker run --init {self.DOCKER_IMAGE} /bin/true'",
+                    f"printf '%s' 'docker run --init {self.DOCKER_IMAGE} /bin/true'",
+                    f"env docker run --init {self.DOCKER_IMAGE} /bin/true",
+                    "true",
+                ):
+                    with self.subTest(action=action, step=name, script=script):
+                        candidate = self.replace_action_step(valid, name, script)
+                        self.assert_policy_issue(
+                            f"{name}: {self.DOCKER_INIT_MESSAGE}",
+                            self.repository_issues({}, {action: candidate}),
+                        )
+                with self.subTest(action=action, step=name, mutation="deleted step"):
+                    renamed = valid.replace(f"- name: {name}\n", "- name: unrelated\n", 1)
+                    self.assertNotEqual(renamed, valid)
+                    self.assert_policy_issue(
+                        f"{name}: {self.DOCKER_INIT_MESSAGE}",
+                        self.repository_issues({}, {action: renamed}),
+                    )
+
+    def test_scoped_docker_init_option_boundaries(self):
+        image = self.DOCKER_IMAGE
+        good = (
+            f"docker run --pull=never --init {image} /bin/true",
+            f"docker run --pull never --env NOTE=--init --env ASAN_OPTIONS --init=true -v '$PWD:/work' {image} /bin/true --init=false",
+            f"docker run --env=NOTE=--init --init --mount type=bind,src=/tmp,dst=/work --network=none --user 1000:1000 '{image}' /bin/true",
+            f"if docker run --init --pull=never --env NOTE=\"$NOTE\" {image} /bin/true; then exit 0; fi",
+            f"docker run --pull=never \\\n  --init \\\n  {image} /bin/true # --init=false",
+            f"docker run --init -- {image} /bin/true",
+            f"# docker run --init=false {image}\necho --init=false\ndocker run --init {image} /bin/true",
+        )
+        bad = (
+            f"docker run --pull=never {image} /bin/true # --init",
+            f"docker run --init=false {image} /bin/true",
+            f"docker run --init --init {image} /bin/true",
+            f"docker run --init=true --init=false {image} /bin/true",
+            f"docker run --init=$INIT {image} /bin/true",
+            f"docker run --init= {image} /bin/true",
+            f"docker run --init=enabled {image} /bin/true",
+            f"docker run --env '--init' {image} /bin/true",
+            f"docker run --env NOTE=--init {image} /bin/true",
+            f"docker run --env=NOTE=--init {image} /bin/true",
+            f"docker run --label '--init' {image} /bin/true",
+            f"docker run --init --env {image}",
+            "docker run --init --env",
+            "docker run --init",
+            f"docker run --init --unknown value {image} /bin/true",
+            f"docker run $DOCKER_FLAGS --init {image} /bin/true",
+            f"docker run --init $DOCKER_FLAGS {image} /bin/true",
+            f"docker run --init {image} /bin/true\ndocker run {image} /bin/true",
+            f"docker run --init '{image} /bin/true",
+            f"eval 'docker run --init {image} /bin/true'",
+            f"sh -c 'docker run --init {image} /bin/true'",
+            f"cat <<'EOF'\ndocker run --init {image} /bin/true\nEOF",
+            f"docker() {{ true; }}\ndocker run --init {image} /bin/true",
+        )
+        valid = self.init_action_fixture("docker-build")
+        for expected_clean, commands in ((True, good), (False, bad)):
+            for command in commands:
+                with self.subTest(clean=expected_clean, command=command):
+                    candidate = self.replace_action_step(valid, "configure", command)
+                    issues = MODULE.docker_init_action_issues(candidate, ("configure", "build"))
+                    assertion = self.assert_policy_clean if expected_clean else self.assert_policy_issue
+                    assertion(f"configure: {self.DOCKER_INIT_MESSAGE}", issues)
+
+    def test_scoped_launch_rejects_hidden_additional_launch_bindings(self):
+        image = self.DOCKER_IMAGE
+        actual = f"docker run --init {image} /bin/true"
+        scripts = (
+            f"env docker run {image} /bin/true\n{actual}",
+            f"command docker run {image} /bin/true\n{actual}",
+            f"exec docker run {image} /bin/true\n{actual}",
+            f"eval 'docker run {image} /bin/true'\n{actual}",
+            f"sh -c 'docker run {image} /bin/true'\n{actual}",
+            f"$LAUNCH_DOCKER run {image} /bin/true\n{actual}",
+            f"launch() {{ {actual}; }}\nlaunch",
+            f"timeout 5 docker run {image} /bin/true\n{actual}",
+            f"python3 hidden-launch.py\n{actual}",
+            f"/usr/bin/docker run {image} /bin/true\n{actual}",
+            f"docker run --init true {image} /bin/true",
+            f"docker run --init false {image} /bin/true",
+        )
+        valid = self.init_action_fixture("docker-build")
+        for script in scripts:
+            with self.subTest(script=script):
+                candidate = self.replace_action_step(valid, "configure", script)
+                self.assert_policy_issue(
+                    f"configure: {self.DOCKER_INIT_MESSAGE}",
+                    MODULE.docker_init_action_issues(candidate, ("configure", "build")),
+                )
+
+    def test_scoped_docker_steps_reject_ambiguous_workflow_fields(self):
+        valid = self.init_action_fixture("docker-build")
+        nested_run = self.replace_action_step(
+            valid, "configure", f"docker run --init {self.DOCKER_IMAGE} /bin/true"
+        ).replace("      run: |\n", "      env:\n        run: |\n", 1).replace(
+            "        docker run --init", "          docker run --init", 1
+        )
+        mutations = {
+            "nested run in environment": nested_run,
+            "duplicate run": valid.replace("      run: |\n", "      run: true\n      run: |\n", 1),
+            "duplicate step": valid.replace("    - name: configure\n", "    - name: configure\n      run: true\n    - name: configure\n", 1),
+            "no-op shell": valid.replace("    - name: configure\n      shell: sh", "    - name: configure\n      shell: 'true {0}'", 1),
+            "duplicate steps": valid.replace("  steps:\n", "  steps: []\n  steps:\n", 1),
+            "duplicate runs": valid.replace("runs:\n", "runs:\n  using: composite\n  steps: []\nruns:\n", 1),
+            "quoted duplicate runs": valid + '\n"runs":\n  using: composite\n  steps: []\n',
+            "quoted duplicate run": valid.replace("      run: |\n", '      "run": true\n      run: |\n', 1),
+            "quoted duplicate name": valid.replace("    - name: configure\n", '    - name: configure\n      "name": unrelated\n', 1),
+            "commented step": valid.replace("    - name: configure\n", "    # - name: configure\n", 1),
+        }
+        for label, candidate in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(candidate, valid)
+                self.assert_policy_issue(
+                    self.DOCKER_INIT_MESSAGE,
+                    self.repository_issues({}, {"docker-build": candidate}),
+                )
+
     def test_expensive_jobs_run_inside_the_locked_analysis_environment(self):
         workflows = self.repository_workflows()
         analysis = {
@@ -1617,7 +1802,26 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
             workflow = analysis[name]
             resolver_start = workflow.index(f"  {self.RESOLVER_JOB}:\n")
             resolver_end = workflow.index(f"  {expensive_job}:\n")
+            image_line = "      image: ${{ needs.ResolveLinuxEnvironment.outputs.image }}\n"
+            container = "    container:\n" + image_line + "      options: --init\n"
+            self.assertIn(container, workflow)
             mutations = {
+                "missing init options": workflow.replace("      options: --init\n", "", 1),
+                "commented init options": workflow.replace("      options: --init\n", "      # options: --init\n", 1),
+                "disabled init": workflow.replace("      options: --init\n", "      options: --init=false\n", 1),
+                "duplicate init flags": workflow.replace("      options: --init\n", "      options: --init --init\n", 1),
+                "dynamic init": workflow.replace("      options: --init\n", "      options: ${{ env.INIT_OPTIONS }}\n", 1),
+                "duplicate options": workflow.replace("      options: --init\n", "      options: --init\n      options: --init=false\n", 1),
+                "duplicate container": workflow.replace(container, container + container, 1),
+                "quoted duplicate container": workflow.replace(container, container + '    "container":\n' + image_line + "      options: --init=false\n", 1),
+                "duplicate image": workflow.replace(image_line, image_line + image_line, 1),
+                "wrong scope options": workflow.replace("      options: --init\n", "    options: --init\n", 1),
+                "nested options": workflow.replace("      options: --init\n", "      env:\n        options: --init\n", 1),
+                "commented container": workflow.replace(container, "".join("    # " + line.lstrip() for line in container.splitlines(keepends=True)), 1),
+                "missing container": workflow.replace(container, "", 1),
+                "wrong scope container": workflow.replace(container, "".join("  " + line for line in container.splitlines(keepends=True)), 1),
+                "block options": workflow.replace("      options: --init\n", "      options: |\n        --init\n", 1),
+                "nested image": workflow.replace(image_line, "      env:\n  " + image_line, 1),
                 "floating container tag": workflow.replace(
                     "image: ${{ needs.ResolveLinuxEnvironment.outputs.image }}",
                     "image: ghcr.io/zeacent/klogg-ci-env:latest",

@@ -412,6 +412,11 @@ class AnalysisCandidateBoundaryTest(unittest.TestCase):
         elif command[:3] == ["docker", "image", "inspect"]:
             stdout = json.dumps([self.loaded])
         elif command[:2] == ["docker", "run"]:
+            self.assertEqual(command[:5], ["docker", "run", "--rm", "--pull=never", "--init"],
+                             "actual qualifier argv must enable runtime init after the existing no-pull prefix")
+            image_index = command.index(self.candidate["image"]["config_digest"])
+            self.assertEqual([value for value in command[2:image_index]
+                              if value == "--init" or value.startswith("--init=")], ["--init"])
             if self.fail_run:
                 raise subprocess.CalledProcessError(1, command, stderr="real role command failed")
             mounts = [next(csv.reader([command[index + 1]])) for index, value in enumerate(command[:-1]) if value == "--mount"]
@@ -434,6 +439,13 @@ class AnalysisCandidateBoundaryTest(unittest.TestCase):
                                 kwargs.pop("output", self.output), runner=kwargs.pop("runner", self.runner),
                                 downloader=kwargs.pop("downloader", self.downloader), extractor=self.extractor, **kwargs)
 
+    def test_all_analysis_roles_enable_init_in_actual_qualifier_argv(self):
+        for role in ("static", "coverage", "codeql"):
+            with self.subTest(role=role):
+                self.qualify(role, output=self.root / role)
+                command = next(command for command in reversed(self.commands) if command[:2] == ["docker", "run"])
+                self.assertLess(command.index("--init"), command.index(self.candidate["image"]["config_digest"]))
+
     def test_static_and_coverage_never_acquire_or_mount_codeql(self):
         for role in ("static", "coverage"):
             result = self.qualify(role, output=self.root / role)
@@ -446,6 +458,8 @@ class AnalysisCandidateBoundaryTest(unittest.TestCase):
         for command in self.commands:
             if command[:2] == ["docker", "run"]:
                 self.assertIn("--pull=never", command)
+                self.assertEqual(command.count("--init"), 1)
+                self.assertLess(command.index("--init"), command.index(self.candidate["image"]["config_digest"]))
                 self.assertIn("--network=none", command)
                 self.assertIn(self.candidate["image"]["config_digest"], command)
                 self.assertNotIn("--privileged", command)
@@ -458,6 +472,8 @@ class AnalysisCandidateBoundaryTest(unittest.TestCase):
         self.assertEqual(set(result["artifacts"]), {"codeql.sarif"})
         self.assertEqual({path.name for path in self.output.iterdir()}, {"analysis-evidence.json", "codeql.sarif"})
         command = next(command for command in self.commands if command[:2] == ["docker", "run"])
+        self.assertEqual(command.count("--init"), 1)
+        self.assertLess(command.index("--init"), command.index(self.candidate["image"]["config_digest"]))
         self.assertTrue(any("target=/klogg-codeql,readonly" in value for value in command))
         self.assertIn("CCACHE_DISABLE=1", command)
         self.assertTrue(all(not path.exists() for path in self.extractions))

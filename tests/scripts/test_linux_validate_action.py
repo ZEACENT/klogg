@@ -80,6 +80,66 @@ class LinuxValidateActionTest(unittest.TestCase):
         self.assertIn("${{ inputs.check-container }}", run_body(check))
         self.assertNotIn("--pull=never", run_body(check))
 
+    def test_shared_build_and_test_launches_enable_runtime_init_before_image(self):
+        image = "zeacent/klogg_ubuntu22.04"
+        for action, name in (("docker-build", "configure"), ("docker-build", "build"),
+                             ("docker-run-tests", "test")):
+            with self.subTest(action=action, step=name), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory).resolve()
+                argv = root / "docker-argv"
+                text = (ROOT / ".github/actions" / action / "action.yml").read_text()
+                step = next(step for step in action_steps(text)
+                            if QUALITY.workflow_step_fields(step)[0].get("name") == name)
+                body = run_body(step).replace("${{ env.KLOGG_CI_IMAGE_PREFIX }}", "zeacent/klogg")
+                body = body.replace("${{ inputs.container-suffix }}", "_ubuntu22.04")
+                # Execute the real wrapper but record Docker argv without a daemon
+                # or container payload. nproc is a deterministic host-side input.
+                fixture = 'docker() { printf "%s\\0" "$@" > "$DOCKER_ARGV"; };\n'
+                fixture += 'nproc() { printf "2\\n"; };\n'
+                env = dict(os.environ, DOCKER_ARGV=str(argv), KLOGG_WORKSPACE=str(root / "workspace with spaces"),
+                           KLOGG_VERSION="fixture-version", KLOGG_BUILD_ROOT="build_root",
+                           KLOGG_CMAKE_OPTS="-DFIXTURE=--init", KLOGG_SANITIZER="",
+                           GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="2")
+                result = subprocess.run(["sh", "-eu", "-c", fixture + body], env=env,
+                                        check=False, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                command = argv.read_bytes().decode().split("\0")[:-1]
+                image_index = command.index(image)
+                options = command[:image_index]
+                self.assertEqual(options[:3], ["run", "--pull=never", "--init"],
+                                 "launch must enable runtime init after the strict no-pull prefix, before the image")
+                self.assertEqual([value for value in options if value == "--init" or value.startswith("--init=")],
+                                 ["--init"])
+                self.assertEqual(command[image_index + 1], "/bin/bash")
+                self.assertEqual(command[command.index("-v") + 1], env["KLOGG_WORKSPACE"] + ":/usr/local")
+                for option in ("ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS", "TSAN_OPTIONS"):
+                    self.assertIn(option, options)
+                if name == "configure":
+                    self.assertIn("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", command[-1])
+                    self.assertIn("-DCPM_SOURCE_CACHE=/usr/local/cpm_cache", command[-1])
+                elif name == "build":
+                    self.assertIn("ci-build-metrics-123-2.json", command[-1])
+                    self.assertIn("-- cmake --build /usr/local/build_root --target ci_build", command[-1])
+                else:
+                    self.assertIn("LANG=C.UTF-8", options)
+                    self.assertIn("ctest --output-on-failure --parallel 2", command[-1])
+
+    def test_ordinary_analysis_jobs_enable_init_unconditionally_on_existing_events(self):
+        for workflow, job in (("coverage.yml", "coverage"), ("static-analysis.yml", "static-analysis"),
+                              ("codeql-analysis.yml", "analyze")):
+            text = (ROOT / ".github/workflows" / workflow).read_text()
+            triggers = QUALITY.workflow_trigger_mapping(text)
+            self.assertIsNotNone(triggers)
+            self.assertEqual(set(triggers), {"pull_request", "push", "workflow_dispatch"})
+            block = QUALITY.workflow_job_blocks(text)[job]
+            container = QUALITY.workflow_mapping_block(block, "container", 4)
+            self.assertIsNotNone(container)
+            for event in triggers:
+                with self.subTest(workflow=workflow, event=event):
+                    self.assertEqual(container["image"][0], "${{ needs.ResolveLinuxEnvironment.outputs.image }}")
+                    self.assertEqual(container.get("options", (None, []))[0], "--init",
+                                     "ordinary analysis needs a direct unconditional runtime init option")
+
     def test_tsan_requires_durable_corresponding_sources_before_application_build(self):
         text = ACTION.read_text()
         steps = action_steps(text)
