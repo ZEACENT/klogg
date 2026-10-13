@@ -211,6 +211,36 @@ struct MainWindowLiveSaveTestAccess {
         window.closeAll( MainWindow::ActionInitiator::User );
     }
 
+    static void closeByApp( MainWindow& window, QWidget* tab )
+    {
+        window.closeTab( window.mainTabWidget_.indexOf( tab ), MainWindow::ActionInitiator::App );
+    }
+
+    static bool batchActive( const MainWindow& window )
+    {
+        return window.tabCloseBatchInProgress_;
+    }
+
+    static bool transactionActive( const MainWindow& window )
+    {
+        return window.liveCloseTransaction_ != nullptr;
+    }
+
+    static bool shutdownActive( const MainWindow& window )
+    {
+        return window.shutdownInProgress_;
+    }
+
+    static bool windowClosePending( const MainWindow& window )
+    {
+        return window.deferredWindowClose_;
+    }
+
+    static auto pendingAppCloses( const MainWindow& window )
+    {
+        return window.pendingAppTabCloseTargets_.size();
+    }
+
     static QString selectOutputPath( MainWindow& window,
                                      CrawlerWidget* crawler )
     {
@@ -1123,6 +1153,245 @@ TEST_CASE( "Tab context batch closes live and file tabs safely",
     }
     config.setConfirmTabClose( previousConfirm );
     config.setMinimizeToTray( previousMinimizeToTray );
+}
+
+TEST_CASE( "Automatic current loading failure survives a tab close batch",
+           "[ui][tab-batch][app-close]" )
+{
+    const bool cancel = GENERATE( false, true );
+    CAPTURE( cancel );
+    QTemporaryDir files;
+    REQUIRE( files.isValid() );
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "AutomaticBatchClose", 0 } };
+    window.show();
+    for ( const auto& name : { "first.log", "second.log", "retained.log" } ) {
+        const auto path = files.filePath( QString::fromLatin1( name ) );
+        QFile file( path );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "line\n" ) == 5 );
+        file.close();
+        window.loadInitialFile( path, false );
+    }
+    auto* tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( tabs->count() == 3 );
+    auto* first = tabs->widget( 0 );
+    auto* second = tabs->widget( 1 );
+    QPointer<CrawlerWidget> retained = qobject_cast<CrawlerWidget*>( tabs->widget( 2 ) );
+    REQUIRE( retained );
+    REQUIRE( waitUiState( [ & ] { return retained->isFirstLoadDone(); } ) );
+    tabs->setCurrentWidget( retained );
+
+    auto& config = Configuration::get();
+    const auto previousConfirm = config.confirmTabClose();
+    config.setConfirmTabClose( true );
+    int confirmations = 0;
+    const auto failCurrent = [ & ] {
+        REQUIRE( tabs->currentWidget() == retained );
+        Q_EMIT retained->loadingFinished( LoadingStatus::Interrupted );
+        Q_EMIT retained->loadingFinished( LoadingStatus::Interrupted );
+        Q_EMIT tabs->tabCloseRequested( tabs->indexOf( retained ) );
+        CHECK( tabs->indexOf( retained ) >= 0 );
+    };
+    const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+        ++confirmations;
+        if ( cancel ) {
+            failCurrent();
+            return static_cast<int>( QDialogButtonBox::No );
+        }
+        return static_cast<int>( QDialogButtonBox::Yes );
+    } };
+    Q_EMIT tabs->tabsCloseRequested( QList<QWidget*>{ first, second } );
+    if ( !cancel ) {
+        failCurrent();
+        tabs->setCurrentWidget( second );
+    }
+    // Neither modal cancellation nor synchronous batch progress may replay App work.
+    CHECK( tabs->indexOf( retained ) >= 0 );
+    REQUIRE( waitUiState( [ & ] { return !retained || tabs->indexOf( retained ) < 0; } ) );
+    CHECK( tabs->count() == ( cancel ? 2 : 0 ) );
+    CHECK( confirmations == ( cancel ? 1 : 2 ) );
+    CHECK( session->openedDocuments().size() == ( cancel ? 2u : 0u ) );
+
+    config.setConfirmTabClose( false );
+    MainWindowLiveSaveTestAccess::closeAllByUser( window );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+    config.setConfirmTabClose( previousConfirm );
+}
+
+TEST_CASE( "Pending automatic closes follow objects across queued dispatch",
+           "[ui][tab-batch][app-close]" )
+{
+    const auto mode = QString::fromLatin1(
+        GENERATE( "file", "folder", "detached", "destroyed", "new-batch" ) );
+    CAPTURE( mode.toStdString() );
+    QTemporaryDir files;
+    REQUIRE( files.isValid() );
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "AutomaticCloseIdentity", 0 } };
+    window.show();
+    for ( const auto& name : { "first.log", "retained.log", "replacement.log" } ) {
+        const auto path = files.filePath( QString::fromLatin1( name ) );
+        QFile file( path );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "line\n" ) == 5 );
+        file.close();
+        window.loadInitialFile( path, false );
+    }
+    auto* tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    auto* first = tabs->widget( 0 );
+    QPointer<QWidget> target = tabs->widget( 1 );
+    QPointer<QWidget> replacement = tabs->widget( 2 );
+    if ( mode == QLatin1String( "folder" ) ) {
+        window.openFolderByPath( files.path() );
+        target = tabs->currentWidget();
+        REQUIRE( qobject_cast<FolderCrawlerWidget*>( target ) != nullptr );
+    }
+    tabs->setCurrentWidget( target );
+    auto& config = Configuration::get();
+    const auto previousConfirm = config.confirmTabClose();
+    config.setConfirmTabClose( true );
+    int confirmations = 0;
+    const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+        ++confirmations;
+        if ( confirmations == 1 ) {
+            MainWindowLiveSaveTestAccess::closeByApp( window, target );
+            MainWindowLiveSaveTestAccess::closeByApp( window, target );
+            CHECK( MainWindowLiveSaveTestAccess::pendingAppCloses( window ) == 1 );
+            Q_EMIT tabs->tabCloseRequested( tabs->indexOf( replacement ) );
+        }
+        else {
+            // The earlier App callback is ready, but a new real batch owns the
+            // nested confirmation frame. Dispatch must recheck that blocker.
+            QCoreApplication::processEvents();
+            CHECK( MainWindowLiveSaveTestAccess::batchActive( window ) );
+            CHECK( tabs->indexOf( target ) >= 0 );
+            CHECK( MainWindowLiveSaveTestAccess::pendingAppCloses( window ) == 1 );
+        }
+        return static_cast<int>( QDialogButtonBox::No );
+    } };
+    Q_EMIT tabs->tabsCloseRequested( QList<QWidget*>{ first } );
+    CHECK_FALSE( MainWindowLiveSaveTestAccess::batchActive( window ) );
+    CHECK( tabs->indexOf( target ) >= 0 );
+    tabs->setCurrentWidget( replacement );
+    auto* tabBar = tabs->findChild<QTabBar*>();
+    REQUIRE( tabBar != nullptr );
+    tabBar->moveTab( tabs->indexOf( replacement ), 0 );
+    config.setConfirmTabClose( false );
+    if ( mode == QLatin1String( "detached" )
+         || mode == QLatin1String( "destroyed" ) ) {
+        Q_EMIT tabs->tabCloseRequested( tabs->indexOf( target ) );
+        CHECK( target );
+        CHECK( tabs->indexOf( target ) < 0 );
+        if ( mode == QLatin1String( "destroyed" ) ) {
+            QCoreApplication::sendPostedEvents( target, QEvent::DeferredDelete );
+            CHECK_FALSE( target );
+        }
+    }
+    else if ( mode == QLatin1String( "new-batch" ) ) {
+        config.setConfirmTabClose( true );
+        Q_EMIT tabs->tabsCloseRequested( QList<QWidget*>{ replacement } );
+        config.setConfirmTabClose( false );
+    }
+    REQUIRE( waitUiState( [ & ] {
+        return MainWindowLiveSaveTestAccess::pendingAppCloses( window ) == 0;
+    } ) );
+    CHECK( ( !target || tabs->indexOf( target ) < 0 ) );
+    CHECK( replacement );
+    CHECK( tabs->indexOf( replacement ) == 0 );
+    CHECK( confirmations == ( mode == QLatin1String( "new-batch" )
+                                 ? 2 : 1 ) );
+    MainWindowLiveSaveTestAccess::closeAllByUser( window );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+    config.setConfirmTabClose( previousConfirm );
+}
+
+TEST_CASE( "Out of memory alert keeps the failing current crawler identity",
+           "[ui][app-close]" )
+{
+    const bool removeDuringAlert = GENERATE( false, true );
+    CAPTURE( removeDuringAlert );
+    QTemporaryDir files;
+    REQUIRE( files.isValid() );
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "LoadingFailureIdentity", 0 } };
+    window.show();
+    for ( const auto& name : { "failed.log", "survivor.log" } ) {
+        const auto path = files.filePath( QString::fromLatin1( name ) );
+        QFile file( path );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "line\n" ) == 5 );
+        file.close();
+        window.loadInitialFile( path, false );
+    }
+    auto* tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    QPointer<CrawlerWidget> failed = qobject_cast<CrawlerWidget*>( tabs->widget( 0 ) );
+    auto* survivor = tabs->widget( 1 );
+    REQUIRE( failed );
+    REQUIRE( waitUiState( [ & ] { return failed->isFirstLoadDone(); } ) );
+    tabs->setCurrentWidget( failed );
+    auto& config = Configuration::get();
+    const auto previousConfirm = config.confirmTabClose();
+    config.setConfirmTabClose( false );
+    int alerts = 0;
+    const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& dialog ) {
+        auto* message = qobject_cast<QMessageBox*>( &dialog ); // lint-allow: platform-fragile -- inspect the injected production alert without executing a modal.
+        REQUIRE( message != nullptr );
+        CHECK( message->text() == QStringLiteral( "Not enough memory." ) );
+        ++alerts;
+        tabs->setCurrentWidget( survivor );
+        if ( removeDuringAlert ) {
+            Q_EMIT tabs->tabCloseRequested( tabs->indexOf( failed ) );
+        }
+        return static_cast<int>( QDialog::Accepted );
+    } };
+    Q_EMIT failed->loadingFinished( LoadingStatus::NoMemory );
+    CHECK( alerts == 1 );
+    CHECK( tabs->count() == 1 );
+    CHECK( tabs->widget( 0 ) == survivor );
+    CHECK( session->openedDocuments().size() == 1u );
+    CHECK( ( !failed || tabs->indexOf( failed ) < 0 ) );
+    MainWindowLiveSaveTestAccess::closeAllByUser( window );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+    config.setConfirmTabClose( previousConfirm );
+}
+
+TEST_CASE( "Queued tab and window close callbacks are cancelled with their context",
+           "[ui][tab-batch][app-close][lifetime]" )
+{
+    QTemporaryDir files;
+    REQUIRE( files.isValid() );
+    const auto path = files.filePath( QStringLiteral( "retained.log" ) );
+    QFile file( path );
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    REQUIRE( file.write( "line\n" ) == 5 );
+    file.close();
+    auto session = std::make_shared<Session>();
+    auto window = std::make_unique<MainWindow>( WindowSession{ session, "QueuedCloseLifetime", 0 } );
+    window->show();
+    window->loadInitialFile( path, false );
+    auto* tabs = window->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    auto* target = tabs->widget( 0 );
+    auto& config = Configuration::get();
+    const auto previousConfirm = config.confirmTabClose();
+    config.setConfirmTabClose( true );
+    const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+        MainWindowLiveSaveTestAccess::closeByApp( *window, target );
+        window->close();
+        CHECK( MainWindowLiveSaveTestAccess::windowClosePending( *window ) );
+        return static_cast<int>( QDialogButtonBox::No );
+    } };
+    Q_EMIT tabs->tabsCloseRequested( QList<QWidget*>{ target } );
+    QPointer<MainWindow> guard( window.get() );
+    window.release()->deleteLater();
+    QCoreApplication::sendPostedEvents( guard, QEvent::DeferredDelete );
+    CHECK_FALSE( guard );
+    QCoreApplication::processEvents();
+    config.setConfirmTabClose( previousConfirm );
 }
 
 TEST_CASE( "Close All in Group stops when a tab close is declined", "[ui][tabgroup][tab-batch]" )
@@ -2050,6 +2319,178 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
     REQUIRE( transport->startedGeneration == controller->snapshot().generation );
 
+    if ( preservationScenario >= 17 && preservationScenario <= 21 ) {
+        using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+        const bool duplicateBeforeDispatch = preservationScenario == 21;
+        const bool windowPriority = preservationScenario == 19 || preservationScenario == 20;
+        const bool cancelApp = preservationScenario == 18 || preservationScenario == 20
+                               || duplicateBeforeDispatch;
+        auto* otherSource = appSession->getAdbLogcatSource( otherCrawler );
+        auto* otherController = appSession->getLiveLogController( otherCrawler );
+        auto* otherData = Access::data( otherCrawler );
+        REQUIRE( otherSource != nullptr );
+        REQUIRE( otherController != nullptr );
+        REQUIRE( otherData != nullptr );
+        REQUIRE( otherSource->reconnectSource() );
+        REQUIRE( factory.created.size() == 2u );
+        QPointer<MenuLiveSourceTransport> otherTransport( factory.created.back() );
+        otherTransport->publishConnected();
+        otherTransport->publishBytes( QByteArrayLiteral( "automatic-preserved\n" ) );
+        const auto capturePath = otherData->capturePath();
+        REQUIRE( QDir( capturePath ).exists() );
+        QTemporaryDir documents;
+        REQUIRE( documents.isValid() );
+        const auto outputPath = documents.filePath( QStringLiteral( "automatic-output.log" ) );
+        REQUIRE( otherSource->bindOutputFile( outputPath, LiveLogSaveAnsiMode::Preserve ) );
+        if ( cancelApp || windowPriority ) {
+            StreamingLogDataTimerTestAccess::failOutputForClose( *otherData,
+                                                                 CaptureOutputError::Flush );
+        }
+        transport->deferStop = true;
+        otherTransport->deferStop = !windowPriority;
+        auto& config = Configuration::get();
+        const auto previousConfirm = config.confirmTabClose();
+        const auto previousMinimizeToTray = config.minimizeToTray();
+        config.setConfirmTabClose( windowPriority || duplicateBeforeDispatch );
+        config.setMinimizeToTray( false );
+        int confirmations = 0;
+        int failures = 0;
+        SafeQSignalSpy windowClosed( mainWindow.get(), &MainWindow::windowClosed );
+        const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& dialog ) {
+            auto* message = qobject_cast<QMessageBox*>( &dialog ); // lint-allow: platform-fragile -- inspect the injected production dialog; no modal is executed.
+            REQUIRE( message != nullptr );
+            if ( message->standardButtons() == ( QMessageBox::Yes | QMessageBox::No ) ) { // lint-allow: platform-fragile -- button enums identify the injected confirmation as data.
+                ++confirmations;
+                MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
+                MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
+                if ( windowPriority ) {
+                    mainWindow->close();
+                    CHECK( MainWindowLiveSaveTestAccess::windowClosePending( *mainWindow ) );
+                }
+                return static_cast<int>( QDialogButtonBox::No );
+            }
+            ++failures;
+            if ( windowPriority && failures == 1 ) {
+                CHECK( MainWindowLiveSaveTestAccess::shutdownActive( *mainWindow ) );
+                CHECK( MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 1 );
+                if ( !cancelApp ) {
+                    StreamingLogDataTimerTestAccess::recoverOutputForClose( *otherData );
+                }
+            }
+            else {
+                CHECK_FALSE( MainWindowLiveSaveTestAccess::shutdownActive( *mainWindow ) );
+            }
+            return 2; // Cancel the window or App Preserve attempt, never retry it.
+        } };
+        if ( duplicateBeforeDispatch ) {
+            Q_EMIT tabs->tabsCloseRequested( QList<QWidget*>{ crawler } );
+            REQUIRE( confirmations == 1 );
+            REQUIRE_FALSE( MainWindowLiveSaveTestAccess::batchActive( *mainWindow ) );
+            REQUIRE_FALSE( MainWindowLiveSaveTestAccess::transactionActive( *mainWindow ) );
+            REQUIRE( MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 1 );
+            // No event-loop turn has dispatched the retained request. A new
+            // unblocked App request for that same object is the same attempt.
+            config.setConfirmTabClose( false );
+            MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
+            REQUIRE( otherTransport->pendingStoppedGeneration );
+            otherTransport->publishStopped();
+            REQUIRE( waitUiState( [ & ] {
+                return !MainWindowLiveSaveTestAccess::transactionActive( *mainWindow )
+                       && MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 0;
+            } ) );
+            CHECK( failures == 1 );
+            CHECK( tabs->count() == 2 );
+            CHECK( QDir( capturePath ).exists() );
+            CHECK( windowClosed.count() == 0 );
+            StreamingLogDataTimerTestAccess::recoverOutputForClose( *otherData );
+            transport->deferStop = false;
+            MainWindowLiveSaveTestAccess::closeAllByUser( *mainWindow );
+            REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+            mainWindow->close();
+            REQUIRE( waitUiState( [ & ] { return !mainWindow->isVisible(); } ) );
+            config.setConfirmTabClose( previousConfirm );
+            config.setMinimizeToTray( previousMinimizeToTray );
+            return;
+        }
+        if ( windowPriority ) {
+            Q_EMIT tabs->tabsCloseRequested( QList<QWidget*>{ crawler } );
+            CHECK( confirmations == 1 );
+            CHECK( MainWindowLiveSaveTestAccess::windowClosePending( *mainWindow ) );
+            config.setConfirmTabClose( false );
+            // Before the queued window callback runs, a new real batch takes
+            // ownership. The pending window flag must survive that callback.
+            Q_EMIT tabs->tabsCloseRequested( QList<QWidget*>{ crawler } );
+            REQUIRE( transport->pendingStoppedGeneration );
+            QCoreApplication::processEvents();
+            CHECK( MainWindowLiveSaveTestAccess::windowClosePending( *mainWindow ) );
+            CHECK( MainWindowLiveSaveTestAccess::batchActive( *mainWindow ) );
+            CHECK( otherTransport->stopRequests.empty() );
+        }
+        else {
+            Q_EMIT tabs->tabCloseRequested( tabs->indexOf( crawler ) );
+            REQUIRE( transport->pendingStoppedGeneration );
+            MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
+            MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
+            // The active transaction's own tab will be detached by completion;
+            // its queued identity must not close a shifted index afterward.
+            MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, crawler );
+            CHECK( MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 2 );
+            config.setConfirmTabClose( true );
+            Q_EMIT tabs->tabCloseRequested( tabs->indexOf( otherCrawler ) );
+            CHECK( confirmations == 0 );
+            const auto filePath = documents.filePath( QStringLiteral( "immediate.log" ) );
+            QFile file( filePath );
+            REQUIRE( file.open( QIODevice::WriteOnly ) );
+            REQUIRE( file.write( "line\n" ) == 5 );
+            file.close();
+            mainWindow->loadFileNonInteractive( filePath );
+            QPointer<QWidget> fileTab( tabs->currentWidget() );
+            MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, fileTab );
+            CHECK( tabs->indexOf( fileTab ) < 0 );
+            mainWindow->openFolderByPath( documents.path() );
+            QPointer<QWidget> folderTab( tabs->currentWidget() );
+            REQUIRE( qobject_cast<FolderCrawlerWidget*>( folderTab ) != nullptr );
+            MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, folderTab );
+            CHECK( tabs->indexOf( folderTab ) < 0 );
+            CHECK( tabs->count() == 2 );
+            CHECK( confirmations == 0 );
+        }
+        transport->publishStopped();
+        if ( !windowPriority ) {
+            REQUIRE( waitUiState( [ & ] { return otherTransport->pendingStoppedGeneration.has_value(); } ) );
+            REQUIRE( otherTransport->stopRequests.size() == 1u );
+            CHECK( otherTransport->stopRequests.front().second == live::StopDisposition::SettleAccepted );
+            CHECK( MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 1 );
+            CHECK( MainWindowLiveSaveTestAccess::transactionActive( *mainWindow ) );
+            otherTransport->publishStopped();
+        }
+        REQUIRE( waitUiState( [ & ] {
+            return !MainWindowLiveSaveTestAccess::transactionActive( *mainWindow )
+                   && !MainWindowLiveSaveTestAccess::batchActive( *mainWindow )
+                   && !MainWindowLiveSaveTestAccess::shutdownActive( *mainWindow )
+                   && MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 0;
+        } ) );
+        CHECK( failures == ( windowPriority ? ( cancelApp ? 2 : 1 ) : ( cancelApp ? 1 : 0 ) ) );
+        CHECK( tabs->count() == ( cancelApp ? 1 : 0 ) );
+        CHECK( QDir( capturePath ).exists() ); // App never commits User Discard.
+        CHECK( windowClosed.count() == 0 );
+        CHECK( mainWindow->isVisible() );
+        if ( cancelApp ) {
+            config.setConfirmTabClose( false );
+            StreamingLogDataTimerTestAccess::recoverOutputForClose( *otherData );
+            // Cancellation resumed a fresh transport. A later User close is a
+            // distinct request, not an automatically repeated Preserve attempt.
+            Q_EMIT tabs->tabCloseRequested( tabs->indexOf( otherCrawler ) );
+            REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+        }
+        config.setConfirmTabClose( false );
+        mainWindow->close();
+        REQUIRE( waitUiState( [ & ] { return !mainWindow->isVisible(); } ) );
+        config.setConfirmTabClose( previousConfirm );
+        config.setMinimizeToTray( previousMinimizeToTray );
+        return;
+    }
+
     if ( preservationScenario == 16 ) {
         using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
         auto* data = Access::data( crawler );
@@ -2776,6 +3217,26 @@ TEST_CASE( "Live bytes and retry countdown preserve opened-files menu actions",
     const auto useIos = GENERATE( false, true );
     const auto background = GENERATE( false, true );
     exerciseLivePresentation( useIos, background );
+}
+
+TEST_CASE( "Automatic live closes survive a competing transaction without discarding capture",
+           "[ui][app-close][live-close]" )
+{
+    const auto scenario = GENERATE( 17, 18 );
+    exerciseLivePresentation( false, false, scenario );
+}
+
+TEST_CASE( "Duplicate automatic live close before queued dispatch is a single attempt",
+           "[ui][tab-batch][app-close][live-close]" )
+{
+    exerciseLivePresentation( false, false, 21 );
+}
+
+TEST_CASE( "Deferred window close keeps priority across a new batch and shutdown cancellation",
+           "[ui][tab-batch][app-close][live-close]" )
+{
+    const auto scenario = GENERATE( 19, 20 );
+    exerciseLivePresentation( false, false, scenario );
 }
 
 TEST_CASE( "Presentation activity follows tab visibility rather than window focus",

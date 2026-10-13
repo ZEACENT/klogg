@@ -325,6 +325,8 @@ class MainWindow : public QMainWindow {
     void continueTabCloseBatch();
     void cancelTabCloseBatch();
     void resumeDeferredWindowClose();
+    void retainAppTabClose( QWidget* tab );
+    void schedulePendingAppTabCloses();
     void beginWindowShutdown();
     void advanceWindowShutdown();
     void abortWindowShutdown();
@@ -461,6 +463,7 @@ class MainWindow : public QMainWindow {
     bool tabCloseBatchInProgress_ = false;
     ActionInitiator tabCloseBatchInitiator_{ ActionInitiator::User };
     std::optional<QList<QPointer<QWidget>>> pendingTabCloseTargets_;
+    QList<QPointer<QWidget>> pendingAppTabCloseTargets_;
     bool deferredWindowClose_ = false;
     std::unique_ptr<klogg::livelog::LiveLogCloseTransaction> liveCloseTransaction_;
     std::vector<CrawlerWidget*> shutdownLiveTabs_;
