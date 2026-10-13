@@ -317,7 +317,8 @@ class MainWindow : public QMainWindow {
     void startLiveCloseTransaction( CrawlerWidget* crawler,
                                     klogg::livelog::LiveLogCloseTransaction::Mode mode,
                                     DiscardCommit discardCommit,
-                                    std::function<void( bool )> completion );
+                                    std::function<void( bool )> completion,
+                                    bool appSingleRequest = false );
     void showLiveCloseFailureDialog(
         const klogg::livelog::LiveLogCloseTransaction::Failure& failure );
     void finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator initiator );
@@ -466,6 +467,7 @@ class MainWindow : public QMainWindow {
     QList<QPointer<QWidget>> pendingAppTabCloseTargets_;
     bool deferredWindowClose_ = false;
     std::unique_ptr<klogg::livelog::LiveLogCloseTransaction> liveCloseTransaction_;
+    QPointer<QWidget> activeAppTabCloseTarget_;
     std::vector<CrawlerWidget*> shutdownLiveTabs_;
     std::vector<CrawlerWidget*> shutdownResumeTabs_;
     std::size_t shutdownLiveTabIndex_ = 0;

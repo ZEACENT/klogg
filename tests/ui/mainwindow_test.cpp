@@ -226,6 +226,11 @@ struct MainWindowLiveSaveTestAccess {
         return window.liveCloseTransaction_ != nullptr;
     }
 
+    static bool appAttemptActive( const MainWindow& window )
+    {
+        return !window.activeAppTabCloseTarget_.isNull();
+    }
+
     static bool shutdownActive( const MainWindow& window )
     {
         return window.shutdownInProgress_;
@@ -253,13 +258,17 @@ struct MainWindowLiveSaveTestAccess {
         window.startLiveLogExport( crawler, outputPath, ansiMode );
     }
 
-    static std::optional<bool> startInvalidClose( MainWindow& window )
+    static std::optional<bool> startInvalidClose( MainWindow& window,
+                                                CrawlerWidget* crawler = nullptr,
+                                                bool appSingleRequest = false )
     {
         std::optional<bool> completion;
+        const auto mode = appSingleRequest
+                              ? klogg::livelog::LiveLogCloseTransaction::Mode::Preserve
+                              : klogg::livelog::LiveLogCloseTransaction::Mode::Discard;
         window.startLiveCloseTransaction(
-            nullptr, klogg::livelog::LiveLogCloseTransaction::Mode::Discard,
-            MainWindow::DiscardCommit::PerTab,
-            [ &completion ]( bool proceed ) { completion = proceed; } );
+            crawler, mode, MainWindow::DiscardCommit::PerTab,
+            [ &completion ]( bool proceed ) { completion = proceed; }, appSingleRequest );
         return completion;
     }
 };
@@ -2319,9 +2328,10 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
     REQUIRE( transport->startedGeneration == controller->snapshot().generation );
 
-    if ( preservationScenario >= 17 && preservationScenario <= 21 ) {
+    if ( preservationScenario >= 17 && preservationScenario <= 22 ) {
         using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
-        const bool duplicateBeforeDispatch = preservationScenario == 21;
+        const bool duplicateWhileActive = preservationScenario == 22;
+        const bool duplicateBeforeDispatch = preservationScenario == 21 || duplicateWhileActive;
         const bool windowPriority = preservationScenario == 19 || preservationScenario == 20;
         const bool cancelApp = preservationScenario == 18 || preservationScenario == 20
                                || duplicateBeforeDispatch;
@@ -2372,6 +2382,7 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             ++failures;
             if ( windowPriority && failures == 1 ) {
                 CHECK( MainWindowLiveSaveTestAccess::shutdownActive( *mainWindow ) );
+                CHECK_FALSE( MainWindowLiveSaveTestAccess::appAttemptActive( *mainWindow ) );
                 CHECK( MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 1 );
                 if ( !cancelApp ) {
                     StreamingLogDataTimerTestAccess::recoverOutputForClose( *otherData );
@@ -2379,10 +2390,29 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             }
             else {
                 CHECK_FALSE( MainWindowLiveSaveTestAccess::shutdownActive( *mainWindow ) );
+                CHECK( MainWindowLiveSaveTestAccess::appAttemptActive( *mainWindow ) );
             }
             return 2; // Cancel the window or App Preserve attempt, never retry it.
         } };
         if ( duplicateBeforeDispatch ) {
+            if ( duplicateWhileActive ) {
+                const auto filePath = documents.filePath( QStringLiteral( "unsupported.log" ) );
+                QFile file( filePath );
+                REQUIRE( file.open( QIODevice::WriteOnly ) );
+                REQUIRE( file.write( "line\n" ) == 5 );
+                file.close();
+                mainWindow->loadFileNonInteractive( filePath );
+                auto* fileCrawler = qobject_cast<CrawlerWidget*>( tabs->currentWidget() );
+                REQUIRE( fileCrawler != nullptr );
+                REQUIRE( waitUiState( [ & ] { return fileCrawler->isFirstLoadDone(); } ) );
+                // An early refusal for a document without live services must
+                // not stamp an active App identity before a transaction exists.
+                CHECK( MainWindowLiveSaveTestAccess::startInvalidClose(
+                           *mainWindow, fileCrawler, true ) == std::optional<bool>{ false } );
+                CHECK_FALSE( MainWindowLiveSaveTestAccess::appAttemptActive( *mainWindow ) );
+                MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, fileCrawler );
+                CHECK( tabs->count() == 2 );
+            }
             Q_EMIT tabs->tabsCloseRequested( QList<QWidget*>{ crawler } );
             REQUIRE( confirmations == 1 );
             REQUIRE_FALSE( MainWindowLiveSaveTestAccess::batchActive( *mainWindow ) );
@@ -2393,17 +2423,47 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             config.setConfirmTabClose( false );
             MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
             REQUIRE( otherTransport->pendingStoppedGeneration );
+            if ( duplicateWhileActive ) {
+                // Private App-close contract characterization, not a native
+                // Interrupted/NoMemory reproduction: the accepted Preserve is
+                // held in its actual stop interval while duplicates arrive.
+                REQUIRE( MainWindowLiveSaveTestAccess::transactionActive( *mainWindow ) );
+                REQUIRE( MainWindowLiveSaveTestAccess::appAttemptActive( *mainWindow ) );
+                REQUIRE( otherTransport->stopRequests.size() == 1u );
+                // Refusing another startup must leave the existing owner intact.
+                CHECK( MainWindowLiveSaveTestAccess::startInvalidClose(
+                           *mainWindow, nullptr, true ) == std::optional<bool>{ false } );
+                MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
+                MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
+                CHECK( MainWindowLiveSaveTestAccess::transactionActive( *mainWindow ) );
+                CHECK( otherTransport->pendingStoppedGeneration.has_value() );
+                CHECK( otherTransport->stopRequests.size() == 1u );
+                MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, crawler );
+                CHECK( MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 1 );
+            }
             otherTransport->publishStopped();
+            if ( duplicateWhileActive ) {
+                // A different target's first App request still survives while
+                // B's own duplicates coalesce. Reset/completion transfers ownership.
+                REQUIRE( waitUiState( [ & ] { return transport->pendingStoppedGeneration.has_value(); } ) );
+                CHECK( MainWindowLiveSaveTestAccess::appAttemptActive( *mainWindow ) );
+                REQUIRE( transport->stopRequests.size() == 1u );
+                CHECK( transport->stopRequests.front().second == live::StopDisposition::SettleAccepted );
+                transport->publishStopped();
+            }
             REQUIRE( waitUiState( [ & ] {
                 return !MainWindowLiveSaveTestAccess::transactionActive( *mainWindow )
                        && MainWindowLiveSaveTestAccess::pendingAppCloses( *mainWindow ) == 0;
             } ) );
             CHECK( failures == 1 );
-            CHECK( tabs->count() == 2 );
+            CHECK_FALSE( MainWindowLiveSaveTestAccess::appAttemptActive( *mainWindow ) );
+            CHECK( tabs->count() == ( duplicateWhileActive ? 1 : 2 ) );
             CHECK( QDir( capturePath ).exists() );
             CHECK( windowClosed.count() == 0 );
             StreamingLogDataTimerTestAccess::recoverOutputForClose( *otherData );
-            transport->deferStop = false;
+            if ( !duplicateWhileActive ) {
+                transport->deferStop = false;
+            }
             MainWindowLiveSaveTestAccess::closeAllByUser( *mainWindow );
             REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
             mainWindow->close();
@@ -2429,6 +2489,7 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
         else {
             Q_EMIT tabs->tabCloseRequested( tabs->indexOf( crawler ) );
             REQUIRE( transport->pendingStoppedGeneration );
+            CHECK_FALSE( MainWindowLiveSaveTestAccess::appAttemptActive( *mainWindow ) );
             MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
             MainWindowLiveSaveTestAccess::closeByApp( *mainWindow, otherCrawler );
             // The active transaction's own tab will be detached by completion;
@@ -3230,6 +3291,14 @@ TEST_CASE( "Duplicate automatic live close before queued dispatch is a single at
            "[ui][tab-batch][app-close][live-close]" )
 {
     exerciseLivePresentation( false, false, 21 );
+}
+
+TEST_CASE( "Active automatic live close coalesces duplicates through cancellation",
+           "[ui][tab-batch][app-close][live-close]" )
+{
+    // Exercise the existing private App-close seam, without inventing a native
+    // live loading failure producer or claiming a reproduced user/CI incident.
+    exerciseLivePresentation( false, false, 22 );
 }
 
 TEST_CASE( "Deferred window close keeps priority across a new batch and shutdown cancellation",

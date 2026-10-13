@@ -1788,7 +1788,8 @@ void MainWindow::resumeDeferredWindowClose()
 void MainWindow::retainAppTabClose( QWidget* tab )
 {
     const QPointer<QWidget> target( tab );
-    if ( target && !pendingAppTabCloseTargets_.contains( target ) ) {
+    if ( target && target != activeAppTabCloseTarget_
+         && !pendingAppTabCloseTargets_.contains( target ) ) {
         pendingAppTabCloseTargets_.append( target );
     }
 }
@@ -2719,7 +2720,7 @@ void MainWindow::closeTab( int index, ActionInitiator initiator, CloseRequestSco
             else if ( scope == CloseRequestScope::Batch ) {
                 cancelTabCloseBatch();
             }
-        } );
+        }, initiator == ActionInitiator::App && scope == CloseRequestScope::Single );
         return;
     }
 
@@ -2765,7 +2766,8 @@ void MainWindow::finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator in
 
 void MainWindow::startLiveCloseTransaction(
     CrawlerWidget* crawler, klogg::livelog::LiveLogCloseTransaction::Mode mode,
-    DiscardCommit discardCommit, std::function<void( bool )> completion )
+    DiscardCommit discardCommit, std::function<void( bool )> completion,
+    bool appSingleRequest )
 {
     if ( crawler == nullptr || liveCloseTransaction_ ) {
         completion( false );
@@ -2783,6 +2785,9 @@ void MainWindow::startLiveCloseTransaction(
         = controller->snapshot().runIntent == klogg::livecapture::RunIntent::Running;
     liveCloseTransaction_ = std::make_unique<klogg::livelog::LiveLogCloseTransaction>(
         *controller, *source, *exportService, mode );
+    // Preserve mode alone does not identify an App Single: window shutdown
+    // also preserves, and a first App request during that transaction must survive.
+    activeAppTabCloseTarget_ = appSingleRequest ? crawler : nullptr;
     liveCloseTransaction_->setCallbacks(
         [ this ]( const klogg::livelog::LiveLogCloseTransaction::Failure& failure ) {
             if ( !liveCloseTransaction_ ) {
@@ -2810,6 +2815,7 @@ void MainWindow::startLiveCloseTransaction(
                 [ this, controller, source, mode, discardCommit, resumeOnCancel,
                   completion = std::move( completion ), proceed ]() mutable {
                     liveCloseTransaction_.reset();
+                    activeAppTabCloseTarget_.clear();
                     if ( !proceed && resumeOnCancel ) {
                         controller->startRequested();
                     }
