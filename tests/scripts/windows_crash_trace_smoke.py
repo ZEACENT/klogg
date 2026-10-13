@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import pathlib
 import re
-import shutil
 import struct
 import subprocess
 import sys
@@ -17,6 +18,9 @@ import pe_identity
 
 MAX_DUMP_BYTES = 32 * 1024 * 1024
 MAX_EVIDENCE_TEXT_BYTES = 64 * 1024
+MAX_EVIDENCE_SUMMARY_BYTES = 64 * 1024
+MAX_DIAGNOSTIC_TEXT_BYTES = 8 * 1024
+DIAGNOSTIC_PREFIX = "Test minidump diagnostic "
 MAX_PE_HEADER_OFFSET = pe_identity.MAX_PE_HEADER_OFFSET
 
 
@@ -33,9 +37,14 @@ def exception_from_dump(path: pathlib.Path, process_architecture: str) -> dict:
     if process_architecture not in layouts:
         raise ValueError("test minidump process architecture unsupported")
     minimum, width, registers, flag_offset, architecture, required_flags = layouts[process_architecture]
-    if path.stat().st_size > MAX_DUMP_BYTES:
+    size = path.stat().st_size
+    if size == 0:
+        raise ValueError("test minidump header missing: empty output")
+    if size > MAX_DUMP_BYTES:
         raise ValueError("test minidump exceeds smoke-test budget")
-    content = path.read_bytes()
+    with path.open("rb") as stream:
+        # Bound the read itself, including if a file grows after the size check.
+        content = stream.read(size)
     if len(content) < 32 or content[:4] != b"MDMP":
         raise ValueError("test minidump header missing")
     count, directory = struct.unpack_from("<II", content, 8)
@@ -78,7 +87,39 @@ def exception_from_dump(path: pathlib.Path, process_architecture: str) -> dict:
     raise ValueError("test minidump has no exception stream")
 
 
-def retain_failed_smoke(output: pathlib.Path, parent: str | None, error: Exception) -> None:
+def bounded_text(text: str, maximum: int) -> str:
+    return text[:maximum].encode("utf-8", errors="replace")[:maximum].decode("utf-8", errors="ignore")
+
+
+def helper_identity(helper: pathlib.Path | None, architecture: str | None) -> dict | None:
+    if helper is None:
+        return None
+    identity = {"path": bounded_text(str(helper), 384), "architecture": architecture,
+                "observed_size_bytes": None, "sha256": None, "status": "unavailable"}
+    if helper.is_symlink() or not helper.is_file():
+        return identity
+    size = helper.stat().st_size
+    identity["observed_size_bytes"] = size
+    if size > MAX_DUMP_BYTES:
+        identity["status"] = "over-budget"
+        return identity
+    digest = hashlib.sha256()
+    remaining = size
+    with helper.open("rb") as stream:
+        while remaining:
+            content = stream.read(min(remaining, 64 * 1024))
+            if not content:
+                identity["status"] = "short-read"
+                return identity
+            digest.update(content)
+            remaining -= len(content)
+    identity.update(sha256=digest.hexdigest(), status="observed-file-prefix")
+    return identity
+
+
+def retain_failed_smoke(output: pathlib.Path, parent: str | None, error: Exception,
+                        helper: pathlib.Path | None = None,
+                        architecture: str | None = None) -> None:
     if not parent:
         return
     destination = pathlib.Path(parent)
@@ -86,18 +127,70 @@ def retain_failed_smoke(output: pathlib.Path, parent: str | None, error: Excepti
         return
     try:
         retained = pathlib.Path(tempfile.mkdtemp(prefix="windows-crash-smoke-", dir=destination))
-        (retained / "failure.txt").write_bytes(str(error).encode("utf-8")[:MAX_EVIDENCE_TEXT_BYTES])
+        (retained / "failure.txt").write_bytes(str(error).encode("utf-8", errors="replace")[:MAX_EVIDENCE_TEXT_BYTES])
         stderr = output / "helper-stderr.txt"
-        if stderr.is_file():
-            (retained / stderr.name).write_bytes(stderr.read_bytes()[:MAX_EVIDENCE_TEXT_BYTES])
+        stderr_bytes = b""
+        if not stderr.is_symlink() and stderr.is_file():
+            with stderr.open("rb") as stream:
+                stderr_bytes = stream.read(MAX_EVIDENCE_TEXT_BYTES)
+            (retained / stderr.name).write_bytes(stderr_bytes)
+        # The native JSON record is evidence, not a command, path authority, or
+        # replacement success signal. Keep its bounded text opaque here.
+        diagnostics = []
+        diagnostic_remaining = MAX_DIAGNOSTIC_TEXT_BYTES
+        diagnostics_truncated = False
+        for line in stderr_bytes.decode("utf-8", errors="replace").splitlines():
+            if line.startswith(DIAGNOSTIC_PREFIX):
+                bounded = bounded_text(line, diagnostic_remaining)
+                if bounded:
+                    diagnostics.append(bounded)
+                    diagnostic_remaining -= len(bounded.encode("utf-8"))
+                diagnostics_truncated |= bounded != line
+        record = {"schema_version": 1, "case": bounded_text(output.name, 128),
+                  "failure": bounded_text(str(error), 512),
+                  "provenance": {"github_environment": {
+                      key: bounded_text(os.environ[key], 96)
+                      for key in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
+                                  "GITHUB_JOB", "GITHUB_REPOSITORY", "GITHUB_WORKFLOW")
+                      if key in os.environ},
+                      "helper": helper_identity(helper, architecture)},
+                  "diagnostics": diagnostics, "diagnostics_truncated": diagnostics_truncated,
+                  "dumps": []}
         remaining = MAX_DUMP_BYTES
         for index, dump in enumerate(output.glob("*.dmp")):
             if index >= 2:
                 break
+            metadata = {"name": bounded_text(dump.name, 128), "observed_size_bytes": None,
+                        "retained_size_bytes": None, "sha256": None, "hash_scope": None,
+                        "status": "not-regular"}
+            record["dumps"].append(metadata)
+            if dump.is_symlink() or not dump.is_file():
+                continue
             size = dump.stat().st_size
-            if size <= remaining:
-                shutil.copyfile(dump, retained / dump.name)
-                remaining -= size
+            metadata["observed_size_bytes"] = size
+            if size > remaining:
+                metadata["status"] = "over-budget"
+                continue
+            digest = hashlib.sha256()
+            copied = 0
+            with dump.open("rb") as source, (retained / dump.name).open("xb") as target:
+                while copied < size:
+                    content = source.read(min(size - copied, 64 * 1024))
+                    if not content:
+                        break
+                    target.write(content)
+                    digest.update(content)
+                    copied += len(content)
+            remaining -= size
+            metadata.update(retained_size_bytes=copied, sha256=digest.hexdigest(),
+                            hash_scope="retained-bytes",
+                            status="retained" if copied == size else "short-read")
+        summary = json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        if len(summary) > MAX_EVIDENCE_SUMMARY_BYTES:
+            record.update(diagnostics=[], diagnostics_truncated=True)
+            summary = json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        if len(summary) <= MAX_EVIDENCE_SUMMARY_BYTES:
+            (retained / "failure-summary.json").write_bytes(summary)
         print(f"Synthetic crash smoke evidence retained at {retained}", file=sys.stderr)
     except OSError as retention_error:
         print(f"Synthetic crash smoke evidence retention failed: {retention_error}", file=sys.stderr)
@@ -119,37 +212,43 @@ def run_smoke_case(helper: pathlib.Path, output: pathlib.Path, case: str,
     result = subprocess.run(command, env=environment, cwd=output,
                             capture_output=True, text=True, timeout=30)
     (output / "helper-stderr.txt").write_bytes(result.stderr.encode("utf-8")[:MAX_EVIDENCE_TEXT_BYTES])
+    # Optional diagnostic fields are opaque data. Embedded marker text can
+    # neither supply missing functional evidence nor invalidate real evidence.
+    trace_lines = [line for line in result.stderr.splitlines()
+                   if not line.startswith(DIAGNOSTIC_PREFIX)]
+    trace = "\n".join(trace_lines)
     if case == "idle":
         if (result.returncode != 0 or list(output.glob("*.dmp"))
-                or result.stderr.count("Test minidump collector ready") != 1
-                or result.stderr.count("Test minidump collector stopped") != 1
-                or "Test minidump captured " in result.stderr
-                or "Exception address " in result.stderr):
+                or trace_lines.count("Test minidump collector ready") != 1
+                or trace_lines.count("Test minidump collector stopped") != 1
+                or "Test minidump captured " in trace
+                or "Exception address " in trace):
             raise ValueError("idle collector did not complete startup and cleanup: " + result.stderr)
         return
     if result.returncode != 67:
         raise ValueError("crash probe failed to preserve exception handling: " + result.stderr)
-    if result.stderr.count("Exception address ") != 2:
+    if len(re.findall(r"^Exception address [0-9a-fA-Fx]+ thread [0-9]+$", trace, re.MULTILINE)) != 2:
         raise ValueError("repeated first-chance exception evidence missing: " + result.stderr)
     dumps = list(output.glob("*.dmp"))
     if case != "enabled":
         if dumps:
             raise ValueError("disabled capture unexpectedly wrote a dump")
-        if "Test minidump collector ready" in result.stderr or "Test minidump captured " in result.stderr:
+        if "Test minidump collector ready" in trace or "Test minidump captured " in trace:
             raise ValueError("disabled capture unexpectedly launched a collector: " + result.stderr)
         if case == "invalid" and (output / "missing").exists():
             raise ValueError("invalid opt-in unexpectedly created a directory")
         if case == "non-directory" and non_directory.read_bytes() != b"Not a directory\n":
             raise ValueError("invalid opt-in changed an existing non-directory file")
         return
-    if (len(dumps) != 1 or "Test minidump captured 1 error 0" not in result.stderr
-            or result.stderr.count("Test minidump captured ") != 1
-            or result.stderr.count("Test minidump collector ready") != 1):
+    if (len(dumps) != 1 or dumps[0].is_symlink() or not dumps[0].is_file()
+            or trace_lines.count("Test minidump captured 1 error 0") != 1
+            or trace.count("Test minidump captured ") != 1
+            or trace_lines.count("Test minidump collector ready") != 1):
         raise ValueError("one minimal test dump was not captured: " + result.stderr)
     exception = exception_from_dump(dumps[0], architecture)
-    first = re.search(r"Exception address ([0-9a-fA-Fx]+) thread ([0-9]+)", result.stderr)
-    context = re.search(r"Original PC 0x([0-9a-fA-F]+) SP 0x([0-9a-fA-F]+) FP 0x([0-9a-fA-F]+)",
-                        result.stderr)
+    first = re.search(r"^Exception address ([0-9a-fA-Fx]+) thread ([0-9]+)$", trace, re.MULTILINE)
+    context = re.search(r"^Original PC 0x([0-9a-fA-F]+) SP 0x([0-9a-fA-F]+) FP 0x([0-9a-fA-F]+)$",
+                        trace, re.MULTILINE)
     if (first is None or context is None
             or exception["address"] != int(first[1], 16)
             or exception["thread"] != int(first[2])
@@ -173,7 +272,7 @@ def run_smoke(helper: pathlib.Path) -> None:
             try:
                 run_smoke_case(helper, output, case, architecture)
             except Exception as error:
-                retain_failed_smoke(output, parent, error)
+                retain_failed_smoke(output, parent, error, helper, architecture)
                 raise
 
 

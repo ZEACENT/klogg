@@ -2504,6 +2504,264 @@ jobs:
             }
           }
 
+          # Failure-only identity evidence: project executables may be retained,
+          # but loaded compiler/DbgHelp/ASan modules are metadata-only. Never run
+          # commands or paths reported by diagnostic JSON.
+          $identityScript = @'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import threading
+
+          workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          build = workspace / "build_root"
+          destination = build / "diagnostics"
+          sys.path.insert(0, str(workspace / "scripts"))
+          import pe_identity
+
+          MAX_TEXT_BYTES = 64 * 1024
+          MAX_COMMAND_BYTES = 128 * 1024
+          MAX_FILE_BYTES = 64 * 1024 * 1024
+          MAX_MODULE_BYTES = 256 * 1024 * 1024
+          MAX_MODULE_RECORDS = 6
+          MAX_MODULE_PATH_UNITS = 512
+          errors = []
+
+          def problem(label, error):
+              message = (label + ": " + str(error))[:1024]
+              errors.append(message)
+              print("Crash smoke identity metadata unavailable: " + message, file=sys.stderr)
+
+          def bounded_bytes(path, limit):
+              with path.open("rb") as stream:
+                  data = stream.read(limit + 1)
+              if len(data) > limit:
+                  raise ValueError("metadata input exceeds byte limit")
+              return data
+
+          def file_identity(path, limit):
+              if path.is_symlink() or not path.is_file():
+                  raise ValueError("not a regular non-symlink file")
+              size = path.stat().st_size
+              if size > limit:
+                  raise ValueError("file exceeds hash/retention limit")
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  remaining = limit
+                  while remaining:
+                      block = stream.read(min(1024 * 1024, remaining))
+                      if not block:
+                          break
+                      digest.update(block)
+                      remaining -= len(block)
+                  if stream.read(1):
+                      raise ValueError("file grew beyond hash limit")
+              return {"path": str(path), "size": size, "sha256": digest.hexdigest()}
+
+          def read_only_command(arguments, directory, limit):
+              # Only fixed Git/Ninja metadata tools reach this seam; JSON paths
+              # and returned compile/link command strings are never executable.
+              with subprocess.Popen(arguments, cwd=directory, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT) as process:
+                  result = []
+                  def read_output():
+                      result.append(process.stdout.read(limit + 1))
+                      if len(result[0]) > limit:
+                          process.kill()
+                  reader = threading.Thread(target=read_output, daemon=True)
+                  reader.start()
+                  try:
+                      process.wait(timeout=15)
+                  except subprocess.TimeoutExpired:
+                      process.kill()
+                      process.wait(timeout=5)
+                      raise ValueError("metadata command timeout")
+                  finally:
+                      reader.join(timeout=5)
+                  if reader.is_alive() or not result or len(result[0]) > limit:
+                      raise ValueError("metadata command output exceeds limit or is unavailable")
+                  if process.returncode:
+                      raise ValueError("metadata command failed: " + result[0].decode("utf-8", "replace")[:1024])
+                  return result[0].decode("utf-8", "replace")
+
+          env_names = ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB",
+                       "GITHUB_WORKFLOW_REF", "GITHUB_WORKFLOW_SHA", "RUNNER_OS", "RUNNER_ARCH",
+                       "ImageOS", "ImageVersion", "KLOGG_LABEL", "KLOGG_CONFIG_ARCH",
+                       "KLOGG_SANITIZER", "ASAN_OPTIONS", "VCToolsVersion", "VCToolsInstallDir",
+                       "VSCMD_VER", "VSCMD_ARG_HOST_ARCH", "VSCMD_ARG_TGT_ARCH",
+                       "WindowsSDKVersion", "WindowsSdkDir", "UCRTVersion")
+          evidence = {"schema_version": 1, "environment": {
+              name: os.environ.get(name, "")[:4096] for name in env_names},
+              "os_version": {name: getattr(sys.getwindowsversion(), name)
+                             for name in ("major", "minor", "build", "platform", "service_pack")}
+                            if hasattr(sys, "getwindowsversion") else None,
+              "source_revision": None, "sources": [], "project_files": [],
+              "build_commands": {"status": "unavailable"}, "compiler": {"status": "unavailable"},
+              "modules": [], "errors": errors}
+          try:
+              revision = read_only_command(["git", "rev-parse", "HEAD"], workspace, 1024).strip()
+              if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                  raise ValueError("invalid checkout revision")
+              evidence["source_revision"] = revision
+          except Exception as error:
+              problem("checkout revision", error)
+          for relative in ("tests/helpers/collector.cpp", "tests/helpers/crash_trace.cpp",
+                           "tests/helpers/crash_trace_test_helper.cpp",
+                           "tests/helpers/crash_collector_protocol.h", "tests/helpers/CMakeLists.txt",
+                           "tests/scripts/windows_crash_trace_smoke.py", "scripts/pe_identity.py",
+                           ".github/workflows/ci-build.yml"):
+              try:
+                  evidence["sources"].append(file_identity(workspace / relative, 1024 * 1024))
+              except Exception as error:
+                  problem("source " + relative, error)
+          for name in ("crash_trace_test_helper.exe", "crash_trace_collector.exe",
+                       "crash_trace_test_helper.pdb", "crash_trace_collector.pdb"):
+              path = build / "output" / name
+              record = {"name": name, "status": "absent"}
+              if path.exists():
+                  try:
+                      record.update(file_identity(path, MAX_FILE_BYTES))
+                      if path.suffix == ".exe":
+                          record["architecture"] = pe_identity.architecture_from_pe(path)
+                      shutil.copyfile(path, destination / name)
+                      record["status"] = "retained"
+                  except Exception as error:
+                      record["status"] = "error"
+                      problem("project file " + name, error)
+              elif path.suffix == ".exe":
+                  problem("project file " + name, "executable absent")
+              # /DEBUG:NONE may legitimately produce no helper/collector PDB.
+              evidence["project_files"].append(record)
+          try:
+              cache = bounded_bytes(build / "CMakeCache.txt", 2 * 1024 * 1024).decode("utf-8", "replace")
+              selected = {}
+              for line in cache.splitlines():
+                  match = re.fullmatch(r"(CMAKE_(?:CXX_COMPILER|MAKE_PROGRAM|BUILD_TYPE|SYSTEM_VERSION)):[^=]+=(.{0,4096})", line)
+                  if match:
+                      selected[match[1]] = match[2]
+              evidence["cmake"] = selected
+              rules_text = bounded_bytes(build / "CMakeFiles" / "rules.ninja", 2 * 1024 * 1024).decode("utf-8", "replace")
+              rules = re.findall(r"^rule (CXX_(?:COMPILER|EXECUTABLE_LINKER|STATIC_LIBRARY_LINKER)__(?:crash_trace_test_helper|crash_trace_collector|test_crash_trace)_[A-Za-z0-9_]+)$", rules_text, re.MULTILINE)
+              required_rules = ("CXX_COMPILER__crash_trace_test_helper_",
+                                "CXX_EXECUTABLE_LINKER__crash_trace_test_helper_",
+                                "CXX_COMPILER__crash_trace_collector_",
+                                "CXX_EXECUTABLE_LINKER__crash_trace_collector_",
+                                "CXX_COMPILER__test_crash_trace_",
+                                "CXX_STATIC_LIBRARY_LINKER__test_crash_trace_")
+              if not 6 <= len(rules) <= 9 or any(
+                      not any(rule.startswith(prefix) for rule in rules) for prefix in required_rules):
+                  raise ValueError("helper/collector Ninja rules unavailable or exceed limit")
+              # compdb -x expands Ninja response-file contents from generated
+              # rules, including link inputs, without executing any build edge.
+              commands = json.loads(read_only_command(
+                  [selected["CMAKE_MAKE_PROGRAM"], "-t", "compdb", "-x", *rules],
+                  build, MAX_COMMAND_BYTES))
+              if not isinstance(commands, list) or not 1 <= len(commands) <= 16:
+                  raise ValueError("helper/collector command count invalid")
+              for entry in commands:
+                  if not isinstance(entry, dict) or any(
+                          not isinstance(entry.get(key), str) or not entry[key]
+                          for key in ("directory", "command", "file", "output")):
+                      raise ValueError("helper/collector command entry invalid")
+                  output = entry["output"].replace(chr(92), "/")
+                  if not re.search(r"(?:^|/)(?:CMakeFiles/(?:crash_trace_test_helper|crash_trace_collector|test_crash_trace)\.dir/|(?:crash_trace_test_helper|crash_trace_collector)\.exe$|(?:lib)?test_crash_trace\.(?:lib|a)$)", output):
+                      raise ValueError("command output is outside helper/collector targets")
+              evidence["build_commands"] = {"status": "generated-not-executed", "rules": rules,
+                                             "response_files_expanded": True, "entries": commands}
+          except Exception as error:
+              problem("effective compile/link commands", error)
+          try:
+              compiler = pathlib.Path(evidence["cmake"]["CMAKE_CXX_COMPILER"])
+              evidence["compiler"] = {"status": "hashed", **file_identity(compiler, MAX_MODULE_BYTES),
+                                      "architecture": pe_identity.architecture_from_pe(compiler)}
+          except Exception as error:
+              problem("offline compiler identity", error)
+          known_modules = {"dbghelp.dll", "dbgcore.dll", "clang_rt.asan_dynamic-x86_64.dll",
+                           "clang_rt.asan_dynamic-i386.dll", "cl_asan_x64.dll"}
+          stderr_files = sorted((build / "crash_dumps").glob("windows-crash-smoke-*/helper-stderr.txt"))[:2]
+          for stderr in stderr_files:
+              try:
+                  text = bounded_bytes(stderr, MAX_TEXT_BYTES).decode("utf-8", "replace")
+                  for line in text.splitlines():
+                      prefix = "Test minidump diagnostic "
+                      if not line.startswith(prefix):
+                          continue
+                      if len(line.encode("utf-8")) > 8192:
+                          raise ValueError("diagnostic JSON line exceeds limit")
+                      module = json.loads(line[len(prefix):])
+                      if not isinstance(module, dict) or module.get("kind") != "module":
+                          continue
+                      if len(evidence["modules"]) >= MAX_MODULE_RECORDS:
+                          raise ValueError("module record count exceeds limit")
+                      process, name, path, status = (module.get(key) for key in ("process", "name", "path", "status"))
+                      if (process not in ("target", "collector") or not isinstance(name, str)
+                              or name.lower() not in known_modules or not isinstance(path, str)
+                              or len(path.encode("utf-16-le")) // 2 > MAX_MODULE_PATH_UNITS
+                              or status not in ("loaded", "absent", "truncated", "error", "unavailable")):
+                          raise ValueError("module identity record invalid")
+                      record = {"process": process, "name": name, "path": path, "status": status,
+                                "reported_by": str(stderr.relative_to(build)),
+                                "offline": {"status": "not-eligible"}}
+                      evidence["modules"].append(record)
+                      # No UNC/device paths, relative paths or alternate streams:
+                      # a loaded local image is observed data, never a DLL to load.
+                      if status == "loaded":
+                          if (not re.match(r"^[A-Za-z]:[\\/]", path) or ":" in path[2:]
+                                  or "\x00" in path or pathlib.PureWindowsPath(path).name.lower() != name.lower()):
+                              record["offline"] = {"status": "rejected-path"}
+                              problem("loaded module path", "not an eligible local image path")
+                              continue
+                          try:
+                              record["offline"] = {"status": "hashed", **file_identity(pathlib.Path(path), MAX_MODULE_BYTES)}
+                          except Exception as error:
+                              record["offline"] = {"status": "unavailable"}
+                              problem("offline module " + name, error)
+              except Exception as error:
+                  problem("module JSON " + stderr.name, error)
+          # Absence is evidence availability, not a successful capture outcome.
+          evidence["module_records_status"] = "observed" if evidence["modules"] else "unavailable"
+          payload = json.dumps(evidence, indent=2, ensure_ascii=True).encode("utf-8")
+          if len(payload) > 256 * 1024:
+              raise ValueError("identity JSON exceeds output limit")
+          (destination / "crash-smoke-identity.json").write_bytes(payload)
+          '@
+          $identityPath = Join-Path $diagRoot "crash-smoke-identity.json"
+          try {
+            $identityScript | python3 -
+            if ($LASTEXITCODE -ne 0) {
+              throw "Crash smoke identity collection exited $LASTEXITCODE"
+            }
+            $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+            $versionRecords = @($identity.modules | ForEach-Object { $_.offline }) + @($identity.compiler)
+            foreach ($file in $versionRecords) {
+              if ($file.status -eq 'hashed') {
+                try {
+                  $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($file.path)
+                  $file | Add-Member -NotePropertyName file_version -NotePropertyValue ($version.FileVersion ?? '').Substring(0, [Math]::Min(256, ($version.FileVersion ?? '').Length))
+                  $file | Add-Member -NotePropertyName product_version -NotePropertyValue ($version.ProductVersion ?? '').Substring(0, [Math]::Min(256, ($version.ProductVersion ?? '').Length))
+                } catch {
+                  $identity.errors += "Offline file version unavailable: $($_.Exception.Message.Substring(0, [Math]::Min(1024, $_.Exception.Message.Length)))"
+                  Write-Warning $identity.errors[-1]
+                }
+              }
+            }
+            $identityJson = $identity | ConvertTo-Json -Depth 20
+            if ([System.Text.Encoding]::UTF8.GetByteCount($identityJson) -gt 262144) {
+              throw "Version-enriched identity JSON exceeds output limit"
+            }
+            $identityJson | Set-Content -LiteralPath $identityPath -Encoding utf8
+          } catch {
+            $detail = $_.Exception.Message
+            $message = "Crash smoke identity metadata collection failed: $($detail.Substring(0, [Math]::Min(1024, $detail.Length)))"
+            Write-Warning $message
+            $message | Add-Content -LiteralPath (Join-Path $diagRoot "metadata-errors.txt")
+          }
+
           $timeRange = (Get-Date).AddHours(-2)
           Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $timeRange } -MaxEvents 300 |
             Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message |

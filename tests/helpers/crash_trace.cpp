@@ -33,6 +33,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <new>
 
@@ -53,6 +54,8 @@ struct Channel {
     HANDLE acknowledgementEvent{};
     HANDLE process{};
     SharedPage* page{};
+    SharedEnvelope* diagnosticView{};
+    DiagnosticData* diagnostics{};
 };
 
 Channel channel;
@@ -63,6 +66,237 @@ LONG crashTraceActive = 0;
 LONG dumpCaptureStarted = 0;
 SRWLOCK lifetimeLock = SRWLOCK_INIT;
 PVOID vectoredHandler{};
+using StackLimitsFunction = void ( WINAPI* )( PULONG_PTR, PULONG_PTR );
+StackLimitsFunction currentThreadStackLimits{};
+std::array<DiagnosticModuleRecord, diagnosticModulesPerProcess> targetModuleObservations{};
+// crashTraceActive serializes rendering; this does not consume the faulting stack.
+std::array<char, 4096> diagnosticLine{};
+
+void prepareDiagnosticIdentity() noexcept
+{
+    const auto kernel = GetModuleHandleW( L"kernel32.dll" );
+    if ( kernel != nullptr ) {
+        const auto procedure = GetProcAddress( kernel, "GetCurrentThreadStackLimits" );
+        static_assert( sizeof( procedure ) == sizeof( currentThreadStackLimits ) );
+        std::memcpy( &currentThreadStackLimits, &procedure, sizeof( procedure ) );
+    }
+#ifdef _WIN64
+    constexpr const wchar_t* asanName = L"clang_rt.asan_dynamic-x86_64.dll";
+#else
+    constexpr const wchar_t* asanName = L"clang_rt.asan_dynamic-i386.dll";
+#endif
+    const std::array<const wchar_t*, diagnosticModulesPerProcess> names{
+        L"dbghelp.dll", L"dbgcore.dll", asanName };
+    for ( std::size_t index = 0; index < names.size(); ++index ) {
+        auto& record = targetModuleObservations[ index ];
+        record = {};
+        record.process = static_cast<std::uint32_t>( DiagnosticProcess::Target );
+        record.name = static_cast<std::uint32_t>( index + 1 );
+        // Basename-selected loaded image, not proof of the executing API's owner.
+        const auto module = GetModuleHandleW( names[ index ] );
+        if ( module == nullptr ) {
+            record.status = static_cast<std::uint32_t>( DiagnosticStatus::Absent );
+            record.error = static_cast<std::uint32_t>( GetLastError() );
+            continue;
+        }
+        std::array<wchar_t, maximumDiagnosticPath> path{};
+        const auto length = GetModuleFileNameW( module, path.data(),
+                                               static_cast<DWORD>( path.size() ) );
+        if ( length == 0 ) {
+            record.status = static_cast<std::uint32_t>( DiagnosticStatus::Error );
+            record.error = static_cast<std::uint32_t>( GetLastError() );
+            continue;
+        }
+        record.status = static_cast<std::uint32_t>( length >= path.size()
+                                                       ? DiagnosticStatus::Truncated
+                                                       : DiagnosticStatus::Loaded );
+        while ( record.pathLength < path.size() && path[ record.pathLength ] != L'\0' ) {
+            ++record.pathLength;
+        }
+        for ( std::size_t offset = 0; offset < record.pathLength; ++offset ) {
+            record.path[ offset ] = static_cast<std::uint16_t>( path[ offset ] );
+        }
+    }
+}
+
+const char* diagnosticStatusName( std::uint32_t status ) noexcept
+{
+    switch ( static_cast<DiagnosticStatus>( status ) ) {
+    case DiagnosticStatus::Loaded: return "loaded";
+    case DiagnosticStatus::Absent: return "absent";
+    case DiagnosticStatus::Truncated: return "truncated";
+    case DiagnosticStatus::Error: return "error";
+    case DiagnosticStatus::Complete: return "complete";
+    case DiagnosticStatus::Partial: return "partial";
+    case DiagnosticStatus::Skipped: return "skipped";
+    case DiagnosticStatus::Budget: return "budget";
+    case DiagnosticStatus::Cycle: return "cycle";
+    case DiagnosticStatus::InvalidRange: return "invalid_range";
+    default: return "unavailable";
+    }
+}
+
+bool appendDiagnosticText( std::size_t& used, std::string_view text ) noexcept
+{
+    if ( used >= diagnosticLine.size() || text.size() >= diagnosticLine.size() - used ) {
+        return false;
+    }
+    for ( const auto character : text ) {
+        diagnosticLine[ used++ ] = character;
+    }
+    diagnosticLine[ used ] = '\0';
+    return true;
+}
+
+void reportDiagnosticModule( const DiagnosticModuleRecord& module ) noexcept
+{
+#ifdef _WIN64
+    constexpr const char* asanName = "clang_rt.asan_dynamic-x86_64.dll";
+#else
+    constexpr const char* asanName = "clang_rt.asan_dynamic-i386.dll";
+#endif
+    const std::array<const char*, diagnosticModulesPerProcess> names{
+        "dbghelp.dll", "dbgcore.dll", asanName };
+    const auto target = module.process == static_cast<std::uint32_t>( DiagnosticProcess::Target );
+    const auto written = std::snprintf(
+        diagnosticLine.data(), diagnosticLine.size(),
+        "Test minidump diagnostic {\"kind\":\"module\",\"process\":\"%s\",\"phase\":\"%s\","
+        "\"lookup\":\"basename\",\"name\":\"%s\",\"status\":\"%s\",\"error\":%lu,\"path\":\"",
+        target ? "target" : "collector", target ? "startup" : "postfailure",
+        names[ module.name - 1 ], diagnosticStatusName( module.status ),
+        static_cast<unsigned long>( module.error ) );
+    bool complete = written >= 0 && static_cast<std::size_t>( written ) < diagnosticLine.size();
+    auto used = complete ? static_cast<std::size_t>( written ) : diagnosticLine.size();
+    for ( std::size_t index = 0; complete && index < module.pathLength; ++index ) {
+        const auto character = module.path[ index ];
+        if ( character >= 0x20 && character <= 0x7e && character != '\\' && character != '"' ) {
+            const char literal[]{ static_cast<char>( character ) };
+            complete = appendDiagnosticText( used, std::string_view{ literal, 1 } );
+        }
+        else if ( character == '\\' || character == '"' ) {
+            const char escaped[]{ '\\', static_cast<char>( character ) };
+            complete = appendDiagnosticText( used, std::string_view{ escaped, 2 } );
+        }
+        else {
+            char escaped[ 7 ]{};
+            const auto count = std::snprintf( escaped, sizeof( escaped ), "\\u%04x",
+                                               static_cast<unsigned int>( character ) );
+            complete = count == 6 && appendDiagnosticText( used, std::string_view{ escaped, 6 } );
+        }
+    }
+    if ( complete && appendDiagnosticText( used, "\"}\n" ) ) {
+        std::fputs( diagnosticLine.data(), stderr );
+    }
+    else {
+        std::fputs( "Test minidump diagnostic {\"kind\":\"summary\",\"status\":\"render_truncated\"}\n",
+                    stderr );
+    }
+}
+
+void publishDiagnosticInput( EXCEPTION_POINTERS* info ) noexcept
+{
+    if ( channel.diagnostics == nullptr ) {
+        return;
+    }
+    auto& data = *channel.diagnostics;
+    data.input = {};
+    data.input.sequence = captureSequence;
+    data.input.threadId = static_cast<std::uint32_t>( GetCurrentThreadId() );
+    data.input.contextFlags = static_cast<std::uint32_t>( info->ContextRecord->ContextFlags );
+    data.input.exceptionPointers = static_cast<std::uint64_t>( reinterpret_cast<std::uintptr_t>( info ) );
+    data.input.exceptionRecord = static_cast<std::uint64_t>( reinterpret_cast<std::uintptr_t>( info->ExceptionRecord ) );
+    data.input.contextRecord = static_cast<std::uint64_t>( reinterpret_cast<std::uintptr_t>( info->ContextRecord ) );
+#ifdef _WIN64
+    data.input.pc = info->ContextRecord->Rip;
+    data.input.sp = info->ContextRecord->Rsp;
+    data.input.fp = info->ContextRecord->Rbp;
+#else
+    data.input.pc = info->ContextRecord->Eip;
+    data.input.sp = info->ContextRecord->Esp;
+    data.input.fp = info->ContextRecord->Ebp;
+#endif
+    if ( currentThreadStackLimits != nullptr ) {
+        ULONG_PTR low = 0;
+        ULONG_PTR high = 0;
+        currentThreadStackLimits( &low, &high );
+        if ( low < high ) {
+            data.input.flags = stackLimitsAvailable;
+            data.input.stackLow = static_cast<std::uint64_t>( low );
+            data.input.stackHigh = static_cast<std::uint64_t>( high );
+        }
+    }
+    InterlockedExchange( reinterpret_cast<volatile LONG*>( &data.inputPublication ),
+                         static_cast<LONG>( captureSequence ) );
+}
+
+void reportCollectorDiagnostics() noexcept
+{
+    if ( !clientState.captureRequested || !clientState.collectorReaped ) {
+        return;
+    }
+    if ( channel.diagnostics == nullptr
+         || !diagnosticReportingAllowed( clientState, *channel.diagnostics, nativePointerBits ) ) {
+        std::fputs( "Test minidump diagnostic {\"kind\":\"summary\",\"status\":\"unavailable\"}\n",
+                    stderr );
+        return;
+    }
+    const auto& data = *channel.diagnostics;
+    const auto& input = data.input;
+    std::fprintf(
+        stderr,
+        "Test minidump diagnostic {\"kind\":\"input\",\"sequence\":%lu,\"thread\":%lu,"
+        "\"pointerBits\":%lu,\"exceptionPointers\":%llu,\"exceptionRecord\":%llu,"
+        "\"contextRecord\":%llu,\"contextFlags\":%lu,\"pc\":%llu,\"sp\":%llu,\"fp\":%llu,"
+        "\"stackLimitsAvailable\":%lu,\"stackLow\":%llu,\"stackHigh\":%llu}\n",
+        static_cast<unsigned long>( input.sequence ), static_cast<unsigned long>( input.threadId ),
+        static_cast<unsigned long>( nativePointerBits ),
+        static_cast<unsigned long long>( input.exceptionPointers ),
+        static_cast<unsigned long long>( input.exceptionRecord ),
+        static_cast<unsigned long long>( input.contextRecord ),
+        static_cast<unsigned long>( input.contextFlags ), static_cast<unsigned long long>( input.pc ),
+        static_cast<unsigned long long>( input.sp ), static_cast<unsigned long long>( input.fp ),
+        static_cast<unsigned long>( input.flags & stackLimitsAvailable ),
+        static_cast<unsigned long long>( input.stackLow ), static_cast<unsigned long long>( input.stackHigh ) );
+    for ( std::size_t index = 0; index < data.result.recordCount; ++index ) {
+        const auto& record = data.records[ index ];
+        std::fprintf(
+            stderr,
+            "Test minidump diagnostic {\"kind\":\"%s\",\"order\":%lu,\"object\":%lu,\"status\":\"%s\","
+            "\"address\":%llu,\"requested\":%llu,\"transferred\":%llu,\"error\":%lu,"
+            "\"regionBase\":%llu,\"regionBytes\":%llu,\"state\":%lu,\"protection\":%lu,\"type\":%lu}\n",
+            record.kind == static_cast<std::uint32_t>( DiagnosticKind::Read ) ? "read" : "region",
+            static_cast<unsigned long>( record.order ), static_cast<unsigned long>( record.object ),
+            diagnosticStatusName( record.status ), static_cast<unsigned long long>( record.address ),
+            static_cast<unsigned long long>( record.requested ), static_cast<unsigned long long>( record.transferred ),
+            static_cast<unsigned long>( record.error ), static_cast<unsigned long long>( record.regionBase ),
+            static_cast<unsigned long long>( record.regionBytes ), static_cast<unsigned long>( record.state ),
+            static_cast<unsigned long>( record.protection ), static_cast<unsigned long>( record.type ) );
+    }
+    for ( const auto& module : data.targetModules ) {
+        reportDiagnosticModule( module );
+    }
+    for ( const auto& module : data.collectorModules ) {
+        reportDiagnosticModule( module );
+    }
+    const auto& result = data.result;
+    std::fprintf(
+        stderr,
+        "Test minidump diagnostic {\"kind\":\"summary\",\"sequence\":%lu,\"dumpSucceeded\":%lu,"
+        "\"dumpDomain\":%lu,\"dumpError\":%lu,\"closeSucceeded\":%lu,\"closeError\":%lu,"
+        "\"readCalls\":%lu,\"queryCalls\":%lu,\"requestedBytes\":%lu,\"flags\":%lu,\"decoded\":%lu,"
+        "\"contextFlags\":%lu,\"exceptionRecord\":%llu,\"contextRecord\":%llu,"
+        "\"pc\":%llu,\"sp\":%llu,\"fp\":%llu}\n",
+        static_cast<unsigned long>( result.sequence ), static_cast<unsigned long>( result.dumpSucceeded ),
+        static_cast<unsigned long>( result.dumpDomain ), static_cast<unsigned long>( result.dumpError ),
+        static_cast<unsigned long>( result.closeSucceeded ), static_cast<unsigned long>( result.closeError ),
+        static_cast<unsigned long>( result.readCalls ), static_cast<unsigned long>( result.queryCalls ),
+        static_cast<unsigned long>( result.requestedBytes ), static_cast<unsigned long>( result.flags ),
+        static_cast<unsigned long>( result.decoded ), static_cast<unsigned long>( result.contextFlags ),
+        static_cast<unsigned long long>( result.exceptionRecord ), static_cast<unsigned long long>( result.contextRecord ),
+        static_cast<unsigned long long>( result.pc ), static_cast<unsigned long long>( result.sp ),
+        static_cast<unsigned long long>( result.fp ) );
+    std::fflush( stderr );
+}
 
 void closeHandle( HANDLE& handle ) noexcept
 {
@@ -195,6 +429,11 @@ public:
 
     void closeResources() noexcept
     {
+        if ( channel.diagnosticView != nullptr ) {
+            UnmapViewOfFile( channel.diagnosticView );
+            channel.diagnosticView = nullptr;
+            channel.diagnostics = nullptr;
+        }
         if ( channel.page != nullptr ) {
             UnmapViewOfFile( channel.page );
             channel.page = nullptr;
@@ -384,7 +623,12 @@ void prepareCollector() noexcept
     clientState.outputOwned = true;
 
     channel.mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
-                                          static_cast<DWORD>( sizeof( SharedPage ) ), nullptr );
+                                          static_cast<DWORD>( sizeof( SharedEnvelope ) ), nullptr );
+    if ( channel.mapping == nullptr ) {
+        // Optional allocation failure does not change the original functional protocol.
+        channel.mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                              static_cast<DWORD>( sizeof( SharedPage ) ), nullptr );
+    }
     if ( channel.mapping == nullptr ) {
         unwindStartup( "mapping", GetLastError() );
         return;
@@ -397,6 +641,15 @@ void prepareCollector() noexcept
     }
     channel.page = ::new ( view ) SharedPage{};
     channel.page->header = makeHeader( nativePointerBits );
+    channel.diagnosticView = static_cast<SharedEnvelope*>( MapViewOfFile(
+        channel.mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof( SharedEnvelope ) ) );
+    if ( channel.diagnosticView != nullptr ) {
+        // A full known-length view establishes extent independently of the trailer header.
+        channel.diagnostics = ::new ( &channel.diagnosticView->diagnostics.data ) DiagnosticData{};
+        channel.diagnostics->header = makeDiagnosticHeader( nativePointerBits );
+        prepareDiagnosticIdentity();
+        channel.diagnostics->targetModules = targetModuleObservations;
+    }
     channel.requestEvent = CreateEventW( nullptr, FALSE, FALSE, nullptr );
     if ( channel.requestEvent == nullptr ) {
         unwindStartup( "request-event", GetLastError() );
@@ -477,6 +730,7 @@ void reportFirstChance( EXCEPTION_POINTERS* info ) noexcept
     std::fflush( stderr );
 
     if ( clientState.ready && InterlockedCompareExchange( &dumpCaptureStarted, 1, 0 ) == 0 ) {
+        publishDiagnosticInput( info );
         const Request request{ static_cast<std::uint32_t>( Operation::Capture ), captureSequence,
                                static_cast<std::uint32_t>( GetCurrentThreadId() ), 0,
                                static_cast<std::uint64_t>(
@@ -484,6 +738,7 @@ void reportFirstChance( EXCEPTION_POINTERS* info ) noexcept
         NativeOps ops;
         const auto outcome = captureOnce( clientState, ops, request, nativePointerBits,
                                           captureTimeoutMs, exitGraceMs );
+        reportCollectorDiagnostics();
         if ( outcome.succeeded ) {
             std::fprintf( stderr, "Test minidump captured 1 error 0\n" );
         }
