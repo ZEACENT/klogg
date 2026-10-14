@@ -2797,6 +2797,10 @@ def docker_init_action_issues(text: str, expected_steps: tuple[str, ...]) -> lis
                         # $((attempt + 1)) / $((attempt * 10)) expressions.
                         if tokens in (["attempt", "+", "1"], ["attempt", "*", "10"]):
                             continue
+                        # Host identity capture does not hide a Docker launch;
+                        # admit only the two literal numeric selector queries.
+                        if tokens in (["id", "-u"], ["id", "-g"]):
+                            continue
                         if tokens[0] not in surrounding_commands:
                             raise ValueError(f"unsupported launch binding {tokens[0]!r}")
                     docker = [tokens for tokens in invocations if tokens[0] == "docker"]

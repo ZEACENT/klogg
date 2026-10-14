@@ -5,9 +5,11 @@ import dataclasses
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -88,6 +90,44 @@ class FakeNativeSecurity:
     def remove_created_directory(self, path):
         self.removed.append(path)
         del self.records[path]
+
+
+def create_native_fixture_parent(parent, name):
+    try:
+        return security.create_private_parent(parent, name)
+    except security.WindowsSecurityError as error:
+        context = getattr(error, "windows_namespace_context", None)
+        if context is not None:
+            comparison = {"available": False, "sampled_after_rejection": True}
+            try:
+                environment = dict(os.environ, KLOGG_NATIVE_ACL_TEST_PATH=context["path"])
+                inspect = (
+                    "$a=Get-Acl -LiteralPath $env:KLOGG_NATIVE_ACL_TEST_PATH;"
+                    "[pscustomobject]@{owner=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;"
+                    "user=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value}"
+                    "|ConvertTo-Json -Compress"
+                )
+                completed = subprocess.run(
+                    ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", inspect],
+                    env=environment, text=True, capture_output=True, check=True, timeout=30)
+                observed = json.loads(completed.stdout)
+                if (not isinstance(observed, dict)
+                        or any(not isinstance(observed.get(key), str)
+                               or len(observed[key]) > 192 for key in ("owner", "user"))):
+                    raise ValueError("invalid independent identity response")
+                comparison.update(
+                    available=True, owner_sid=observed["owner"], user_sid=observed["user"],
+                    owner_matches=observed["owner"] == context["owner_sid"],
+                    user_matches=observed["user"] == context["user_sid"],
+                )
+            except Exception as failure:
+                comparison["failure"] = security._diagnostic_text(str(failure), 192)
+            error.windows_namespace_independent = comparison
+            try:
+                print("Independent native namespace snapshot: " + json.dumps(comparison), file=sys.stderr)
+            except Exception:
+                pass
+        raise
 
 
 class DirectoryPolicyModelTest(unittest.TestCase):
@@ -173,6 +213,100 @@ class DirectoryPolicyModelTest(unittest.TestCase):
                 self.fail("unsafe ancestor entered")
         self.assertEqual(api.closed, list(reversed(api.opened)))
         self.assertNotIn(PRIVATE, api.opened)
+
+    def test_owner_rejection_identifies_ancestor_without_creating_or_repairing_it(self):
+        api = FakeNativeSecurity()
+        api.records[PARENT] = dataclasses.replace(
+            api.records[PARENT], security=dataclasses.replace(ancestor_security(), owner=FOREIGN))
+
+        with self.assertRaises(security.WindowsSecurityError) as caught:
+            security.create_private_parent(PARENT, "new-private", api=api)
+
+        self.assertTrue(str(caught.exception).startswith("untrusted directory owner can change its DACL"))
+        context = getattr(caught.exception, "windows_namespace_context", None)
+        self.assertIsNotNone(context, "rejection omits its inspected namespace context")
+        self.assertEqual(context["path"], PARENT)
+        self.assertEqual(context["owner_sid"], FOREIGN)
+        self.assertEqual(context["user_sid"], USER)
+        self.assertFalse(context["private"])
+        self.assertIn("Windows namespace:", str(caught.exception))
+        self.assertEqual(api.created, [])
+        self.assertEqual(api.removed, [])
+        self.assertEqual(api.closed, list(reversed(api.opened)))
+
+    def test_bounded_rejection_context_preserves_primary_and_secondary_errors(self):
+        path = "C:\\" + "\\".join(["a" * 200] * 4)
+        api = FakeNativeSecurity()
+        api.records = {
+            name: security.DirectoryRecord((1, index + 1), 0x10, name, ancestor_security())
+            for index, name in enumerate(security.directory_chain(path))
+        }
+        entries = (
+            security.AccessEntry(0, 0, 0x40000000, FOREIGN),
+            security.AccessEntry(1, 0, security.FILE_ALL_ACCESS, FOREIGN),
+            security.AccessEntry(0, 8, security.FILE_ALL_ACCESS, FOREIGN),
+        ) * 4
+        api.records[path] = dataclasses.replace(
+            api.records[path], security=dataclasses.replace(ancestor_security(), owner=FOREIGN, entries=entries))
+        api.close_failure = path
+        primary = security.WindowsSecurityError("original refusal")
+        primary.__cause__ = ValueError("original cause")
+        validation = security.validate_directory_security
+
+        def refuse_leaf(descriptor, user, *, private):
+            if descriptor.owner == FOREIGN:
+                raise primary
+            validation(descriptor, user, private=private)
+
+        with mock.patch.object(security, "validate_directory_security", side_effect=refuse_leaf):
+            with self.assertRaises(security.WindowsSecurityError) as caught:
+                with security.private_parent_lease(path, api=api):
+                    self.fail("refused namespace entered")
+
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(str(primary.__cause__), "original cause")
+        self.assertEqual(primary.windows_security_cleanup_errors, ("close failed",))
+        context = getattr(primary, "windows_namespace_context", None)
+        self.assertIsNotNone(context, "primary error has no bounded namespace diagnosis")
+        self.assertEqual(context["path"], path)
+        self.assertEqual(len(context["mutation_entries"]), 4)
+        self.assertEqual(context["omitted_entries"], 8)
+        self.assertEqual(context["mutation_entries"][0]["mutation_mask"],
+                         security._access_mask(0x40000000) & security.MUTATION_RIGHTS)
+        self.assertFalse(context["mutation_entries"][1]["applicable_allow"])
+        self.assertFalse(context["mutation_entries"][2]["applicable_allow"])
+        suffix = str(primary).split("Windows namespace:", 1)[1]
+        self.assertLessEqual(len(suffix), 2048)
+        self.assertIn("truncated", suffix)
+        self.assertTrue(str(primary).startswith("original refusal"))
+        self.assertEqual(api.closed, list(reversed(api.opened)))
+
+    def test_native_refusal_is_independently_observed_and_never_becomes_success(self):
+        original_path = os.environ.get("KLOGG_NATIVE_ACL_TEST_PATH")
+        for probe_fails in (False, True):
+            with self.subTest(probe_fails=probe_fails):
+                primary = security.WindowsSecurityError("original native refusal")
+                primary.windows_namespace_context = {
+                    "path": PARENT, "owner_sid": FOREIGN, "user_sid": USER,
+                }
+                independent = mock.Mock(stdout=json.dumps({"owner": FOREIGN, "user": USER}))
+                with mock.patch.object(security, "create_private_parent", side_effect=primary):
+                    with mock.patch.object(subprocess, "run", return_value=independent,
+                                           side_effect=OSError("probe unavailable") if probe_fails else None) as run:
+                        with mock.patch.object(sys, "stderr"):
+                            with self.assertRaises(security.WindowsSecurityError) as caught:
+                                create_native_fixture_parent(PARENT, "native-private")
+                self.assertIs(caught.exception, primary)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs["env"]["KLOGG_NATIVE_ACL_TEST_PATH"], PARENT)
+                self.assertEqual(primary.args, ("original native refusal",))
+                comparison = getattr(primary, "windows_namespace_independent", None)
+                self.assertIsNotNone(comparison, "native rejection has no independent diagnostic")
+                self.assertEqual(comparison["available"], not probe_fails)
+                if not probe_fails:
+                    self.assertTrue(comparison["owner_matches"])
+                    self.assertTrue(comparison["user_matches"])
+                self.assertEqual(os.environ.get("KLOGG_NATIVE_ACL_TEST_PATH"), original_path)
 
     def test_filesystem_reparse_volume_path_alias_and_identity_changes_fail_closed(self):
         for changed in (
@@ -320,7 +454,7 @@ class NativeDirectorySecurityTest(unittest.TestCase):
         self.api = security.NativeSecurityApi()
 
     def test_atomic_owner_only_creation_and_native_lease(self):
-        root = security.create_private_parent(self.parent, "native-private")
+        root = create_native_fixture_parent(self.parent, "native-private")
         with security.private_parent_lease(root):
             self.assertTrue(root.is_dir())
         handle = self.api.open_directory(str(root))
@@ -334,7 +468,6 @@ class NativeDirectorySecurityTest(unittest.TestCase):
         finally:
             self.api.close_directory(handle)
         # Independent .NET ACL/token inspection, not the production ctypes parser.
-        import subprocess
         environment = dict(os.environ, KLOGG_NATIVE_ACL_TEST_PATH=str(root))
         inspect = (
             "$a=Get-Acl -LiteralPath $env:KLOGG_NATIVE_ACL_TEST_PATH;"
@@ -361,8 +494,8 @@ class NativeDirectorySecurityTest(unittest.TestCase):
             security.create_private_parent(self.parent, "native-private")
 
     def test_native_mutable_ancestor_is_rejected_without_acl_repair(self):
-        ancestor = security.create_private_parent(self.parent, "owned-ancestor")
-        root = security.create_private_parent(ancestor, "native-private")
+        ancestor = create_native_fixture_parent(self.parent, "owned-ancestor")
+        root = create_native_fixture_parent(ancestor, "native-private")
         descriptor = self.api.HANDLE()
         size = self.api.DWORD()
         user = self.api.current_user_sid()
@@ -393,10 +526,9 @@ class NativeDirectorySecurityTest(unittest.TestCase):
             self.api.close_directory(handle)
 
     def test_native_reparse_directory_is_rejected(self):
-        root = security.create_private_parent(self.parent, "native-private")
+        root = create_native_fixture_parent(self.parent, "native-private")
         link = self.parent / "junction"
         # mklink creates only this test-owned alias; no payload or external path.
-        import subprocess
         subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(root)],
                        check=True, capture_output=True, timeout=30)
         self.addCleanup(link.rmdir)
@@ -405,7 +537,7 @@ class NativeDirectorySecurityTest(unittest.TestCase):
                 self.fail("reparse root entered")
 
     def test_distinct_restricted_token_cannot_read_private_child(self):
-        root = security.create_private_parent(self.parent, "native-private")
+        root = create_native_fixture_parent(self.parent, "native-private")
         child = root / "protected.bin"
         child.write_bytes(b"private native core fixture")
         advapi = ctypes.WinDLL("advapi32", use_last_error=True)

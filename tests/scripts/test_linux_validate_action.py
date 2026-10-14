@@ -1,10 +1,12 @@
 """Exercise wrapper scripts without building images or running real containers."""
 import importlib.util
+import json
 import os
 import pathlib
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -96,6 +98,8 @@ class LinuxValidateActionTest(unittest.TestCase):
                 # or container payload. nproc is a deterministic host-side input.
                 fixture = 'docker() { printf "%s\\0" "$@" > "$DOCKER_ARGV"; };\n'
                 fixture += 'nproc() { printf "2\\n"; };\n'
+                # MODEL host identity: never query this machine's UID/GID.
+                fixture += 'id() { case "$1" in -u) printf "21123\\n";; -g) printf "21124\\n";; *) return 1;; esac; };\n'
                 env = dict(os.environ, DOCKER_ARGV=str(argv), KLOGG_WORKSPACE=str(root / "workspace with spaces"),
                            KLOGG_VERSION="fixture-version", KLOGG_BUILD_ROOT="build_root",
                            KLOGG_CMAKE_OPTS="-DFIXTURE=--init", KLOGG_SANITIZER="",
@@ -382,6 +386,257 @@ class LinuxValidateActionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotEqual(env["KLOGG_WORKSPACE"], workspace)
         self.assertEqual(env["KLOGG_WORKSPACE"], "/usr/local")
+
+
+class DockerBuildNamespaceActionTest(unittest.TestCase):
+    """MODEL selector/argv tests, not native-container ownership qualification."""
+
+    def body(self, name, text=None, suffix="_ubuntu22.04"):
+        text = (ROOT / ".github/actions/docker-build/action.yml").read_text() if text is None else text
+        step = next(step for step in action_steps(text) if QUALITY.workflow_step_fields(step)[0].get("name") == name)
+        return (run_body(step).replace("${{ env.KLOGG_CI_IMAGE_PREFIX }}", "zeacent/klogg")
+                .replace("${{ inputs.container-suffix }}", suffix))
+
+    def execute(self, name, *, body=None, statuses="0", inherited=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            calls = root / "calls.jsonl"
+            sleeps = root / "sleeps"
+            model = root / "docker_model.py"
+            model.write_text(textwrap.dedent('''\
+                import json
+                import os
+                import pathlib
+                import sys
+                calls = pathlib.Path(os.environ["DOCKER_MODEL_CALLS"])
+                previous = calls.read_text().splitlines() if calls.exists() else []
+                with calls.open("a") as stream:
+                    stream.write(json.dumps(sys.argv[1:]) + "\\n")
+                if os.environ.get("DOCKER_MODEL_REQUIRE_NAMESPACE") == "1":
+                    argv = sys.argv[1:]
+                    options = argv[:argv.index("/bin/bash") - 1]
+                    users = [options[index + 1] for index, value in enumerate(options) if value == "--user"]
+                    homes = [options[index + 1] for index, value in enumerate(options)
+                             if value == "--env" and options[index + 1].startswith("HOME=")]
+                    # MODEL mount ancestry is host-owned; default image identity
+                    # cannot materialize verified sources. No real owner is probed.
+                    if users != [os.environ["MODEL_UID"] + ":" + os.environ["MODEL_GID"]] or homes != ["HOME=/tmp/klogg-build-home"]:
+                        print("MODEL namespace identity/HOME rejected before configure/build", file=sys.stderr)
+                        sys.exit(86)
+                    print("MODEL payload entered")
+                statuses = os.environ["DOCKER_MODEL_STATUSES"].split(",")
+                sys.exit(int(statuses[min(len(previous), len(statuses) - 1)]))
+                '''))
+            fixture = '''\
+                docker() { "$MODEL_PYTHON" "$DOCKER_MODEL" "$@"; }
+                id() {
+                  case "$1" in
+                    -u) printf '%s\\n' "$MODEL_UID"; return "$MODEL_UID_STATUS" ;;
+                    -g) printf '%s\\n' "$MODEL_GID"; return "$MODEL_GID_STATUS" ;;
+                    *) return 1 ;;
+                  esac
+                }
+                sleep() { printf '%s\\n' "$@" >> "$MODEL_SLEEPS"; }
+                '''
+            env = dict(os.environ, MODEL_PYTHON=sys.executable, DOCKER_MODEL=str(model),
+                       DOCKER_MODEL_CALLS=str(calls), DOCKER_MODEL_STATUSES=statuses,
+                       MODEL_SLEEPS=str(sleeps), MODEL_UID="21123", MODEL_GID="21124",
+                       MODEL_UID_STATUS="0", MODEL_GID_STATUS="0", HOME="/root",
+                       KLOGG_WORKSPACE=str(root / "workspace with spaces"),
+                       KLOGG_VERSION="model-version", KLOGG_BUILD_ROOT="build_root",
+                       KLOGG_CMAKE_OPTS="-DFIXTURE=ON", KLOGG_SANITIZER="",
+                       ASAN_OPTIONS="model-asan", UBSAN_OPTIONS="model-ubsan",
+                       LSAN_OPTIONS="model-lsan", TSAN_OPTIONS="model-tsan",
+                       GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="2")
+            env.update(inherited or {})
+            result = subprocess.run(["sh", "-eu", "-c", fixture + (body if body is not None else self.body(name))],
+                                    cwd=ROOT / "tests/scripts", env=env, check=False, capture_output=True, text=True)
+            commands = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            backoffs = sleeps.read_text().splitlines() if sleeps.exists() else []
+            return result, commands, backoffs
+
+    def test_configure_and_build_project_host_identity_and_owned_home_before_payload(self):
+        for name in ("configure", "build"):
+            with self.subTest(step=name):
+                result, calls, sleeps = self.execute(name, inherited={"DOCKER_MODEL_REQUIRE_NAMESPACE": "1",
+                                                                     "KLOGG_CONTAINER_USER": "0:0"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((len(calls), sleeps), (1, []))
+                self.assertIn("MODEL payload entered", result.stdout)
+
+    def test_real_action_mutations_cannot_drop_spoof_or_override_namespace_projection(self):
+        text = (ROOT / ".github/actions/docker-build/action.yml").read_text()
+        for old, new in (
+                ('--user "$host_uid:$host_gid"', '--user "0:0"'),
+                ('--user "$host_uid:$host_gid"', '# --user "$host_uid:$host_gid"'),
+                ('--env HOME=/tmp/klogg-build-home', '--env HOME=/root'),
+                ('--env HOME=/tmp/klogg-build-home', '--env HOME="$HOME"')):
+            self.assertIn(old, text)
+            mutated = text.replace(old, new)
+            for name in ("configure", "build"):
+                with self.subTest(mutation=new, step=name):
+                    # A shell comment in a continued command can terminate it;
+                    # either shell failure or the MODEL selector gate must stop it.
+                    result, _, _ = self.execute(name, body=self.body(name, mutated),
+                                                inherited={"DOCKER_MODEL_REQUIRE_NAMESPACE": "1"})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("MODEL payload entered", result.stdout)
+
+    def test_projection_uses_current_host_identity_not_an_inherited_selector_or_uid_allowlist(self):
+        for uid, gid in (("0", "0"), ("123", "456")):
+            for name in ("configure", "build"):
+                with self.subTest(uid=uid, gid=gid, step=name):
+                    result, calls, sleeps = self.execute(name, inherited={"DOCKER_MODEL_REQUIRE_NAMESPACE": "1",
+                                                                         "MODEL_UID": uid, "MODEL_GID": gid,
+                                                                         "host_uid": "999", "host_gid": "999"})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual((len(calls), sleeps), (1, []))
+
+    def test_pr_push_and_dispatch_call_paths_execute_the_shared_projection_for_each_build_role(self):
+        from test_ci_environment_workflow import event_expression
+
+        ordinary_text = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        ordinary = QUALITY.workflow_job_blocks(ordinary_text)
+        ordinary_steps = QUALITY.workflow_job_steps(ordinary_text)
+        producer_text = (ROOT / ".github/workflows/ci-environments.yml").read_text()
+        producer = QUALITY.workflow_job_blocks(producer_text)
+        producer_steps = QUALITY.workflow_job_steps(producer_text)
+        for event, mode in (("pull_request", "off"), ("push", "off"),
+                            ("workflow_dispatch", "off"), ("workflow_dispatch", "qualify")):
+            roles = []
+            for job in ("LinuxPackages", "LinuxSanitizers", "LinuxTsan"):
+                condition = QUALITY.workflow_job_direct_value(ordinary[job], "if")
+                if not event_expression(condition, event, mode):
+                    continue
+                steps = ordinary_steps[job]
+                self.assertEqual(sum(QUALITY.workflow_step_fields(step)[0].get("uses") ==
+                                     "./.github/actions/docker-build" for step in steps), 1)
+                if job == "LinuxTsan":
+                    env = QUALITY.workflow_mapping_block(ordinary[job], "env", 4)
+                    roles.append((env["KLOGG_CONTAINER_SUFFIX"][0], env["KLOGG_SANITIZER"][0]))
+                else:
+                    matrix = QUALITY.workflow_job_matrix_values(ordinary[job])
+                    roles.extend((suffix, sanitizer) for suffix in sorted(matrix["container_suffix"])
+                                 for sanitizer in sorted(matrix["sanitizer"]))
+            caller = ordinary["EnvironmentProducer"]
+            if event_expression(QUALITY.workflow_job_direct_value(caller, "if"), event, mode):
+                self.assertEqual(QUALITY.workflow_job_direct_value(caller, "uses"),
+                                 "./.github/workflows/ci-environments.yml")
+                for job, steps in producer_steps.items():
+                    if not any(QUALITY.workflow_step_fields(step)[0].get("uses") ==
+                               "./.github/actions/linux-validate" for step in steps):
+                        continue
+                    env = QUALITY.workflow_mapping_block(producer[job], "env", 4)
+                    configured, values, _ = LinuxValidateActionTest().configuration(
+                        env["KLOGG_FAMILY"][0], env["KLOGG_PROFILE"][0])
+                    self.assertEqual(configured.returncode, 0, configured.stderr)
+                    roles.append((values["KLOGG_CONTAINER_SUFFIX"], values["KLOGG_SANITIZER"]))
+            # Six owner-failed roles plus the separate TSan caller. This is only
+            # an event/profile/shell MODEL; it issues no qualification evidence.
+            self.assertEqual(sorted(roles), sorted([("_ubuntu20.04", ""), ("_ubuntu22.04", ""),
+                                                    ("_ubuntu24.04", ""), ("_ubuntu26.04", ""),
+                                                    ("_ubuntu22.04", "address"), ("_ubuntu22.04", "undefined"),
+                                                    ("_ubuntu22.04-tsan", "thread")]))
+            for suffix, sanitizer in roles:
+                for name in ("configure", "build"):
+                    with self.subTest(event=event, mode=mode, suffix=suffix, sanitizer=sanitizer, step=name):
+                        result, calls, sleeps = self.execute(name, body=self.body(name, suffix=suffix),
+                                                            inherited={"DOCKER_MODEL_REQUIRE_NAMESPACE": "1",
+                                                                       "KLOGG_SANITIZER": sanitizer,
+                                                                       "GITHUB_EVENT_NAME": event})
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual((len(calls), sleeps), (1, []))
+                        self.assertIn("MODEL payload entered", result.stdout)
+
+    def test_payload_creates_writable_container_home_without_touching_source_or_object_cache(self):
+        for name in ("configure", "build"):
+            with self.subTest(step=name), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory).resolve()
+                workspace = root / "workspace"
+                workspace.mkdir()
+                for cache in ("cpm_cache", ".ccache"):
+                    (workspace / cache).mkdir()
+                    (workspace / cache / "sentinel").write_text("retained MODEL cache\n")
+                home = root / "model-image-tmp/home"
+                result, calls, _ = self.execute(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = calls[0][-1].replace("/usr/local", str(workspace))
+                fixture = '''\
+                    model_payload() {
+                      test -d "$HOME" || { printf 'MODEL HOME was not created\\n' >&2; return 1; }
+                      printf '%s\\n' "$*" > "$HOME/payload"
+                    }
+                    cmake() { model_payload "$@"; }
+                    python3() { model_payload "$@"; }
+                    '''
+                # Only shell/temp-file semantics are real. Image/toolchain,
+                # identity, CMake and metrics are MODEL stubs, never executed.
+                result = subprocess.run(["sh", "-eu", "-c", fixture + payload],
+                                        cwd=root, env=dict(os.environ, HOME=str(home)),
+                                        check=False, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((home / "payload").is_file())
+                for cache in ("cpm_cache", ".ccache"):
+                    self.assertEqual((workspace / cache / "sentinel").read_text(), "retained MODEL cache\n")
+
+    def test_missing_malformed_or_failed_host_identity_never_enters_docker_or_retries(self):
+        for name in ("configure", "build"):
+            for key in ("MODEL_UID", "MODEL_GID"):
+                for value in ("", "root", "-1", "12:34", "12 34", "12\n34"):
+                    with self.subTest(step=name, key=key, value=value):
+                        result, calls, sleeps = self.execute(name, inherited={key: value})
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual((calls, sleeps), ([], []))
+            for key in ("MODEL_UID_STATUS", "MODEL_GID_STATUS"):
+                with self.subTest(step=name, failed=key):
+                    result, calls, sleeps = self.execute(name, inherited={key: "9"})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual((calls, sleeps), ([], []))
+
+    def test_characterization_mount_toolchain_metrics_and_cache_modes_are_preserved(self):
+        for name in ("configure", "build"):
+            for sanitizer, cache in (("", "measured"), ("thread", "disabled")):
+                with self.subTest(step=name, sanitizer=sanitizer):
+                    result, calls, backoffs = self.execute(name, inherited={"KLOGG_SANITIZER": sanitizer})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(backoffs, [])
+                    command = calls[0]
+                    self.assertEqual(command[:3], ["run", "--pull=never", "--init"])
+                    mount = command[command.index("-v") + 1]
+                    self.assertTrue(mount.endswith("workspace with spaces:/usr/local"), mount)
+                    self.assertEqual(command[-4:-1], ["zeacent/klogg_ubuntu22.04", "/bin/bash",
+                                                    "-lc" if name == "configure" else "-c"])
+                    for option in ("ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS", "TSAN_OPTIONS"):
+                        self.assertIn(option, command[:-4])
+                    if name == "configure":
+                        self.assertIn("KLOGG_VERSION=model-version", command)
+                        self.assertIn("-DFIXTURE=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON", command[-1])
+                        self.assertIn("-DCPM_SOURCE_CACHE=/usr/local/cpm_cache /usr/local", command[-1])
+                    else:
+                        self.assertIn("KLOGG_OBJECT_CACHE=" + cache, command)
+                        self.assertEqual(command[-1].count("cmake --build"), 1)
+                        self.assertIn("ci-build-metrics-123-2.json", command[-1])
+                        self.assertIn("--object-cache " + cache, command[-1])
+                        self.assertIn("-- cmake --build /usr/local/build_root --target ci_build", command[-1])
+
+    def test_characterization_configure_retries_are_bounded_but_build_is_not_retried(self):
+        for statuses, expected_status, attempts, backoffs in (
+                ("7,0", 0, 2, ["20"]), ("7", 1, 3, ["20", "30"])):
+            result, calls, sleeps = self.execute("configure", statuses=statuses)
+            self.assertEqual(result.returncode, expected_status)
+            self.assertEqual(len(calls), attempts)
+            self.assertEqual(sleeps, backoffs)
+            self.assertTrue(all(command == calls[0] for command in calls))
+        result, calls, sleeps = self.execute("build", statuses="7")
+        self.assertEqual((result.returncode, len(calls), sleeps), (7, 1, []))
+
+    def test_characterization_conflicting_compile_database_option_never_enters_docker(self):
+        for value in ("OFF", "0"):
+            result, calls, sleeps = self.execute("configure", inherited={"KLOGG_CMAKE_OPTS":
+                                                                        "-DCMAKE_EXPORT_COMPILE_COMMANDS=" + value})
+            self.assertEqual((result.returncode, calls, sleeps), (1, [], []))
+            self.assertIn("conflicts with the required compile database", result.stdout)
 
 
 if __name__ == "__main__":

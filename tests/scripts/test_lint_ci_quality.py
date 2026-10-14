@@ -1736,6 +1736,41 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     assertion = self.assert_policy_clean if expected_clean else self.assert_policy_issue
                     assertion(f"configure: {self.DOCKER_INIT_MESSAGE}", issues)
 
+    def test_scoped_docker_init_accepts_only_literal_host_identity_queries(self):
+        valid = self.init_action_fixture("docker-build")
+        # The actual action captures both selectors before its literal launch.
+        self.assertEqual(MODULE.docker_init_action_issues(valid, ("configure", "build")), [])
+        for query in ("id -u", "id -g"):
+            script = (f"identity=$({query}) || exit 1\n"
+                      f'docker run --pull=never --init --user "$identity:$identity" {self.DOCKER_IMAGE} /bin/true')
+            candidate = self.replace_action_step(valid, "configure", script)
+            with self.subTest(query=query):
+                self.assertEqual(MODULE.docker_init_action_issues(candidate, ("configure",)), [])
+
+    def test_scoped_identity_query_compatibility_keeps_unknown_bindings_and_init_spoofs_closed(self):
+        valid = self.init_action_fixture("docker-build")
+        image = self.DOCKER_IMAGE
+        launch = f"docker run --pull=never --init {image} /bin/true"
+        bad = (
+            "identity=$(id)\n" + launch,
+            "identity=$(id -un)\n" + launch,
+            "identity=$(id -u root)\n" + launch,
+            "identity=$(id --user)\n" + launch,
+            "identity=$(env id -u)\n" + launch,
+            f"identity=$(id -u; docker run {image} /bin/true)\n" + launch,
+            "id() { printf '123\\n'; }\nidentity=$(id -u)\n" + launch,
+            f"identity=$(id -u)\n# {launch}\ntrue",
+            f"identity=$(id -u)\necho '{launch}'",
+            f"identity=$(id -u)\ndocker run --pull=never {image} /bin/true # --init",
+        )
+        for script in bad:
+            with self.subTest(script=script):
+                candidate = self.replace_action_step(valid, "configure", script)
+                self.assert_policy_issue(
+                    f"configure: {self.DOCKER_INIT_MESSAGE}",
+                    MODULE.docker_init_action_issues(candidate, ("configure",)),
+                )
+
     def test_scoped_launch_rejects_hidden_additional_launch_bindings(self):
         image = self.DOCKER_IMAGE
         actual = f"docker run --init {image} /bin/true"

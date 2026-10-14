@@ -156,6 +156,58 @@ def directory_chain(path) -> tuple:
     return tuple(paths)
 
 
+def _diagnostic_text(value, maximum: int) -> str:
+    text = ascii(value) if isinstance(value, (str, int, bool)) else "<unavailable>"
+    marker = "<truncated>"
+    return text if len(text) <= maximum else text[:maximum - len(marker)] + marker
+
+
+def _rejection_context(error, record: DirectoryRecord, path: str, user_sid: str,
+                       *, private: bool) -> None:
+    """Describe inspected values without changing refusal or claiming effective access."""
+    descriptor = record.security
+    owner = getattr(descriptor, "owner", None)
+    entries = getattr(descriptor, "entries", ())
+    mutations = []
+    omitted = 0
+    if isinstance(entries, tuple):
+        for entry in entries[:1024]:
+            if not isinstance(entry, AccessEntry):
+                continue
+            try:
+                mask = _access_mask(entry.mask) & MUTATION_RIGHTS
+            except WindowsSecurityError:
+                continue
+            if not mask:
+                continue
+            if len(mutations) == 4:
+                omitted += 1
+                continue
+            mutations.append({
+                "sid": _diagnostic_text(entry.sid, 192),
+                "kind": entry.kind,
+                "flags": entry.flags,
+                "raw_mask": entry.mask,
+                "mutation_mask": mask,
+                "applicable_allow": entry.kind == ACCESS_ALLOWED_ACE_TYPE
+                    and type(entry.flags) is int and not entry.flags & INHERIT_ONLY_ACE,
+                "trusted_principal": entry.sid in (user_sid, SYSTEM_SID, ADMINISTRATORS_SID),
+            })
+        omitted += max(0, len(entries) - 1024)
+    reason = str(error)
+    error.windows_namespace_context = {
+        "path": path, "owner_sid": owner, "user_sid": user_sid, "private": private,
+        "decision": reason, "mutation_entries": mutations, "omitted_entries": omitted,
+    }
+    detail = (f"path={_diagnostic_text(path, 512)} owner={_diagnostic_text(owner, 192)} "
+              f"user={_diagnostic_text(user_sid, 192)} private={private} "
+              f"observed_mutation_entries={mutations!r} omitted={omitted}")
+    marker = "<truncated>"
+    if len(detail) > 2048:
+        detail = detail[:2048 - len(marker)] + marker
+    error.args = (reason + "\nWindows namespace:" + detail,) + error.args[1:]
+
+
 def _record(api, handle, path: str, user_sid: str, *, private: bool) -> DirectoryRecord:
     record = api.inspect_directory(handle)
     _require(isinstance(record, DirectoryRecord)
@@ -167,7 +219,15 @@ def _record(api, handle, path: str, user_sid: str, *, private: bool) -> Director
              and all(type(value) is int and value >= 0 for value in record.identity)
              and record.identity[1] != 0, "invalid native directory identity")
     _require(api.paths_equal(record.path, path), "directory lease rejects path aliases")
-    validate_directory_security(record.security, user_sid, private=private)
+    try:
+        validate_directory_security(record.security, user_sid, private=private)
+    except WindowsSecurityError as error:
+        try:
+            _rejection_context(error, record, path, user_sid, private=private)
+        except Exception:
+            # Diagnostic formatting must never replace the original refusal.
+            pass
+        raise
     return record
 
 
