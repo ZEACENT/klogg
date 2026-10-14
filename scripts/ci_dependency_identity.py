@@ -26,6 +26,7 @@ SHARED_POLICY_FILES = (
     "scripts/ci_dependency_full_evidence.py",
     "scripts/ci_dependency_pipeline.py",
     "scripts/ci_dependency_core.py",
+    "scripts/ci_dependency_windows_security.py",
     "scripts/ci_dependency_producer.py",
     "scripts/ci_dependency_toolchain.py",
 )

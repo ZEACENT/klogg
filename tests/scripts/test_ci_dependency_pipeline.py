@@ -1,13 +1,18 @@
 """A trusted workflow gate must not promote self-reported offline candidates."""
 
+import ast
 import copy
 import hashlib
 import json
 import pathlib
 import sys
 import tempfile
+import textwrap
+import types
 import unittest
 from unittest import mock
+
+from test_ci_environment_workflow import QUALITY, event_expression
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -264,6 +269,140 @@ class DependencyPipelineTest(unittest.TestCase):
             altered[target_id][field] = spoof
             with self.subTest(target_id=target_id), self.assertRaises(pipeline.PipelineError):
                 self.qualify(trusted_environment=altered)
+
+
+class WindowsNativeQualityEnrollmentTest(unittest.TestCase):
+    WORKFLOW = ROOT / ".github/workflows/ci-build.yml"
+    TARGET_GUARD = "${{ env.KLOGG_ADB_HELPER_TARGET == 'windows-x86_64' }}"
+    SETUP = "Select native Windows Python for dependency contracts"
+    TEST = "Run native Windows dependency filesystem contracts"
+    JOBS = {"BuildAdbLinuxX64": "linux-x86_64", "BuildAdbLinuxArm64": "linux-arm64",
+            "BuildAdbWindowsX64": "windows-x86_64", "BuildAdbMacX64": "macos-x86_64",
+            "BuildAdbMacArm64": "macos-arm64"}
+    JOB_GUARD = ("${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' "
+                 "&& inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' "
+                 "&& (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) "
+                 "&& !contains(github.event.head_commit.message, '[skip ci]') }}")
+    UNITTEST = ('unittest.main(module=None, argv=["unittest", "-v", '
+                '"test_ci_dependency_windows_security", "test_ci_dependency_core"])')
+
+    def enrollment(self, text):
+        rows = [QUALITY.workflow_step_fields(step) for step in
+                QUALITY.workflow_job_steps(text)["BuildAdbWindowsX64"]]
+        result = []
+        for name in (self.SETUP, self.TEST):
+            matches = [(index, fields, children) for index, (fields, children) in enumerate(rows)
+                       if fields.get("name") == name]
+            self.assertEqual(len(matches), 1, "missing mandatory Windows contract path: " + name)
+            result.append(matches[0])
+        return rows, result
+
+    def assert_enrollment(self, text):
+        rows, ((setup_index, setup, setup_children), (test_index, test, test_children)) = self.enrollment(text)
+        self.assertTrue(rows[0][0]["uses"].startswith("actions/checkout@"))
+        self.assertEqual(rows[0][1]["with"], {"persist-credentials": "false"})
+        self.assertEqual((setup_index, test_index), (1, 2))
+        self.assertEqual(setup, {"name": self.SETUP, "id": "windows-contract-python",
+                                 "if": self.TARGET_GUARD, "with": "",
+                                 "uses": "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"})
+        self.assertEqual(setup_children, {"with": {"python-version": "3.14", "architecture": "x64",
+                                                  "update-environment": "false"}})
+        self.assertEqual(set(test), {"name", "if", "shell", "working-directory", "env", "run"})
+        self.assertEqual(test["if"], self.TARGET_GUARD)
+        self.assertEqual(test["shell"], "pwsh")
+        self.assertEqual(test["working-directory"], "tests/scripts")
+        self.assertEqual(test_children, {"env": {
+            "KLOGG_NATIVE_PYTHON": "${{ steps.windows-contract-python.outputs.python-path }}"}})
+        raw = QUALITY.workflow_job_steps(text)["BuildAdbWindowsX64"][test_index]
+        begin = next(index for index, line in enumerate(raw) if line.strip() == "run: |")
+        script = textwrap.dedent("\n".join(raw[begin + 1:])).strip()
+        self.assertTrue(script.startswith("$source = @'\n"))
+        source, invocation = script[len("$source = @'\n"):].split("\n'@\n", 1)
+        self.assertEqual(invocation, "& $env:KLOGG_NATIVE_PYTHON -c $source\nexit $LASTEXITCODE")
+        body = ast.parse(source).body
+        self.assertEqual([type(node) for node in body], [ast.Import, ast.Import, ast.If, ast.Import, ast.Expr])
+        self.assertEqual([(node.names[0].name, node.names[0].asname) for node in (body[0], body[1], body[3])],
+                         [("os", None), ("sys", None), ("unittest", None)])
+        self.assertTrue(all(len(node.names) == 1 for node in (body[0], body[1], body[3])))
+        platform = body[2]
+        self.assertEqual(ast.dump(platform.test), ast.dump(ast.parse(
+            'os.name != "nt" or sys.platform != "win32"', mode="eval").body))
+        self.assertEqual(platform.orelse, [])
+        self.assertEqual(len(platform.body), 1)
+        self.assertIsInstance(platform.body[0], ast.Raise)
+        self.assertIsInstance(platform.body[0].exc, ast.Call)
+        self.assertEqual(ast.dump(platform.body[0].exc.func), ast.dump(ast.Name(id="SystemExit", ctx=ast.Load())))
+        self.assertEqual(ast.dump(body[4].value), ast.dump(ast.parse(self.UNITTEST).body[0].value))
+        blocks = QUALITY.workflow_job_blocks(text)
+        for job, target in self.JOBS.items():
+            self.assertEqual(QUALITY.workflow_job_direct_value(blocks[job], "if"), self.JOB_GUARD)
+            environment = QUALITY.workflow_mapping_block(blocks[job], "env", 4)
+            self.assertEqual(environment["KLOGG_ADB_HELPER_TARGET"][0], target)
+            shared = [QUALITY.workflow_step_fields(step) for step in QUALITY.workflow_job_steps(text)[job]]
+            self.assertEqual(shared, rows)
+            for event, environment, dependency, active in (
+                ("pull_request", "off", "off", True), ("push", "off", "off", True),
+                ("workflow_dispatch", "off", "off", True),
+                ("workflow_dispatch", "off", "qualify", True),
+                ("workflow_dispatch", "off", "publish", True),
+                ("workflow_dispatch", "qualify", "off", False),
+                ("workflow_dispatch", "publish", "off", False),
+                ("workflow_dispatch", "off", "observe-ios-host", False),
+            ):
+                self.assertEqual(bool(event_expression(self.JOB_GUARD, event, environment, dependency)), active)
+                for fields in (setup, test):
+                    condition = fields["if"].replace("env.KLOGG_ADB_HELPER_TARGET", repr(target))
+                    self.assertEqual(active and bool(event_expression(condition, event, environment, dependency)),
+                                     active and target == "windows-x86_64")
+        return platform
+
+    def test_real_windows_builder_enrolls_unmocked_contracts_for_ordinary_and_dependency_events(self):
+        self.assert_enrollment(self.WORKFLOW.read_text())
+
+    def test_non_native_platforms_fail_before_unittest_import_or_loading(self):
+        platform = self.assert_enrollment(self.WORKFLOW.read_text())
+        module = ast.Module(body=[platform], type_ignores=[])
+        for os_name, sys_platform in (("posix", "darwin"), ("posix", "win32"), ("nt", "msys")):
+            for optimize in (0, 2):
+                with self.subTest(os_name=os_name, sys_platform=sys_platform, optimize=optimize), self.assertRaisesRegex(
+                        SystemExit, "Native Windows CPython required"):
+                    exec(compile(module, "<native Windows platform boundary>", "exec", optimize=optimize), {
+                        "os": types.SimpleNamespace(name=os_name),
+                        "sys": types.SimpleNamespace(platform=sys_platform, executable="unsupported-python")})
+
+    def test_real_enrollment_mutations_cannot_skip_native_proof_or_change_build_path(self):
+        text = self.WORKFLOW.read_text()
+        block = "\n".join(QUALITY.workflow_job_blocks(text)["BuildAdbLinuxX64"])
+        mutations = (
+            ('KLOGG_ADB_HELPER_TARGET: linux-x86_64', 'KLOGG_ADB_HELPER_TARGET: windows-x86_64'),
+            ('if os.name != "nt" or sys.platform != "win32":\n'
+             '              raise SystemExit(f"Native Windows CPython required: {os.name}/{sys.platform} ({sys.executable})")', ''),
+            ('if os.name != "nt" or sys.platform != "win32":\n'
+             '              raise SystemExit(f"Native Windows CPython required: {os.name}/{sys.platform} ({sys.executable})")',
+             'assert os.name == "nt" and sys.platform == "win32"'),
+            ('if os.name != "nt" or sys.platform != "win32":', 'if False:'),
+            ('if os.name != "nt" or sys.platform != "win32":', 'if os.name != "nt" and sys.platform != "win32":'),
+            ('raise SystemExit(f"Native Windows CPython required: {os.name}/{sys.platform} ({sys.executable})")',
+             'pass # Native Windows CPython required'),
+            ('& $env:KLOGG_NATIVE_PYTHON -c $source', 'python3 -c $source'),
+            ('exit $LASTEXITCODE', 'exit 0'),
+            ('exit $LASTEXITCODE', 'python3 -c "pass"\n          exit $LASTEXITCODE'),
+            ('update-environment: false', 'update-environment: true'),
+            ('update-environment: false', '# update-environment: false'),
+            ('KLOGG_NATIVE_PYTHON: ${{ steps.windows-contract-python.outputs.python-path }}',
+             'PATH: C:/msys64/usr/bin\n          KLOGG_NATIVE_PYTHON: ${{ steps.windows-contract-python.outputs.python-path }}'),
+            (self.TARGET_GUARD, "${{ runner.os == 'Windows' }}"),
+            ('architecture: x64', 'architecture: x86'),
+            ('shell: pwsh\n        working-directory: tests/scripts',
+             'shell: pwsh\n        continue-on-error: true\n        working-directory: tests/scripts'),
+            (self.TARGET_GUARD, "${{ env.KLOGG_ADB_HELPER_TARGET == 'windows-x86_64' && inputs.dependency-mode == 'qualify' }}"),
+            ('"test_ci_dependency_core"', '"test_ci_dependency_pipeline"'),
+        )
+        for old, new in mutations:
+            self.assertIn(old, block)
+            mutated = text.replace(block, block.replace(old, new, 1), 1)
+            with self.subTest(mutation=new), self.assertRaises(AssertionError):
+                self.assert_enrollment(mutated)
 
 
 if __name__ == "__main__":

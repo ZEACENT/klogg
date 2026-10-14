@@ -12,6 +12,8 @@ import tempfile
 import textwrap
 import unittest
 
+from test_ci_environment_workflow import event_expression
+
 
 ROOT = pathlib.Path(__file__).parents[2]
 SPEC = importlib.util.spec_from_file_location("lint_ci_quality", ROOT / "scripts/lint_ci_quality.py")
@@ -432,36 +434,86 @@ class DependencyQualificationWorkflowTest(unittest.TestCase):
         self.assertIn("!contains(github.event.head_commit.message, '[skip ci]')", condition)
 
     def test_native_macos_builders_select_exact_xcode_before_tools_and_builds(self):
-        workflow = WORKFLOW.read_text()
+        self.assert_macos_selection_order(WORKFLOW.read_text())
+
+    def assert_macos_selection_order(self, workflow):
         jobs = LINT.workflow_job_steps(workflow)
+        blocks = LINT.workflow_job_blocks(workflow)
         for job, (_, runner, family) in TARGETS.items():
             if runner not in {"macos-26-intel", "macos-26"}:
                 continue
-            with self.subTest(job=job):
-                records = [LINT.workflow_step_fields(step)[0] for step in jobs[job]]
-                selections = [(index, step) for index, step in enumerate(records)
-                              if step.get("name") == "Select verified Xcode 26.6"]
-                self.assertEqual(len(selections), 1)
-                index, selection = selections[0]
-                self.assertEqual(index, 1, "selection must precede all toolchain actions")
-                self.assertEqual(selection.get("shell"), "bash")
-                self.assertNotIn("continue-on-error", selection)
-                self.assertEqual(selection.get("if"),
-                                 "${{ startsWith(env.KLOGG_ADB_HELPER_TARGET, 'macos-') }}" if family == "adb" else None)
-                script = LINT.active_script_content(selection.get("run", ""))
-                for marker in ("set -euo pipefail", "/Applications/Xcode_26.6.app/Contents/Developer",
-                               'test -d "$DEVELOPER_DIR"', "xcodebuild -version", "17F113",
-                               '>> "$GITHUB_ENV"'):
-                    self.assertIn(marker, script)
-                self.assertLess(index, next(i for i, step in enumerate(records)
-                                            if step.get("name") == ("Install locked native CMake toolchain"
-                                                                     if family == "adb" else "Install iOS native source-build tools")))
-                if family == "ios":
-                    verify = next(i for i, step in enumerate(records)
-                                  if step.get("name") == "Verify pinned iOS producer toolchain")
-                    self.assertLess(index, verify)
-                    self.assertNotIn("Xcode_16.4.app", records[verify].get("run", ""))
-                    self.assertIn("ci_dependency_toolchain.py", records[verify].get("run", ""))
+            records = [LINT.workflow_step_fields(step)[0] for step in jobs[job]]
+            selections = [(index, step) for index, step in enumerate(records)
+                          if step.get("name") == "Select verified Xcode 26.6"]
+            self.assertEqual(len(selections), 1)
+            index, selection = selections[0]
+            env = LINT.workflow_mapping_block(blocks[job], "env", 4)
+            target = env["KLOGG_ADB_HELPER_TARGET"][0] if family == "adb" else ""
+            for event, dependency in (("pull_request", "off"), ("push", "off"),
+                                      ("workflow_dispatch", "off"), ("workflow_dispatch", "qualify"),
+                                      ("workflow_dispatch", "publish")):
+                job_condition = LINT.workflow_job_direct_value(blocks[job], "if")
+                self.assertTrue(event_expression(job_condition, event, "off", dependency), job)
+                executed = []
+                for step in records[:index + 1]:
+                    condition = step.get("if")
+                    if condition is not None:
+                        condition = re.sub(
+                            r"(!?)startsWith\(env\.KLOGG_ADB_HELPER_TARGET, '([^']*)'\)",
+                            lambda match: repr(not target.startswith(match[2]) if match[1]
+                                               else target.startswith(match[2])), condition)
+                        condition = condition.replace("env.KLOGG_ADB_HELPER_TARGET", repr(target))
+                    if condition is None or event_expression(condition, event, "off", dependency):
+                        executed.append(step)
+                self.assertEqual(len(executed), 2, f"{job}/{event}/{dependency}: Xcode must be first executed after checkout")
+                self.assertTrue(executed[0].get("uses", "").startswith("actions/checkout@"))
+                self.assertEqual(executed[1], selection)
+            self.assertEqual(selection.get("shell"), "bash")
+            self.assertNotIn("continue-on-error", selection)
+            self.assertEqual(selection.get("if"),
+                             "${{ startsWith(env.KLOGG_ADB_HELPER_TARGET, 'macos-') }}" if family == "adb" else None)
+            script = LINT.active_script_content(selection.get("run", ""))
+            for marker in ("set -euo pipefail", "/Applications/Xcode_26.6.app/Contents/Developer",
+                           'test -d "$DEVELOPER_DIR"', "xcodebuild -version", "17F113",
+                           '>> "$GITHUB_ENV"'):
+                self.assertIn(marker, script)
+            self.assertLess(index, next(i for i, step in enumerate(records)
+                                        if step.get("name") == ("Install locked native CMake toolchain"
+                                                                 if family == "adb" else "Install iOS native source-build tools")))
+            if family == "ios":
+                verify = next(i for i, step in enumerate(records)
+                              if step.get("name") == "Verify pinned iOS producer toolchain")
+                self.assertLess(index, verify)
+                self.assertNotIn("Xcode_16.4.app", records[verify].get("run", ""))
+                self.assertIn("ci_dependency_toolchain.py", records[verify].get("run", ""))
+
+    def test_effective_macos_order_rejects_early_executed_actions_and_late_selection(self):
+        workflow = WORKFLOW.read_text()
+        blocks = LINT.workflow_job_blocks(workflow)
+        shared = "\n".join(blocks["BuildAdbLinuxX64"])
+        guard = "        if: ${{ env.KLOGG_ADB_HELPER_TARGET == 'windows-x86_64' }}\n"
+        self.assertIn(guard, shared)
+        cases = [workflow.replace(shared, shared.replace(guard, "", 1), 1)]
+        test_header = "      - name: Run native Windows dependency filesystem contracts\n"
+        self.assertIn(test_header + guard, shared)
+        cases.append(workflow.replace(shared, shared.replace(test_header + guard, test_header, 1), 1))
+        selection = "      - name: Select verified Xcode 26.6\n"
+        for action in ("      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n",
+                       "      - uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb\n"):
+            cases.append(workflow.replace(shared, shared.replace(selection, action + selection, 1), 1))
+        raw_steps = LINT.workflow_job_steps(workflow)["BuildAdbLinuxX64"]
+        selection_step = next(step for step in raw_steps if LINT.workflow_step_fields(step)[0].get("name")
+                              == "Select verified Xcode 26.6")
+        tools_step = next(step for step in raw_steps if LINT.workflow_step_fields(step)[0].get("name")
+                          == "Install locked native CMake toolchain")
+        ordered = "\n".join(selection_step) + "\n" + "\n".join(tools_step)
+        self.assertIn(ordered, shared)
+        reordered = shared.replace(ordered, "\n".join(tools_step) + "\n" + "\n".join(selection_step), 1)
+        cases.append(workflow.replace(shared, reordered, 1))
+        for index, mutated in enumerate(cases):
+            self.assertNotEqual(mutated, workflow)
+            with self.subTest(mutation=index), self.assertRaises(AssertionError):
+                self.assert_macos_selection_order(mutated)
 
     def test_native_macos_xcode_selection_near_misses_fail_closed(self):
         workflow = WORKFLOW.read_text()

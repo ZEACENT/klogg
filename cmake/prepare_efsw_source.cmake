@@ -1,8 +1,8 @@
 # Materialize a verified clean dependency checkout for build-private patching.
 #
 # CACHE_SOURCE is a shared CPM cache and is never modified. DESTINATION is a
-# build-private checkout that retains Git metadata so the patch helper can
-# verify and recover its patch series.
+# build-private pinned checkout or explicitly typed approved-content snapshot.
+# Snapshots never claim the approved revision as an actual private Git commit.
 
 foreach(_required_variable
     DEPENDENCY
@@ -25,6 +25,13 @@ endif()
 
 get_filename_component(CACHE_SOURCE "${CACHE_SOURCE}" ABSOLUTE)
 get_filename_component(DESTINATION "${DESTINATION}" ABSOLUTE)
+set(_destination_leaf_is_symlink FALSE)
+if(IS_SYMLINK "${DESTINATION}")
+  set(_destination_leaf_is_symlink TRUE)
+endif()
+if(NOT DEFINED PATCHED_TREE_HASH)
+  set(PATCHED_TREE_HASH "")
+endif()
 
 # Standalone script mode does not inherit a sibling directory's interpreter.
 # Validate the explicit host prerequisite before starting any Git operation.
@@ -66,6 +73,43 @@ function(_klogg_prepare_require_owned_completion result diagnostic)
   endif()
 endfunction()
 
+get_filename_component(_snapshot_script
+                       "${CMAKE_CURRENT_LIST_DIR}/../scripts/prepare_efsw_snapshot.py" ABSOLUTE)
+function(klogg_prepare_write_private_marker kind)
+  if(UNIX OR "${kind}" STREQUAL "approved-content-snapshot")
+    execute_process(
+      COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_snapshot_script}"
+              --operation write-marker --kind "${kind}" --marker "${_destination_marker}"
+              --revision "${EXPECTED_REVISION}" --clean-tree "${CLEAN_TREE_HASH}"
+              "--final-tree=${PATCHED_TREE_HASH}"
+      RESULT_VARIABLE _marker_result
+      ERROR_VARIABLE _marker_error
+      TIMEOUT ${GIT_TIMEOUT}
+    )
+    if(NOT _marker_result EQUAL 0)
+      message(FATAL_ERROR "Failed to write owned private marker (status ${_marker_result}): ${_marker_error}")
+    endif()
+  else()
+    file(WRITE "${_destination_marker}" "${EXPECTED_REVISION}\n")
+  endif()
+endfunction()
+
+# Reject source links/specials before CMake's digest walker can follow or open
+# them. Normal Windows Git materialization retains its existing contract.
+if(UNIX AND IS_DIRECTORY "${CACHE_SOURCE}")
+  get_filename_component(_preflight_source "${CACHE_SOURCE}" REALPATH)
+  execute_process(
+    COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_snapshot_script}"
+            --operation preflight --source "${_preflight_source}"
+    RESULT_VARIABLE _preflight_result
+    ERROR_VARIABLE _preflight_error
+    TIMEOUT ${GIT_TIMEOUT}
+  )
+  if(NOT _preflight_result EQUAL 0)
+    message(FATAL_ERROR "${DEPENDENCY} source preflight failed: ${_preflight_error}")
+  endif()
+endif()
+
 # A shared cache may be clean or contain a previously approved patch series.
 # The clone and detached checkout below intentionally use its pinned commit,
 # not its working tree bytes.
@@ -76,6 +120,7 @@ klogg_require_pinned_source(
   GIT_OWNER "${_git_owner_script}"
   PYTHON_EXECUTABLE "${PREPARE_PYTHON_EXECUTABLE}"
   GIT_TIMEOUT "${GIT_TIMEOUT}"
+  VERIFICATION_MODE_OUTPUT _cache_verification_mode
   ${APPROVED_CACHE_TREE_HASHES}
 )
 get_filename_component(CACHE_SOURCE "${CACHE_SOURCE}" REALPATH)
@@ -83,9 +128,10 @@ get_filename_component(CACHE_SOURCE "${CACHE_SOURCE}" REALPATH)
 # Trust only the verified cache's own Git directory for the local clone.
 # Never resolve a gitfile, symlink, or common-directory redirect into an
 # ownership exception for metadata outside this source tree.
-if(NOT IS_DIRECTORY "${CACHE_SOURCE}/.git" OR IS_SYMLINK "${CACHE_SOURCE}/.git"
-   OR EXISTS "${CACHE_SOURCE}/.git/commondir"
-   OR IS_SYMLINK "${CACHE_SOURCE}/.git/commondir")
+if((EXISTS "${CACHE_SOURCE}/.git" OR IS_SYMLINK "${CACHE_SOURCE}/.git")
+   AND (NOT IS_DIRECTORY "${CACHE_SOURCE}/.git" OR IS_SYMLINK "${CACHE_SOURCE}/.git"
+        OR EXISTS "${CACHE_SOURCE}/.git/commondir"
+        OR IS_SYMLINK "${CACHE_SOURCE}/.git/commondir"))
   message(FATAL_ERROR
           "${DEPENDENCY} cache source does not retain ordinary Git metadata: '${CACHE_SOURCE}'")
 endif()
@@ -94,6 +140,11 @@ endif()
 # a destination below a symlink while retaining CMake 3.14 compatibility.
 set(_destination_existing_ancestor "${DESTINATION}")
 while(NOT EXISTS "${_destination_existing_ancestor}")
+  # EXISTS follows links. Never append an unresolved dangling alias to the
+  # approved spelling: later realpath-based creation could enter the cache.
+  if(IS_SYMLINK "${_destination_existing_ancestor}")
+    message(FATAL_ERROR "Cannot resolve dangling symlink in private destination '${DESTINATION}'")
+  endif()
   get_filename_component(_destination_parent_candidate
                          "${_destination_existing_ancestor}" DIRECTORY)
   if("${_destination_parent_candidate}" STREQUAL "${_destination_existing_ancestor}")
@@ -141,9 +192,39 @@ get_filename_component(_destination_name "${DESTINATION}" NAME)
 set(_destination_marker
     "${_destination_parent}/.${_destination_name}.klogg-private-source")
 
-# The lock belongs to the private destination parent, never to the shared
-# source tree or its content-addressed cache location.
-file(MAKE_DIRECTORY "${_destination_parent}")
+# Snapshot namespace approval precedes even lock-file writes. Descriptor/leaf
+# modes alone cannot protect a private path under a foreign-writable ancestor.
+if(IS_SYMLINK "${_destination_marker}" OR IS_DIRECTORY "${_destination_marker}")
+  message(FATAL_ERROR "${DEPENDENCY} private source marker must not redirect outside its owned parent")
+endif()
+set(_snapshot_namespace_required FALSE)
+if("${_cache_verification_mode}" STREQUAL "approved-content")
+  set(_snapshot_namespace_required TRUE)
+endif()
+if(EXISTS "${_destination_marker}")
+  klogg_private_source_kind("${_destination_marker}" "${PREPARE_PYTHON_EXECUTABLE}"
+                           "${_snapshot_script}" _existing_kind)
+  if("${_existing_kind}" STREQUAL "approved-content-snapshot")
+    set(_snapshot_namespace_required TRUE)
+  endif()
+endif()
+if(UNIX OR _snapshot_namespace_required)
+  execute_process(
+    COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_snapshot_script}"
+            --operation prepare-parent --source "${_destination_parent}"
+    RESULT_VARIABLE _namespace_result
+    ERROR_VARIABLE _namespace_error
+    TIMEOUT ${GIT_TIMEOUT}
+  )
+  if(NOT _namespace_result EQUAL 0)
+    message(FATAL_ERROR "${DEPENDENCY} snapshot namespace rejected: ${_namespace_error}")
+  endif()
+else()
+  file(MAKE_DIRECTORY "${_destination_parent}")
+endif()
+
+# The lock belongs to the verified actual private destination parent, never to
+# the shared source tree. Fresh POSIX parents are already canonical and private.
 file(LOCK "${_destination_parent}/klogg-${DEPENDENCY}-prepare.lock"
      GUARD PROCESS
      TIMEOUT ${LOCK_TIMEOUT}
@@ -153,10 +234,38 @@ if(NOT _prepare_lock_result EQUAL 0)
           "Failed to lock ${DEPENDENCY} private source parent: ${_prepare_lock_result}")
 endif()
 
+if(IS_SYMLINK "${_destination_marker}" OR IS_DIRECTORY "${_destination_marker}")
+  message(FATAL_ERROR "${DEPENDENCY} private source marker must not redirect outside its owned parent")
+endif()
+
 if(EXISTS "${DESTINATION}")
   if(NOT IS_DIRECTORY "${DESTINATION}")
     message(FATAL_ERROR
             "${DEPENDENCY} private destination already exists and is not an approved clean private source: '${DESTINATION}'")
+  endif()
+
+  if(EXISTS "${_destination_marker}" OR IS_SYMLINK "${_destination_marker}")
+    klogg_private_source_kind("${_destination_marker}" "${PREPARE_PYTHON_EXECUTABLE}"
+                             "${_snapshot_script}" _destination_kind)
+    if("${_destination_kind}" STREQUAL "approved-content-snapshot")
+      if(_destination_leaf_is_symlink)
+        message(FATAL_ERROR "Snapshot private destination must not be a symlink")
+      endif()
+      execute_process(
+        COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_snapshot_script}"
+                --operation verify --source "${DESTINATION}" --marker "${_destination_marker}"
+                --revision "${EXPECTED_REVISION}" --clean-tree "${CLEAN_TREE_HASH}"
+                "--final-tree=${PATCHED_TREE_HASH}"
+        RESULT_VARIABLE _snapshot_result
+        ERROR_VARIABLE _snapshot_error
+        TIMEOUT ${GIT_TIMEOUT}
+      )
+      if(NOT _snapshot_result EQUAL 0)
+        message(FATAL_ERROR "${DEPENDENCY} private snapshot reuse rejected: ${_snapshot_error}")
+      endif()
+      message(STATUS "${DEPENDENCY} approved-content snapshot already prepared for patch series")
+      return()
+    endif()
   endif()
 
   # Reuse only private Git metadata. A redirected worktree or shared Git dir
@@ -268,6 +377,35 @@ if(EXISTS "${_staging_directory}" OR IS_SYMLINK "${_staging_directory}"
           "Failed to allocate unique ${DEPENDENCY} private source staging/config context")
 endif()
 
+# Select content materialization before clone, only after the shared verifier
+# accepted absent/incomplete metadata. A failed readable-pin clone never falls
+# back here. Only exact CLEAN bytes are captured, not an approved patched cache.
+if("${_cache_verification_mode}" STREQUAL "approved-content")
+  execute_process(
+    COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_snapshot_script}"
+            --operation materialize --source "${CACHE_SOURCE}" --destination "${_staging_directory}"
+            --revision "${EXPECTED_REVISION}" --clean-tree "${CLEAN_TREE_HASH}"
+            "--final-tree=${PATCHED_TREE_HASH}"
+    RESULT_VARIABLE _snapshot_result
+    OUTPUT_QUIET
+    ERROR_VARIABLE _snapshot_error
+    TIMEOUT ${GIT_TIMEOUT}
+  )
+  # The single-process descriptor helper owns cleanup. Never recursively delete
+  # its staging after a timeout, identity uncertainty or incomplete cleanup.
+  if(NOT _snapshot_result EQUAL 0)
+    message(FATAL_ERROR "Failed to capture clean ${DEPENDENCY} private snapshot: ${_snapshot_error}")
+  endif()
+  if(EXISTS "${DESTINATION}" OR IS_SYMLINK "${DESTINATION}")
+    file(REMOVE_RECURSE "${_staging_directory}")
+    message(FATAL_ERROR "${DEPENDENCY} private destination appeared during snapshot preparation")
+  endif()
+  klogg_prepare_write_private_marker("approved-content-snapshot")
+  file(RENAME "${_staging_directory}" "${DESTINATION}")
+  message(STATUS "Prepared clean private ${DEPENDENCY} approved-content snapshot at '${DESTINATION}'")
+  return()
+endif()
+
 # Local transports can discard command-scope configuration before upload-pack.
 # Select an owned, temporary GLOBAL-scope protected input only for the clone
 # and its children. Do not modify the caller's global file or CMake environment.
@@ -366,7 +504,7 @@ endif()
 
 # A cooperating concurrent preparation cannot replace an unknown destination:
 # the parent lock covers the marker, final check, and atomic publish.
-file(WRITE "${_destination_marker}" "${EXPECTED_REVISION}\n")
+klogg_prepare_write_private_marker("pinned-git")
 if(EXISTS "${DESTINATION}")
   file(REMOVE_RECURSE "${_staging_directory}")
   file(REMOVE "${_destination_marker}")

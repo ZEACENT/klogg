@@ -568,6 +568,290 @@ class IosNativeReleaseContractTest(unittest.TestCase):
             self.assertTrue((output / "ios-native-overlay-receipt.json").is_file())
             self.assertIn("26.09.28", (output / "ios-native-source-offer.txt").read_text())
 
+    def legal_mode_argv(self, core: pathlib.Path, stack: pathlib.Path, output: pathlib.Path):
+        return [str(LEGAL_SCRIPT), "--lock", str(LOCK), "--core-root", str(core),
+                "--stack-root", str(stack), "--overlay-only", "--version", "26.10.15",
+                "--base-url", "https://example.org/new", "--output", str(output),
+                "--source-set-sha256", LEGAL_MODULE.sha256(core / "ios-native-source-set-receipt.json"),
+                "--legal-receipt-sha256", LEGAL_MODULE.sha256(core / "ios-native-legal-receipt.json"),
+                "--build-receipt-sha256", LEGAL_MODULE.sha256(stack / "ios-native-build-receipt.json")]
+
+    def tree_bytes(self, root: pathlib.Path):
+        return {path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*") if path.is_file()}
+
+    def test_overlay_only_rejects_original_build_bound_to_a_different_source_core(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            source_path = core / "ios-native-source-set-receipt.json"
+            build_path = stack / "ios-native-build-receipt.json"
+            legal_path = core / "ios-native-legal-receipt.json"
+            original_source_hash = LEGAL_MODULE.sha256(source_path)
+            build = json.loads(build_path.read_text())
+            build["source_set_receipt_sha256"] = original_source_hash
+            build_path.write_text(json.dumps(build), encoding="utf-8")
+            # Model a newly generated reproduction archive under the unchanged
+            # dependency lock, not a new build or a rewritten build authority.
+            archive = core / "ios-native-corresponding-source.tar.gz"
+            archive.write_bytes(archive.read_bytes() + b"new reproduction scripts")
+            source = json.loads(source_path.read_text())
+            source["archive"]["sha256"] = LEGAL_MODULE.sha256(archive)
+            source_path.write_text(json.dumps(source), encoding="utf-8")
+            (core / "ios-native-source-receipt.json").write_bytes(source_path.read_bytes())
+            legal = json.loads(legal_path.read_text())
+            legal["source_set_receipt_sha256"] = LEGAL_MODULE.sha256(source_path)
+            legal["build_receipt_sha256"] = LEGAL_MODULE.sha256(build_path)
+            legal_path.write_text(json.dumps(legal), encoding="utf-8")
+            LEGAL_MODULE.write_overlay(core, source, "26.09.27", "https://example.org/old")
+            self.assertNotEqual(LEGAL_MODULE.sha256(source_path), original_source_hash)
+            ordinary = [str(VERIFY_SCRIPT), "--lock", str(LOCK), "--stack-root", str(stack),
+                        "--architecture", "arm64", "--asset-scope", "release",
+                        "--source-assets-root", str(core), "--source-receipt", str(source_path),
+                        "--legal-receipt", str(legal_path), "--sbom", str(core / "ios-native-sbom.spdx.json")]
+            error = io.StringIO()
+            with mock.patch.object(sys, "argv", ordinary), mock.patch.object(
+                VERIFY_MODULE, "verify_stack", return_value=build["dylibs"]
+            ), contextlib.redirect_stderr(error):
+                self.assertEqual(VERIFY_MODULE.main(), 1)
+            self.assertIn("stale source-set receipt binding", error.getvalue())
+            output = root / "output"
+            argv = self.legal_mode_argv(core, stack, output)
+            before = self.tree_bytes(core), self.tree_bytes(stack)
+            with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
+                RuntimeError, "stale source-set receipt binding"
+            ):
+                LEGAL_MODULE.main()
+            self.assertFalse(output.exists())
+            self.assertEqual((self.tree_bytes(core), self.tree_bytes(stack)), before)
+
+    def test_overlay_only_accepts_absent_null_or_matching_original_build_source_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            build_path = stack / "ios-native-build-receipt.json"
+            legal_path = core / "ios-native-legal-receipt.json"
+            original_build = json.loads(build_path.read_text())
+            source_hash = LEGAL_MODULE.sha256(core / "ios-native-source-set-receipt.json")
+            for label, binding in (("absent", None), ("null", None), ("matching", source_hash)):
+                build = dict(original_build)
+                if label != "absent":
+                    build["source_set_receipt_sha256"] = binding
+                build_path.write_text(json.dumps(build), encoding="utf-8")
+                legal = json.loads(legal_path.read_text())
+                legal["build_receipt_sha256"] = LEGAL_MODULE.sha256(build_path)
+                legal_path.write_text(json.dumps(legal), encoding="utf-8")
+                output = root / label
+                argv = self.legal_mode_argv(core, stack, output)
+                before = self.tree_bytes(core), self.tree_bytes(stack)
+                with self.subTest(binding=label), mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(LEGAL_MODULE.main(), 0)
+                self.assertEqual((self.tree_bytes(core), self.tree_bytes(stack)), before)
+                self.assertEqual((output / legal_path.name).read_bytes(), legal_path.read_bytes())
+
+    def test_core_only_and_pinned_overlay_only_reuse_immutable_bytes_without_rebuilding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, original = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            immutable = self.tree_bytes(original)
+            for name in ("ios-native-source-offer.txt", "ios-native-lgpl-replacement.txt",
+                         "ios-native-overlay-receipt.json"):
+                immutable.pop(name)
+            core = root / "core"
+            argv = [str(LEGAL_SCRIPT), "--lock", str(LOCK), "--stack-root", str(stack),
+                    "--archive-root", str(root), "--repository-root", str(ROOT),
+                    "--core-only", "--output", str(core)]
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                LEGAL_MODULE, "write_deterministic_source_archive",
+                side_effect=lambda path, *_args: path.write_bytes(b"fixed source closure")
+            ), mock.patch.object(LEGAL_MODULE, "extract_legal_file", return_value=b"license\n"):
+                self.assertEqual(LEGAL_MODULE.main(), 0)
+            self.assertEqual(self.tree_bytes(core), immutable)
+            core_before, stack_before = self.tree_bytes(core), self.tree_bytes(stack)
+            for version, url in (("26.10.15", "https://example.org/new"),
+                                 ("26.10.16", "https://example.org/other")):
+                output = root / version
+                if version == "26.10.16":
+                    output.mkdir()
+                argv = self.legal_mode_argv(core, stack, output)
+                argv[argv.index("--version") + 1] = version
+                argv[argv.index("--base-url") + 1] = url
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                    LEGAL_MODULE, "write_deterministic_source_archive",
+                    side_effect=AssertionError("overlay must not regenerate source")
+                ), mock.patch.object(LEGAL_MODULE, "extract_legal_file",
+                                     side_effect=AssertionError("overlay must not reopen upstream sources")), \
+                        mock.patch.object(subprocess, "run", side_effect=AssertionError("no native tools")):
+                    self.assertEqual(LEGAL_MODULE.main(), 0)
+                materialized = self.tree_bytes(output)
+                self.assertEqual({name: materialized[name] for name in immutable}, immutable)
+                self.assertIn(f"klogg-v{version}", (output / "ios-native-source-offer.txt").read_text())
+                self.assertIn(url, (output / "ios-native-source-offer.txt").read_text())
+                hashes = VERIFY_MODULE.verify_legal_assets(
+                    LOCK, "arm64", output / "ios-native-source-set-receipt.json",
+                    output / "ios-native-legal-receipt.json", output / "ios-native-sbom.spdx.json",
+                    source_assets_root=output, build_receipt_path=stack / "ios-native-build-receipt.json")
+                self.assertEqual(hashes["source_set_receipt_sha256"], LEGAL_MODULE.sha256(
+                    core / "ios-native-source-set-receipt.json"))
+            self.assertEqual(self.tree_bytes(core), core_before)
+            self.assertEqual(self.tree_bytes(stack), stack_before)
+
+    def test_overlay_only_rejects_unpinned_mutated_or_overlapping_inputs_before_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            output = root / "output"
+            good = self.legal_mode_argv(core, stack, output)
+            for flag in ("--source-set-sha256", "--legal-receipt-sha256", "--build-receipt-sha256"):
+                for replacement in (None, "0" * 64, "a" * 64):
+                    argv = list(good)
+                    index = argv.index(flag)
+                    if replacement is None:
+                        del argv[index:index + 2]
+                    else:
+                        argv[index + 1] = replacement
+                    with self.subTest(flag=flag, replacement=replacement), \
+                            mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()), \
+                            self.assertRaises((RuntimeError, SystemExit)):
+                        LEGAL_MODULE.main()
+                    self.assertFalse(output.exists())
+            for path in (core / "ios-native-corresponding-source.tar.gz",
+                         core / "NOTICE-ios-native.txt", core / "ios-native-sbom.spdx.json",
+                         core / "ios-native-source-set-receipt.json", core / "ios-native-legal-receipt.json",
+                         stack / "ios-native-build-receipt.json", stack / "lib/libfixture.dylib",
+                         next((core / "licenses").iterdir())):
+                before = path.read_bytes()
+                path.write_bytes(before + b"tampered")
+                changed_core, changed_stack = self.tree_bytes(core), self.tree_bytes(stack)
+                try:
+                    with self.subTest(path=path.name), mock.patch.object(sys, "argv", good), \
+                            self.assertRaises(RuntimeError):
+                        LEGAL_MODULE.main()
+                    self.assertFalse(output.exists())
+                    self.assertEqual(self.tree_bytes(core), changed_core)
+                    self.assertEqual(self.tree_bytes(stack), changed_stack)
+                finally:
+                    path.write_bytes(before)
+            for destination in (core, stack, core / "nested", root):
+                argv = self.legal_mode_argv(core, stack, destination)
+                core_before, stack_before = self.tree_bytes(core), self.tree_bytes(stack)
+                with self.subTest(destination=destination), mock.patch.object(sys, "argv", argv), \
+                        self.assertRaises(RuntimeError):
+                    LEGAL_MODULE.main()
+                self.assertEqual(self.tree_bytes(core), core_before)
+                self.assertEqual(self.tree_bytes(stack), stack_before)
+                self.assertFalse((core / "nested").exists())
+            output.mkdir()
+            (output / "keep").write_bytes(b"existing output")
+            with mock.patch.object(sys, "argv", good), self.assertRaises(RuntimeError):
+                LEGAL_MODULE.main()
+            self.assertEqual(self.tree_bytes(output), {"keep": b"existing output"})
+
+    def test_overlay_only_rechecks_complete_output_and_cleans_copy_failures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            output = root / "output"
+            argv = self.legal_mode_argv(core, stack, output)
+            core_before, stack_before = self.tree_bytes(core), self.tree_bytes(stack)
+            digest = LEGAL_MODULE.sha256
+            changed = False
+
+            def change_earlier_copy(path):
+                nonlocal changed
+                observed = digest(path)
+                earlier = output / "ios-native-source-set-receipt.json"
+                if not changed and output in path.parents and path != earlier and earlier.exists():
+                    earlier.write_bytes(earlier.read_bytes() + b"changed during another copy")
+                    changed = True
+                return observed
+
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                LEGAL_MODULE, "sha256", side_effect=change_earlier_copy
+            ), self.assertRaises(RuntimeError):
+                LEGAL_MODULE.main()
+            self.assertFalse(output.exists())
+            self.assertEqual(self.tree_bytes(core), core_before)
+            self.assertEqual(self.tree_bytes(stack), stack_before)
+
+    def test_overlay_only_rejects_source_changed_after_validation_without_repairing_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            output = root / "output"
+            argv = self.legal_mode_argv(core, stack, output)
+            source_archive = core / "ios-native-corresponding-source.tar.gz"
+            changed = source_archive.read_bytes() + b"changed after validation"
+            copy = LEGAL_MODULE.copy_checked_files
+
+            def change_before_copy(source, target, files, created=None):
+                if source == core:
+                    source_archive.write_bytes(changed)
+                copy(source, target, files, created)
+
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                LEGAL_MODULE, "copy_checked_files", side_effect=change_before_copy
+            ), self.assertRaises(RuntimeError):
+                LEGAL_MODULE.main()
+            self.assertFalse(output.exists())
+            self.assertEqual(source_archive.read_bytes(), changed)
+
+    def test_new_legal_modes_retain_parser_receipt_and_output_guards(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            output = root / "output"
+            overlay = self.legal_mode_argv(core, stack, output)
+            core_only = [str(LEGAL_SCRIPT), "--lock", str(LOCK), "--stack-root", str(stack),
+                         "--archive-root", str(root), "--repository-root", str(ROOT),
+                         "--core-only", "--output", str(output)]
+            for argv in (overlay + ["--core-only"], overlay + ["--archive-root", str(root)],
+                         core_only + ["--version", "26.10.15"], core_only + ["--core-root", str(core)]):
+                with self.subTest(argv=argv), mock.patch.object(sys, "argv", argv), \
+                        contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    LEGAL_MODULE.main()
+                self.assertFalse(output.exists())
+            build = stack / "ios-native-build-receipt.json"
+            original = build.read_bytes()
+            for changes in ({"schema_version": True}, {"native_qualified": False},
+                            {"architecture": "x86_64"}, {"deployment_target": "1.0"}):
+                document = json.loads(original)
+                document.update(changes)
+                build.write_text(json.dumps(document), encoding="utf-8")
+                try:
+                    for argv in (core_only, self.legal_mode_argv(core, stack, output)):
+                        with self.subTest(changes=changes, mode=argv), mock.patch.object(sys, "argv", argv), \
+                                self.assertRaises(RuntimeError):
+                            LEGAL_MODULE.main()
+                        self.assertFalse(output.exists())
+                finally:
+                    build.write_bytes(original)
+            witness = root / "empty-witness"
+            witness.mkdir()
+            output.symlink_to(witness, target_is_directory=True)
+            with mock.patch.object(sys, "argv", overlay), self.assertRaises(RuntimeError):
+                LEGAL_MODULE.main()
+            self.assertTrue(output.is_symlink())
+            self.assertEqual(list(witness.iterdir()), [])
+            output.unlink()
+            core_before, stack_before = self.tree_bytes(core), self.tree_bytes(stack)
+            copy = LEGAL_MODULE.copy_checked_files
+
+            def fail_partial_copy(source, target, files, created=None):
+                if target == output:
+                    name = next(iter(files))
+                    copy(source, target, {name: files[name]}, created)
+                    raise OSError("injected copy failure")
+                copy(source, target, files, created)
+
+            with mock.patch.object(sys, "argv", overlay), mock.patch.object(
+                LEGAL_MODULE, "copy_checked_files", side_effect=fail_partial_copy
+            ), self.assertRaises(OSError):
+                LEGAL_MODULE.main()
+            self.assertFalse(output.exists())
+            self.assertEqual(self.tree_bytes(core), core_before)
+            self.assertEqual(self.tree_bytes(stack), stack_before)
+
     def test_architectures_share_core_but_keep_distinct_dylib_bound_sboms(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

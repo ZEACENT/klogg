@@ -23,6 +23,14 @@ if(NOT DEFINED LOCK_TIMEOUT)
   set(LOCK_TIMEOUT 120)
 endif()
 
+set(_patch_command git)
+set(_snapshot_mode FALSE)
+function(klogg_patch_require_owned_completion result diagnostic)
+  if(_snapshot_mode AND NOT "${result}" STREQUAL "0" AND NOT "${result}" STREQUAL "1")
+    message(FATAL_ERROR "Owned snapshot patch command failed (status ${result}); preserving private state: ${diagnostic}")
+  endif()
+endfunction()
+
 function(klogg_reverse_patch_list patch_list require_all)
   set(_patches ${patch_list})
   list(LENGTH _patches _patch_count)
@@ -30,17 +38,23 @@ function(klogg_reverse_patch_list patch_list require_all)
     math(EXPR _patch_count "${_patch_count} - 1")
     list(GET _patches ${_patch_count} _patch_file)
     execute_process(
-      COMMAND git apply --reverse --check "${_patch_file}"
+      COMMAND ${_patch_command} apply --reverse --check "${_patch_file}"
       WORKING_DIRECTORY "${REPO_DIR}"
       RESULT_VARIABLE _reverse_check_result
-      ERROR_QUIET
+      ERROR_VARIABLE _reverse_check_error
     )
+    klogg_patch_require_owned_completion("${_reverse_check_result}" "${_reverse_check_error}")
     if(_reverse_check_result EQUAL 0)
       execute_process(
-        COMMAND git apply --reverse "${_patch_file}"
+        COMMAND ${_patch_command} apply --reverse "${_patch_file}"
         WORKING_DIRECTORY "${REPO_DIR}"
         RESULT_VARIABLE _reverse_result
+        ERROR_VARIABLE _reverse_error
       )
+      klogg_patch_require_owned_completion("${_reverse_result}" "${_reverse_error}")
+      if(_reverse_error)
+        message("${_reverse_error}")
+      endif()
       if(NOT _reverse_result EQUAL 0)
         message(FATAL_ERROR "Failed to roll back patch: ${_patch_file}")
       endif()
@@ -69,6 +83,33 @@ endfunction()
 
 get_filename_component(REPO_DIR "${REPO_DIR}" REALPATH)
 get_filename_component(REPO_PARENT_DIR "${REPO_DIR}" DIRECTORY)
+include("${CMAKE_CURRENT_LIST_DIR}/verify_pinned_source.cmake")
+get_filename_component(_repo_name "${REPO_DIR}" NAME)
+set(_private_marker "${REPO_PARENT_DIR}/.${_repo_name}.klogg-private-source")
+# Classification and namespace checks read only; integrity/patch verification
+# stays under the transaction lock below. No lock writes precede namespace trust.
+if(EXISTS "${_private_marker}" OR IS_SYMLINK "${_private_marker}")
+  if(NOT DEFINED PREPARE_PYTHON_EXECUTABLE)
+    find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
+    set(PREPARE_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
+  endif()
+  get_filename_component(_snapshot_script
+                         "${CMAKE_CURRENT_LIST_DIR}/../scripts/prepare_efsw_snapshot.py" ABSOLUTE)
+  klogg_private_source_kind("${_private_marker}" "${PREPARE_PYTHON_EXECUTABLE}"
+                           "${_snapshot_script}" _prelock_kind)
+  if(UNIX OR "${_prelock_kind}" STREQUAL "approved-content-snapshot")
+    execute_process(
+      COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_snapshot_script}"
+              --operation namespace --source "${REPO_PARENT_DIR}"
+      RESULT_VARIABLE _namespace_result
+      ERROR_VARIABLE _namespace_error
+      TIMEOUT 30
+    )
+    if(NOT _namespace_result EQUAL 0)
+      message(FATAL_ERROR "${DEPENDENCY} snapshot namespace rejected: ${_namespace_error}")
+    endif()
+  endif()
+endif()
 if(DEFINED BEFORE_LOCK_MARKER)
   file(WRITE "${BEFORE_LOCK_MARKER}" "waiting")
 endif()
@@ -85,6 +126,52 @@ if(DEFINED LOCK_ACQUIRED_MARKER)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/verify_pinned_source.cmake")
+get_filename_component(_repo_name "${REPO_DIR}" NAME)
+set(_private_marker "${REPO_PARENT_DIR}/.${_repo_name}.klogg-private-source")
+if(EXISTS "${_private_marker}" OR IS_SYMLINK "${_private_marker}")
+  if(NOT DEFINED PREPARE_PYTHON_EXECUTABLE)
+    find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
+    set(PREPARE_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
+  endif()
+  get_filename_component(_snapshot_script
+                         "${CMAKE_CURRENT_LIST_DIR}/../scripts/prepare_efsw_snapshot.py" ABSOLUTE)
+  klogg_private_source_kind("${_private_marker}" "${PREPARE_PYTHON_EXECUTABLE}"
+                           "${_snapshot_script}" _source_kind)
+  if("${_source_kind}" STREQUAL "approved-content-snapshot")
+    if(NOT DEFINED GIT_TIMEOUT)
+      set(GIT_TIMEOUT 120)
+    endif()
+    execute_process(
+      COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_snapshot_script}"
+              --operation verify --source "${REPO_DIR}" --marker "${_private_marker}"
+              --revision "${EXPECTED_REVISION}" --clean-tree "${CLEAN_TREE_HASH}"
+              "--final-tree=${PATCHED_TREE_HASH}"
+      RESULT_VARIABLE _snapshot_result
+      ERROR_VARIABLE _snapshot_error
+      TIMEOUT ${GIT_TIMEOUT}
+    )
+    if(NOT _snapshot_result EQUAL 0)
+      message(FATAL_ERROR "${DEPENDENCY} snapshot patch input rejected: ${_snapshot_error}")
+    endif()
+    get_filename_component(_git_owner_script
+                           "${CMAKE_CURRENT_LIST_DIR}/../scripts/prepare_efsw_git.py" ABSOLUTE)
+    _klogg_owned_git_startup_arguments(_startup_arguments)
+    set(_patch_command "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"
+        ${_startup_arguments} --timeout "${GIT_TIMEOUT}" --operation snapshot-patch
+        --ceiling "${REPO_PARENT_DIR}" -- -c core.autocrlf=false)
+    set(_snapshot_mode TRUE)
+  else()
+    if(NOT DEFINED GIT_TIMEOUT)
+      set(GIT_TIMEOUT 120)
+    endif()
+    get_filename_component(_git_owner_script
+                           "${CMAKE_CURRENT_LIST_DIR}/../scripts/prepare_efsw_git.py" ABSOLUTE)
+    klogg_require_private_git_source("${DEPENDENCY}" "${REPO_DIR}" "${EXPECTED_REVISION}"
+                                    "${_private_marker}" "${PREPARE_PYTHON_EXECUTABLE}"
+                                    "${_git_owner_script}" "${GIT_TIMEOUT}")
+  endif()
+endif()
+
 klogg_require_pinned_revision(
   "${DEPENDENCY}"
   "${REPO_DIR}"
@@ -119,23 +206,34 @@ foreach(PATCH_FILE IN LISTS PATCH_FILES)
   endif()
 
   execute_process(
-    COMMAND git apply --check "${PATCH_FILE}"
+    COMMAND ${_patch_command} apply --check "${PATCH_FILE}"
     WORKING_DIRECTORY "${REPO_DIR}"
     RESULT_VARIABLE patch_check_result
-    ERROR_QUIET
+    ERROR_VARIABLE _patch_check_error
   )
+  klogg_patch_require_owned_completion("${patch_check_result}" "${_patch_check_error}")
   if(NOT patch_check_result EQUAL 0)
+    # Report the first error before recovery: rollback may itself terminate,
+    # and ordinary Git failure is not necessarily a patch context mismatch.
+    if(_patch_check_error)
+      message("${_patch_check_error}")
+    endif()
     klogg_rollback_applied_patches()
     message(FATAL_ERROR
-            "Failed to apply patch (context mismatch): ${PATCH_FILE}. "
+            "Failed to check patch: ${PATCH_FILE}. "
             "The dependency source was restored to its approved clean state.")
   endif()
 
   execute_process(
-    COMMAND git apply "${PATCH_FILE}"
+    COMMAND ${_patch_command} apply "${PATCH_FILE}"
     WORKING_DIRECTORY "${REPO_DIR}"
     RESULT_VARIABLE patch_apply_result
+    ERROR_VARIABLE _patch_apply_error
   )
+  klogg_patch_require_owned_completion("${patch_apply_result}" "${_patch_apply_error}")
+  if(_patch_apply_error)
+    message("${_patch_apply_error}")
+  endif()
   if(NOT patch_apply_result EQUAL 0)
     klogg_rollback_applied_patches()
     message(FATAL_ERROR "Failed to apply patch: ${PATCH_FILE}")

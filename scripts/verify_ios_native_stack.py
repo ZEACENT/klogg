@@ -448,7 +448,12 @@ def verify_overlay(
     return sha256(assets_root / "ios-native-overlay-receipt.json")
 
 
-def verify_legal_assets(
+def validate_build_source_set_binding(receipt: dict, expected_source_set_hash: str) -> None:
+    if receipt.get("source_set_receipt_sha256") not in (None, expected_source_set_hash):
+        raise VerificationError("iOS native build receipt has a stale source-set receipt binding")
+
+
+def verify_legal_core(
     lock_path: pathlib.Path,
     architecture: str,
     source_receipt_path: pathlib.Path,
@@ -459,6 +464,7 @@ def verify_legal_assets(
     source_assets_root: pathlib.Path | None = None,
     build_receipt_path: pathlib.Path | None = None,
 ) -> dict:
+    """Check immutable local bindings; this neither authenticates nor qualifies a core."""
     lock_hash = sha256(lock_path)
     source = read_json(source_receipt_path, "iOS native source-set receipt")
     legal = read_json(legal_receipt_path, "iOS native legal receipt")
@@ -522,9 +528,7 @@ def verify_legal_assets(
     ):
         raise VerificationError("iOS native source-set package support coverage is incomplete")
     source_set_hash = sha256(source_receipt_path)
-    overlay_hash = None
     if not legacy_layout:
-        overlay_hash = verify_overlay(assets_root, source, source_set_hash)
         if legal.get("source_set_receipt_sha256") != source_set_hash:
             raise VerificationError("iOS native legal receipt source-set binding mismatch")
         if build_receipt_path is not None and (
@@ -570,10 +574,35 @@ def verify_legal_assets(
     return {
         "source_receipt_sha256": source_set_hash,
         "source_set_receipt_sha256": source_set_hash,
-        **({"overlay_receipt_sha256": overlay_hash} if overlay_hash is not None else {}),
         "legal_receipt_sha256": sha256(legal_receipt_path),
         "sbom_sha256": sha256(sbom_path),
     }
+
+
+def verify_legal_assets(
+    lock_path: pathlib.Path,
+    architecture: str,
+    source_receipt_path: pathlib.Path,
+    legal_receipt_path: pathlib.Path,
+    sbom_path: pathlib.Path,
+    *,
+    asset_scope: str | None = None,
+    source_assets_root: pathlib.Path | None = None,
+    build_receipt_path: pathlib.Path | None = None,
+) -> dict:
+    hashes = verify_legal_core(
+        lock_path, architecture, source_receipt_path, legal_receipt_path, sbom_path,
+        asset_scope=asset_scope, source_assets_root=source_assets_root,
+        build_receipt_path=build_receipt_path,
+    )
+    source = read_json(source_receipt_path, "iOS native source-set receipt")
+    kinds = {item["kind"] for item in source["package_support_assets"]}
+    if not {"source-offer", "replacement-guide"}.issubset(kinds):
+        hashes["overlay_receipt_sha256"] = verify_overlay(
+            source_assets_root or source_receipt_path.parent, source,
+            hashes["source_set_receipt_sha256"],
+        )
+    return hashes
 
 
 def verify_package_receipt(
@@ -690,12 +719,7 @@ def main() -> int:
                 source_assets_root=args.source_assets_root,
                 build_receipt_path=receipt_path,
             )
-            expected_source_set_hash = legal_hashes["source_set_receipt_sha256"]
-            bound_source_set_hash = receipt.get("source_set_receipt_sha256")
-            if bound_source_set_hash not in (None, expected_source_set_hash):
-                raise VerificationError(
-                    "iOS native build receipt has a stale source-set receipt binding"
-                )
+            validate_build_source_set_binding(receipt, legal_hashes["source_set_receipt_sha256"])
 
         build_receipt_hash = sha256(receipt_path)
         if args.package_receipt is not None:

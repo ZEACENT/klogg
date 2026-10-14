@@ -1,6 +1,7 @@
 """Deterministic real-command analysis contracts; no compilation or downloads."""
 from __future__ import annotations
 
+import argparse
 import contextlib
 import copy
 import csv
@@ -186,25 +187,85 @@ class AnalysisRoleTest(unittest.TestCase):
         strict = [command for command in self.commands if command[0] == "cppcheck" and "--error-exitcode=1" in command]
         self.assertEqual(len(strict), 1)
 
+    def assert_coverage_build_paths_inside_workspace(self, commands):
+        # Parse the emitted gcovr option surface so --root, report outputs and
+        # other option values cannot be mistaken for positional search paths.
+        gcovr_options = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        for option in ("--root", "--filter", "--gcov-ignore-parse-errors", "--html-title", "-o"):
+            gcovr_options.add_argument(option)
+        for option in ("--html-details", "--html-self-contained", "--print-summary", "--json", "--json-pretty"):
+            gcovr_options.add_argument(option, action="store_true")
+        gcovr_options.add_argument("--object-directory", "--gcov-object-directory", action="append", default=[])
+        gcovr_options.add_argument("search_paths", nargs="+")
+        paths = []
+        observed = set()
+        for command in commands:
+            if command[0] == "cmake":
+                for option in ("-B", "--build"):
+                    if any(value == option or value.startswith(option + "=") for value in command):
+                        paths.append(self.option(command, option))
+                        observed.add(option)
+            elif command[0] == "gcovr":
+                options = gcovr_options.parse_args(command[1:])
+                paths.extend(options.search_paths + options.object_directory)
+                observed.add("gcovr")
+        self.assertEqual(observed, {"-B", "--build", "gcovr"})
+        workspace = self.workspace.resolve()
+        for value in paths:
+            resolved = (workspace / value).resolve()
+            self.assertIn(workspace, resolved.parents,
+                          "coverage build path is not a workspace child: " + str(resolved))
+
     def test_coverage_build_lives_inside_the_workspace_for_gcovr_resolution(self):
         # gcovr 7.0 computes object directories relative to --root; a build
         # tree outside the workspace produces bogus ../../../ escapes and
         # "no_working_dir_found" (observed on the real qualification leg).
         self.run_role("coverage")
-        build_commands = [command for command in self.commands
-                          if command[0] == "cmake" and ("--build" in command or "-B" in command)]
-        gcovr = [command for command in self.commands if command[0] == "gcovr"]
-        self.assertTrue(build_commands and gcovr)
-        for command in build_commands + gcovr:
-            paths = [value for value in command if isinstance(value, str) and "build" in value
-                     and (value.startswith("/") or value == "build_root")]
-            for value in paths:
-                if value == "build_root" or value.startswith("-D"):
-                    continue
-                resolved = value.split("=", 1)[-1]
-                if resolved.startswith("/"):
-                    self.assertTrue(resolved.startswith(str(self.workspace) + "/"),
-                                    "coverage build path escapes the workspace: " + resolved)
+        self.assert_coverage_build_paths_inside_workspace(self.commands)
+
+    def test_coverage_workspace_ancestor_name_does_not_identify_build_arguments(self):
+        ancestor = self.root / "build-ancestor"
+        ancestor.mkdir()
+        self.workspace = self.workspace.rename(ancestor / "workspace")
+        self.run_role("coverage")
+        self.assert_coverage_build_paths_inside_workspace(self.commands)
+
+    def test_coverage_guard_rejects_mutated_build_and_search_paths(self):
+        self.run_role("coverage")
+        for index, command in enumerate(self.commands):
+            if command[0] == "cmake" and "-B" in command:
+                path_index = command.index("-B") + 1
+            elif command[0] == "cmake" and "--build" in command:
+                path_index = command.index("--build") + 1
+            elif command[0] == "gcovr":
+                path_index = len(command) - 1
+            else:
+                continue
+            for path in (self.root / "objects", self.workspace,
+                         self.root / "workspace-sibling/objects", self.workspace / "../objects"):
+                with self.subTest(command=index, path=str(path)):
+                    mutated = copy.deepcopy(self.commands)
+                    mutated[index][path_index] = str(path)
+                    with self.assertRaisesRegex(AssertionError, "not a workspace child"):
+                        self.assert_coverage_build_paths_inside_workspace(mutated)
+
+    def test_coverage_guard_checks_explicit_gcovr_object_directories(self):
+        self.run_role("coverage")
+        for index, command in enumerate(self.commands):
+            if command[0] != "gcovr":
+                continue
+            for option in ("--object-directory", "--gcov-object-directory"):
+                for joined in (False, True):
+                    for path in (self.workspace / "build_root", self.root / "objects", self.workspace):
+                        with self.subTest(command=index, option=option, joined=joined, path=str(path)):
+                            mutated = copy.deepcopy(self.commands)
+                            arguments = [option + "=" + str(path)] if joined else [option, str(path)]
+                            mutated[index][1:1] = arguments
+                            if path == self.workspace / "build_root":
+                                self.assert_coverage_build_paths_inside_workspace(mutated)
+                            else:
+                                with self.assertRaisesRegex(AssertionError, "not a workspace child"):
+                                    self.assert_coverage_build_paths_inside_workspace(mutated)
 
     def test_coverage_builds_all_targets_runs_all_ctest_and_current_ratchet(self):
         result = self.run_role("coverage")

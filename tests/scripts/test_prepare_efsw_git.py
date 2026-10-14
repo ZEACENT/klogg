@@ -239,6 +239,23 @@ class PrepareEfswGitTest(unittest.TestCase):
         self.assertEqual(arguments, ["space argument", "quote\"and\\slash", ""])
         self.assertEqual(pathlib.Path(cwd).resolve(), (ROOT / "tests" / "scripts").resolve())
 
+    def test_snapshot_patch_isolates_repository_selectors_without_mutating_caller_configuration(self):
+        selectors = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                     "GIT_SHALLOW_FILE", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE")
+        original = {name: "hostile-repository" for name in selectors}
+        original.update(GIT_CONFIG_GLOBAL="caller-config", GIT_CONFIG_SYSTEM="system-config",
+                        GIT_CONFIG_PARAMETERS="'core.autocrlf=true'", CUSTOM="unchanged")
+        before = original.copy()
+        result = self.driver._environment("snapshot-patch", None, "/owned/private", original)
+        self.assertFalse(set(selectors) & set(result))
+        self.assertEqual(result["GIT_CEILING_DIRECTORIES"], "/owned/private")
+        self.assertEqual(result["GIT_CONFIG_GLOBAL"], "caller-config")
+        self.assertEqual(result["GIT_CONFIG_SYSTEM"], "system-config")
+        self.assertEqual(result["GIT_CONFIG_PARAMETERS"], original["GIT_CONFIG_PARAMETERS"])
+        self.assertEqual(result["CUSTOM"], "unchanged")
+        self.assertEqual(original, before)
+
     def test_environment_is_a_copy_and_preserves_absent_empty_and_value(self):
         keys = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
         for value in (None, "", "original"):

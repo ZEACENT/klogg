@@ -747,6 +747,33 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Select native Windows Python for dependency contracts
+        id: windows-contract-python
+        if: ${{ env.KLOGG_ADB_HELPER_TARGET == 'windows-x86_64' }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+          architecture: x64
+          update-environment: false
+
+      - name: Run native Windows dependency filesystem contracts
+        if: ${{ env.KLOGG_ADB_HELPER_TARGET == 'windows-x86_64' }}
+        shell: pwsh
+        working-directory: tests/scripts
+        env:
+          KLOGG_NATIVE_PYTHON: ${{ steps.windows-contract-python.outputs.python-path }}
+        run: |
+          $source = @'
+          import os
+          import sys
+          if os.name != "nt" or sys.platform != "win32":
+              raise SystemExit(f"Native Windows CPython required: {os.name}/{sys.platform} ({sys.executable})")
+          import unittest
+          unittest.main(module=None, argv=["unittest", "-v", "test_ci_dependency_windows_security", "test_ci_dependency_core"])
+          '@
+          & $env:KLOGG_NATIVE_PYTHON -c $source
+          exit $LASTEXITCODE
+
       - name: Select verified Xcode 26.6
         if: ${{ startsWith(env.KLOGG_ADB_HELPER_TARGET, 'macos-') }}
         shell: bash
@@ -1927,13 +1954,24 @@ jobs:
           print(f"current={today.isoformat()}")
           PY
 
-      - name: Restore ccache for the macOS build
-        id: restore-ccache
+      - name: Restore own-PR ccache for the macOS build
+        id: restore-pr-ccache
+        if: ${{ github.event_name == 'pull_request' && github.repository == 'ZEACENT/klogg' && github.event.pull_request.head.repo.full_name == github.repository && toJSON(github.event.pull_request.head.repo.id) == github.repository_id && github.event.pull_request.number > 0 }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          # Same bounded daily v2 strategy as Linux: restore the current UTC
-          # day, then the newest retained generation. The first successful
-          # master push seeds the immutable daily key; PRs remain restore-only.
+          # GitHub scopes PR caches to refs/pull/N/merge; this explicit namespace
+          # also keeps PR writes out of the trusted push keys and other PR keys.
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}
+          restore-keys: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-
+
+      - name: Restore ccache for the macOS build
+        id: restore-ccache
+        if: ${{ steps.restore-pr-ccache.outputs.cache-matched-key == '' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          # Preserve the trusted push daily key and label-only fallback on a PR
+          # miss, for forks, and for ordinary push/dispatch runs.
           path: ${{ github.workspace }}/.ccache
           key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
           restore-keys: |
@@ -2071,7 +2109,7 @@ jobs:
           compression-level: 0
 
       - name: Bound macOS ccache before save
-        if: ${{ success() && github.event_name == 'push' }}
+        if: ${{ success() && (github.event_name == 'push' || steps.restore-pr-ccache.outcome == 'success') }}
         shell: sh
         run: |
           ccache --set-config=compression=true
@@ -2088,6 +2126,15 @@ jobs:
           # after the cache is compressed and bounded to 250M above. Later runs
           # reuse it instead of creating per-commit entries; PRs never save it.
           key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+
+      - name: Save own-PR ccache for the macOS build
+        # A successful guarded restore (including a miss) authorizes only this
+        # PR's namespace. Skipped fork/missing-metadata restores cannot save.
+        if: ${{ success() && github.event_name == 'pull_request' && steps.restore-pr-ccache.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}
 
   MacArmPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacArm64, BuildIosNativeArm64, ReleaseQualificationPreflight]

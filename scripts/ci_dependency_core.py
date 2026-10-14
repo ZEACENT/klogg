@@ -10,6 +10,7 @@ locked, verified OCI descriptor before accepting a downloaded archive.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import gzip
 import hashlib
@@ -25,6 +26,7 @@ import tarfile
 import tempfile
 
 from ci_dependency_artifact import MAX_CORE_BYTES, validate_archive_name, ArtifactError
+import ci_dependency_windows_security as windows_security
 from prefetch_adb_helper_sources import safe_extract
 
 MANIFEST = ".ci-dependency-core.json"
@@ -367,10 +369,34 @@ def _require_private_parent(parent: pathlib.Path, *, platform: str = None) -> No
     _require(parent.is_dir() and not parent.is_symlink(),
              "core destination requires an existing private parent")
     # Python 3.8 does not establish a private Windows ACL from mkdir(mode=0700).
-    _require(platform == "posix", "Windows core staging requires audited private ACL support")
+    if platform == "nt":
+        try:
+            with windows_security.private_parent_lease(parent):
+                return
+        except windows_security.WindowsSecurityError as error:
+            raise CoreError(str(error)) from error
+    _require(platform == "posix", "unsupported core staging platform")
     info = parent.stat()
     _require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) & 0o077 == 0,
              "core destination parent must belong to this user and be private")
+
+
+@contextlib.contextmanager
+def _private_parent_boundary(parent: pathlib.Path, *, platform: str = None, api=None):
+    platform = os.name if platform is None else platform
+    if platform != "nt":
+        _require_private_parent(parent, platform=platform)
+        yield None
+        return
+    try:
+        with windows_security.private_parent_lease(parent, api=api) as lease:
+            yield lease
+    except windows_security.WindowsSecurityError as error:
+        failure = CoreError(str(error))
+        secondary = getattr(error, "windows_security_cleanup_errors", ())
+        if secondary:
+            failure.windows_security_cleanup_errors = secondary
+        raise failure from error
 
 
 def _publish_no_replace(source: pathlib.Path, destination: pathlib.Path) -> None:
@@ -409,16 +435,39 @@ def stage_core(archive: pathlib.Path, destination: pathlib.Path, *, component: s
     versioned legal assets; no product workflow calls it without that boundary.
     """
     archive, destination = pathlib.Path(archive), pathlib.Path(destination)
+    with _private_parent_boundary(destination.parent) as lease:
+        return _stage_private_core(archive, destination, component=component,
+                                   target=target, core_identity=core_identity,
+                                   expected_sha256=expected_sha256,
+                                   expected_size=expected_size, lease=lease)
+
+
+def _stage_private_core(archive: pathlib.Path, destination: pathlib.Path, *, component: str,
+                        target: str, core_identity: str, expected_sha256: str,
+                        expected_size: int, lease) -> dict[str, object]:
     parent = destination.parent
-    _require_private_parent(parent)
     _require(not destination.exists() and not destination.is_symlink(),
              "core destination already exists")
     _require(archive.is_file() and not archive.is_symlink(), "missing safe core archive")
+    # Layout only: Windows namespace security is established by the held native lease.
+    try:
+        resolved_archive = archive.resolve(strict=True)
+        resolved_parent = parent.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise CoreError("cannot safely resolve core archive layout") from error
+    try:
+        resolved_archive.relative_to(resolved_parent)
+    except ValueError:
+        pass
+    else:
+        raise CoreError("core input archive must be outside private transaction parent")
     _require(type(expected_size) is int and 0 < expected_size <= MAX_CORE_BYTES,
              "invalid expected core archive size")
     try:
         with tempfile.TemporaryDirectory(prefix=".native-core-", dir=parent) as temporary:
             workspace = pathlib.Path(temporary)
+            if lease is not None:
+                lease.verify()
             snapshot = workspace / "core.tar.gz"
             copied = 0
             with archive.open("rb") as source, snapshot.open("xb") as output:
@@ -444,8 +493,12 @@ def stage_core(archive: pathlib.Path, destination: pathlib.Path, *, component: s
                      "core archive changed during staging")
             _require(not destination.exists() and not destination.is_symlink(),
                      "core destination appeared during staging")
+            if lease is not None:
+                lease.verify()
             _publish_no_replace(stage, destination)
             return verified
+    except (CoreError, windows_security.WindowsSecurityError):
+        raise
     except (OSError, RuntimeError, ValueError, KeyError, IndexError,
             OverflowError, tarfile.TarError) as error:
         raise CoreError("cannot safely stage verified native core") from error

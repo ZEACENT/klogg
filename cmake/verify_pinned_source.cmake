@@ -37,13 +37,22 @@ function(klogg_require_pinned_revision dependency source_dir expected_revision)
   # Preparation explicitly supplies its command owner. All other callers keep
   # the legacy revision probe and incomplete-metadata fallback unchanged.
   cmake_parse_arguments(PARSE_ARGV 3 _revision ""
-                        "GIT_OWNER;PYTHON_EXECUTABLE;GIT_TIMEOUT" "")
+                        "GIT_OWNER;PYTHON_EXECUTABLE;GIT_TIMEOUT;VERIFICATION_MODE_OUTPUT" "")
   if(NOT IS_DIRECTORY "${source_dir}")
     message(FATAL_ERROR "${dependency} source directory does not exist: '${source_dir}'")
   endif()
 
+  set(_verification_mode "approved-content")
   if(EXISTS "${source_dir}/.git")
-    if(_revision_GIT_OWNER)
+    if(IS_DIRECTORY "${source_dir}/.git"
+       AND NOT IS_SYMLINK "${source_dir}/.git"
+       AND NOT EXISTS "${source_dir}/.git/HEAD" AND NOT IS_SYMLINK "${source_dir}/.git/HEAD"
+       AND NOT DEFINED ENV{GIT_DIR} AND NOT DEFINED ENV{GIT_WORK_TREE}
+       AND NOT DEFINED ENV{GIT_COMMON_DIR})
+      # An ordinary metadata directory without HEAD cannot name a commit.
+      # Do not accidentally authenticate the enclosing project's revision.
+      set(_revision_result 1)
+    elseif(_revision_GIT_OWNER)
       if(NOT _revision_PYTHON_EXECUTABLE OR NOT _revision_GIT_TIMEOUT)
         message(FATAL_ERROR "Owned Git revision verification requires an interpreter and timeout")
       endif()
@@ -74,6 +83,7 @@ function(klogg_require_pinned_revision dependency source_dir expected_revision)
       )
     endif()
     if(_revision_result EQUAL 0)
+      set(_verification_mode "pinned-git")
       if(NOT "${_actual_revision}" STREQUAL "${expected_revision}")
         message(
           FATAL_ERROR
@@ -87,20 +97,25 @@ function(klogg_require_pinned_revision dependency source_dir expected_revision)
       )
     endif()
   endif()
+  if(_revision_VERIFICATION_MODE_OUTPUT)
+    set(${_revision_VERIFICATION_MODE_OUTPUT} "${_verification_mode}" PARENT_SCOPE)
+  endif()
 endfunction()
 
 function(klogg_require_pinned_source dependency source_dir expected_revision)
   cmake_parse_arguments(PARSE_ARGV 3 _source ""
-                        "GIT_OWNER;PYTHON_EXECUTABLE;GIT_TIMEOUT" "")
+                        "GIT_OWNER;PYTHON_EXECUTABLE;GIT_TIMEOUT;VERIFICATION_MODE_OUTPUT" "")
   if(_source_GIT_OWNER)
     klogg_require_pinned_revision(
       "${dependency}" "${source_dir}" "${expected_revision}"
       GIT_OWNER "${_source_GIT_OWNER}"
       PYTHON_EXECUTABLE "${_source_PYTHON_EXECUTABLE}"
       GIT_TIMEOUT "${_source_GIT_TIMEOUT}"
+      VERIFICATION_MODE_OUTPUT _verification_mode
     )
   else()
-    klogg_require_pinned_revision("${dependency}" "${source_dir}" "${expected_revision}")
+    klogg_require_pinned_revision("${dependency}" "${source_dir}" "${expected_revision}"
+                                 VERIFICATION_MODE_OUTPUT _verification_mode)
   endif()
 
   if(NOT _source_UNPARSED_ARGUMENTS)
@@ -116,6 +131,83 @@ function(klogg_require_pinned_source dependency source_dir expected_revision)
         "${dependency} source tree SHA-256 mismatch: got ${_actual_tree_hash} from '${source_dir}'"
     )
   endif()
+  if(_source_VERIFICATION_MODE_OUTPUT)
+    set(${_source_VERIFICATION_MODE_OUTPUT} "${_verification_mode}" PARENT_SCOPE)
+  endif()
+endfunction()
+
+# A marked private Git source cannot use the unmarked cache's incomplete-Git
+# content fallback. Verify the real private repository, not marker syntax alone.
+function(klogg_require_private_git_source dependency source_dir expected_revision marker python_executable git_owner timeout)
+  if(NOT IS_DIRECTORY "${source_dir}/.git" OR IS_SYMLINK "${source_dir}/.git"
+     OR EXISTS "${source_dir}/.git/commondir" OR IS_SYMLINK "${source_dir}/.git/commondir"
+     OR NOT EXISTS "${source_dir}/.git/HEAD" OR IS_SYMLINK "${source_dir}/.git/HEAD")
+    message(FATAL_ERROR "${dependency} marked pinned source requires ordinary private Git metadata and a real HEAD")
+  endif()
+  file(READ "${marker}" _marker LIMIT 4096)
+  if(NOT "${_marker}" STREQUAL "${expected_revision}\n")
+    message(FATAL_ERROR "${dependency} private Git marker does not match the independently supplied pin")
+  endif()
+  get_filename_component(_expected_git_dir "${source_dir}/.git" ABSOLUTE)
+  _klogg_owned_git_startup_arguments(_startup_arguments)
+  foreach(_query --show-toplevel --absolute-git-dir --git-common-dir HEAD)
+    execute_process(
+      COMMAND "${python_executable}" -I -S "${git_owner}" ${_startup_arguments}
+              --timeout "${timeout}" --operation inherit -- -C "${source_dir}" rev-parse "${_query}"
+      RESULT_VARIABLE _probe_result
+      OUTPUT_VARIABLE _identity
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_VARIABLE _probe_error
+    )
+    if(NOT _probe_result EQUAL 0)
+      message(FATAL_ERROR "${dependency} private Git identity failed (status ${_probe_result}): ${_probe_error}")
+    endif()
+    if("${_query}" STREQUAL "--show-toplevel")
+      set(_expected "${source_dir}")
+    elseif("${_query}" STREQUAL "HEAD")
+      set(_expected "${expected_revision}")
+    else()
+      set(_expected "${_expected_git_dir}")
+      if(NOT IS_ABSOLUTE "${_identity}")
+        get_filename_component(_identity "${source_dir}/${_identity}" ABSOLUTE)
+      endif()
+    endif()
+    if(NOT "${_identity}" STREQUAL "${_expected}")
+      message(FATAL_ERROR "${dependency} private Git ${_query} must be '${_expected}', got '${_identity}'")
+    endif()
+  endforeach()
+endfunction()
+
+# Marker classification is not approval: snapshot consumers independently
+# verify the full marker and actual source bytes against trusted caller inputs.
+function(klogg_private_source_kind marker python_executable snapshot_script output_variable)
+  if(UNIX)
+    execute_process(
+      COMMAND "${python_executable}" -I -S "${snapshot_script}"
+              --operation classify --marker "${marker}"
+      RESULT_VARIABLE _kind_result
+      OUTPUT_VARIABLE _kind
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_VARIABLE _kind_error
+      TIMEOUT 30
+    )
+    if(NOT _kind_result EQUAL 0)
+      message(FATAL_ERROR "Private source marker validation failed: ${_kind_error}")
+    endif()
+  else()
+    # Snapshot verification remains unsupported on descriptor-incompatible
+    # hosts; preserve ordinary pinned Git marker handling on those hosts.
+    if(IS_SYMLINK "${marker}" OR IS_DIRECTORY "${marker}")
+      message(FATAL_ERROR "Private source marker must be an ordinary file")
+    endif()
+    file(STRINGS "${marker}" _first_line LIMIT_COUNT 1)
+    if("${_first_line}" STREQUAL "klogg-private-source-v1")
+      set(_kind "approved-content-snapshot")
+    else()
+      set(_kind "pinned-git")
+    endif()
+  endif()
+  set(${output_variable} "${_kind}" PARENT_SCOPE)
 endfunction()
 
 # Verify dependency bytes before evaluating their CMakeLists.txt. This ordering

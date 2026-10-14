@@ -500,6 +500,14 @@ def _environment(operation, global_config, ceiling, original=None):
         for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
             environment.pop(name, None)
         environment["GIT_CEILING_DIRECTORIES"] = ceiling
+    elif operation == "snapshot-patch":
+        # Only this child is repository-free. Preserve caller configuration and
+        # environment objects; never publish an ambient selector change.
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                     "GIT_SHALLOW_FILE", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE"):
+            environment.pop(name, None)
+        environment["GIT_CEILING_DIRECTORIES"] = ceiling
     elif operation == "clone":
         for name in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"):
             environment.pop(name, None)
@@ -612,7 +620,7 @@ def main(argv=None):
         return 0
     parser = _Parser(description=__doc__)
     parser.add_argument("--timeout", type=float, required=True)
-    parser.add_argument("--operation", choices=("inherit", "config", "clone"), required=True)
+    parser.add_argument("--operation", choices=("inherit", "config", "clone", "snapshot-patch"), required=True)
     parser.add_argument("--global-config")
     parser.add_argument("--ceiling")
     parser.add_argument("--startup-lc-ctype-state", choices=("absent", "present"), required=True)
@@ -629,6 +637,10 @@ def main(argv=None):
             parser.error("--timeout must be finite and positive")
         if options.operation == "config" and options.ceiling is None:
             parser.error("config requires --ceiling")
+        if options.operation == "snapshot-patch":
+            if (not options.ceiling or not os.path.isabs(options.ceiling)
+                    or os.pathsep in options.ceiling):
+                parser.error("snapshot-patch requires one absolute unambiguous --ceiling")
         if options.operation == "clone" and options.global_config is None:
             parser.error("clone requires --global-config")
         if (options.startup_lc_ctype_state == "present") != (options.startup_lc_ctype is not None):

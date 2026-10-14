@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import shlex
 import socket
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -38,11 +40,61 @@ def directory_bytes(source: pathlib.Path) -> dict:
     }
 
 
+def directory_namespace(source: pathlib.Path) -> dict:
+    # Include directories, links and locks; a file-only manifest misses mkdir
+    # side effects in an authenticated shared source cache.
+    result = {}
+    for path in [source] + list(source.rglob("*")):
+        info = path.lstat()
+        content = (os.readlink(path) if path.is_symlink()
+                   else hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file()
+                   else None)
+        result[path.relative_to(source).as_posix()] = (
+            info.st_mode, info.st_uid, info.st_gid, info.st_nlink, content,
+        )
+    return result
+
+
 def directory_ownership(source: pathlib.Path) -> dict:
     return {
         path.relative_to(source).as_posix(): (path.lstat().st_uid, path.lstat().st_gid)
         for path in [source] + list(source.rglob("*"))
     }
+
+
+def read_startup_identity(peer):
+    identity = bytearray()
+    while not identity.endswith(b"\n"):
+        chunk = peer.recv(1)
+        if not chunk:
+            raise EOFError(f"Startup child closed before completing identity: {bytes(identity)!r}")
+        identity.extend(chunk)
+    return json.loads(identity)
+
+
+class StartupIdentityTest(unittest.TestCase):
+    def test_complete_identity_is_read_through_its_newline(self):
+        record = b'{"pid":1,"ppid":2,"group":3}\n'
+        peer = mock.Mock()
+        peer.recv.side_effect = [bytes([value]) for value in record]
+
+        self.assertEqual(read_startup_identity(peer), {"pid": 1, "ppid": 2, "group": 3})
+        self.assertEqual(peer.recv.call_count, len(record))
+        peer.recv.assert_called_with(1)
+
+    def test_eof_before_newline_reports_partial_identity_without_reading_again(self):
+        for partial in (b"", b'{"pid":1'):
+            with self.subTest(partial=partial):
+                peer = mock.Mock()
+                peer.recv.side_effect = [bytes([value]) for value in partial] + [
+                    b"", AssertionError("Startup observer read again after EOF"),
+                ]
+
+                with self.assertRaises(EOFError) as failure:
+                    read_startup_identity(peer)
+
+                self.assertIn(repr(partial), str(failure.exception))
+                self.assertEqual(peer.recv.call_count, len(partial) + 1)
 
 
 class PrepareEfswSourceTest(unittest.TestCase):
@@ -126,7 +178,8 @@ class PrepareEfswSourceTest(unittest.TestCase):
         )
 
     def tearDown(self):
-        self.temporary.cleanup()
+        if not getattr(self, "_preserve_uncertain_fixture", False):
+            self.temporary.cleanup()
 
     def git_output(self, *arguments, cwd=None):
         return subprocess.check_output(
@@ -147,6 +200,9 @@ class PrepareEfswSourceTest(unittest.TestCase):
         script=PREPARE_SCRIPT,
         cwd=None,
         python=None,
+        final_digest=None,
+        child_umask=None,
+        controlled_phase=False,
     ):
         cache = cache or self.cache
         revision = revision or self.revision
@@ -159,6 +215,7 @@ class PrepareEfswSourceTest(unittest.TestCase):
             f"-DDESTINATION={destination}",
             f"-DEXPECTED_REVISION={revision}",
             f"-DCLEAN_TREE_HASH={clean_digest}",
+            f"-DPATCHED_TREE_HASH={final_digest or self.patched_digest}",
             "-DAPPROVED_CACHE_TREE_HASHES="
             + ";".join(approved_cache_digests),
             "-DLOCK_TIMEOUT=2",
@@ -168,6 +225,31 @@ class PrepareEfswSourceTest(unittest.TestCase):
         ]
         if python is not None:
             command.insert(1, f"-DPREPARE_PYTHON_EXECUTABLE={python}")
+        if child_umask is not None:
+            launcher = self.root / "prepare-child-mask.py"
+            launcher.write_text(
+                "import os, sys\n"
+                "os.umask(int(sys.argv[1], 8))\n"
+                "os.execvp(sys.argv[2], sys.argv[2:])\n"
+            )
+            command = [sys.executable, "-I", "-S", str(launcher), f"{child_umask:o}"] + command
+        if controlled_phase:
+            # Only the synthetic caller-boundary phase promises no nested
+            # sessions. Generic/native prepare below is not universally family
+            # contained: real Git owners reserve their own separate sessions.
+            sys.path.insert(0, str(ROOT / "scripts"))
+            import prepare_efsw_git as owner
+            result = owner._run(command, timeout=timeout, env=self.environment, cwd=cwd)
+            if result.kind == "cleanup":
+                self._preserve_uncertain_fixture = True
+                self.temporary._finalizer.detach()
+                raise RuntimeError("Controlled CMake family cleanup incomplete: " + result.diagnostic)
+            if result.kind == "timeout":
+                raise subprocess.TimeoutExpired(command, timeout, output=result.stdout, stderr=result.stderr)
+            if result.kind not in ("ok", "git"):
+                raise RuntimeError("Controlled CMake family failed: " + result.diagnostic)
+            return subprocess.CompletedProcess(command, result.returncode,
+                                               result.stdout.decode("utf-8"), result.stderr.decode("utf-8"))
         # Inherited pipes can hide CMake completion while an orphan remains.
         # Owned files let the result and socket lifetime be observed separately.
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as output, \
@@ -366,11 +448,13 @@ class PrepareEfswSourceTest(unittest.TestCase):
         self.assertEqual(list(destination.parent.glob(f".{destination.name}.prepare-*")), [])
         self.assertEqual(list(destination.parent.glob(f".{destination.name}.clone-config-*")), [])
 
-    def apply_series(self, destination, patch, patched_digest):
+    def apply_series(self, destination, patch, patched_digest, python=None):
         return subprocess.run(
             [
                 "cmake",
                 "-DDEPENDENCY=efsw",
+                f"-DPREPARE_PYTHON_EXECUTABLE={python or sys.executable}",
+                "-DGIT_TIMEOUT=2",
                 f"-DREPO_DIR={destination}",
                 f"-DEXPECTED_REVISION={self.revision}",
                 f"-DCLEAN_TREE_HASH={self.clean_digest}",
@@ -677,18 +761,47 @@ class PrepareEfswSourceTest(unittest.TestCase):
                 residual += list(destination.parent.glob(".efsw.clone-config-*"))
                 self.assertEqual(residual, [sentinel])
 
-    @unittest.skipIf(os.name == "nt", "The selective executable Git shim requires POSIX")
+    @unittest.skipIf(os.name == "nt", "The controlled owner protocol fixture requires POSIX exec")
     def test_reuse_allocates_no_temporary_configuration(self):
+        # Allocation is the contract here, not observational-shim/bootstrap
+        # latency. Native reuse identity and owner timeouts have separate tests.
         destination = self.root / "private" / "efsw"
-        first = self.prepare(destination)
-        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-        self.enable_different_owner_clone(fail_config_write=1)
+        shutil.copytree(self.cache, destination)
+        self.private_marker(destination).write_bytes((self.revision + "\n").encode())
+        interpreter = self.root / "reuse-protocol-python"
+        calls = self.root / "reuse-protocol-calls"
+        interpreter.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "arguments = sys.argv[1:]\n"
+            "if any(pathlib.Path(arg).name == 'prepare_efsw_git.py' for arg in arguments):\n"
+            "    if '--check-interpreter' in arguments: sys.exit(0)\n"
+            "    command = arguments[arguments.index('--') + 1:]\n"
+            f"    with open({str(calls)!r}, 'a') as output: output.write(json.dumps(command) + '\\n')\n"
+            "    if arguments[arguments.index('--operation') + 1] != 'inherit':\n"
+            "        sys.stderr.write('reuse attempted a constructor operation\\n'); sys.exit(3)\n"
+            "    path = command[command.index('-C') + 1]\n"
+            f"    if path not in ({str(self.cache)!r}, {str(destination)!r}): sys.exit(3)\n"
+            "    query = command[-1]\n"
+            f"    if query == 'HEAD': print({self.revision!r})\n"
+            "    elif query == '--show-toplevel': print(path)\n"
+            "    elif query == '--absolute-git-dir': print(str(pathlib.Path(path) / '.git'))\n"
+            "    else: sys.exit(3)\n"
+            "    sys.exit(0)\n"
+            f"os.execv({sys.executable!r}, [{sys.executable!r}] + arguments)\n"
+        )
+        interpreter.chmod(0o755)
+        script = self.allocation_script(["a" * 16])
 
-        result = self.prepare(destination)
+        result = self.prepare(destination, script=script, python=interpreter)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.clone_calls(), [])
-        self.assertFalse(any(call["kind"] == "config-write" for call in self.git_calls()))
+        self.assertFalse(self.allocation_count.exists(), "Reuse reached production random allocation")
+        commands = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual(len(commands), 5)
+        for command in commands:
+            self.assertNotIn("config", command)
+            self.assertNotIn("clone", command)
         self.assertEqual(list(destination.parent.glob(".efsw.clone-config-*")), [])
 
     def assert_config_write_failure_cleans_context(self, step):
@@ -911,16 +1024,19 @@ class PrepareEfswSourceTest(unittest.TestCase):
                 self.assert_prepared_clean_checkout(destination)
         self.assertEqual(directory_bytes(self.cache), cache_before)
 
-    def assert_cleanup_failure_preserves_owned_residue(self, failure_step):
+    def cleanup_failure_interpreter(self, failure_step, observation=None):
         interpreter = self.root / "cleanup-failure-python"
+        protocol = self.root / "cleanup-failure-protocol.py"
         write_count = self.root / "cleanup-config-write-count"
-        interpreter.write_text(
+        protocol.write_text(
             f"#!{sys.executable}\n"
-            "import os, pathlib, sys\n"
+            "import os, pathlib, shutil, sys\n"
             f"target = {failure_step!r}\n"
+            f"cache = pathlib.Path({str(self.cache)!r})\n"
+            f"revision = {self.revision!r}\n"
             f"count_file = pathlib.Path({str(write_count)!r})\n"
             "arguments = sys.argv[1:]\n"
-            "if '--operation' in arguments:\n"
+            "if any(pathlib.Path(argument).name == 'prepare_efsw_git.py' for argument in arguments) and '--operation' in arguments:\n"
             "    operation = arguments[arguments.index('--operation') + 1]\n"
             "    git_arguments = arguments[arguments.index('--') + 1:]\n"
             "    step = operation\n"
@@ -950,14 +1066,69 @@ class PrepareEfswSourceTest(unittest.TestCase):
             "            pathlib.Path(str(config) + '.lock').write_bytes(b'preserve uncertain config lock')\n"
             "        sys.stderr.write('primary fixture Git cause; cleanup incomplete\\n')\n"
             "        sys.exit(5)\n"
-            f"os.execv({sys.executable!r}, [{sys.executable!r}] + arguments)\n"
+            "    # Controlled caller-boundary model: no native Git or nested\n"
+            "    # owner sessions in this injected phase. Values come from the\n"
+            "    # real fixture; native ownership is covered separately.\n"
+            "    if operation == 'config':\n"
+            "        if git_arguments[:1] != ['config'] or git_arguments[-3:-1] != ['--add', 'safe.directory']: sys.exit(3)\n"
+            "        value = git_arguments[-1]\n"
+            "        expected = '' if step == 'config-1' else str(cache / '.git')\n"
+            "        if value != expected: sys.exit(3)\n"
+            "        with config.open('a') as output: output.write('[safe]\\n\\tdirectory = ' + value + '\\n')\n"
+            "    elif operation == 'clone':\n"
+            "        if '--no-hardlinks' not in git_arguments or '--no-checkout' not in git_arguments or git_arguments[-2] != str(cache): sys.exit(3)\n"
+            "        shutil.copytree(cache, staging)\n"
+            "    elif step == 'checkout':\n"
+            "        if git_arguments[-2:] != ['--detach', revision]: sys.exit(3)\n"
+            "    elif '-C' in git_arguments and git_arguments[-2:] == ['rev-parse', 'HEAD']:\n"
+            "        candidate = pathlib.Path(git_arguments[git_arguments.index('-C') + 1])\n"
+            "        if candidate != cache and '.prepare-' not in candidate.name: sys.exit(3)\n"
+            "        print(revision)\n"
+            "    else: sys.exit(3)\n"
+            "    sys.exit(0)\n"
+            "if any(pathlib.Path(argument).name == 'prepare_efsw_git.py' for argument in arguments) and '--check-interpreter' in arguments: sys.exit(0)\n"
+            f"os.execv({sys.executable!r}, [{sys.executable!r}, '-B'] + arguments)\n"
+        )
+        if observation is not None:
+            source = protocol.read_text().replace(
+                "arguments = sys.argv[1:]\n",
+                "import json\n"
+                f"pathlib.Path({str(observation)!r}).write_text(json.dumps({{'isolated': sys.flags.isolated, "
+                "'no_site': sys.flags.no_site, 'dont_write_bytecode': sys.dont_write_bytecode}))\n"
+                "arguments = sys.argv[1:]\n",
+            )
+            protocol.write_text(source)
+        # Flags after a shebang script become its argv, not Python startup
+        # options. Isolate the actual protocol interpreter before its filename.
+        interpreter.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} -B -I -S {shlex.quote(str(protocol))} \"$@\"\n"
         )
         interpreter.chmod(0o755)
+        return interpreter
+
+    def assert_cleanup_failure_preserves_owned_residue(self, failure_step):
+        interpreter = self.cleanup_failure_interpreter(failure_step)
         destination = self.root / "private" / "efsw"
         script = self.allocation_script(["a" * 16, "b" * 16])
         cache_before = directory_bytes(self.cache)
-
-        result = self.prepare(destination, python=interpreter, script=script)
+        cache_namespace_before = directory_namespace(self.cache)
+        trap_directory = self.root / "controlled-git-trap"
+        trap_directory.mkdir()
+        trap_log = self.root / "unexpected-native-git"
+        trap = trap_directory / "git"
+        trap.write_text("#!/bin/sh\n"
+                        f"printf 'unexpected native Git\\n' >> {shlex.quote(str(trap_log))}\n"
+                        "exit 97\n")
+        trap.chmod(0o755)
+        native_path = self.environment["PATH"]
+        self.environment["PATH"] = str(trap_directory) + os.pathsep + native_path
+        try:
+            result = self.prepare(destination, python=interpreter, script=script, controlled_phase=True)
+        finally:
+            self.environment["PATH"] = native_path
+        self.assertFalse(trap_log.exists(), "Synthetic caller-boundary phase invoked native Git")
+        self.assertEqual(directory_namespace(self.cache), cache_namespace_before)
 
         self.assertNotEqual(result.returncode, 0)
         diagnostic = " ".join((result.stdout + result.stderr).split())
@@ -980,6 +1151,73 @@ class PrepareEfswSourceTest(unittest.TestCase):
         for path, preserved in residue.items():
             self.assertEqual(directory_bytes(path), preserved)
 
+    @unittest.skipIf(os.name == "nt", "The controlled startup interpreter uses POSIX exec")
+    def test_controlled_outer_timeout_closes_startup_family_before_teardown(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(5)
+        interpreter = self.root / "blocked-startup-python"
+        protocol = self.root / "blocked-startup-protocol.py"
+        protocol.write_text(
+            "import json, os, socket\n"
+            f"peer = socket.create_connection({listener.getsockname()!r})\n"
+            "peer.sendall((json.dumps({'pid': os.getpid(), 'ppid': os.getppid(), 'group': os.getpgrp()}) + '\\n').encode())\n"
+            "while True:\n"
+            "    command = peer.recv(1)\n"
+            "    if command == b'?': peer.sendall(b'A')\n"
+            "    elif command == b'x' or not command: break\n"
+            "peer.close()\n"
+            "os._exit(0)\n"
+        )
+        interpreter.write_text("#!/bin/sh\n"
+                               f"exec {shlex.quote(sys.executable)} -B -I -S {shlex.quote(str(protocol))} \"$@\"\n")
+        interpreter.chmod(0o755)
+        peer = None
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self.prepare, self.root / "private/efsw", python=interpreter,
+                                         timeout=2, controlled_phase=True)
+                peer, _ = listener.accept()
+                peer.settimeout(5)
+                observed = read_startup_identity(peer)
+                self.assertGreater(observed["pid"], 0)
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    future.result(timeout=10)
+                try:
+                    peer.sendall(b"?")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                self.assertEqual(peer.recv(1), b"", f"Startup family survived outer timeout: {observed}")
+        finally:
+            # RED cleanup releases only this socket-bound fixture child. Never
+            # signal an unreserved numeric PID/group or another user's process.
+            if peer is not None:
+                try:
+                    peer.sendall(b"x")
+                    self.assertEqual(peer.recv(1), b"")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                peer.close()
+            listener.close()
+
+    @unittest.skipIf(os.name == "nt", "The interpreter protocol bootstrap uses POSIX exec")
+    def test_cleanup_protocol_bootstrap_is_isolated_and_does_not_write_home_bytecode(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import prepare_efsw_git as owner
+        observation = self.root / "cleanup-bootstrap.json"
+        interpreter = self.cleanup_failure_interpreter("clone", observation=observation)
+        home = self.root / "protocol-home"
+        environment = dict(self.environment, HOME=str(home))
+        result = owner._run(
+            [str(interpreter), "-I", "-S", str(ROOT / "scripts/prepare_efsw_git.py"), "--check-interpreter"],
+            timeout=5, env=environment,
+        )
+        self.assertEqual(result.kind, "ok", result.stderr.decode())
+        flags = json.loads(observation.read_text())
+        self.assertFalse(home.exists(), f"Protocol bootstrap wrote HOME cache; flags={flags}")
+        self.assertEqual(flags, {"isolated": 1, "no_site": 1, "dont_write_bytecode": True})
+
     @unittest.skipIf(os.name == "nt", "The fake interpreter status protocol uses a POSIX executable")
     def test_first_config_cleanup_failure_preserves_uncertain_owned_state(self):
         self.assert_cleanup_failure_preserves_owned_residue("config-1")
@@ -1000,16 +1238,35 @@ class PrepareEfswSourceTest(unittest.TestCase):
     def test_staged_query_cleanup_failure_preserves_uncertain_owned_state(self):
         self.assert_cleanup_failure_preserves_owned_residue("staged-revision")
 
-    def test_preparation_has_one_owned_route_for_every_git_operation(self):
-        source = PREPARE_SCRIPT.read_text()
+    def assert_owned_git_routes(self, source):
         self.assertNotIn("COMMAND git", source)
-        self.assertNotIn("TIMEOUT ${GIT_TIMEOUT}", source)
+        git_commands = [block for block in re.findall(r"execute_process\((.*?)\n\s*\)", source, re.S)
+                        if '"${_git_owner_script}"' in block]
+        self.assertTrue(git_commands)
+        for command in git_commands:
+            self.assertNotIn("TIMEOUT ${GIT_TIMEOUT}", command)
         self.assertNotIn("-E env", source)
         self.assertEqual(source.count("--operation inherit"), 5)
         self.assertEqual(source.count("--operation config"), 2)
         self.assertEqual(source.count("--operation clone"), 1)
         self.assertEqual(source.count('GIT_OWNER "${_git_owner_script}"'), 2)
         self.assertIn("--check-interpreter", source)
+
+    def test_preparation_has_one_owned_route_for_every_git_operation(self):
+        self.assert_owned_git_routes(PREPARE_SCRIPT.read_text())
+
+    def test_owned_git_route_guard_rejects_bare_git_and_cmake_timeout_mutants(self):
+        source = PREPARE_SCRIPT.read_text()
+        clone = next(block for block in re.findall(r"execute_process\((.*?)\n\s*\)", source, re.S)
+                     if "--operation clone" in block)
+        bare = clone.replace('COMMAND "${PREPARE_PYTHON_EXECUTABLE}" -I -S "${_git_owner_script}"',
+                             "COMMAND git")
+        timeout = clone.replace("RESULT_VARIABLE _clone_result",
+                                "TIMEOUT ${GIT_TIMEOUT}\n  RESULT_VARIABLE _clone_result")
+        for mutant in (bare, timeout):
+            self.assertNotEqual(mutant, clone)
+            with self.assertRaises(AssertionError):
+                self.assert_owned_git_routes(source.replace(clone, mutant))
 
     def test_shared_verifier_falls_back_only_for_ordinary_owned_git_failure(self):
         owner = self.root / "status-owner.py"
@@ -1328,9 +1585,11 @@ class PrepareEfswSourceTest(unittest.TestCase):
         cache_bytes_before = directory_bytes(self.cache)
         cache_head_before = self.git_output("rev-parse", "HEAD")
         cache_index_before = (self.cache / ".git" / "index").read_bytes()
+        namespace_before = directory_namespace(self.cache)
 
         result = self.prepare(destination)
 
+        self.assertEqual(directory_namespace(self.cache), namespace_before)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must not overlap", result.stdout + result.stderr)
         self.assertEqual(directory_bytes(self.cache), cache_bytes_before)
@@ -1355,6 +1614,59 @@ class PrepareEfswSourceTest(unittest.TestCase):
 
         self.assert_cache_isolation_rejected(alias_parent / "private-source")
 
+    def assert_dangling_alias_cannot_mutate_cache_namespace(self, metadata_free):
+        if metadata_free:
+            shutil.rmtree(self.cache / ".git")
+        outside = self.root / "outside-witness"
+        outside.mkdir()
+        (outside / "sentinel").write_bytes(b"do not modify\n")
+        for index, suffix in enumerate(("", "efsw", "nested/further/efsw")):
+            with self.subTest(suffix=suffix):
+                target = self.cache / f"new-parent-{index}"
+                alias = self.root / f"dangling-alias-{index}"
+                alias.symlink_to(target, target_is_directory=True)
+                self.assertFalse(alias.exists())
+                self.assertTrue(alias.is_symlink())
+                cache_before = directory_namespace(self.cache)
+                root_before = directory_namespace(self.root)
+                destination = alias / suffix if suffix else alias
+
+                result = self.prepare(destination, python=sys.executable)
+
+                self.assertEqual(directory_namespace(self.cache), cache_before)
+                root_after = directory_namespace(self.root)
+                self.assertEqual(root_after, root_before,
+                                 f"Added namespace: {sorted(set(root_after) - set(root_before))}; "
+                                 f"preparation: {result.stdout + result.stderr}")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(target.exists())
+                self.assertEqual(os.readlink(alias), str(target))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX dangling directory alias contract")
+    def test_dangling_alias_into_cache_preserves_complete_snapshot_cache_namespace(self):
+        self.assert_dangling_alias_cannot_mutate_cache_namespace(metadata_free=True)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX dangling directory alias contract")
+    def test_dangling_alias_into_cache_preserves_complete_pinned_git_cache_namespace(self):
+        self.assert_dangling_alias_cannot_mutate_cache_namespace(metadata_free=False)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX existing directory alias contract")
+    def test_existing_destination_parent_alias_preserves_both_materialization_routes(self):
+        for metadata_free in (False, True):
+            with self.subTest(metadata_free=metadata_free):
+                if metadata_free:
+                    shutil.rmtree(self.cache / ".git")
+                target = self.root / f"resolved-parent-{metadata_free}"
+                target.mkdir(mode=0o700)
+                alias = self.root / f"resolved-alias-{metadata_free}"
+                alias.symlink_to(target, target_is_directory=True)
+                cache_before = directory_namespace(self.cache)
+                result = self.prepare(alias / "new-parent" / "efsw")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(source_tree_digest(target / "new-parent" / "efsw"), self.clean_digest)
+                self.assertEqual(directory_namespace(self.cache), cache_before)
+                self.assertTrue(alias.is_symlink())
+
     def test_rejects_cache_source_nested_within_destination(self):
         self.assert_cache_isolation_rejected(self.root)
 
@@ -1376,11 +1688,352 @@ class PrepareEfswSourceTest(unittest.TestCase):
         self.assertIn("source directory does not exist", result.stdout + result.stderr)
         self.assertFalse(destination.exists())
 
+    def assert_verified_clean_content_materializes(self, metadata_kind):
+        # This is the approved-content contract, not a foreign-owner Git model.
+        self.environment["GIT_CEILING_DIRECTORIES"] = str(self.root)
+        if metadata_kind == "absent":
+            shutil.rmtree(self.cache / ".git")
+        else:
+            (self.cache / ".git" / "HEAD").unlink()
+        witness = self.root / "external-witness"
+        witness.write_bytes(b"independent fixture bytes\n")
+        cache_bytes_before = directory_bytes(self.cache)
+        cache_ownership_before = directory_ownership(self.cache)
+        cache_modes_before = {
+            path.relative_to(self.cache).as_posix(): path.lstat().st_mode
+            for path in [self.cache] + list(self.cache.rglob("*"))
+        }
+        verifier = self.root / "verify-clean-content.cmake"
+        verifier.write_text(
+            f"include([[{(ROOT / 'cmake' / 'verify_pinned_source.cmake').as_posix()}]])\n"
+            f"klogg_require_pinned_source(efsw [[{self.cache.as_posix()}]] {self.revision}\n"
+            f"  GIT_OWNER [[{(ROOT / 'scripts' / 'prepare_efsw_git.py').as_posix()}]]\n"
+            f"  PYTHON_EXECUTABLE [[{pathlib.Path(sys.executable).as_posix()}]]\n"
+            f"  GIT_TIMEOUT 2 {self.clean_digest})\n"
+            'message(STATUS "Independent approved clean content verification succeeded")\n'
+        )
+        verified = subprocess.run(
+            ["cmake", "-P", str(verifier)], capture_output=True, text=True,
+            env=self.environment, cwd=self.root, timeout=10, check=False,
+        )
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertIn("Independent approved clean content verification succeeded", verified.stdout)
+        if metadata_kind == "unusable":
+            self.assertIn("Git metadata is incomplete", verified.stdout)
+        print(f"Approved clean content independently verified ({metadata_kind}): {self.clean_digest}", flush=True)
+        destination = self.root / "private" / "efsw"
+
+        result = self.prepare(destination, cwd=self.root)
+
+        self.assertEqual(directory_bytes(self.cache), cache_bytes_before)
+        self.assertEqual(directory_ownership(self.cache), cache_ownership_before)
+        self.assertEqual(
+            {
+                path.relative_to(self.cache).as_posix(): path.lstat().st_mode
+                for path in [self.cache] + list(self.cache.rglob("*"))
+            },
+            cache_modes_before,
+        )
+        self.assertEqual(witness.read_bytes(), b"independent fixture bytes\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((destination / "value.txt").read_bytes(), b"clean source\n")
+        self.assertEqual(source_tree_digest(destination), self.clean_digest)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_verified_clean_cache_without_git_metadata_materializes_private_source(self):
+        self.assert_verified_clean_content_materializes("absent")
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_verified_clean_cache_with_unusable_git_metadata_materializes_private_source(self):
+        self.assert_verified_clean_content_materializes("unusable")
+
+    def make_typed_snapshot(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import prepare_efsw_snapshot as snapshot
+        self.environment["GIT_CEILING_DIRECTORIES"] = str(self.root)
+        shutil.rmtree(self.cache / ".git")
+        destination = self.root / "private" / "efsw"
+        destination.parent.mkdir()
+        snapshot.materialize(self.cache, destination, self.clean_digest)
+        self.private_marker(destination).write_bytes(
+            snapshot.marker_bytes(self.revision, self.clean_digest, self.patched_digest)
+        )
+        return destination
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_missing_cache_head_never_reads_the_enclosing_repository_revision(self):
+        subprocess.run(self.git + ["init", "-q", str(self.root)], env=self.environment, check=True)
+        subprocess.run(self.git + ["-C", str(self.root), "-c", "user.name=Fixture",
+                                  "-c", "user.email=fixture@example.invalid", "commit", "-q",
+                                  "--allow-empty", "-m", "unrelated enclosing revision"],
+                       env=self.environment, check=True)
+        parent_before = directory_bytes(self.root / ".git")
+        (self.cache / ".git" / "HEAD").unlink()
+        destination = self.root / "private" / "efsw"
+        result = self.prepare(destination)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(source_tree_digest(destination), self.clean_digest)
+        self.assertEqual(directory_bytes(self.root / ".git"), parent_before)
+        self.assertFalse((destination / ".git").exists())
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_typed_clean_snapshot_reuses_without_inventing_pinned_git_head(self):
+        destination = self.make_typed_snapshot()
+        before = directory_bytes(destination)
+        result = self.prepare(destination)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((destination / ".git").exists())
+        self.assertEqual(directory_bytes(destination), before)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_patch_and_reconfigure_preserve_parent_repository_and_hostile_selectors(self):
+        destination = self.make_typed_snapshot()
+        subprocess.run(self.git + ["init", "-q", str(self.root)], env=self.environment, check=True)
+        (self.root / "value.txt").write_bytes(b"clean source\n")
+        parent_before = directory_bytes(self.root / ".git")
+        config_before = self.global_config.read_bytes()
+        self.environment.update({
+            "GIT_DIR": str(self.root / ".git"), "GIT_COMMON_DIR": str(self.root / ".git"),
+            "GIT_WORK_TREE": str(self.root), "GIT_INDEX_FILE": str(self.root / ".git" / "index"),
+            "GIT_OBJECT_DIRECTORY": str(self.root / ".git" / "objects"),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(self.root / ".git" / "objects"),
+        })
+        selectors_before = dict(self.environment)
+        for operation in (lambda: self.apply_series(destination, self.patch, self.patched_digest),
+                          lambda: self.prepare(destination),
+                          lambda: self.apply_series(destination, self.patch, self.patched_digest)):
+            result = operation()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(source_tree_digest(destination), self.patched_digest)
+        self.assertFalse((destination / ".git").exists())
+        self.assertEqual(directory_bytes(self.root / ".git"), parent_before)
+        self.assertEqual((self.root / "value.txt").read_bytes(), b"clean source\n")
+        self.assertEqual((self.cache / "value.txt").read_bytes(), b"clean source\n")
+        self.assertEqual(self.global_config.read_bytes(), config_before)
+        self.assertEqual(self.environment, selectors_before)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_rejects_forged_final_digest_in_marker(self):
+        destination = self.make_typed_snapshot()
+        (destination / "value.txt").write_bytes(b"unapproved source\n")
+        forged = self.private_marker(destination).read_bytes().replace(
+            self.patched_digest.encode(), source_tree_digest(destination).encode()
+        )
+        self.private_marker(destination).write_bytes(forged)
+        result = self.prepare(destination)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("independently supplied approval", result.stdout + result.stderr)
+        self.assertEqual((destination / "value.txt").read_bytes(), b"unapproved source\n")
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_rejects_git_commit_added_under_snapshot_provenance(self):
+        metadata = self.root / "saved-metadata"
+        shutil.copytree(self.cache / ".git", metadata)
+        destination = self.make_typed_snapshot()
+        shutil.copytree(metadata, destination / ".git")
+        result = self.prepare(destination)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("metadata/commit to be absent", result.stdout + result.stderr)
+        self.assertEqual(self.git_output("rev-parse", "HEAD", cwd=destination), self.revision)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_interrupted_known_patch_state_fails_closed_without_marker_authority(self):
+        destination = self.make_typed_snapshot()
+        first = self.root / "first.patch"
+        first.write_bytes(self.patch.read_bytes().replace(b"approved patched cache", b"intermediate source"))
+        subprocess.run(self.git + ["apply", str(first)], cwd=destination,
+                       env=self.environment, check=True)
+        before = directory_bytes(destination)
+        for operation in (lambda: self.prepare(destination),
+                          lambda: self.apply_series(destination, self.patch, self.patched_digest)):
+            result = operation()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("dirty/interrupted state rejected", result.stdout + result.stderr)
+        self.assertEqual(directory_bytes(destination), before)
+
+    @unittest.skipUnless(os.name == "posix", "Child-only POSIX umask and descriptor namespace contract")
+    def test_snapshot_creates_private_parents_before_lock_under_permissive_child_umasks(self):
+        shutil.rmtree(self.cache / ".git")
+        source_before = directory_bytes(self.cache)
+        probe_before = self.root / "caller-mode-before"
+        probe_before.write_bytes(b"caller probe\n")
+        caller_mode = probe_before.stat().st_mode & 0o777
+        for mask in (0o002, 0o000):
+            with self.subTest(mask=mask):
+                ancestor = self.root / f"mask-{mask:o}"
+                ancestor.mkdir(mode=0o700)
+                destination = ancestor / "first" / "second" / "efsw"
+                result = self.prepare(destination, child_umask=mask)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for parent in (ancestor / "first", destination.parent):
+                    self.assertEqual(parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(source_tree_digest(destination), self.clean_digest)
+                repeated = self.prepare(destination, child_umask=mask)
+                self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        probe_after = self.root / "caller-mode-after"
+        probe_after.write_bytes(b"caller probe\n")
+        self.assertEqual(probe_after.stat().st_mode & 0o777, caller_mode)
+        self.assertEqual(directory_bytes(self.cache), source_before)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_counterfeit_pinned_marker_cannot_downgrade_to_unowned_patch_route(self):
+        destination = self.make_typed_snapshot()
+        self.private_marker(destination).write_bytes((self.revision + "\n").encode())
+        before = directory_bytes(destination)
+        result = self.apply_series(destination, self.patch, self.patched_digest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(directory_bytes(destination), before)
+        self.assertFalse((destination / ".git").exists())
+
+    def test_marked_private_git_rejects_marker_pin_mismatch_before_patching(self):
+        destination = self.root / "private" / "efsw"
+        prepared = self.prepare(destination)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        self.private_marker(destination).write_bytes(b"0" * 40 + b"\n")
+        before = directory_bytes(destination)
+        result = self.apply_series(destination, self.patch, self.patched_digest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("independently supplied pin", " ".join((result.stdout + result.stderr).split()))
+        self.assertEqual(directory_bytes(destination), before)
+
+    def test_marked_private_git_rejects_shared_common_directory_selector(self):
+        destination = self.root / "private" / "efsw"
+        prepared = self.prepare(destination)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        cache_before = directory_bytes(self.cache)
+        before = directory_bytes(destination)
+        self.environment["GIT_COMMON_DIR"] = str(self.cache / ".git")
+        result = self.apply_series(destination, self.patch, self.patched_digest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--git-common-dir", result.stdout + result.stderr)
+        self.assertEqual(directory_bytes(destination), before)
+        self.assertEqual(directory_bytes(self.cache), cache_before)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_ordinary_git_failure_keeps_bad_config_primary_diagnostic(self):
+        destination = self.make_typed_snapshot()
+        self.global_config.write_bytes(b"[unterminated section\n")
+        before = directory_bytes(destination)
+        result = self.apply_series(destination, self.patch, self.patched_digest)
+        self.assertNotEqual(result.returncode, 0)
+        diagnostic = " ".join((result.stdout + result.stderr).split())
+        self.assertIn("bad config", diagnostic)
+        self.assertIn(str(self.global_config), diagnostic)
+        self.assertEqual(directory_bytes(destination), before)
+
+    @unittest.skipUnless(os.name == "posix", "Owned driver protocol fixture requires POSIX exec")
+    def test_snapshot_primary_error_precedes_secondary_rollback_failure(self):
+        destination = self.make_typed_snapshot()
+        interpreter = self.root / "ordinary-patch-python"
+        second = self.root / "second.patch"
+        second.write_bytes(self.patch.read_bytes())
+        interpreter.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            "arguments = sys.argv[1:]\n"
+            "if any(pathlib.Path(arg).name == 'prepare_efsw_git.py' for arg in arguments) and '--' in arguments:\n"
+            "    command = arguments[arguments.index('--') + 1:]\n"
+            "    if '--reverse' in command:\n"
+            "        sys.stderr.write('secondary rollback fixture failure\\n'); sys.exit(1)\n"
+            f"    if '--check' in command and {str(second)!r} in command:\n"
+            "        sys.stderr.write('primary malformed-config fixture failure\\n'); sys.exit(1)\n"
+            f"os.execv({sys.executable!r}, [{sys.executable!r}] + arguments)\n"
+        )
+        interpreter.chmod(0o755)
+        result = self.apply_series(destination, f"{self.patch};{second}", self.patched_digest,
+                                   python=interpreter)
+        self.assertNotEqual(result.returncode, 0)
+        diagnostic = " ".join(result.stderr.split())
+        self.assertIn("primary malformed-config fixture failure", diagnostic)
+        self.assertIn("Cannot cleanly roll back patch", diagnostic)
+        self.assertLess(diagnostic.index("primary malformed-config fixture failure"),
+                        diagnostic.index("Cannot cleanly roll back patch"))
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_namespace_rejection_precedes_lockfile_writes(self):
+        destination = self.make_typed_snapshot()
+        self.root.chmod(0o777)
+        before = directory_bytes(destination)
+        for operation in (lambda: self.prepare(destination),
+                          lambda: self.apply_series(destination, self.patch, self.patched_digest)):
+            result = operation()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("namespace ancestor", " ".join((result.stdout + result.stderr).split()))
+        self.assertFalse((destination.parent / "klogg-efsw-prepare.lock").exists())
+        self.assertFalse((destination.parent / "klogg-patch.lock").exists())
+        self.assertEqual(directory_bytes(destination), before)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_rejects_dangling_marker_redirect_without_writing_external_target(self):
+        shutil.rmtree(self.cache / ".git")
+        destination = self.root / "private" / "efsw"
+        destination.parent.mkdir()
+        witness = self.root / "external-marker-witness"
+        self.private_marker(destination).symlink_to(witness)
+        result = self.prepare(destination)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(witness.exists())
+        self.assertFalse(destination.exists())
+        self.assertTrue(self.private_marker(destination).is_symlink())
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_patch_owner_fatal_statuses_never_retry_or_rollback_uncertain_state(self):
+        destination = self.make_typed_snapshot()
+        interpreter = self.root / "fatal-patch-python"
+        calls = self.root / "owned-patch-calls"
+        interpreter.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            "arguments = sys.argv[1:]\n"
+            "if any(pathlib.Path(arg).name == 'prepare_efsw_git.py' for arg in arguments) and 'snapshot-patch' in arguments:\n"
+            f"    with open({str(calls)!r}, 'a') as output: output.write('owned-patch\\n')\n"
+            "    sys.stderr.write('primary owned patch fixture failure\\n')\n"
+            "    sys.exit(int(os.environ['KLOGG_FIXTURE_PATCH_FAILURE']))\n"
+            f"os.execv({sys.executable!r}, [{sys.executable!r}] + arguments)\n"
+        )
+        interpreter.chmod(0o755)
+        before = directory_bytes(destination)
+        for status in (2, 3, 4, 5):
+            with self.subTest(status=status):
+                calls.write_bytes(b"")
+                self.environment["KLOGG_FIXTURE_PATCH_FAILURE"] = str(status)
+                result = self.apply_series(destination, self.patch, self.patched_digest, python=interpreter)
+                self.assertNotEqual(result.returncode, 0)
+                diagnostic = " ".join((result.stdout + result.stderr).split())
+                self.assertIn(f"status {status}", diagnostic)
+                self.assertIn("primary owned patch fixture failure", diagnostic)
+                self.assertEqual(calls.read_bytes(), b"owned-patch\n")
+                self.assertEqual(directory_bytes(destination), before)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_snapshot_patch_failure_rolls_back_to_authenticated_clean_bytes(self):
+        destination = self.make_typed_snapshot()
+        missing = self.root / "missing.patch"
+        result = self.apply_series(destination, f"{self.patch};{missing}", self.patched_digest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Patch file does not exist", result.stdout + result.stderr)
+        self.assertEqual(source_tree_digest(destination), self.clean_digest)
+        reused = self.prepare(destination)
+        self.assertEqual(reused.returncode, 0, reused.stdout + reused.stderr)
+
+    @unittest.skipUnless(os.name == "posix", "Snapshot capture requires descriptor-relative no-follow IO")
+    def test_metadata_free_approved_patched_cache_is_not_reconstructed_as_clean(self):
+        subprocess.run(self.git + ["apply", str(self.patch)], cwd=self.cache,
+                       env=self.environment, check=True)
+        shutil.rmtree(self.cache / ".git")
+        destination = self.root / "private" / "efsw"
+        result = self.prepare(destination, approved_cache_digests=[self.clean_digest, self.patched_digest])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Clean source tree SHA-256 mismatch", " ".join((result.stdout + result.stderr).split()))
+        self.assert_no_private_source(destination)
+
     def test_partial_git_cache_fails_within_the_subprocess_bound_and_cleans_staging(self):
         partial = self.root / "partial-cache"
         shutil.copytree(self.cache, partial)
         partial_revision = self.git_output("rev-parse", "HEAD", cwd=partial)
         shutil.rmtree(partial / ".git" / "objects")
+        # Keep an invalid fixture from discovering this worktree's real HEAD.
+        self.environment["GIT_CEILING_DIRECTORIES"] = str(self.root)
         destination = self.root / "private" / "efsw"
 
         result = self.prepare(
@@ -1391,9 +2044,21 @@ class PrepareEfswSourceTest(unittest.TestCase):
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Failed to clone", result.stdout + result.stderr)
+        self.assertIn("retaining HEAD", result.stdout + result.stderr)
         self.assertFalse(destination.exists())
         self.assertEqual(list(destination.parent.glob(".efsw.prepare-*")), [])
+
+    def test_readable_pin_with_missing_commit_objects_never_falls_back_after_clone(self):
+        partial = self.root / "partial-cache"
+        shutil.copytree(self.cache, partial)
+        shutil.rmtree(partial / ".git" / "objects")
+        (partial / ".git" / "objects").mkdir()
+        self.assertEqual(self.git_output("rev-parse", "HEAD", cwd=partial), self.revision)
+        destination = self.root / "private" / "efsw"
+        result = self.prepare(destination, cache=partial)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Failed to clone", result.stdout + result.stderr)
+        self.assert_no_private_source(destination)
 
     def test_never_overwrites_an_unknown_existing_destination(self):
         destination = self.root / "private" / "efsw"

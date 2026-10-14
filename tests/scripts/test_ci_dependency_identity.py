@@ -161,6 +161,33 @@ class DependencyIdentityTest(unittest.TestCase):
             self.assertNotEqual(identity.policy_identity("adb-helper", root, lock=self.adb), before["adb-policy"])
             self.assertNotEqual(identity.policy_identity("ios-native", root, lock=self.ios), before["ios-policy"])
 
+    def test_windows_security_helper_is_enrolled_without_rebuilding_either_core(self):
+        helper = "scripts/ci_dependency_windows_security.py"
+        self.assertIn(helper, identity.SHARED_POLICY_FILES)
+        self.assertIn(helper, identity.ADB_POLICY_FILES)
+        self.assertIn(helper, identity.IOS_POLICY_FILES)
+        self.assertNotIn(helper, identity.ADB_BUILD_FILES)
+        self.assertNotIn(helper, identity.IOS_BUILD_FILES)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            files = set(identity.ADB_BUILD_FILES + identity.IOS_BUILD_FILES
+                        + identity.ADB_POLICY_FILES + identity.IOS_POLICY_FILES)
+            for relative in files:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("original verifier\n", encoding="utf-8")
+            catalog_path = root / "ci/dependencies/catalog.json"
+            catalog_path.parent.mkdir(parents=True)
+            catalog_path.write_bytes((ROOT / "ci/dependencies/catalog.json").read_bytes())
+            for component, target, lock in (("adb-helper", "macos-arm64", self.adb),
+                                          ("ios-native", "arm64", self.ios)):
+                before_core = identity.core_identity(component, target, lock, root)
+                before_policy = identity.policy_identity(component, root, lock=lock)
+                (root / helper).write_text("changed trusted security helper\n", encoding="utf-8")
+                self.assertEqual(identity.core_identity(component, target, lock, root), before_core)
+                self.assertNotEqual(identity.policy_identity(component, root, lock=lock), before_policy)
+                (root / helper).write_text("original verifier\n", encoding="utf-8")
+
     def test_verifier_only_changes_requalify_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

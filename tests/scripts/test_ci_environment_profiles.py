@@ -128,6 +128,8 @@ class EnvironmentProfilesTest(unittest.TestCase):
             "cmake/prepare_efsw_source.cmake",
             "cmake/verify_pinned_source.cmake",
             "scripts/prepare_efsw_git.py",
+            "scripts/prepare_efsw_snapshot.py",
+            "cmake/apply_git_patch_series.cmake",
             "3rdparty/CMakeLists.txt",
         )
         materials = {"codeql": [self.codeql_material()]}
