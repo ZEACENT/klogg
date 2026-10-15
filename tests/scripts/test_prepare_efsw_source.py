@@ -274,8 +274,9 @@ class PrepareEfswSourceTest(unittest.TestCase):
         shim_directory.mkdir()
         self.git_log = self.root / "git-log.jsonl"
         self.git_log.write_text("")
+        # Keep Python isolation in one shebang argument for POSIX kernels.
         common = (
-            f"#!{sys.executable}\n"
+            f"#!{sys.executable} -IS\n"
             "import json, os, pathlib, shlex, socket, subprocess, sys\n"
             f"real_git = {real_git!r}\n"
             f"log_path = {str(self.git_log)!r}\n"
@@ -632,6 +633,65 @@ class PrepareEfswSourceTest(unittest.TestCase):
         self.assertEqual(self.global_config.read_bytes(), global_before)
         self.assertEqual(foreign_gitfile.read_bytes(), foreign_bytes_before)
         self.assertEqual(list(destination.parent.glob(".efsw.clone-config-*")), [])
+
+    @unittest.skipIf(os.name == "nt", "The observational executable Git shim requires POSIX")
+    def test_git_shim_startup_ignores_ambient_python_imports_and_preserves_call_context(self):
+        self.enable_different_owner_clone()
+        imports = self.root / "ambient-python"
+        imports.mkdir()
+        marker = self.root / "ambient-site-imported"
+        (imports / "sitecustomize.py").write_text(
+            f"with open({str(marker)!r}, 'w') as output: output.write('ambient site imported')\n"
+        )
+        (imports / "json.py").write_text(
+            "raise RuntimeError('ambient json import must not run in the Git shim')\n"
+        )
+        caller = self.root / "shim-caller"
+        caller.mkdir()
+        environment = self.environment.copy()
+        environment.update({
+            "PYTHONPATH": str(imports),
+            "GIT_CONFIG_PARAMETERS": "'fixture.parameters=unchanged'",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "fixture.number",
+            "GIT_CONFIG_VALUE_0": "unchanged",
+            "GIT_DIR": str(self.cache / ".git"),
+            "GIT_WORK_TREE": str(self.cache),
+            "GIT_COMMON_DIR": str(self.cache / ".git"),
+            "GIT_CEILING_DIRECTORIES": str(self.root),
+        })
+        fixture_environment_before = self.environment.copy()
+        environment_before = environment.copy()
+        arguments = self.git[1:] + ["--version"]
+
+        result = subprocess.run(
+            [self.git[0]] + arguments, cwd=caller, env=environment,
+            capture_output=True, text=True, timeout=10,
+        )
+
+        self.assertEqual(
+            result.returncode, 0,
+            result.stdout + result.stderr + f"\nAmbient site marker exists: {marker.exists()}",
+        )
+        self.assertTrue(result.stdout.startswith("git version "), result.stdout)
+        self.assertFalse(marker.exists(), "Git shim imported ambient site customization")
+        calls = self.git_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["arguments"], arguments)
+        self.assertEqual(calls[0]["working_directory"], str(caller.resolve()))
+        for field, selector in (
+            ("global_config", "GIT_CONFIG_GLOBAL"),
+            ("parameters", "GIT_CONFIG_PARAMETERS"),
+            ("count", "GIT_CONFIG_COUNT"),
+            ("git_dir", "GIT_DIR"),
+            ("git_work_tree", "GIT_WORK_TREE"),
+            ("git_common_dir", "GIT_COMMON_DIR"),
+            ("ceiling", "GIT_CEILING_DIRECTORIES"),
+        ):
+            with self.subTest(selector=selector):
+                self.assertEqual(calls[0][field], environment_before[selector])
+        self.assertEqual(environment, environment_before)
+        self.assertEqual(self.environment, fixture_environment_before)
 
     @unittest.skipIf(os.name == "nt", "The observational executable Git shim requires POSIX")
     def test_logging_inspection_does_not_relocate_an_unavailable_caller(self):

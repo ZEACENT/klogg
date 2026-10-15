@@ -86,6 +86,29 @@ jobs:
         env:
           KLOGG_WORKSPACE: ${{ github.workspace }}
 
+      - name: Acquire private coverage source and build namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # gcovr requires the build beneath its source root. Copy the exact
+          # detached/merge checkout, not the repository's default branch. Both
+          # live beneath a retained private parent outside the runner mount.
+          private_parent=$(mktemp -d /tmp/klogg-analysis.XXXXXXXX)
+          source_root=$(cd "$GITHUB_WORKSPACE" && pwd -P)
+          source_head=$(git -C "$source_root" rev-parse --verify HEAD)
+          # Local clone checks the foreign source git directory separately from
+          # the worktree. This trust is exact and confined to this job container.
+          git config --global --add safe.directory "$source_root/.git"
+          git clone --no-hardlinks --no-checkout -- "$source_root" "$private_parent/source"
+          test ! -e "$private_parent/source/.git/objects/info/alternates"
+          test ! -L "$private_parent/source/.git/objects/info/alternates"
+          git -C "$private_parent/source" checkout --detach "$source_head"
+          test "$(git -C "$private_parent/source" rev-parse --verify HEAD)" = "$source_head"
+          test "$(git -C "$source_root" rev-parse --verify HEAD)" = "$source_head"
+          printf 'KLOGG_WORKSPACE=%s/source\nKLOGG_BUILD_ROOT=%s/source/build_root\n' \
+            "$private_parent" "$private_parent" >> "$GITHUB_ENV"
+          printf 'KLOGG_CPM_SOURCE_CACHE=%s/cpm_cache\n' "$source_root" >> "$GITHUB_ENV"
+
       - name: Configure (Debug + coverage)
         shell: bash
         run: |
@@ -99,7 +122,7 @@ jobs:
             -DKLOGG_USE_VECTORSCAN=OFF \
             -DKLOGG_USE_LTO=OFF \
             -DKLOGG_OVERRIDE_MALLOC=OFF \
-            -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
+            -DCPM_SOURCE_CACHE="$KLOGG_CPM_SOURCE_CACHE" \
             -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             "$KLOGG_WORKSPACE"

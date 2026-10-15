@@ -93,6 +93,23 @@ class FakeNativeSecurity:
         del self.records[path]
 
 
+def run_native_acl_probe(path, command):
+    # Keep the built-in Windows PowerShell runtime and module namespace coherent.
+    try:
+        chain = security.directory_chain(os.environ.get("SystemRoot", ""))
+    except security.WindowsSecurityError as error:
+        raise ValueError("independent ACL probe requires a canonical Windows SystemRoot") from error
+    if len(chain) < 2:
+        raise ValueError("independent ACL probe requires a Windows SystemRoot directory")
+    runtime = pathlib.PureWindowsPath(chain[-1]) / "System32" / "WindowsPowerShell" / "v1.0"
+    environment = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+    environment["PSModulePath"] = str(runtime / "Modules")
+    environment["KLOGG_NATIVE_ACL_TEST_PATH"] = str(path)
+    return subprocess.run(
+        [str(runtime / "powershell.exe"), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        env=environment, text=True, capture_output=True, check=True, timeout=30)
+
+
 def create_native_fixture_parent(parent, name):
     try:
         return security.create_private_parent(parent, name)
@@ -101,16 +118,13 @@ def create_native_fixture_parent(parent, name):
         if context is not None:
             comparison = {"available": False, "sampled_after_rejection": True}
             try:
-                environment = dict(os.environ, KLOGG_NATIVE_ACL_TEST_PATH=context["path"])
                 inspect = (
                     "$a=Get-Acl -LiteralPath $env:KLOGG_NATIVE_ACL_TEST_PATH;"
                     "[pscustomobject]@{owner=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;"
                     "user=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value}"
                     "|ConvertTo-Json -Compress"
                 )
-                completed = subprocess.run(
-                    ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", inspect],
-                    env=environment, text=True, capture_output=True, check=True, timeout=30)
+                completed = run_native_acl_probe(context["path"], inspect)
                 observed = json.loads(completed.stdout)
                 if (not isinstance(observed, dict)
                         or any(not isinstance(observed.get(key), str)
@@ -390,7 +404,8 @@ class DirectoryPolicyModelTest(unittest.TestCase):
                     "path": PARENT, "owner_sid": FOREIGN, "user_sid": USER,
                 }
                 independent = mock.Mock(stdout=json.dumps({"owner": FOREIGN, "user": USER}))
-                with mock.patch.object(security, "create_private_parent", side_effect=primary):
+                with mock.patch.dict(os.environ, {"SystemRoot": "Z:\\Windows"}), \
+                        mock.patch.object(security, "create_private_parent", side_effect=primary):
                     with mock.patch.object(subprocess, "run", return_value=independent,
                                            side_effect=OSError("probe unavailable") if probe_fails else None) as run:
                         with mock.patch.object(sys, "stderr"):
@@ -417,7 +432,8 @@ class DirectoryPolicyModelTest(unittest.TestCase):
             17, ["powershell.exe", "-Command", "command-prefix" * 1000],
             output="probe-output " * 1000, stderr="ParserError: actual reason " * 1000,
         )
-        with mock.patch.object(security, "create_private_parent", side_effect=primary):
+        with mock.patch.dict(os.environ, {"SystemRoot": "Z:\\Windows"}), \
+                mock.patch.object(security, "create_private_parent", side_effect=primary):
             with mock.patch.object(subprocess, "run", side_effect=failure):
                 with mock.patch.object(sys, "stderr"):
                     with self.assertRaises(security.WindowsSecurityError) as caught:
@@ -432,6 +448,72 @@ class DirectoryPolicyModelTest(unittest.TestCase):
         self.assertLessEqual(len(comparison["stderr"]), 512)
         self.assertLessEqual(len(comparison["stdout"]), 512)
         self.assertIn("truncated", comparison["stderr"])
+
+    def test_independent_probe_uses_only_builtin_modules_for_its_windows_runtime(self):
+        # A child-environment model; Get-Acl itself still requires native Windows.
+        primary = security.WindowsSecurityError("original native refusal")
+        primary.windows_namespace_context = {
+            "path": PARENT, "owner_sid": FOREIGN, "user_sid": USER,
+        }
+        environment = {
+            "SystemRoot": "Z:\\Windows",
+            "PSModulePath": "Q:\\PowerShell\\7\\Modules;Q:\\UserModules",
+            "PSMODULEPATH": "Q:\\InheritedModules",
+            "KLOGG_NATIVE_ACL_TEST_PATH": "unchanged caller path",
+            "UNRELATED_PROBE_TEST": "preserved",
+        }
+        independent = mock.Mock(stdout=json.dumps({"owner": FOREIGN, "user": USER}))
+        with mock.patch.dict(os.environ, environment, clear=True):
+            before = dict(os.environ)
+            with mock.patch.object(security, "create_private_parent", side_effect=primary), \
+                    mock.patch.object(subprocess, "run", return_value=independent) as run, \
+                    mock.patch.object(sys, "stderr"):
+                with self.assertRaises(security.WindowsSecurityError) as caught:
+                    create_native_fixture_parent(PARENT, "native-private")
+            self.assertEqual(dict(os.environ), before)
+        self.assertIs(caught.exception, primary)
+        run.assert_called_once()
+        arguments, options = run.call_args
+        runtime = "Z:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+        self.assertEqual(arguments[0][:5], [
+            runtime + "\\powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        ])
+        self.assertIn("Get-Acl -LiteralPath", arguments[0][5])
+        child = options["env"]
+        module_keys = [key for key in child if key.upper() == "PSMODULEPATH"]
+        self.assertEqual(len(module_keys), 1)
+        self.assertEqual(child[module_keys[0]], runtime + "\\Modules")
+        self.assertEqual(child["KLOGG_NATIVE_ACL_TEST_PATH"], PARENT)
+        self.assertEqual(child["UNRELATED_PROBE_TEST"], "preserved")
+        self.assertEqual({key: value for key, value in options.items() if key != "env"}, {
+            "text": True, "capture_output": True, "check": True, "timeout": 30,
+        })
+        self.assertTrue(primary.windows_namespace_independent["available"])
+
+    def test_missing_or_unsafe_system_root_never_launches_another_runtime(self):
+        for root in (None, "", "Windows", "Z:Windows", "Z:\\", "Z:\\Windows\\..",
+                     "Z:\\Windows.", "Z:\\Windows ", "Z:/Windows", "\\\\host\\Windows",
+                     "\\\\?\\Z:\\Windows", "Z:\\Windows:stream"):
+            with self.subTest(root=root):
+                primary = security.WindowsSecurityError("original native refusal")
+                primary.windows_namespace_context = {
+                    "path": PARENT, "owner_sid": FOREIGN, "user_sid": USER,
+                }
+                environment = {} if root is None else {"SystemRoot": root}
+                with mock.patch.dict(os.environ, environment, clear=True), \
+                        mock.patch.object(security, "create_private_parent", side_effect=primary), \
+                        mock.patch.object(subprocess, "run") as run, \
+                        mock.patch.object(sys, "stderr"):
+                    with self.assertRaises(security.WindowsSecurityError) as caught:
+                        create_native_fixture_parent(PARENT, "native-private")
+                self.assertIs(caught.exception, primary)
+                self.assertEqual(primary.args, ("original native refusal",))
+                run.assert_not_called()
+                comparison = primary.windows_namespace_independent
+                self.assertFalse(comparison["available"])
+                self.assertTrue(comparison["sampled_after_rejection"])
+                self.assertIn("SystemRoot", comparison["failure"])
+                self.assertLessEqual(len(comparison["failure"]), 192)
 
     def test_filesystem_reparse_volume_path_alias_and_identity_changes_fail_closed(self):
         for changed in (
@@ -587,12 +669,41 @@ class NativeDescriptorBufferModelTest(unittest.TestCase):
             self.assertEqual(api.freed, [ctypes.addressof(api.buffer)])
 
 
+class NativeFixturePortabilityModelTest(unittest.TestCase):
+    def test_owned_temporary_parent_is_canonical_before_native_backend_selection(self):
+        # Exercise setup only: no alias privilege or native Windows call is needed.
+        case = NativeDirectorySecurityTest("test_atomic_owner_only_creation_and_native_lease")
+        with tempfile.TemporaryDirectory() as owned:
+            canonical = pathlib.Path(owned).resolve(strict=True)
+            (canonical / "alias-child").mkdir()
+            alias = canonical / "alias-child" / ".."
+            temporary = mock.Mock()
+            temporary.name = str(alias)
+
+            def select_backend():
+                self.assertEqual(case.parent, canonical)
+                return mock.sentinel.native_api
+
+            resolve = pathlib.Path.resolve
+            try:
+                with mock.patch.object(tempfile, "TemporaryDirectory", return_value=temporary), \
+                        mock.patch.object(security, "NativeSecurityApi", side_effect=select_backend), \
+                        mock.patch.object(pathlib.Path, "resolve", autospec=True,
+                                          side_effect=resolve) as canonicalize:
+                    case.setUp()
+                    canonicalize.assert_any_call(alias, strict=True)
+                self.assertIs(case.api, mock.sentinel.native_api)
+            finally:
+                case.doCleanups()
+            temporary.cleanup.assert_called_once_with()
+
+
 @unittest.skipUnless(os.name == "nt", "requires native Windows ACL and token APIs")
 class NativeDirectorySecurityTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.parent = pathlib.Path(self.temporary.name)
+        self.parent = pathlib.Path(self.temporary.name).resolve(strict=True)
         self.api = security.NativeSecurityApi()
 
     def test_atomic_owner_only_creation_and_native_lease(self):
@@ -610,7 +721,6 @@ class NativeDirectorySecurityTest(unittest.TestCase):
         finally:
             self.api.close_directory(handle)
         # Independent .NET ACL/token inspection, not the production ctypes parser.
-        environment = dict(os.environ, KLOGG_NATIVE_ACL_TEST_PATH=str(root))
         inspect = (
             "$a=Get-Acl -LiteralPath $env:KLOGG_NATIVE_ACL_TEST_PATH;"
             "$r=@($a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) | "
@@ -622,9 +732,7 @@ class NativeDirectorySecurityTest(unittest.TestCase):
             "user=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;"
             "protected=$a.AreAccessRulesProtected;rules=$r}|ConvertTo-Json -Depth 4 -Compress"
         )
-        completed = subprocess.run(
-            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", inspect],
-            env=environment, text=True, capture_output=True, check=True, timeout=30)
+        completed = run_native_acl_probe(root, inspect)
         independent = json.loads(completed.stdout)
         self.assertEqual(independent["owner"], independent["user"])
         self.assertTrue(independent["protected"])

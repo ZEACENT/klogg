@@ -138,6 +138,7 @@ set_tests_properties(
   ios_compiler_portability_contract
   PROPERTIES TIMEOUT 60
 )
+set_tests_properties(external_source_asset_package_contract PROPERTIES RUN_SERIAL TRUE)
 # The identity test walks the whole repository (git ls-files with an os.walk
 # fallback); give it its own outer bound with real headroom on slow
 # filesystems instead of raising the shared 60s block for everyone.

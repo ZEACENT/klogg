@@ -87,8 +87,17 @@ jobs:
             --output-dir "$RUNNER_TEMP/klogg-codeql" \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Acquire private analysis build namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the root-owned parent alive across prebuild and traced build.
+          private_parent=$(mktemp -d /tmp/klogg-analysis.XXXXXXXX)
+          printf 'KLOGG_ANALYSIS_PRIVATE_ROOT=%s\n' "$private_parent" >> "$GITHUB_ENV"
+
       - name: Configure traced build
         shell: bash
+        working-directory: ${{ env.KLOGG_ANALYSIS_PRIVATE_ROOT }}
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -102,10 +111,12 @@ jobs:
 
       - name: Prebuild vendored dependencies outside CodeQL tracing
         shell: bash
+        working-directory: ${{ env.KLOGG_ANALYSIS_PRIVATE_ROOT }}
         run: cmake --build build -t klogg_codeql_thirdparty
 
       - name: Verify traced build contains only first-party work
         shell: bash
+        working-directory: ${{ env.KLOGG_ANALYSIS_PRIVATE_ROOT }}
         run: |
           cmake --build build -t klogg -- -n > /tmp/codeql-traced-plan.txt
           if grep -E 'cpm_cache|_deps|3rdparty/CMakeFiles' /tmp/codeql-traced-plan.txt; then
@@ -122,6 +133,7 @@ jobs:
 
       - name: Build traced application
         shell: bash
+        working-directory: ${{ env.KLOGG_ANALYSIS_PRIVATE_ROOT }}
         run: cmake --build build -t klogg
 
       - name: Perform CodeQL Analysis

@@ -35,7 +35,7 @@ class DependencyCoreTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = pathlib.Path(self.temporary.name)
+        self.root = pathlib.Path(self.temporary.name).resolve(strict=True)
         self.source = self.root / "staged"
         self.source.mkdir()
         self.archive = self.root / "core.tar.gz"
@@ -560,6 +560,33 @@ def ntfs_permission_model():
 
 class CoreFixturePortabilityModelTest(unittest.TestCase):
     """Run the real fixture bodies with modeled platform selection, not Win32."""
+
+    def test_owned_temporary_root_is_canonical_before_backend_selection(self):
+        # A test-owned lexical alias models an 8.3 ancestor, not native Win32.
+        module = sys.modules[__name__]
+        case = DependencyCoreTest()
+        with tempfile.TemporaryDirectory() as owned:
+            canonical = pathlib.Path(owned).resolve(strict=True)
+            (canonical / "alias-child").mkdir()
+            alias = canonical / "alias-child" / ".."
+            temporary = mock.Mock()
+            temporary.name = str(alias)
+
+            def select_backend():
+                self.assertEqual(case.root, canonical)
+                return os.name
+
+            resolve = pathlib.Path.resolve
+            try:
+                with mock.patch.object(tempfile, "TemporaryDirectory", return_value=temporary), \
+                        mock.patch.object(module, "fixture_platform", side_effect=select_backend), \
+                        mock.patch.object(pathlib.Path, "resolve", autospec=True,
+                                          side_effect=resolve) as canonicalize:
+                    case.setUp()
+                    canonicalize.assert_any_call(alias, strict=True)
+            finally:
+                case.doCleanups()
+            temporary.cleanup.assert_called_once_with()
 
     def test_positive_fixture_selects_private_windows_creation_api(self):
         module = sys.modules[__name__]

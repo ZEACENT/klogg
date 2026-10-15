@@ -174,6 +174,29 @@ class ExternalSourceAssetPackageContractTest(unittest.TestCase):
         cls.adb = cls.contract["source_sets"]["adb-helper"]
         cls.ios = cls.contract["source_sets"]["ios-native"]
 
+    def test_package_contract_has_exclusive_ctest_scheduling(self):
+        cmake = required_text(ROOT / "tests" / "CMakeLists.txt")
+        name = "external_source_asset_package_contract"
+        self.assertRegex(
+            cmake,
+            r"add_test\(\s*NAME external_source_asset_package_contract\s+"
+            r"COMMAND \$\{Python3_EXECUTABLE\} \$\{CMAKE_SOURCE_DIR\}/"
+            r"tests/scripts/test_external_source_asset_package_contract\.py\s*\)",
+        )
+        shared_timeout = re.search(
+            r"set_tests_properties\(([^)]*?)PROPERTIES TIMEOUT 60\s*\)",
+            cmake,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(shared_timeout)
+        self.assertIn(name, shared_timeout.group(1).split())
+        serial_blocks = [
+            block.split()
+            for block in re.findall(r"(?m)^[ \t]*set_tests_properties\(([^)]*)\)", cmake)
+            if name in block.split() and "RUN_SERIAL" in block.split()
+        ]
+        self.assertEqual(serial_blocks, [[name, "PROPERTIES", "RUN_SERIAL", "TRUE"]])
+
     def test_windows_version_smoke_waits_for_the_gui_app_exit_code(self):
         # klogg.exe is a GUI-subsystem binary: `& app -v` in pwsh returns
         # immediately and never updates $LASTEXITCODE, so the smoke must drive
@@ -1487,12 +1510,20 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
         for extra in extras:
             with self.subTest(extra=extra):
                 manifest, _ = self.make_manifest()
-                self.write_asset(extra, b"unreferenced\n")
-                result = self.run_verifier(manifest)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertRegex(
-                    (result.stdout + result.stderr).lower(), r"unreferenced|publication"
+                self.assertFalse(
+                    any((self.root / candidate).exists() for candidate in extras),
+                    "each negative scenario must start without another unreferenced asset",
                 )
+                try:
+                    self.write_asset(extra, b"unreferenced\n")
+                    result = self.run_verifier(manifest)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertRegex(
+                        (result.stdout + result.stderr).lower(), r"unreferenced|publication"
+                    )
+                    self.assertIn(extra, result.stderr)
+                finally:
+                    (self.root / extra).unlink(missing_ok=True)
 
     def test_manifest_verifier_requires_exact_platform_source_coverage(self):
         scenarios = {

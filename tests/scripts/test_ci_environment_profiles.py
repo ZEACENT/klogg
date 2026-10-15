@@ -283,14 +283,40 @@ class EnvironmentProfilesTest(unittest.TestCase):
                 for key in set(environment) & set(image_env):
                     self.assertEqual(environment[key], image_env[key], key)
 
+    def analysis_workflow_options(self, workflow, configure_name):
+        configure = workflow.split("- name: " + configure_name, 1)[1].split("- name:", 1)[0]
+        options = [token.replace('"', '') for token in re.findall(r"-D[^\s\\]+", configure)]
+        if "-DCPM_SOURCE_CACHE=$KLOGG_CPM_SOURCE_CACHE" in options:
+            # The source checkout can be private while the authenticated cache
+            # remains at its original runtime location. Prove the alias first.
+            for binding in ('source_root=$(cd "$GITHUB_WORKSPACE" && pwd -P)',
+                            r'''printf 'KLOGG_CPM_SOURCE_CACHE=%s/cpm_cache\n' "$source_root" >> "$GITHUB_ENV"'''):
+                self.assertRegex(workflow, r"(?m)^[ \t]*" + re.escape(binding) + r"[ \t]*$")
+            options = [token.replace("$KLOGG_CPM_SOURCE_CACHE", "@WORKSPACE@/cpm_cache") for token in options]
+        return [
+            token.replace("$KLOGG_WORKSPACE", "@WORKSPACE@").replace("$GITHUB_WORKSPACE", "@WORKSPACE@")
+            for token in options
+        ]
+
+    def test_runtime_cache_alias_requires_original_checkout_binding(self):
+        workflow = (ROOT / ".github/workflows/coverage.yml").read_text(encoding="utf-8")
+        source = 'source_root=$(cd "$GITHUB_WORKSPACE" && pwd -P)'
+        cache = r'''printf 'KLOGG_CPM_SOURCE_CACHE=%s/cpm_cache\n' "$source_root" >> "$GITHUB_ENV"'''
+        for old, new in ((source, 'source_root="$private_parent/source"'),
+                         (cache, cache.replace('"$source_root"', '"$private_parent/source"')),
+                         (cache, "# cache binding omitted"),
+                         (source, "# " + source), (cache, "# " + cache)):
+            with self.subTest(binding=new):
+                self.assertIn(old, workflow)
+                with self.assertRaises(AssertionError):
+                    self.analysis_workflow_options(workflow.replace(old, new, 1), "Configure (Debug + coverage)")
+
     def test_analysis_roles_keep_their_own_options_and_workspace_is_runtime_only(self):
         for profile, workflow_name, configure_name in (("static", "static-analysis.yml", "Configure (generate compile_commands.json)"),
                                                         ("coverage", "coverage.yml", "Configure (Debug + coverage)"),
                                                         ("codeql", "codeql-analysis.yml", "Configure traced build")):
             workflow = (ROOT / ".github/workflows" / workflow_name).read_text(encoding="utf-8")
-            configure = workflow.split("- name: " + configure_name, 1)[1].split("- name:", 1)[0]
-            options = re.findall(r"-D[^\s\\]+", configure)
-            options = [token.replace('"', '').replace("$KLOGG_WORKSPACE", "@WORKSPACE@").replace("$GITHUB_WORKSPACE", "@WORKSPACE@") for token in options]
+            options = self.analysis_workflow_options(workflow, configure_name)
             config = profiles_api.profile_configuration(self.profiles, ANALYSIS, profile)
             self.assertEqual(config["cmake_options"], ["-G", "Ninja"] + options)
             self.assertEqual(config["role"], profile)
