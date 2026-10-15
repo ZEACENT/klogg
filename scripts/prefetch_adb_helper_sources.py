@@ -358,6 +358,10 @@ def safe_extract(
     return matched_exclusions
 
 
+class DownloadSizeError(RuntimeError):
+    """A response exceeded its caller-supplied, non-retryable byte budget."""
+
+
 def download(
     url: str,
     destination: pathlib.Path,
@@ -365,7 +369,16 @@ def download(
     backoff_seconds: float = DOWNLOAD_RETRY_BASE_SECONDS,
     sleep=time.sleep,
     cancel_event: Optional[threading.Event] = None,
+    *,
+    max_bytes: Optional[int] = None,
 ) -> None:
+    """Atomically download a response, optionally bounding bytes per attempt.
+
+    The default preserves existing callers. A bounded response may read one
+    overflow byte to distinguish exact-limit EOF; excess bytes are never written.
+    """
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
+        raise ValueError("download max_bytes must be a positive integer or None")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
         temporary = pathlib.Path(stream.name)
@@ -379,12 +392,19 @@ def download(
                     request, timeout=DOWNLOAD_SOCKET_TIMEOUT_SECONDS
                 ) as response, temporary.open("wb") as output:
                     read_chunk = getattr(response, "read1", response.read)
+                    total = 0
                     while True:
                         if cancel_event is not None and cancel_event.is_set():
                             raise RuntimeError("ADB source prefetch cancelled")
-                        chunk = read_chunk(DOWNLOAD_CHUNK_SIZE)
+                        size = DOWNLOAD_CHUNK_SIZE if max_bytes is None else min(
+                            DOWNLOAD_CHUNK_SIZE, max_bytes - total + 1
+                        )
+                        chunk = read_chunk(size)
                         if not chunk:
                             break
+                        total += len(chunk)
+                        if max_bytes is not None and total > max_bytes:
+                            raise DownloadSizeError("download exceeds byte limit")
                         output.write(chunk)
                 temporary.replace(destination)
                 return

@@ -1,9 +1,11 @@
 import hashlib
+import io
 import json
 import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
 
@@ -36,7 +38,9 @@ def pinned_material(**overrides):
 
 
 def fake_downloader(payload):
-    def download(url, destination):
+    def download(url, destination, *, max_bytes):
+        assert max_bytes == fetch_codeql_bundle.MAX_BUNDLE_BYTES
+        # Deliberately ignore the budget here to retain post-download defenses.
         pathlib.Path(destination).write_bytes(payload)
 
     return download
@@ -111,6 +115,74 @@ class FetchCodeqlBundleTest(unittest.TestCase):
             finally:
                 fetch_codeql_bundle.MAX_BUNDLE_BYTES = original_limit
             self.assertFalse((output / "codeql-bundle-linux64.tar.gz").exists())
+
+    def test_default_transport_stops_at_the_first_overflow_byte(self):
+        class Response:
+            def __init__(self):
+                self.read_sizes = []
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused):
+                self.closed = True
+                self.partial_payloads = [path.read_bytes() for path in output.iterdir()]
+
+            def read(self, size):
+                raise AssertionError("read1 must be preferred")
+
+            def read1(self, size):
+                self.read_sizes.append(size)
+                if len(self.read_sizes) == 1:
+                    return b"12345678"
+                if len(self.read_sizes) == 2:
+                    return b"9"
+                raise AssertionError("transport continued reading after the first overflow byte")
+
+        response = Response()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary) / "repo"
+            write_materials(root, [pinned_material()])
+            output = pathlib.Path(temporary) / "out"
+            with mock.patch.object(fetch_codeql_bundle, "MAX_BUNDLE_BYTES", 8), mock.patch.object(
+                fetch_codeql_bundle.transport.urllib.request, "urlopen", return_value=response
+            ) as opened, mock.patch.object(fetch_codeql_bundle.transport, "sha256") as digest:
+                with self.assertRaisesRegex(fetch_codeql_bundle.BundleError, "size bound") as caught:
+                    fetch_codeql_bundle.fetch_bundle(root, output)
+            self.assertIsInstance(caught.exception.__cause__, fetch_codeql_bundle.transport.DownloadSizeError)
+            opened.assert_called_once()
+            digest.assert_not_called()
+            self.assertEqual(response.read_sizes, [9, 1])
+            self.assertEqual(response.partial_payloads, [b"12345678"])
+            self.assertTrue(response.closed)
+            self.assertEqual(list(output.iterdir()), [])
+
+    def test_default_transport_accepts_exact_bound_then_verifies_checksum(self):
+        response = io.BytesIO(PAYLOAD)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary) / "repo"
+            write_materials(root, [pinned_material()])
+            output = pathlib.Path(temporary) / "out"
+            with mock.patch.object(fetch_codeql_bundle, "MAX_BUNDLE_BYTES", len(PAYLOAD)), mock.patch.object(
+                fetch_codeql_bundle.transport.urllib.request, "urlopen", return_value=response
+            ):
+                bundle = fetch_codeql_bundle.fetch_bundle(root, output)
+            self.assertEqual(bundle.read_bytes(), PAYLOAD)
+            self.assertTrue(response.closed)
+            self.assertEqual(list(output.iterdir()), [bundle])
+
+    def test_downloader_type_error_does_not_fall_back_to_an_unbounded_call(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary) / "repo"
+            write_materials(root, [pinned_material()])
+            output = pathlib.Path(temporary) / "out"
+            downloader = mock.Mock(side_effect=TypeError("unsupported byte budget"))
+            with self.assertRaisesRegex(TypeError, "unsupported byte budget"):
+                fetch_codeql_bundle.fetch_bundle(root, output, downloader=downloader)
+            downloader.assert_called_once_with(pinned_material()["url"], output / "codeql-bundle-linux64.tar.gz",
+                                               max_bytes=fetch_codeql_bundle.MAX_BUNDLE_BYTES)
+            self.assertEqual(list(output.iterdir()), [])
 
     def test_main_exposes_the_bundle_path_through_the_github_output(self):
         with tempfile.TemporaryDirectory() as temporary:

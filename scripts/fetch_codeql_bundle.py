@@ -66,7 +66,7 @@ def fetch_bundle(root, output_dir, *, downloader=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     destination = output_dir / "codeql-bundle-linux64.tar.gz"
     try:
-        downloader(pin["url"], destination)
+        downloader(pin["url"], destination, max_bytes=MAX_BUNDLE_BYTES)
         if not destination.is_file() or destination.is_symlink():
             raise BundleError("CodeQL bundle download did not produce a regular file")
         if destination.stat().st_size > MAX_BUNDLE_BYTES:
@@ -74,8 +74,10 @@ def fetch_bundle(root, output_dir, *, downloader=None):
         digest = transport.sha256(destination)
         if digest != pin["sha256"]:
             raise BundleError("CodeQL bundle checksum does not match the reviewed pin")
-    except BaseException:
+    except BaseException as error:
         destination.unlink(missing_ok=True)
+        if isinstance(error, transport.DownloadSizeError):
+            raise BundleError("CodeQL bundle exceeds the reviewed size bound") from error
         raise
     return destination
 
