@@ -461,6 +461,53 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("rootPath, 0, shouldStop", scheduler)
         self.assertIn("preserveModifiedAfter, {}, 0,", scheduler)
 
+    def test_capture_child_observations_cover_pre_application_startup(self):
+        main = function_body(UNIT_TEST_MAIN.read_text(), "int main(")
+        ordered = (
+            "recordCaptureChildPhase( CaptureChildPhase::MainEnter );",
+            "QApplication a( argc, argv );",
+            "recordCaptureChildPhase( CaptureChildPhase::ApplicationReady );",
+            "configureTestTempDir();",
+            "recordCaptureChildPhase( CaptureChildPhase::CatchDispatch );",
+            "Catch::Session().run",
+        )
+        for statement in ordered:
+            self.assertIn(statement, main)
+        self.assertEqual([main.index(statement) for statement in ordered],
+                         sorted(main.index(statement) for statement in ordered))
+
+    def test_capture_child_observations_do_not_gate_the_handshake(self):
+        source = (ROOT / "tests/unit/capturestore_test.cpp").read_text()
+        child = function_body(source, 'TEST_CASE( "CaptureStore child holds active process marker" )')
+        ordered = (
+            "recordCaptureChildPhase( CaptureChildPhase::BeforeStore );",
+            "CaptureStore store( captureId, rootPath );",
+            "recordCaptureChildPhase( CaptureChildPhase::StoreReady );",
+            "recordCaptureChildPhase( CaptureChildPhase::ReadyPublishBegin );",
+            "QSaveFile readyFile( readyPath );",
+            "recordCaptureChildPhase( CaptureChildPhase::ReadyCommitBegin );",
+            "REQUIRE( readyFile.commit() );",
+            "recordCaptureChildPhase( CaptureChildPhase::ReadyCommitted );",
+            "REQUIRE( waitForFile( releasePath ) );",
+        )
+        for statement in ordered:
+            self.assertIn(statement, child)
+        self.assertEqual([child.index(statement) for statement in ordered],
+                         sorted(child.index(statement) for statement in ordered))
+        startup = function_body(source, "bool startAndWaitUntilReady(")
+        self.assertIn("waitForStarted( 5000 )", startup)
+        self.assertIn("readyContents_ = waitForPublishedContent( readyPath_ );", startup)
+        self.assertIn('waitUntilMarkerRecordCoherent() || failStartup( "marker-coherence" )', startup)
+        release = function_body(source, "bool releaseAndWait(")
+        for body in (startup, release):
+            self.assertNotIn("captureChildPhaseSnapshot", body)
+            self.assertNotIn("KLOGG_CAPTURESTORE_CHILD_PHASES", body)
+        failure = function_body(source, "bool failStartup(")
+        self.assertIn("captureChildPhaseSnapshot", failure)
+        self.assertIn("bounded( startupDiagnostic_, 16384 )", failure)
+        self.assertIn("catch ( ... )", failure)
+        self.assertTrue(failure.rstrip().endswith("return false;\n    }"))
+
     def test_capture_background_workers_stop_before_qt_teardown(self):
         header = CAPTURESTORE_HEADER.read_text()
         source = CAPTURESTORE_SOURCE.read_text()

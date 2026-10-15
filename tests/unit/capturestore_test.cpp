@@ -20,6 +20,7 @@
 #include <catch2/catch.hpp>
 
 #include "test_utils.h"
+#include "capture_child_observation.h"
 
 #include <algorithm>
 #include <atomic>
@@ -760,6 +761,8 @@ class ActiveCaptureChild {
         environment.insert( QStringLiteral( "KLOGG_TEST_PRESERVE_TEMP_DIR" ),
                             QStringLiteral( "1" ) );
         environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_ROOT" ), rootPath );
+        environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_PHASES" ),
+                            QStringLiteral( "1" ) );
         environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_ID" ), captureId );
         environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_READY" ), readyPath_ );
         environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_RELEASE" ), releasePath_ );
@@ -886,6 +889,10 @@ class ActiveCaptureChild {
                       bounded( qEnvironmentVariable( "KLOGG_CAPTURE_COORDINATION_ROOT" ), 512 ),
                       output( process_.readAllStandardOutput() ),
                       output( process_.readAllStandardError() ) );
+            startupDiagnostic_ += QLatin1Char( '\n' )
+                + klogg::testing::captureChildPhaseSnapshot(
+                    process_.processEnvironment().value(
+                        QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_ROOT" ) ) );
             startupDiagnostic_ = bounded( startupDiagnostic_, 16384 );
             std::cerr << startupDiagnostic_.toStdString() << '\n';
         }
@@ -949,6 +956,89 @@ class ActiveCaptureChild {
     bool started_ = false;
 };
 } // namespace
+
+TEST_CASE( "Capture child phase records are bounded and opt in",
+           "[capturestore][child-phase-observation]" )
+{
+    using namespace klogg::testing;
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const ScopedEnvironmentVariable rootGuard{ "KLOGG_CAPTURESTORE_CHILD_ROOT",
+                                                root.path().toUtf8() };
+    const ScopedEnvironmentVariable enabledGuard{ "KLOGG_CAPTURESTORE_CHILD_PHASES", "1" };
+
+    SECTION( "exact allowlisted phases round trip" )
+    {
+        QStringList expected;
+        for ( std::size_t i = 0; i < CaptureChildPhaseNames.size(); ++i ) {
+            recordCaptureChildPhase( static_cast<CaptureChildPhase>( i ) );
+            const auto token = QString::fromLatin1( CaptureChildPhaseNames[ i ] );
+            expected.append( token );
+            QFile record( root.filePath( QStringLiteral( ".child-phase-" ) + token ) );
+            REQUIRE( record.open( QIODevice::ReadOnly ) );
+            const auto contents = record.read( 65 );
+            REQUIRE( contents == token.toLatin1() + '\n' );
+            REQUIRE( contents.size() <= 64 );
+        }
+        REQUIRE( captureChildPhaseSnapshot( root.path() )
+                 == QStringLiteral( "observed_child_phases=" ) + expected.join( QLatin1Char( ',' ) ) );
+        REQUIRE( captureChildPhaseSnapshot( root.path() ).size() <= 512 );
+    }
+    SECTION( "disabled or unknown phases create nothing" )
+    {
+        {
+            const ScopedEnvironmentVariable disabled{ "KLOGG_CAPTURESTORE_CHILD_PHASES", "" };
+            recordCaptureChildPhase( CaptureChildPhase::MainEnter );
+        }
+        recordCaptureChildPhase( static_cast<CaptureChildPhase>( 255 ) );
+        REQUIRE( QDir( root.path() ).entryList( QDir::Files | QDir::Hidden ).isEmpty() );
+    }
+    SECTION( "existing records are never replaced" )
+    {
+        QFile record( root.filePath( QStringLiteral( ".child-phase-main-enter" ) ) );
+        REQUIRE( record.open( QIODevice::WriteOnly | QIODevice::NewOnly ) );
+        REQUIRE( record.write( "owned\n" ) == 6 );
+        record.close();
+        REQUIRE_NOTHROW( recordCaptureChildPhase( CaptureChildPhase::MainEnter ) );
+        REQUIRE( record.open( QIODevice::ReadOnly ) );
+        REQUIRE( record.readAll() == QByteArrayLiteral( "owned\n" ) );
+        REQUIRE( captureChildPhaseSnapshot( root.path() )
+                 == QStringLiteral( "observed_child_phases=none" ) );
+    }
+    SECTION( "missing roots and directory destinations are harmless refusals" )
+    {
+        {
+            const ScopedEnvironmentVariable missing{ "KLOGG_CAPTURESTORE_CHILD_ROOT",
+                root.filePath( QStringLiteral( "missing" ) ).toUtf8() };
+            REQUIRE_NOTHROW( recordCaptureChildPhase( CaptureChildPhase::MainEnter ) );
+            REQUIRE_FALSE( QFileInfo::exists( root.filePath( QStringLiteral( "missing" ) ) ) );
+        }
+        REQUIRE( QDir( root.path() ).mkdir( QStringLiteral( ".child-phase-main-enter" ) ) );
+        REQUIRE_NOTHROW( recordCaptureChildPhase( CaptureChildPhase::MainEnter ) );
+        REQUIRE( captureChildPhaseSnapshot( root.path() )
+                 == QStringLiteral( "observed_child_phases=none" ) );
+    }
+}
+
+TEST_CASE( "Capture child phase snapshots accept only complete known records",
+           "[capturestore][child-phase-observation]" )
+{
+    using namespace klogg::testing;
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto contents = GENERATE( QByteArrayLiteral( "main-enter\n" ),
+        QByteArrayLiteral( "main-enter" ), QByteArrayLiteral( "main-enter\nextra" ),
+        QByteArrayLiteral( "VERY_SECRET_UNKNOWN_PHASE\n" ), QByteArray( 1024, 'x' ) );
+    QFile record( root.filePath( QStringLiteral( ".child-phase-main-enter" ) ) );
+    REQUIRE( record.open( QIODevice::WriteOnly | QIODevice::NewOnly ) );
+    REQUIRE( record.write( contents ) == contents.size() );
+    record.close();
+    const auto snapshot = captureChildPhaseSnapshot( root.path() );
+    REQUIRE( snapshot == ( contents == QByteArrayLiteral( "main-enter\n" )
+        ? QStringLiteral( "observed_child_phases=main-enter" )
+        : QStringLiteral( "observed_child_phases=none" ) ) );
+    REQUIRE_FALSE( snapshot.contains( QStringLiteral( "VERY_SECRET" ) ) );
+}
 
 TEST_CASE( "Capture child readiness keeps successful and failed startup contracts",
            "[capturestore][maintenance-lifecycle]" )
@@ -2727,6 +2817,8 @@ TEST_CASE( "CaptureStore cleanup preserves a live foreign process marker" )
 
 TEST_CASE( "CaptureStore child holds active process marker" )
 {
+    using klogg::testing::CaptureChildPhase;
+    using klogg::testing::recordCaptureChildPhase;
     const auto rootPath = qEnvironmentVariable( "KLOGG_CAPTURESTORE_CHILD_ROOT" );
     if ( rootPath.isEmpty() ) {
         SUCCEED();
@@ -2736,22 +2828,31 @@ TEST_CASE( "CaptureStore child holds active process marker" )
     const auto captureId = qEnvironmentVariable( "KLOGG_CAPTURESTORE_CHILD_ID" );
     const auto readyPath = qEnvironmentVariable( "KLOGG_CAPTURESTORE_CHILD_READY" );
     const auto releasePath = qEnvironmentVariable( "KLOGG_CAPTURESTORE_CHILD_RELEASE" );
+    recordCaptureChildPhase( CaptureChildPhase::BeforeStore );
     CaptureStore store( captureId, rootPath );
+    recordCaptureChildPhase( CaptureChildPhase::StoreReady );
     const auto spillsSegment
         = qEnvironmentVariableIsSet( "KLOGG_CAPTURESTORE_CHILD_SPILL" );
     if ( spillsSegment ) {
+        recordCaptureChildPhase( CaptureChildPhase::AppendBegin );
         store.appendUtf8( QByteArrayLiteral( "external-a\nexternal-b\n" ) );
+        recordCaptureChildPhase( CaptureChildPhase::SpillBegin );
         REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
+        recordCaptureChildPhase( CaptureChildPhase::SpillComplete );
     } else if ( qEnvironmentVariableIsSet( "KLOGG_CAPTURESTORE_CHILD_WRITE" ) ) {
+        recordCaptureChildPhase( CaptureChildPhase::AppendBegin );
         store.appendUtf8( QByteArrayLiteral( "replacement\n" ) );
     }
+    recordCaptureChildPhase( CaptureChildPhase::ReadyPublishBegin );
     QSaveFile readyFile( readyPath );
     readyFile.setDirectWriteFallback( false );
     REQUIRE( readyFile.open( QIODevice::WriteOnly ) );
     const auto captureIdentity
         = CaptureStoreTestAccess::capturePathIdentity( store ).toUtf8();
     REQUIRE( readyFile.write( captureIdentity ) == captureIdentity.size() );
+    recordCaptureChildPhase( CaptureChildPhase::ReadyCommitBegin );
     REQUIRE( readyFile.commit() );
+    recordCaptureChildPhase( CaptureChildPhase::ReadyCommitted );
     REQUIRE( waitForFile( releasePath ) );
     if ( spillsSegment ) {
         REQUIRE( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ),

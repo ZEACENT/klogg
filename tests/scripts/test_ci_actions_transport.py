@@ -40,6 +40,88 @@ class ActionsMetadataTest(unittest.TestCase):
             with self.assertRaisesRegex(transport.TransportError, "oversized"):
                 transport.metadata("metadata")
 
+    def test_request_failure_names_safe_stage_and_status_through_existing_wrapper(self):
+        cases = (
+            ("artifacts/11120135967", ("endpoint=artifact", "artifact=11120135967")),
+            ("runs/36764134677", ("endpoint=run", "run=36764134677")),
+            ("runs/36764134677/attempts/1", ("endpoint=run-attempt", "attempt=1")),
+            ("runs/36764134677/attempts/1/jobs?per_page=100",
+             ("endpoint=run-attempt-jobs", "attempt=1")),
+        )
+        for suffix, expected in cases:
+            with self.subTest(endpoint=suffix):
+                error = subprocess.CalledProcessError(
+                    1, ["gh", "api", "VERY_SECRET_COMMAND"], output=b"VERY_SECRET_BODY",
+                    stderr=b"gh: VERY_SECRET_MESSAGE (HTTP 403)\n",
+                )
+                with mock.patch.object(transport.subprocess, "run", side_effect=error) as run:
+                    with self.assertRaises(source_cache.SourceCacheError) as caught:
+                        source_cache._metadata("repos/ZEACENT/klogg/actions/" + suffix)
+                message = str(caught.exception)
+                for field in expected + ("failure=exit", "exit=1", "http=403"):
+                    self.assertIn(field, message)
+                self.assertNotIn("VERY_SECRET", message)
+                self.assertIs(caught.exception.__cause__.__cause__, error)
+                run.assert_called_once()
+
+    def test_timeout_spawn_and_generic_subprocess_failures_are_distinct_and_private(self):
+        cases = (
+            (subprocess.TimeoutExpired("VERY_SECRET_COMMAND", 30,
+                                       output=b"VERY_SECRET_BODY", stderr=b"VERY_SECRET_ERROR"),
+             ("failure=timeout", "http=unknown")),
+            (OSError(2, "VERY_SECRET_MESSAGE", "VERY_SECRET_FILENAME"),
+             ("failure=os-error", "errno=2", "http=unknown")),
+            (subprocess.SubprocessError("VERY_SECRET_MESSAGE"),
+             ("failure=subprocess", "http=unknown")),
+        )
+        for error, expected in cases:
+            with self.subTest(failure=type(error).__name__):
+                with mock.patch.object(transport.subprocess, "run", side_effect=error) as run:
+                    with self.assertRaises(transport.TransportError) as caught:
+                        transport.metadata("repos/ZEACENT/klogg/actions/runs/42")
+                message = str(caught.exception)
+                self.assertIn("endpoint=run", message)
+                for field in expected:
+                    self.assertIn(field, message)
+                self.assertNotIn("VERY_SECRET", message)
+                self.assertIs(caught.exception.__cause__, error)
+                run.assert_called_once()
+
+    def test_ambiguous_unstructured_or_oversized_stderr_never_supplies_http_status(self):
+        for stderr in (
+            b"VERY_SECRET_BODY (HTTP 403)",
+            b"gh: first (HTTP 403)\ngh: second (HTTP 502)\n",
+            b"gh: invalid (HTTP 900)\n",
+            b"gh: message (HTTP 403)\ntrailing VERY_SECRET_BODY\n",
+            b"VERY_SECRET_BODY" * 1000,
+        ):
+            with self.subTest(stderr_size=len(stderr)):
+                error = subprocess.CalledProcessError(1, ["VERY_SECRET_COMMAND"], stderr=stderr)
+                with mock.patch.object(transport.subprocess, "run", side_effect=error):
+                    with self.assertRaises(transport.TransportError) as caught:
+                        transport.metadata("metadata")
+                self.assertIn("http=unknown", str(caught.exception))
+                self.assertNotIn("VERY_SECRET", str(caught.exception))
+
+    def test_unrecognized_paths_and_queries_are_not_echoed_in_diagnostics(self):
+        paths = (
+            "https://VERY_SECRET_USER:VERY_SECRET_PASSWORD@example.invalid/private?token=VERY_SECRET_TOKEN",
+            "repos/private/VERY_SECRET_REPO/actions/runs/42",
+            "repos/ZEACENT/klogg/actions/runs/42?access_token=VERY_SECRET_TOKEN",
+        )
+        for path in paths:
+            with self.subTest(path_length=len(path)):
+                error = subprocess.CalledProcessError(1, ["gh", "api", path])
+                with mock.patch.object(transport.subprocess, "run", side_effect=error):
+                    with self.assertRaises(transport.TransportError) as caught:
+                        transport.metadata(path)
+                message = str(caught.exception)
+                self.assertNotIn("VERY_SECRET", message)
+                self.assertNotIn("access_token", message)
+                self.assertNotIn("example.invalid", message)
+                self.assertIn("endpoint=", message)
+                self.assertLess(len(message), 256)
+
     def test_request_failure_preserves_source_cache_error_contract(self):
         for error in (OSError("missing gh"), subprocess.TimeoutExpired("gh", 30)):
             with self.subTest(error=type(error).__name__):

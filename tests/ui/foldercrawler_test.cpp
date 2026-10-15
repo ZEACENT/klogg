@@ -35,6 +35,7 @@
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
+#include <QFileInfo>
 #include <QLineEdit>
 #include <QMenu>
 #include <QScrollBar>
@@ -61,6 +62,7 @@
 #include "filterfavoritesmodel.h"
 #include "foldercrawlerwidget.h"
 #include "folderfilteredview.h"
+#include "foldersearchengine.h"
 #include "foldersearchresults.h"
 #include "linetypes.h"
 #include "logmainview.h"
@@ -300,6 +302,16 @@ struct AbstractLogView::access_by<FolderViewTestAccess> {
 
 template <>
 struct FolderCrawlerWidget::access_by<FolderViewTestAccess> {
+    static FolderSearchEngine* engine( FolderCrawlerWidget* widget )
+    {
+        return widget->engine_;
+    }
+
+    static quint64 searchGeneration( const FolderCrawlerWidget* widget )
+    {
+        return widget->currentSearchGeneration_;
+    }
+
     static bool refreshPending( const FolderCrawlerWidget* widget )
     {
         return widget->presentationRefreshTimer_.isPending();
@@ -919,13 +931,16 @@ TEST_CASE( "FolderCrawlerWidget a marked non-match row shows its source line tex
     REQUIRE( dir.isValid() );
     // line 3 = the match ("ERROR hit"); line 4 = the following non-match line.
     QByteArray bytes( "line0\nline1\nline2\nERROR hit\nfollow line (not a match)\nline5\n" );
-    // Pad past the cap so the whole-file decoded-line cache refuses the file.
-    const QByteArray filler( "filler line to push the file past the cache cap\n" );
+    // The regression depends on bytes, not hundreds of thousands of filler rows.
+    // Keep both the mark-line cache and whole-file scan above their size caps.
+    QByteArray filler( 4096, 'x' );
+    filler.append( '\n' );
     while ( bytes.size() <= FolderSearchResults::kMarkLineCacheCap ) {
         bytes.append( filler );
     }
     bytes.append( "tail\n" );
     const QString a = writeFile( dir, "a.log", bytes );
+    REQUIRE( QFileInfo( a ).size() > FolderSearchResults::kMarkLineCacheCap );
 
     FolderCrawlerWidget widget;
     widget.setFolder( dir.path(), QStringList{ a } );
@@ -933,8 +948,52 @@ TEST_CASE( "FolderCrawlerWidget a marked non-match row shows its source line tex
     widget.resize( 800, 600 );
     QTest::qWait( 100 );
 
+    auto* engine = FolderCrawlerWidget::access_by<FolderViewTestAccess>::engine( &widget );
+    REQUIRE( engine != nullptr );
+    quint64 startedGeneration = 0;
+    quint64 snapshotGeneration = 0;
+    quint64 groupGeneration = 0;
+    quint64 progressGeneration = 0;
+    quint64 finishedGeneration = 0;
+    quint64 observedMatches = 0;
+    int observedPercent = -1;
+    // Worker signals must update GUI-owned scalars through queued connections.
+    // Destroy this context before the captured scalars, including on REQUIRE failure.
+    QObject observationContext;
+    QObject::connect( engine, &FolderSearchEngine::searchStarted, &observationContext,
+                      [ & ]( quint64 generation ) { startedGeneration = generation; },
+                      Qt::QueuedConnection );
+    QObject::connect( engine, &FolderSearchEngine::folderSnapshotReady, &observationContext,
+                      [ & ]( const QStringList&, quint64 generation ) {
+                          snapshotGeneration = generation;
+                      }, Qt::QueuedConnection );
+    QObject::connect( engine, &FolderSearchEngine::fileGroupReady, &observationContext,
+                      [ & ]( int, quint64 generation ) { groupGeneration = generation; },
+                      Qt::QueuedConnection );
+    QObject::connect( engine, &FolderSearchEngine::searchProgressed, &observationContext,
+                      [ & ]( quint64 matches, int percent, quint64 generation ) {
+                          progressGeneration = generation;
+                          observedMatches = matches;
+                          observedPercent = percent;
+                      }, Qt::QueuedConnection );
+    QObject::connect( engine, &FolderSearchEngine::searchFinished, &observationContext,
+                      [ & ]( quint64 generation ) { finishedGeneration = generation; },
+                      Qt::QueuedConnection );
+
     widget.searchFor( "ERROR" );
-    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    const bool searchCompleted = waitFor( [ & ]() { return !widget.isSearchActive(); } );
+    INFO( "initial search: bytes=" << bytes.size()
+          << " widget-generation="
+          << FolderCrawlerWidget::access_by<FolderViewTestAccess>::searchGeneration( &widget )
+          << " engine-generation=" << engine->currentGeneration()
+          << " started=" << startedGeneration << " snapshot=" << snapshotGeneration
+          << " group=" << groupGeneration << " progress=" << progressGeneration
+          << " finished=" << finishedGeneration << " matches=" << observedMatches
+          << " percent=" << observedPercent << " engine-matches=" << engine->matchCount()
+          << " active=" << widget.isSearchActive()
+          << " rows=" << widget.folderResults()->getNbLine().get()
+          << " status=" << widget.statusText().toStdString() );
+    REQUIRE( searchCompleted );
     REQUIRE( widget.folderResults()->getNbLine() == 2_lcount ); // header + 1 match
 
     // Click the result row -> main view opens a.log at the matched line.
