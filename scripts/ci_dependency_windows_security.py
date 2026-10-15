@@ -41,6 +41,9 @@ ACCESS_ALLOWED_ACE_TYPE = 0
 ACCESS_DENIED_ACE_TYPE = 1
 SYSTEM_SID = "S-1-5-18"
 ADMINISTRATORS_SID = "S-1-5-32-544"
+# OWNER RIGHTS denotes the current object owner, not the CREATOR OWNER placeholder.
+# https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-identifiers#well-known-sids
+OWNER_RIGHTS_SID = "S-1-3-4"
 # Exact OS servicing authority, not arbitrary service SIDs or account-name lookup.
 # https://learn.microsoft.com/en-us/archive/msdn-magazine/2008/november/access-control-understanding-windows-file-and-registry-permissions
 TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
@@ -96,6 +99,12 @@ def _access_mask(mask: int) -> int:
     return result
 
 
+def _trusted_mutation_principal(sid: str, owner_sid: str, user_sid: str) -> bool:
+    # Use the owner from the same inspected descriptor, including on revalidation.
+    principal = owner_sid if sid == OWNER_RIGHTS_SID else sid
+    return principal in (user_sid, SYSTEM_SID, ADMINISTRATORS_SID)
+
+
 def validate_directory_security(security: DirectorySecurity, user_sid: str,
                                 *, private: bool, servicing_root_owner: bool = False) -> None:
     """Reject any unprivileged ancestor mutation or non-owner private grant."""
@@ -119,7 +128,8 @@ def validate_directory_security(security: DirectorySecurity, user_sid: str,
                  "unsupported directory ACE semantics")
         mask = _access_mask(entry.mask)
         if entry.kind == ACCESS_ALLOWED_ACE_TYPE and not entry.flags & INHERIT_ONLY_ACE:
-            _require(entry.sid in trusted or mask & MUTATION_RIGHTS == 0,
+            _require(_trusted_mutation_principal(entry.sid, security.owner, user_sid)
+                     or mask & MUTATION_RIGHTS == 0,
                      "unprivileged ancestor mutation grant")
     if private:
         _require(security.owner == user_sid and security.protected is True
@@ -199,7 +209,7 @@ def _rejection_context(error, record: DirectoryRecord, path: str, user_sid: str,
                 "mutation_mask": mask,
                 "applicable_allow": entry.kind == ACCESS_ALLOWED_ACE_TYPE
                     and type(entry.flags) is int and not entry.flags & INHERIT_ONLY_ACE,
-                "trusted_principal": entry.sid in (user_sid, SYSTEM_SID, ADMINISTRATORS_SID),
+                "trusted_principal": _trusted_mutation_principal(entry.sid, owner, user_sid),
             })
         omitted += max(0, len(entries) - 1024)
     reason = str(error)

@@ -175,8 +175,8 @@ def model_tool(tool, arguments):
             require(str(build) == state.get("build") and state.get("tested"), "gcovr must consume the tested build")
             require(option("--filter") == "^src/", "coverage filter changed")
             output = path(option("-o"))
-            require(cwd == workspace and output.parent == workspace / "coverage_report",
-                    "coverage reports must remain in the original upload destination")
+            require(cwd in (workspace, source) and output.parent == cwd / "coverage_report",
+                    "coverage reports must use the reporting working directory")
             if output.name == "index.html":
                 require({"--html-details", "--html-self-contained", "--html-title", "--print-summary"}.issubset(arguments)
                         and "--json" not in arguments, "HTML report mode/summary arguments changed")
@@ -187,10 +187,21 @@ def model_tool(tool, arguments):
             else:
                 raise ValueError("MODEL unexpected coverage report name")
             state.setdefault("coverage_reports", []).append(output.name)
-            # Synthetic report bytes and percentages, not real gcovr output.
-            output.write_text(json.dumps({"files": [{"file": "src/example.cpp"}]}))
+            # Explicit relative gcovr filters are CWD-relative, not --root-relative.
+            # These candidate counters and report bytes remain synthetic.
+            matches = lambda filename: bool(re.match(option("--filter"), os.path.relpath(str(filename), str(cwd))))
+            selected = matches(source / "src/example.cpp")
+            state.setdefault("coverage_selections", []).append({
+                "cwd": str(cwd), "first_party": selected,
+                "original_checkout": matches(workspace / "src/example.cpp"),
+                "vendor": matches(workspace / "cpm_cache/efsw/src/vendor.cpp"),
+            })
+            output.write_text(json.dumps({"files": [{"file": "src/example.cpp"}] if selected else []}))
+            if output.name == "index.html":
+                (output.parent / "example.cpp.html").write_text("synthetic detail report\n")
             if "--print-summary" in arguments:
-                print("lines: 100.0% (1 out of 1)\nbranches: 100.0% (1 out of 1)")
+                measured = "100.0% (1 out of 1)" if selected else "0.0% (0 out of 0)"
+                print("lines: " + measured + "\nbranches: " + measured)
         elif tool == "python3":
             script = pathlib.Path(arguments[0]).name
             if script == "enforce_coverage_ratchet.py":
@@ -241,6 +252,8 @@ def model_tool(tool, arguments):
             require(arguments == ["coverage_report/"] and state.get("ratcheted"), "upload/ratchet context changed")
             require(all((workspace / "coverage_report" / name).is_file()
                         for name in ("index.html", "summary.txt", "coverage.json")), "coverage uploads are missing")
+            files = json.loads((workspace / "coverage_report/coverage.json").read_text())["files"]
+            require(files == [{"file": "src/example.cpp"}], "JSON report omitted the measured private source")
         else:
             raise ValueError("MODEL unexpected tool: " + tool)
     finally:
@@ -340,6 +353,9 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
     def execute(self, role, text=None, fail_allocation=False, static_mode="full-report", stop_after=None):
         self.state.write_text(json.dumps({"calls": [], "role": role, "job_uid": 0, "workspace_uid": 21123}))
         self.github_env.write_text("")
+        # Each scenario models a fresh job: prior upload data cannot mask an
+        # omitted report transport from the new private checkout.
+        shutil.rmtree(self.workspace / "coverage_report", ignore_errors=True)
         global_config = pathlib.Path(self.environment["GIT_CONFIG_GLOBAL"])
         if global_config.exists():
             global_config.unlink()
@@ -441,12 +457,79 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("clang-tidy used another build", result.stderr)
 
+    def test_coverage_filters_private_source_and_transports_reports(self):
+        result, state = self.execute("coverage")
+        summary = self.workspace / "coverage_report/summary.txt"
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr
+                         + (summary.read_text() if summary.exists() else ""))
+        self.assertEqual(len(state["coverage_selections"]), 2)
+        for selection in state["coverage_selections"]:
+            self.assertEqual(selection["cwd"], state["source"])
+            self.assertTrue(selection["first_party"])
+            self.assertFalse(selection["original_checkout"])
+            self.assertFalse(selection["vendor"])
+        report = self.workspace / "coverage_report"
+        staged = pathlib.Path(state["source"]) / "coverage_report"
+        self.assertEqual({path.name for path in report.iterdir()}, {path.name for path in staged.iterdir()})
+        for path in staged.iterdir():
+            self.assertEqual((report / path.name).read_bytes(), path.read_bytes())
+
+    def test_each_gcovr_call_requires_private_source_filter_context(self):
+        text = self.workflow("coverage")
+        marker = "          gcovr \\\n"
+        self.assertEqual(text.count(marker), 2)
+        for index in range(2):
+            with self.subTest(call=index):
+                start = text.find(marker) if index == 0 else text.rfind(marker)
+                wrapper = '          ( cd "$GITHUB_WORKSPACE"; mkdir -p coverage_report; gcovr \\\n'
+                mutated = text[:start] + text[start:].replace(marker, wrapper, 1)
+                if index == 0:
+                    end = "            | tee coverage_report/summary.txt"
+                    mutated = mutated.replace(end, "          ) | tee coverage_report/summary.txt", 1)
+                else:
+                    end = '            "$KLOGG_BUILD_ROOT"\n'
+                    self.assertIn(end, mutated)
+                    mutated = mutated.replace(end, end + "          )\n", 1)
+                result, state = self.execute("coverage", mutated)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(state["coverage_selections"]), 2)
+                for call, selection in enumerate(state["coverage_selections"]):
+                    self.assertEqual(selection["first_party"], call != index)
+                    self.assertEqual(selection["original_checkout"], call == index)
+                    self.assertFalse(selection["vendor"])
+                self.assertIn("below the ratchet floor" if index == 0 else "JSON report omitted", result.stderr)
+        field = "        working-directory: ${{ env.KLOGG_WORKSPACE }}\n"
+        self.assertIn(field, text)
+        result, state = self.execute("coverage", text.replace(field, "", 1))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(state["coverage_selections"]), 2)
+        self.assertFalse(any(selection["first_party"] for selection in state["coverage_selections"]))
+
+    def test_coverage_transport_cannot_reuse_stale_reports_or_hide_copy_failure(self):
+        text = self.workflow("coverage")
+        transport = 'cp -R coverage_report "$GITHUB_WORKSPACE/"'
+        self.assertIn(transport, text)
+        for replacement in (":", 'cp -R coverage_report "$GITHUB_WORKSPACE/missing-parent/destination/"'):
+            with self.subTest(transport=replacement):
+                stale = self.workspace / "coverage_report"
+                stale.mkdir(exist_ok=True)
+                for name in ("summary.txt", "coverage.json", "index.html"):
+                    (stale / name).write_text("stale report from a previous scenario\n")
+                result, state = self.execute("coverage", text.replace(transport, replacement, 1))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(stale.exists())
+                self.assertFalse(state.get("ratcheted"))
+                staged = pathlib.Path(state["source"]) / "coverage_report"
+                self.assertIn("100.0%", (staged / "summary.txt").read_text())
+                self.assertTrue(all(selection["first_party"] for selection in state["coverage_selections"]))
+
     def test_coverage_missing_print_summary_is_rejected(self):
         text = self.workflow("coverage")
         argument = '--print-summary "$KLOGG_BUILD_ROOT"'
         self.assertIn(argument, text)
         result, _ = self.execute("coverage", text.replace(argument, '"$KLOGG_BUILD_ROOT"', 1))
-        summary = (self.workspace / "coverage_report/summary.txt").read_text()
+        summary_path = self.workspace / "coverage_report/summary.txt"
+        summary = summary_path.read_text() if summary_path.exists() else "<not published>"
         self.assertNotEqual(result.returncode, 0, "MODEL accepted summary: " + repr(summary))
 
     def test_coverage_report_modes_are_required(self):

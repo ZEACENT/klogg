@@ -140,8 +140,11 @@ jobs:
 
       - name: Generate coverage report
         shell: bash
+        working-directory: ${{ env.KLOGG_WORKSPACE }}
         run: |
           set -euo pipefail
+          # Explicit relative filters use CWD, not --root. Select the private
+          # checkout's src/ while retaining the original upload/ratchet context.
           mkdir -p coverage_report
           # HTML report (primary, human-readable) + textual summary in one pass.
           # --print-summary writes to stdout while -o directs the HTML output.
@@ -169,6 +172,7 @@ jobs:
 
           echo "=== gcovr summary ==="
           cat coverage_report/summary.txt
+          cp -R coverage_report "$GITHUB_WORKSPACE/"
 
       - name: Enforce coverage ratchet
         shell: bash

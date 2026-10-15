@@ -18,6 +18,7 @@ import ci_dependency_windows_security as security
 USER = "S-1-5-21-100-200-300-1001"
 FOREIGN = "S-1-5-21-100-200-300-1002"
 INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+OWNER_RIGHTS = "S-1-3-4"
 PARENT = "C:\\Users\\runner"
 PRIVATE = PARENT + "\\private"
 
@@ -35,6 +36,14 @@ def ancestor_security():
         (security.AccessEntry(0, 0, security.FILE_ALL_ACCESS, security.SYSTEM_SID),
          security.AccessEntry(0, 0, 0x00120089, "S-1-1-0")),
     )
+
+
+def owner_rights_security(owner):
+    # Model the observed Windows temporary-parent descriptor, not native access.
+    return security.DirectorySecurity(owner, True, False, tuple(
+        security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, sid)
+        for sid in (security.SYSTEM_SID, security.ADMINISTRATORS_SID, OWNER_RIGHTS)
+    ))
 
 
 class FakeNativeSecurity:
@@ -154,6 +163,121 @@ def create_native_fixture_parent(parent, name):
 class DirectoryPolicyModelTest(unittest.TestCase):
     def test_protected_owner_only_private_directory_is_accepted(self):
         security.validate_directory_security(private_security(), USER, private=True)
+
+    def test_owner_rights_binds_to_each_trusted_nonprivate_descriptor_owner(self):
+        for owner in (security.ADMINISTRATORS_SID, security.SYSTEM_SID, USER):
+            with self.subTest(owner=owner):
+                security.validate_directory_security(owner_rights_security(owner), USER, private=False)
+
+    def test_owner_rights_never_bypasses_foreign_owner_policy(self):
+        for owner in (FOREIGN, INSTALLER, "S-1-5-80-1234"):
+            for entries in ((), (security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, OWNER_RIGHTS),),
+                            (security.AccessEntry(1, 3, security.FILE_ALL_ACCESS, OWNER_RIGHTS),),
+                            (security.AccessEntry(0, 11, security.FILE_ALL_ACCESS, OWNER_RIGHTS),)):
+                with self.subTest(owner=owner, entries=entries):
+                    descriptor = security.DirectorySecurity(owner, True, False, entries)
+                    with self.assertRaisesRegex(security.WindowsSecurityError, "owner"):
+                        security.validate_directory_security(descriptor, USER, private=False)
+
+    def test_owner_rights_cannot_replace_or_expand_the_private_canonical_acl(self):
+        owner_rights = security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, OWNER_RIGHTS)
+        for entries in ((owner_rights,), private_security().entries + (owner_rights,)):
+            with self.subTest(entries=entries):
+                descriptor = dataclasses.replace(private_security(), entries=entries)
+                with self.assertRaises(security.WindowsSecurityError):
+                    security.validate_directory_security(descriptor, USER, private=True)
+        for owner in (security.ADMINISTRATORS_SID, security.SYSTEM_SID, FOREIGN, INSTALLER):
+            with self.subTest(owner=owner):
+                with self.assertRaises(security.WindowsSecurityError):
+                    security.validate_directory_security(
+                        dataclasses.replace(private_security(), owner=owner), USER, private=True)
+
+    def test_owner_rights_does_not_trust_other_mutation_principals_or_subtract_denies(self):
+        for sid in ("S-1-3-0", "S-1-1-0", "S-1-5-80-1234", INSTALLER, FOREIGN):
+            with self.subTest(sid=sid):
+                descriptor = owner_rights_security(security.ADMINISTRATORS_SID)
+                descriptor = dataclasses.replace(descriptor, entries=descriptor.entries + (
+                    security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, sid),))
+                with self.assertRaisesRegex(security.WindowsSecurityError, "mutation grant"):
+                    security.validate_directory_security(descriptor, USER, private=False)
+        descriptor = security.DirectorySecurity(USER, True, False, (
+            security.AccessEntry(1, 3, security.FILE_ALL_ACCESS, OWNER_RIGHTS),
+            security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, FOREIGN),
+        ))
+        with self.assertRaisesRegex(security.WindowsSecurityError, "mutation grant"):
+            security.validate_directory_security(descriptor, USER, private=False)
+
+    def test_owner_rights_preserves_inherit_only_empty_and_unknown_ace_rules(self):
+        for entries in ((), (security.AccessEntry(0, 11, security.FILE_ALL_ACCESS, OWNER_RIGHTS),)):
+            descriptor = security.DirectorySecurity(USER, True, False, entries)
+            security.validate_directory_security(descriptor, USER, private=False)
+            with self.assertRaisesRegex(security.WindowsSecurityError, "private directory"):
+                security.validate_directory_security(descriptor, USER, private=True)
+        for flags in (3, 11):
+            for entry in (security.AccessEntry(5, flags, security.FILE_ALL_ACCESS, OWNER_RIGHTS),
+                          security.AccessEntry(0, flags | 0x20, security.FILE_ALL_ACCESS, OWNER_RIGHTS),
+                          security.AccessEntry(0, flags, 0x01000000, OWNER_RIGHTS)):
+                with self.subTest(entry=entry):
+                    descriptor = security.DirectorySecurity(USER, True, False, (entry,))
+                    with self.assertRaisesRegex(security.WindowsSecurityError, "unsupported"):
+                        security.validate_directory_security(descriptor, USER, private=False)
+
+    def test_owner_rights_parent_creation_and_revalidation_use_current_descriptor(self):
+        api = FakeNativeSecurity()
+        api.records[PARENT] = dataclasses.replace(
+            api.records[PARENT], security=owner_rights_security(security.ADMINISTRATORS_SID))
+        created = security.create_private_parent(PARENT, "owner-rights-private", api=api)
+        self.assertEqual(api.created, [(str(created), USER)])
+        self.assertCountEqual(api.closed, api.opened)
+        for mutation in ("owner", "grant"):
+            with self.subTest(mutation=mutation):
+                api = FakeNativeSecurity()
+                descriptor = owner_rights_security(security.ADMINISTRATORS_SID)
+                api.records[PARENT] = dataclasses.replace(api.records[PARENT], security=descriptor)
+                entered = []
+                with self.assertRaisesRegex(security.WindowsSecurityError, "owner|mutation grant"):
+                    with security.private_parent_lease(PRIVATE, api=api) as lease:
+                        entered.append(True)
+                        changed = (dataclasses.replace(descriptor, owner=FOREIGN) if mutation == "owner"
+                                   else dataclasses.replace(descriptor, entries=descriptor.entries + (
+                                       security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, FOREIGN),)))
+                        api.records[PARENT] = dataclasses.replace(api.records[PARENT], security=changed)
+                        lease.verify()
+                self.assertEqual(entered, [True])
+                self.assertEqual(api.closed, list(reversed(api.opened)))
+
+    def test_owner_rights_diagnostics_keep_raw_sid_and_contextual_trust(self):
+        api = FakeNativeSecurity()
+        descriptor = owner_rights_security(security.ADMINISTRATORS_SID)
+        descriptor = dataclasses.replace(descriptor, entries=descriptor.entries + (
+            security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, FOREIGN),))
+        api.records[PARENT] = dataclasses.replace(api.records[PARENT], security=descriptor)
+        with self.assertRaisesRegex(security.WindowsSecurityError, "mutation grant") as caught:
+            with security.private_parent_lease(PRIVATE, api=api):
+                self.fail("foreign grant entered the lease")
+        entries = caught.exception.windows_namespace_context["mutation_entries"]
+        observed = next(entry for entry in entries if entry["sid"] == repr(OWNER_RIGHTS))
+        self.assertTrue(observed["trusted_principal"])
+        self.assertEqual((observed["kind"], observed["flags"], observed["raw_mask"]),
+                         (0, 3, security.FILE_ALL_ACCESS))
+        self.assertEqual(observed["mutation_mask"], security.FILE_ALL_ACCESS & security.MUTATION_RIGHTS)
+        self.assertEqual(descriptor.entries[2].sid, OWNER_RIGHTS)
+        self.assertFalse(entries[-1]["trusted_principal"])
+
+    def test_servicing_owner_rights_remains_an_untrusted_mutation_grant(self):
+        api = self.installer_root_api()
+        root = api.records["C:\\"]
+        api.records["C:\\"] = dataclasses.replace(root, security=dataclasses.replace(
+            root.security, entries=root.security.entries + (
+                security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, OWNER_RIGHTS),)))
+        with self.assertRaisesRegex(security.WindowsSecurityError, "mutation grant") as caught:
+            security.create_private_parent(PARENT, "new-private", api=api)
+        context = caught.exception.windows_namespace_context
+        observed = next(entry for entry in context["mutation_entries"] if entry["sid"] == repr(OWNER_RIGHTS))
+        self.assertFalse(observed["trusted_principal"])
+        self.assertEqual(context["owner_sid"], INSTALLER)
+        self.assertEqual(api.created, [])
+        self.assertEqual(api.closed, list(reversed(api.opened)))
 
     def installer_root_api(self):
         api = FakeNativeSecurity()
