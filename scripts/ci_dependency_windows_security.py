@@ -2,7 +2,9 @@
 """Private Windows staging under an audited, leased local NTFS namespace.
 
 The current identity and privileged SYSTEM/Administrators are trusted, as root
-and the owning uid are on POSIX. A stable platform drive mapping and ancestor
+and the owning uid are on POSIX. The OS servicing principal is accepted only as
+owner of an audited fixed-NTFS drive root, never as an additional mutation grant
+or private/descendant owner. A stable platform drive mapping and ancestor
 security are prerequisites; this does not defend against those principals or
 foreign mutation handles retained from an earlier insecure host configuration.
 Tokens exercising filesystem/security override privileges are also outside this
@@ -39,6 +41,9 @@ ACCESS_ALLOWED_ACE_TYPE = 0
 ACCESS_DENIED_ACE_TYPE = 1
 SYSTEM_SID = "S-1-5-18"
 ADMINISTRATORS_SID = "S-1-5-32-544"
+# Exact OS servicing authority, not arbitrary service SIDs or account-name lookup.
+# https://learn.microsoft.com/en-us/archive/msdn-magazine/2008/november/access-control-understanding-windows-file-and-registry-permissions
+TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 SID = re.compile(r"S-1-(?:[0-9]+-)*[0-9]+\Z")
 DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {
     prefix + str(index) for prefix in ("COM", "LPT") for index in range(1, 10)
@@ -92,14 +97,17 @@ def _access_mask(mask: int) -> int:
 
 
 def validate_directory_security(security: DirectorySecurity, user_sid: str,
-                                *, private: bool) -> None:
+                                *, private: bool, servicing_root_owner: bool = False) -> None:
     """Reject any unprivileged ancestor mutation or non-owner private grant."""
     _require(isinstance(user_sid, str) and SID.fullmatch(user_sid) is not None,
              "invalid current Windows identity")
     _require(isinstance(security, DirectorySecurity) and security.dacl_present is True
              and type(security.protected) is bool, "missing, NULL or invalid directory DACL")
     trusted = {user_sid, SYSTEM_SID, ADMINISTRATORS_SID}
-    _require(security.owner in trusted, "untrusted directory owner can change its DACL")
+    _require(security.owner in trusted
+             or (servicing_root_owner is True and not private
+                 and security.owner == TRUSTED_INSTALLER_SID),
+             "untrusted directory owner can change its DACL")
     _require(isinstance(security.entries, tuple) and len(security.entries) <= 1024,
              "invalid directory ACL entries")
     for entry in security.entries:
@@ -208,7 +216,8 @@ def _rejection_context(error, record: DirectoryRecord, path: str, user_sid: str,
     error.args = (reason + "\nWindows namespace:" + detail,) + error.args[1:]
 
 
-def _record(api, handle, path: str, user_sid: str, *, private: bool) -> DirectoryRecord:
+def _record(api, handle, path: str, user_sid: str, *, private: bool,
+            servicing_root_owner: bool = False) -> DirectoryRecord:
     record = api.inspect_directory(handle)
     _require(isinstance(record, DirectoryRecord)
              and type(record.attributes) is int
@@ -219,8 +228,12 @@ def _record(api, handle, path: str, user_sid: str, *, private: bool) -> Director
              and all(type(value) is int and value >= 0 for value in record.identity)
              and record.identity[1] != 0, "invalid native directory identity")
     _require(api.paths_equal(record.path, path), "directory lease rejects path aliases")
+    _require(servicing_root_owner is False
+             or (servicing_root_owner is True and not private and directory_chain(path) == (path,)),
+             "servicing owner requires an audited drive-root ancestor")
     try:
-        validate_directory_security(record.security, user_sid, private=private)
+        validate_directory_security(record.security, user_sid, private=private,
+                                    servicing_root_owner=servicing_root_owner)
     except WindowsSecurityError as error:
         try:
             _rejection_context(error, record, path, user_sid, private=private)
@@ -247,8 +260,9 @@ class DirectoryLease:
         self.records = records
 
     def verify(self) -> None:
-        for handle, path, before, private in self.records:
-            current = _record(self.api, handle, path, self.user_sid, private=private)
+        for handle, path, before, private, servicing_root_owner in self.records:
+            current = _record(self.api, handle, path, self.user_sid, private=private,
+                              servicing_root_owner=servicing_root_owner)
             _require(current.identity == before.identity, "leased directory identity changed")
 
 
@@ -263,13 +277,17 @@ def _directory_lease(parent, *, private: bool, api=None):
     try:
         for index, path in enumerate(paths):
             handle = api.open_directory(path)
-            records.append((handle, path, None, private and index == len(paths) - 1))
-            observed = _record(api, handle, path, user_sid,
-                               private=private and index == len(paths) - 1)
-            records[-1] = (handle, path, observed, private and index == len(paths) - 1)
+            private_leaf = private and index == len(paths) - 1
+            servicing_root_owner = index == 0 and not private_leaf
+            records.append((handle, path, None, private_leaf, servicing_root_owner))
             if index == 0:
+                # Establish the platform-root prerequisite before owner policy;
+                # keep this proof with the held root for every revalidation.
                 _require(api.is_local_ntfs(path, handle), "private staging requires a fixed local NTFS volume")
-            else:
+            observed = _record(api, handle, path, user_sid, private=private_leaf,
+                               servicing_root_owner=servicing_root_owner)
+            records[-1] = (handle, path, observed, private_leaf, servicing_root_owner)
+            if index != 0:
                 _require(observed.identity[0] == records[0][2].identity[0],
                          "directory lease crossed a volume boundary")
         lease = DirectoryLease(api, user_sid, records)
@@ -285,7 +303,7 @@ def _directory_lease(parent, *, private: bool, api=None):
                 lease.verify()
             except Exception as error:
                 failures.append(str(error))
-        for handle, _path, _record_value, _private in reversed(records):
+        for handle, _path, _record_value, _private, _servicing_root_owner in reversed(records):
             try:
                 api.close_directory(handle)
             except Exception as error:

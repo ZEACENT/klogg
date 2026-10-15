@@ -17,6 +17,7 @@ import ci_dependency_windows_security as security
 
 USER = "S-1-5-21-100-200-300-1001"
 FOREIGN = "S-1-5-21-100-200-300-1002"
+INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 PARENT = "C:\\Users\\runner"
 PRIVATE = PARENT + "\\private"
 
@@ -121,7 +122,13 @@ def create_native_fixture_parent(parent, name):
                     user_matches=observed["user"] == context["user_sid"],
                 )
             except Exception as failure:
-                comparison["failure"] = security._diagnostic_text(str(failure), 192)
+                comparison["failure_type"] = type(failure).__name__
+                if isinstance(failure, subprocess.CalledProcessError):
+                    comparison["returncode"] = failure.returncode
+                    comparison["stdout"] = security._diagnostic_text(failure.stdout, 512)
+                    comparison["stderr"] = security._diagnostic_text(failure.stderr, 512)
+                else:
+                    comparison["failure"] = security._diagnostic_text(str(failure), 192)
             error.windows_namespace_independent = comparison
             try:
                 print("Independent native namespace snapshot: " + json.dumps(comparison), file=sys.stderr)
@@ -133,6 +140,76 @@ def create_native_fixture_parent(parent, name):
 class DirectoryPolicyModelTest(unittest.TestCase):
     def test_protected_owner_only_private_directory_is_accepted(self):
         security.validate_directory_security(private_security(), USER, private=True)
+
+    def installer_root_api(self):
+        api = FakeNativeSecurity()
+        descriptor = security.DirectorySecurity(INSTALLER, True, False, (
+            security.AccessEntry(0, 11, 0xe0010000, "S-1-5-11"),
+            security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, security.SYSTEM_SID),
+            security.AccessEntry(0, 3, security.FILE_ALL_ACCESS, security.ADMINISTRATORS_SID),
+        ))
+        api.records["C:\\"] = dataclasses.replace(api.records["C:\\"], security=descriptor)
+        return api
+
+    def test_documented_servicing_owner_is_supported_only_for_leased_ntfs_root(self):
+        api = self.installer_root_api()
+        created = security.create_private_parent(PARENT, "new-private", api=api)
+        self.assertEqual(str(created), PARENT + "\\new-private")
+        self.assertEqual(api.created, [(str(created), USER)])
+        with security.private_parent_lease(str(created), api=api):
+            pass
+        self.assertCountEqual(api.closed, api.opened)
+
+    def test_servicing_root_owner_does_not_trust_descendant_private_or_unknown_owners(self):
+        for path, owner in ((PARENT, INSTALLER), (PRIVATE, INSTALLER),
+                            ("C:\\", FOREIGN), ("C:\\", INSTALLER + "1")):
+            with self.subTest(path=path, owner=owner):
+                api = self.installer_root_api()
+                api.records[path] = dataclasses.replace(
+                    api.records[path], security=dataclasses.replace(api.records[path].security, owner=owner))
+                with self.assertRaisesRegex(security.WindowsSecurityError, "owner"):
+                    with security.private_parent_lease(PRIVATE, api=api):
+                        self.fail("untrusted owner entered lease")
+                self.assertEqual(api.created, [])
+                self.assertEqual(api.closed, list(reversed(api.opened)))
+
+    def test_servicing_root_owner_never_expands_mutation_grant_trust(self):
+        for sid in (INSTALLER, FOREIGN):
+            with self.subTest(sid=sid):
+                api = self.installer_root_api()
+                record = api.records["C:\\"]
+                api.records["C:\\"] = dataclasses.replace(record, security=dataclasses.replace(
+                    record.security, entries=record.security.entries + (
+                        security.AccessEntry(0, 0, security.FILE_ALL_ACCESS, sid),)))
+                with self.assertRaisesRegex(security.WindowsSecurityError, "mutation grant"):
+                    security.create_private_parent(PARENT, "new-private", api=api)
+                self.assertEqual(api.created, [])
+                self.assertEqual(api.closed, list(reversed(api.opened)))
+
+    def test_servicing_root_exception_cannot_bypass_namespace_checks_or_revalidation(self):
+        for violation in ("filesystem", "reparse", "alias", "identity", "volume"):
+            with self.subTest(violation=violation):
+                api = self.installer_root_api()
+                root = api.records["C:\\"]
+                if violation == "filesystem":
+                    api.local_ntfs = False
+                elif violation == "reparse":
+                    api.records["C:\\"] = dataclasses.replace(root, attributes=0x410)
+                elif violation == "alias":
+                    api.records["C:\\"] = dataclasses.replace(root, path="D:\\")
+                elif violation == "identity":
+                    api.records["C:\\"] = dataclasses.replace(root, identity=(1, 0))
+                else:
+                    api.records[PARENT] = dataclasses.replace(api.records[PARENT], identity=(2, 10))
+                with self.assertRaises(security.WindowsSecurityError):
+                    security.create_private_parent(PARENT, "new-private", api=api)
+                self.assertEqual(api.created, [])
+                self.assertEqual(api.closed, list(reversed(api.opened)))
+        api = self.installer_root_api()
+        with self.assertRaisesRegex(security.WindowsSecurityError, "identity changed"):
+            with security.private_parent_lease(PRIVATE, api=api):
+                api.records["C:\\"] = dataclasses.replace(api.records["C:\\"], identity=(1, 999))
+        self.assertEqual(api.closed, list(reversed(api.opened)))
 
     def test_platform_ancestor_with_no_foreign_mutation_grant_is_accepted(self):
         security.validate_directory_security(ancestor_security(), USER, private=False)
@@ -253,10 +330,10 @@ class DirectoryPolicyModelTest(unittest.TestCase):
         primary.__cause__ = ValueError("original cause")
         validation = security.validate_directory_security
 
-        def refuse_leaf(descriptor, user, *, private):
+        def refuse_leaf(descriptor, user, *, private, servicing_root_owner=False):
             if descriptor.owner == FOREIGN:
                 raise primary
-            validation(descriptor, user, private=private)
+            validation(descriptor, user, private=private, servicing_root_owner=servicing_root_owner)
 
         with mock.patch.object(security, "validate_directory_security", side_effect=refuse_leaf):
             with self.assertRaises(security.WindowsSecurityError) as caught:
@@ -307,6 +384,31 @@ class DirectoryPolicyModelTest(unittest.TestCase):
                     self.assertTrue(comparison["owner_matches"])
                     self.assertTrue(comparison["user_matches"])
                 self.assertEqual(os.environ.get("KLOGG_NATIVE_ACL_TEST_PATH"), original_path)
+
+    def test_independent_probe_error_keeps_exit_and_stderr_before_long_command_text(self):
+        primary = security.WindowsSecurityError("original native refusal")
+        primary.windows_namespace_context = {
+            "path": PARENT, "owner_sid": FOREIGN, "user_sid": USER,
+        }
+        failure = subprocess.CalledProcessError(
+            17, ["powershell.exe", "-Command", "command-prefix" * 1000],
+            output="probe-output " * 1000, stderr="ParserError: actual reason " * 1000,
+        )
+        with mock.patch.object(security, "create_private_parent", side_effect=primary):
+            with mock.patch.object(subprocess, "run", side_effect=failure):
+                with mock.patch.object(sys, "stderr"):
+                    with self.assertRaises(security.WindowsSecurityError) as caught:
+                        create_native_fixture_parent(PARENT, "native-private")
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(primary.args, ("original native refusal",))
+        comparison = primary.windows_namespace_independent
+        self.assertFalse(comparison["available"])
+        self.assertEqual(comparison.get("failure_type"), "CalledProcessError")
+        self.assertEqual(comparison.get("returncode"), 17)
+        self.assertIn("ParserError: actual reason", comparison.get("stderr", ""))
+        self.assertLessEqual(len(comparison["stderr"]), 512)
+        self.assertLessEqual(len(comparison["stdout"]), 512)
+        self.assertIn("truncated", comparison["stderr"])
 
     def test_filesystem_reparse_volume_path_alias_and_identity_changes_fail_closed(self):
         for changed in (

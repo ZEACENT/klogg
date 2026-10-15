@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import sys
+
+if __name__ == "__main__":
+    print("external-source-package-contract: importing", file=sys.stderr, flush=True)
+
 import copy
 import hashlib
 import io
@@ -7,11 +12,11 @@ import json
 import pathlib
 import re
 import subprocess
-import sys
 import tarfile
 import tempfile
 import unittest
 import urllib.parse
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -33,6 +38,38 @@ README = ROOT / "README.md"
 PUBLICATION_VERIFIER = ROOT / "scripts" / "verify_source_publication_manifest.py"
 PUBLICATION_PREPARER = ROOT / "scripts" / "prepare_source_publication.py"
 RELEASE_DOWNLOAD_RENDERER = ROOT / "scripts" / "render_release_downloads.py"
+
+
+TRACE_CONTRACT_CLI = __name__ == "__main__"
+CONTRACT_CLI_SEQUENCE = 0
+
+
+def run_contract_cli(command, **kwargs):
+    if not TRACE_CONTRACT_CLI:
+        return subprocess.run(command, **kwargs)
+    global CONTRACT_CLI_SEQUENCE
+    CONTRACT_CLI_SEQUENCE += 1
+    sequence = CONTRACT_CLI_SEQUENCE
+    role = "inline" if len(command) > 1 and command[1] == "-c" else pathlib.Path(command[1]).name
+    role = re.sub(r"[^A-Za-z0-9_.-]", "?", role)[:96]
+
+    def observe(state):
+        try:
+            print(f"contract-cli[{sequence}] {state}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+    observe("before role=" + role)
+    try:
+        completed = subprocess.run(command, **kwargs)
+    except subprocess.TimeoutExpired:
+        observe("timeout")
+        raise
+    except BaseException as error:
+        observe("error type=" + type(error).__name__)
+        raise
+    observe(f"returned returncode={completed.returncode}")
+    return completed
 
 
 def required_text(path: pathlib.Path) -> str:
@@ -62,6 +99,74 @@ def sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+class ContractCliObservationTest(unittest.TestCase):
+    class ObservedStream(io.StringIO):
+        def __init__(self):
+            super().__init__()
+            self.flushes = 0
+
+        def flush(self):
+            self.flushes += 1
+            super().flush()
+
+    def test_cli_start_is_flushed_before_invocation_and_results_are_unchanged(self):
+        for code in (0, 17):
+            with self.subTest(returncode=code):
+                stream = self.ObservedStream()
+                command = ["model-python", "fixture-cli.py"]
+                completed = subprocess.CompletedProcess(command, code, "original-json", "original-stderr")
+
+                def invoke(actual, **kwargs):
+                    self.assertEqual(actual, command)
+                    self.assertEqual(kwargs, {"timeout": 10, "capture_output": True})
+                    self.assertIn("contract-cli[1] before role=fixture-cli.py", stream.getvalue())
+                    self.assertNotIn("returned", stream.getvalue())
+                    self.assertGreater(stream.flushes, 0)
+                    return completed
+
+                with mock.patch(__name__ + ".TRACE_CONTRACT_CLI", True), \
+                        mock.patch(__name__ + ".CONTRACT_CLI_SEQUENCE", 0), \
+                        mock.patch.object(sys, "stderr", stream), \
+                        mock.patch.object(subprocess, "run", side_effect=invoke):
+                    actual = run_contract_cli(command, timeout=10, capture_output=True)
+                self.assertIs(actual, completed)
+                self.assertIn(f"contract-cli[1] returned returncode={code}", stream.getvalue())
+                self.assertNotIn("original-json", stream.getvalue())
+                self.assertNotIn("original-stderr", stream.getvalue())
+
+    def test_cli_timeout_and_launch_error_keep_original_exception_and_terminal_trace(self):
+        command = ["model-python", "-c", "private inline body"]
+        for failure, terminal in ((subprocess.TimeoutExpired(command, 10), "timeout"),
+                                  (OSError("launch unavailable"), "error type=OSError")):
+            with self.subTest(terminal=terminal):
+                stream = self.ObservedStream()
+
+                def invoke(*args, **kwargs):
+                    self.assertIn("contract-cli[1] before role=inline", stream.getvalue())
+                    self.assertGreater(stream.flushes, 0)
+                    raise failure
+
+                with mock.patch(__name__ + ".TRACE_CONTRACT_CLI", True), \
+                        mock.patch(__name__ + ".CONTRACT_CLI_SEQUENCE", 0), \
+                        mock.patch.object(sys, "stderr", stream), \
+                        mock.patch.object(subprocess, "run", side_effect=invoke):
+                    with self.assertRaises(type(failure)) as caught:
+                        run_contract_cli(command, timeout=10)
+                self.assertIs(caught.exception, failure)
+                self.assertIn("contract-cli[1] " + terminal, stream.getvalue())
+                self.assertNotIn("private inline body", stream.getvalue())
+
+    def test_imported_discovery_path_is_quiet(self):
+        stream = self.ObservedStream()
+        completed = subprocess.CompletedProcess(["model-python", "fixture.py"], 0)
+        with mock.patch(__name__ + ".TRACE_CONTRACT_CLI", False), \
+                mock.patch.object(sys, "stderr", stream), \
+                mock.patch.object(subprocess, "run", return_value=completed) as invoke:
+            self.assertIs(run_contract_cli(completed.args, timeout=10), completed)
+        invoke.assert_called_once_with(completed.args, timeout=10)
+        self.assertEqual(stream.getvalue(), "")
+
+
 class ExternalSourceAssetPackageContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -85,7 +190,7 @@ class ExternalSourceAssetPackageContractTest(unittest.TestCase):
         self.assertEqual(action.count("version smoke failed with exit code"), 2)
 
     def test_source_publication_identity_accepts_ci_calver_with_build_number(self):
-        result = subprocess.run(
+        result = run_contract_cli(
             [
                 sys.executable,
                 "-c",
@@ -117,7 +222,7 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
     else:
         raise SystemExit("accepted " + name)
 """
-        result = subprocess.run(
+        result = run_contract_cli(
             [sys.executable, "-c", code],
             cwd=ROOT / "scripts",
             capture_output=True,
@@ -159,7 +264,7 @@ publish_component(
 )
 """
             output.mkdir()
-            result = subprocess.run(
+            result = run_contract_cli(
                 [sys.executable, "-c", code, str(component_root), str(output)],
                 cwd=ROOT / "scripts",
                 capture_output=True,
@@ -241,7 +346,7 @@ print(json.dumps({"component": record, "support": support}))
                             "{invalid json" if mutation == "malformed" else json.dumps(overlay),
                             encoding="utf-8",
                         )
-                    result = subprocess.run(
+                    result = run_contract_cli(
                         [sys.executable, "-c", code, str(sources), str(output)],
                         cwd=ROOT / "scripts", capture_output=True, text=True, timeout=10, check=False,
                     )
@@ -331,7 +436,7 @@ print(json.dumps({"component": record, "support": support}))
                             "{invalid json" if mutation == "malformed" else json.dumps(overlay),
                             encoding="utf-8",
                         )
-                    result = subprocess.run(
+                    result = run_contract_cli(
                         [sys.executable, "-c", code, str(sources), str(output)],
                         cwd=ROOT / "scripts", capture_output=True, text=True, timeout=10, check=False,
                     )
@@ -353,7 +458,7 @@ print(json.dumps({"component": record, "support": support}))
     def test_publication_preparer_rejects_channel_tag_mismatches(self):
         for channel, tag in (("stable", "continuous"), ("continuous", "v26.08.28.1718")):
             with self.subTest(channel=channel, tag=tag):
-                result = subprocess.run(
+                result = run_contract_cli(
                     [
                         sys.executable,
                         str(PUBLICATION_PREPARER),
@@ -1115,7 +1220,7 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
             PUBLICATION_VERIFIER.is_file(),
             f"missing publication manifest verifier: {PUBLICATION_VERIFIER}",
         )
-        return subprocess.run(
+        return run_contract_cli(
             [
                 sys.executable,
                 str(PUBLICATION_VERIFIER),
@@ -1904,7 +2009,7 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
         evidence_level: str = "signed",
     ) -> subprocess.CompletedProcess[str]:
         tag = f"v{self.VERSION}" if channel == "stable" else "continuous"
-        return subprocess.run(
+        return run_contract_cli(
             [
                 sys.executable,
                 str(PUBLICATION_VERIFIER),
@@ -2518,7 +2623,7 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
                 changelog_path = render_root / "CHANGELOG.txt"
                 output = render_root / "release-body.md"
                 changelog_path.write_text(changelog + "\n", encoding="utf-8")
-                result = subprocess.run(
+                result = run_contract_cli(
                     [
                         sys.executable,
                         str(RELEASE_DOWNLOAD_RENDERER),
@@ -2606,7 +2711,7 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
                 output = render_root / "release-body.md"
                 if output.exists():
                     output.unlink()
-                result = subprocess.run(
+                result = run_contract_cli(
                     [
                         sys.executable,
                         str(RELEASE_DOWNLOAD_RENDERER),
@@ -2772,4 +2877,4 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)
