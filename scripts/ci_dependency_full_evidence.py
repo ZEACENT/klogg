@@ -15,12 +15,15 @@ its ADB envelope but does not claim that separate qualification step.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import os
 import pathlib
 import posixpath
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -340,16 +343,22 @@ def _compare_binary_closure(root: pathlib.Path, row: dict, entries: dict) -> Non
     _require(observed == entries, "candidate binary bytes, file modes or symlinks differ from full tar")
 
 
-def verify_full_evidence(*, repo_root: pathlib.Path, source: dict, run: dict,
-                         attempt_jobs: list, needs: dict, artifacts: list,
-                         full_downloads: dict, candidate_archives: dict, bundles: dict,
-                         catalog: dict, workflow_text: str,
-                         run_verifier=subprocess.run, attestation_runner=subprocess.run) -> dict:
-    """Verify all seven before emitting runner/toolchain data for validate_evidence.
+@contextlib.contextmanager
+def project_authenticated_full_artifacts(*, repo_root: pathlib.Path, source: dict, run: dict,
+                                         attempt_jobs: list, needs: dict, artifacts: list,
+                                         full_downloads: dict, candidate_archives: dict, bundles: dict,
+                                         catalog: dict, workflow_text: str,
+                                         run_verifier=subprocess.run,
+                                         attestation_runner=subprocess.run):
+    """Yield scheduler evidence and original full roots after all seven pass.
 
-    Caller must establish checkout SHA and child `needs` provenance. No signing,
-    publication, or production lock is performed. ADB legal assets are not
-    authenticated here and must be separately verified before publication.
+    The fresh private roots and original tar snapshots are owned by
+    this context and removed on exit while base ownership remains intact; a
+    foreign replacement is left untouched. Headers and support material come only
+    from the exact signature-verified full tar, never the binary-only core.
+    Caller must establish checkout SHA and child `needs` provenance. This is
+    not production-core qualification, signing, publication, or a production
+    lock. Separate ADB legal assets remain unauthenticated here.
     """
     try:
         targets = validate_catalog(catalog)
@@ -383,8 +392,38 @@ def verify_full_evidence(*, repo_root: pathlib.Path, source: dict, run: dict,
         raise FullEvidenceError("cannot recompute checked-out core identities") from error
     result = {}
     ids = set()
-    with tempfile.TemporaryDirectory(prefix="native-full-evidence-") as temporary:
-        base = pathlib.Path(temporary)
+    checkout = pathlib.Path(repo_root).resolve()
+    base = pathlib.Path(tempfile.mkdtemp(prefix="native-full-evidence-"))
+    resolved_base = base.resolve()
+    # Existing fixed recipe inputs were read above; archives are in memory.
+    # A fresh checkout descendant cannot overlap them. Never take cleanup
+    # authority over the checkout itself or an ancestor, even on rejection.
+    _require(resolved_base != checkout and resolved_base not in checkout.parents,
+             "full projection must not contain checkout")
+    base_stat = base.lstat()
+
+    def owns_base():
+        try:
+            current = base.lstat()
+            return (stat.S_ISDIR(current.st_mode) and base.resolve() == resolved_base
+                    and (current.st_dev, current.st_ino) == (base_stat.st_dev, base_stat.st_ino))
+        except OSError:
+            return False
+
+    try:
+        def require_owned_directories(*paths):
+            _require(owns_base() and all(path.is_dir() and not path.is_symlink() for path in paths),
+                     "full projection directory ownership changed")
+
+        def full_links(root):
+            return {path.relative_to(root).as_posix(): os.readlink(path)
+                    for path in root.rglob("*") if path.is_symlink()}
+
+        def require_subject(subject, raw):
+            _require(subject.is_file() and not subject.is_symlink() and subject.read_bytes() == raw,
+                     "signed full tar snapshot changed")
+
+        roots, snapshots = {}, []
         for target_id, row in sorted(targets.items()):
             output = needs[BUILDER_JOBS[target_id]]["outputs"].get("full_artifact_id")
             _require(isinstance(output, str) and DECIMAL.fullmatch(output) is not None,
@@ -403,12 +442,18 @@ def verify_full_evidence(*, repo_root: pathlib.Path, source: dict, run: dict,
             subject = work / tar_name
             subject.write_bytes(full_tar)
             _verified_full_tar(subject, bundles[target_id], source, attestation_runner)
+            require_owned_directories(work)
+            require_subject(subject, full_tar)
             full_root = work / "full"
             full_root.mkdir()
             try:
                 _unpack_full(full_tar, full_root)
                 _checksum_full(full_root)
+                checksum_bytes = (full_root / "SHA256SUMS").read_bytes()
+                links = full_links(full_root)
                 receipt = _verify_full_metadata(full_root, pathlib.Path(repo_root), row, run_verifier)
+                require_owned_directories(work, full_root)
+                require_subject(subject, full_tar)
                 if row["component"] == "ios-native":
                     _require(isinstance(receipt, dict) and receipt.get("toolchain") == row["toolchain"],
                              "iOS observed build receipt differs from pinned preflight toolchain")
@@ -421,5 +466,42 @@ def verify_full_evidence(*, repo_root: pathlib.Path, source: dict, run: dict,
             result[target_id] = {"runner": runners[target_id]}
             if row["component"] == "ios-native":
                 result[target_id]["toolchain"] = row["toolchain"]
-    _require(ids == set(by_id), "unexpected full artifacts")
-    return result
+            roots[target_id] = full_root
+            snapshots.append((target_id, row, work, subject, full_tar, full_root, checksum_bytes, links, core))
+        _require(ids == set(by_id), "unexpected full artifacts")
+        # External runners have now finished. Recheck the original signed
+        # subject/envelope, authenticated links, and existing content validators
+        # before exposing roots. Checksum envelopes intentionally omit aliases.
+        for target_id, row, work, subject, raw, full_root, checksum_bytes, links, core in snapshots:
+            try:
+                require_owned_directories(work, full_root)
+                require_subject(subject, raw)
+                envelope = full_root / "SHA256SUMS"
+                _require(not envelope.is_symlink() and envelope.read_bytes() == checksum_bytes,
+                         "original full checksum envelope changed")
+                _require(full_links(full_root) == links, "original full archive symlinks changed")
+                _checksum_full(full_root)
+                _compare_binary_closure(full_root, row, core)
+            except (OSError, ValueError, RuntimeError, tarfile.TarError) as error:
+                raise FullEvidenceError(f"unqualified full build or core: {target_id}") from error
+        yield result, roots
+    finally:
+        # A runner or caller may have moved our base and installed a foreign
+        # directory at its old path. Never clean up that replacement.
+        if owns_base():
+            shutil.rmtree(base)
+
+
+def verify_full_evidence(*, repo_root: pathlib.Path, source: dict, run: dict,
+                         attempt_jobs: list, needs: dict, artifacts: list,
+                         full_downloads: dict, candidate_archives: dict, bundles: dict,
+                         catalog: dict, workflow_text: str,
+                         run_verifier=subprocess.run, attestation_runner=subprocess.run) -> dict:
+    """Return existing scheduler/toolchain evidence without retaining full roots."""
+    with project_authenticated_full_artifacts(
+            repo_root=repo_root, source=source, run=run, attempt_jobs=attempt_jobs,
+            needs=needs, artifacts=artifacts, full_downloads=full_downloads,
+            candidate_archives=candidate_archives, bundles=bundles, catalog=catalog,
+            workflow_text=workflow_text, run_verifier=run_verifier,
+            attestation_runner=attestation_runner) as (result, _):
+        return result

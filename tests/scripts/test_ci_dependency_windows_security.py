@@ -311,6 +311,29 @@ class DirectoryPolicyModelTest(unittest.TestCase):
         self.assertEqual(api.removed, [])
         self.assertEqual(api.closed, list(reversed(api.opened)))
 
+    def test_namespace_rejections_report_requested_and_handle_observed_paths(self):
+        original = FakeNativeSecurity().records[PARENT]
+        for reason, changed in (
+            ("path aliases", dataclasses.replace(original, path=PARENT + "\\other")),
+            ("non-directory or reparse", dataclasses.replace(original, attributes=0x410)),
+            ("native directory identity", dataclasses.replace(original, identity=(1, 0))),
+        ):
+            with self.subTest(reason=reason):
+                api = FakeNativeSecurity()
+                api.records[PARENT] = changed
+                with self.assertRaisesRegex(security.WindowsSecurityError, reason) as caught:
+                    security.create_private_parent(PARENT, "new-private", api=api)
+                context = getattr(caught.exception, "windows_namespace_context", None)
+                self.assertIsNotNone(context, "namespace rejection omits inspected paths")
+                self.assertEqual(context["path"], PARENT)
+                self.assertEqual(context["observed_path"], changed.path)
+                self.assertIn("observed_path=", str(caught.exception))
+                self.assertTrue(str(caught.exception).startswith("directory lease rejects")
+                                or str(caught.exception).startswith("invalid native directory identity"))
+                self.assertEqual(api.created, [])
+                self.assertEqual(api.removed, [])
+                self.assertEqual(api.closed, list(reversed(api.opened)))
+
     def test_bounded_rejection_context_preserves_primary_and_secondary_errors(self):
         path = "C:\\" + "\\".join(["a" * 200] * 4)
         api = FakeNativeSecurity()
@@ -483,6 +506,23 @@ class DirectoryPolicyModelTest(unittest.TestCase):
         self.assertEqual(api.removed, [PARENT + "\\bad-private"])
         self.assertNotIn(PARENT + "\\bad-private", api.records)
         self.assertEqual(api.records[PRIVATE].security, private_security())
+
+    def test_native_name_comparison_distinguishes_api_error_from_unequal_names(self):
+        for result in (0, 1, 2, 3):
+            with self.subTest(result=result):
+                api = security.NativeSecurityApi.__new__(security.NativeSecurityApi)
+                api.compare = mock.Mock(return_value=result)
+                failure = security.WindowsSecurityError("comparison failed (model Win32 87)")
+                api._error = mock.Mock(return_value=failure)
+                if result == 0:
+                    with self.assertRaises(security.WindowsSecurityError) as caught:
+                        api.paths_equal(PARENT, PARENT.lower())
+                    self.assertIs(caught.exception, failure)
+                    api._error.assert_called_once()
+                else:
+                    self.assertEqual(api.paths_equal(PARENT, PARENT.lower()), result == 2)
+                    api._error.assert_not_called()
+                api.compare.assert_called_once_with(PARENT, -1, PARENT.lower(), -1, True)
 
     def test_real_native_backend_is_unavailable_on_non_windows(self):
         if os.name != "nt":

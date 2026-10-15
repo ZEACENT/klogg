@@ -204,10 +204,12 @@ def _rejection_context(error, record: DirectoryRecord, path: str, user_sid: str,
         omitted += max(0, len(entries) - 1024)
     reason = str(error)
     error.windows_namespace_context = {
-        "path": path, "owner_sid": owner, "user_sid": user_sid, "private": private,
+        "path": path, "observed_path": record.path,
+        "owner_sid": owner, "user_sid": user_sid, "private": private,
         "decision": reason, "mutation_entries": mutations, "omitted_entries": omitted,
     }
-    detail = (f"path={_diagnostic_text(path, 512)} owner={_diagnostic_text(owner, 192)} "
+    detail = (f"path={_diagnostic_text(path, 512)} "
+              f"observed_path={_diagnostic_text(record.path, 512)} owner={_diagnostic_text(owner, 192)} "
               f"user={_diagnostic_text(user_sid, 192)} private={private} "
               f"observed_mutation_entries={mutations!r} omitted={omitted}")
     marker = "<truncated>"
@@ -219,19 +221,19 @@ def _rejection_context(error, record: DirectoryRecord, path: str, user_sid: str,
 def _record(api, handle, path: str, user_sid: str, *, private: bool,
             servicing_root_owner: bool = False) -> DirectoryRecord:
     record = api.inspect_directory(handle)
-    _require(isinstance(record, DirectoryRecord)
-             and type(record.attributes) is int
-             and record.attributes & DIRECTORY_ATTRIBUTE != 0
-             and record.attributes & REPARSE_ATTRIBUTE == 0,
-             "directory lease rejects non-directory or reparse objects")
-    _require(isinstance(record.identity, tuple) and len(record.identity) == 2
-             and all(type(value) is int and value >= 0 for value in record.identity)
-             and record.identity[1] != 0, "invalid native directory identity")
-    _require(api.paths_equal(record.path, path), "directory lease rejects path aliases")
-    _require(servicing_root_owner is False
-             or (servicing_root_owner is True and not private and directory_chain(path) == (path,)),
-             "servicing owner requires an audited drive-root ancestor")
     try:
+        _require(isinstance(record, DirectoryRecord)
+                 and type(record.attributes) is int
+                 and record.attributes & DIRECTORY_ATTRIBUTE != 0
+                 and record.attributes & REPARSE_ATTRIBUTE == 0,
+                 "directory lease rejects non-directory or reparse objects")
+        _require(isinstance(record.identity, tuple) and len(record.identity) == 2
+                 and all(type(value) is int and value >= 0 for value in record.identity)
+                 and record.identity[1] != 0, "invalid native directory identity")
+        _require(api.paths_equal(record.path, path), "directory lease rejects path aliases")
+        _require(servicing_root_owner is False
+                 or (servicing_root_owner is True and not private and directory_chain(path) == (path,)),
+                 "servicing owner requires an audited drive-root ancestor")
         validate_directory_security(record.security, user_sid, private=private,
                                     servicing_root_owner=servicing_root_owner)
     except WindowsSecurityError as error:
@@ -467,7 +469,10 @@ class NativeSecurityApi:
             raise self._error("cannot close directory lease")
 
     def paths_equal(self, left: str, right: str) -> bool:
-        return self.compare(left, -1, right, -1, True) == 2
+        result = self.compare(left, -1, right, -1, True)
+        if result == 0:
+            raise self._error("cannot compare native names")
+        return result == 2
 
     def is_local_ntfs(self, path: str, handle) -> bool:
         if self.drive_type(path) != 3:

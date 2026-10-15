@@ -10,10 +10,12 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import pathlib
 import re
 import shutil
 import tarfile
+import tempfile
 
 from source_publication_identity import (
     normalize_base_url,
@@ -311,62 +313,205 @@ def write_overlay_receipt(
     )
 
 
-def write_release_hashes(output: pathlib.Path, release_assets: list[dict]) -> None:
+def write_release_hashes(
+    output: pathlib.Path, release_assets: list[dict], *, preserve_core_sidecars: bool = False,
+) -> None:
     receipt_assets = []
     for asset in release_assets:
         path = output / asset["file_name"]
         if not path.is_file() or path.is_symlink():
             raise RuntimeError(f"required ADB release asset was not generated: {path}")
-        write_hash(path)
+        if not preserve_core_sidecars or asset["ownership"] != "core":
+            write_hash(path)
         receipt_assets.append({"kind": asset["kind"], "path": path.name, "sha256": sha256(path)})
     (output / "adb-helper-release-assets.json").write_text(
         json.dumps(receipt_assets, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 
+def check_overlay_paths(
+    outputs: list[pathlib.Path], inputs: list[pathlib.Path],
+) -> None:
+    for path in [*inputs, *outputs]:
+        if any(parent.is_symlink() for parent in (path, *path.parents)):
+            raise RuntimeError("ADB immutable inputs and overlay outputs must not use symlinks")
+    for index, output in enumerate(outputs):
+        resolved = output.resolve()
+        for other in [*inputs, *outputs[:index]]:
+            other_resolved = other.resolve()
+            if (resolved == other_resolved or resolved in other_resolved.parents
+                    or other_resolved in resolved.parents):
+                raise RuntimeError("ADB overlay outputs must be separate and disjoint from inputs")
+
+
+def check_overlay_outputs(outputs: list[pathlib.Path], inputs: list[pathlib.Path]) -> None:
+    check_overlay_paths(outputs, inputs)
+    for output in outputs:
+        if output.exists() and (not output.is_dir() or any(output.iterdir())):
+            raise RuntimeError("ADB overlay output must be a fresh empty directory")
+        if not output.parent.is_dir():
+            raise RuntimeError("ADB overlay output parent must already exist")
+
+
+def copy_checked_asset(
+    source: pathlib.Path, destination: pathlib.Path, expected: str,
+    created: dict[pathlib.Path, tuple[int, int]], *,
+    output_identity: tuple[int, int] | None = None,
+) -> None:
+    from verify_adb_helper_artifact import require_regular_file
+
+    # Recheck acquired ownership before each copy. Portable path checks do
+    # not provide atomic isolation against arbitrary concurrent renames.
+    if output_identity is not None:
+        parent = destination.parent
+        if any(path.is_symlink() for path in (parent, *parent.parents)):
+            raise RuntimeError("ADB acquired output must not use symlinks")
+        identity = parent.stat()
+        if (identity.st_dev, identity.st_ino) != output_identity:
+            raise RuntimeError("ADB acquired output directory ownership identity changed")
+    require_regular_file(source, "ADB immutable copy input")
+    digest = hashlib.sha256()
+    with source.open("rb") as original, destination.open("xb") as copied:
+        identity = os.fstat(copied.fileno())
+        created[destination] = (identity.st_dev, identity.st_ino)
+        for chunk in iter(lambda: original.read(1024 * 1024), b""):
+            digest.update(chunk)
+            copied.write(chunk)
+    if digest.hexdigest() != expected or sha256(destination) != expected:
+        raise RuntimeError(f"ADB immutable asset changed while copying: {source.name}")
+
+
 def materialize_overlay_from_core(
     lock_path: pathlib.Path, lock: dict, release_assets: list[dict],
     core_root: pathlib.Path, output: pathlib.Path,
     package_support_output: pathlib.Path | None, version: str, base_url: str,
+    build_receipt_path: pathlib.Path, source_set_sha256: str, build_receipt_sha256: str,
 ) -> None:
     from verify_adb_helper_artifact import (
-        VerificationError, require_regular_file, validate_source_set_receipt,
-        verify_hash_sidecar,
+        BINARY_BUILD_RECEIPT, VerificationError, find_receipt_asset, has_exact_schema,
+        read_json, require_regular_file,
+        validate_overlay_receipt, validate_source_set_receipt, verify_hash_sidecar,
     )
 
-    # The consumer may reassemble the overlay from a published core, but may
-    # not trust a marker file or a source-set receipt without checking its
-    # lock, asset hashes, and corresponding-source archive.
-    output_path = output.resolve()
-    core_path = core_root.resolve()
-    if (
-        output_path == core_path
-        or output_path in core_path.parents
-        or core_path in output_path.parents
-        or any(output.iterdir())
-    ):
-        raise RuntimeError("ADB overlay output must be empty and separate from its core")
+    # External expected-byte pins and legal checks are not signature
+    # authentication, native binary qualification, or publication authority.
+    outputs = [output] + ([package_support_output] if package_support_output is not None else [])
+    inputs = [core_root, lock_path, build_receipt_path]
+    check_overlay_outputs(outputs, inputs)
+    if not core_root.is_dir():
+        raise RuntimeError("ADB immutable core must be a real directory")
     core_assets = [asset for asset in release_assets if asset["ownership"] == "core"]
-    try:
-        source_set_asset = next(asset for asset in core_assets if asset["kind"] == "source-set-receipt")
-        source_set_path = core_root / source_set_asset["file_name"]
-        require_regular_file(source_set_path, "ADB core source-set receipt")
-        validate_source_set_receipt(
-            lock, lock_path, {"source_set_receipt_sha256": sha256(source_set_path)},
-            core_root, "release",
-        )
+    source_set_asset = next(asset for asset in core_assets if asset["kind"] == "source-set-receipt")
+
+    def validate_core(root: pathlib.Path) -> tuple[dict, dict[str, str]]:
+        source_set_path = root / source_set_asset["file_name"]
+        for path, expected in ((source_set_path, source_set_sha256),
+                               (build_receipt_path, build_receipt_sha256)):
+            require_regular_file(path, "ADB immutable receipt")
+            if sha256(path) != expected:
+                raise RuntimeError(f"external immutable receipt digest mismatch: {path.name}")
+        build_receipt = read_json(build_receipt_path, "ADB original binary-build receipt")
+        if not has_exact_schema(build_receipt, 1):
+            raise RuntimeError("ADB original binary-build receipt has an unsupported schema")
+        if build_receipt.get("receipt_kind", BINARY_BUILD_RECEIPT) != BINARY_BUILD_RECEIPT:
+            raise RuntimeError("ADB original receipt is not binary-build evidence")
+        if build_receipt.get("lock_sha256") != sha256(lock_path):
+            raise RuntimeError("ADB original binary-build receipt lock sha256 mismatch")
+        validate_source_set_receipt(lock, lock_path, build_receipt, root, "release")
+        files = {}
         for asset in core_assets:
-            path = core_root / asset["file_name"]
-            sidecar = core_root / asset["sha256_file"]
+            path = root / asset["file_name"]
             require_regular_file(path, f"ADB core asset {asset['kind']}")
-            verify_hash_sidecar(sidecar, sha256(path), path.name)
-            shutil.copyfile(path, output / path.name)
-    except VerificationError as error:
-        raise RuntimeError(f"ADB core asset verification failed: {error}") from error
-    write_overlay_receipt(output, release_assets, version, base_url)
-    write_release_hashes(output, release_assets)
-    if package_support_output is not None:
-        materialize_package_support(output, package_support_output, release_assets)
+            digest = sha256(path)
+            sidecar = root / asset["sha256_file"]
+            verify_hash_sidecar(sidecar, digest, path.name)
+            if asset["distribution"]["package_required"]:
+                record = find_receipt_asset(build_receipt, asset["kind"])
+                if record.get("path") != asset["file_name"] or record.get("sha256") != digest:
+                    raise RuntimeError(f"ADB original build support sha256 or path mismatch: {asset['kind']}")
+            files[path.name] = digest
+            files[sidecar.name] = sha256(sidecar)
+        return build_receipt, files
+
+    # No output exists until pins, original bindings, archive and support
+    # checks have all succeeded. Never use the destructive default projection.
+    created_roots: list[tuple[pathlib.Path, int, int, bool]] = []
+    created: dict[pathlib.Path, tuple[int, int]] = {}
+    try:
+        original_build, files = validate_core(core_root)
+        with tempfile.TemporaryDirectory(prefix=".adb-overlay-", dir=output.parent) as directory:
+            stage = pathlib.Path(directory)
+            for name, digest in files.items():
+                copy_checked_asset(core_root / name, stage / name, digest, {})
+            if validate_core(stage) != (original_build, files):
+                raise RuntimeError("ADB copied immutable core differs from original inputs")
+            write_overlay_receipt(stage, release_assets, version, base_url)
+            write_release_hashes(stage, release_assets, preserve_core_sidecars=True)
+            expected_names = {asset[field] for asset in release_assets
+                              for field in ("file_name", "sha256_file")}
+            index_path = stage / "adb-helper-release-assets.json"
+            if {path.name for path in stage.iterdir()} != expected_names | {index_path.name}:
+                raise RuntimeError("ADB release output file coverage mismatch")
+            expected_index = [{"kind": asset["kind"], "path": asset["file_name"],
+                               "sha256": sha256(stage / asset["file_name"])}
+                              for asset in release_assets]
+            require_regular_file(index_path, "ADB release asset index")
+            if json.loads(index_path.read_text(encoding="utf-8")) != expected_index:
+                raise RuntimeError("ADB release asset index mismatch")
+            if validate_core(stage) != (original_build, files):
+                raise RuntimeError("ADB staged immutable core differs from original inputs")
+            validate_overlay_receipt(lock, stage, "release", source_set_sha256)
+            release_files = {path.name: sha256(path) for path in stage.iterdir()}
+            support_files = {asset[field]: release_files[asset[field]]
+                             for asset in release_assets if asset["distribution"]["package_required"]
+                             for field in ("file_name", "sha256_file")}
+            for root in outputs:
+                # The other projection may have changed during the preceding
+                # root's copies. Check this root immediately before acquisition.
+                boundaries = [*inputs, *(other for other in outputs if other != root)]
+                check_overlay_outputs([root], boundaries)
+                existed = root.exists()
+                root.mkdir(exist_ok=existed)
+                check_overlay_outputs([root], boundaries)
+                identity = root.stat()
+                output_identity = (identity.st_dev, identity.st_ino)
+                created_roots.append((root, *output_identity, existed))
+                expected = release_files if root == output else support_files
+                for name, digest in expected.items():
+                    copy_checked_asset(stage / name, root / name, digest, created,
+                                       output_identity=output_identity)
+            check_overlay_paths(outputs, inputs)
+            if (validate_core(core_root) != (original_build, files)
+                    or validate_core(output) != (original_build, files)):
+                raise RuntimeError("ADB materialized immutable core differs from original inputs")
+            validate_overlay_receipt(lock, output, "release", source_set_sha256)
+            if package_support_output is not None:
+                validate_source_set_receipt(lock, lock_path, original_build,
+                                            package_support_output, "package")
+                validate_overlay_receipt(lock, package_support_output, "package", source_set_sha256)
+            for root in outputs:
+                expected = release_files if root == output else support_files
+                for name in expected:
+                    require_regular_file(root / name, "ADB materialized output asset")
+                if {path.name: sha256(path) for path in root.iterdir()} != expected:
+                    raise RuntimeError("ADB materialized output changed before completion")
+    except BaseException as error:
+        # These roots were checked empty, disjoint and nonsymlink before we
+        # acquired them. Do not remove a replacement root or immutable input.
+        for root, device, inode, existed in reversed(created_roots):
+            if not root.is_symlink() and root.exists():
+                identity = root.stat()
+                if (identity.st_dev, identity.st_ino) == (device, inode):
+                    for path, expected_identity in created.items():
+                        if path.parent == root and not path.is_symlink() and path.is_file():
+                            file_identity = path.stat()
+                            if (file_identity.st_dev, file_identity.st_ino) == expected_identity:
+                                path.unlink()
+                    if not existed and not any(root.iterdir()):
+                        root.rmdir()
+        if isinstance(error, VerificationError):
+            raise RuntimeError(f"ADB core asset verification failed: {error}") from error
+        raise
 
 
 def main() -> int:
@@ -382,7 +527,19 @@ def main() -> int:
     mode.add_argument("--core-only", action="store_true")
     mode.add_argument("--overlay-only", action="store_true")
     parser.add_argument("--core-root", type=pathlib.Path)
+    parser.add_argument("--build-receipt", type=pathlib.Path)
+    parser.add_argument("--source-set-sha256")
+    parser.add_argument("--build-receipt-sha256")
     args = parser.parse_args()
+    pins = (args.source_set_sha256, args.build_receipt_sha256)
+    if args.overlay_only:
+        if not args.build_receipt or any(
+            not isinstance(pin, str) or re.fullmatch(r"[0-9a-f]{64}", pin) is None
+            or pin == "0" * 64 for pin in pins
+        ):
+            parser.error("overlay-only requires original build-receipt and two external immutable receipt SHA-256 pins")
+    elif args.build_receipt or any(pin is not None for pin in pins):
+        parser.error("original build receipt and external pins are overlay-only inputs")
 
     if args.core_only:
         if args.version or args.base_url or args.core_root or args.package_support_output:
@@ -399,16 +556,17 @@ def main() -> int:
     base_url = normalize_base_url(args.base_url) if not args.core_only else None
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
     release_assets = release_asset_plan(lock)
-    args.output.mkdir(parents=True, exist_ok=True)
-    if args.core_only and any(args.output.iterdir()):
-        raise RuntimeError("ADB core output must be empty; stale overlay assets are forbidden")
-    by_kind = {asset["kind"]: asset for asset in release_assets}
     if args.overlay_only:
         materialize_overlay_from_core(
             args.lock, lock, release_assets, args.core_root, args.output,
             args.package_support_output, version, base_url,
+            args.build_receipt, args.source_set_sha256, args.build_receipt_sha256,
         )
         return 0
+    args.output.mkdir(parents=True, exist_ok=True)
+    if args.core_only and any(args.output.iterdir()):
+        raise RuntimeError("ADB core output must be empty; stale overlay assets are forbidden")
+    by_kind = {asset["kind"]: asset for asset in release_assets}
 
     source_manifest = {
         "schema_version": 1,

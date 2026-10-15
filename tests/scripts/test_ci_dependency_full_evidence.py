@@ -1,10 +1,13 @@
 """Full native provenance must come from the parent run, not candidate receipts."""
 
+import contextlib
 import copy
 import hashlib
 import io
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -87,6 +90,12 @@ class FullEvidenceTest(unittest.TestCase):
                 package_core(stage, core, component=row["component"], target=row["target"],
                              core_identity=cls.identities[target_id]["core_identity"])
                 cls.cores[target_id] = core.read_bytes()
+                if row["component"] == "ios-native":
+                    files["include/fixture/original.h"] = (b"authenticated header sentinel\n", 0o644)
+                    files["share/fixture/support.dat"] = (b"authenticated support sentinel\x00", 0o644)
+                    for name in ("ios-native-source-set-receipt.json", "ios-native-legal-receipt.json",
+                                 "ios-native-sbom.spdx.json", "corresponding-source/fixture.tar.gz"):
+                        files[name] = (("original full artifact: " + name).encode(), 0o644)
                 receipt_data = json.dumps(receipt).encode()
                 files[receipt_name] = (receipt_data, 0o644)
                 if row["component"] == "adb-helper":
@@ -124,24 +133,285 @@ class FullEvidenceTest(unittest.TestCase):
         values = values or self.inputs()
         values.update(overrides)
 
-        def verifier(command, **kwargs):
-            # The full verifier is intentionally injected; these synthetic fixtures
-            # contain no executable ADB, Mach-O, or full source/legal artifacts.
-            if "--package-verification-receipt" in command:
-                output = pathlib.Path(command[command.index("--package-verification-receipt") + 1])
-                output.write_bytes(b"{}")
-            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+        with mock.patch.object(evidence, "verify_artifact_envelope"):
+            return evidence.verify_full_evidence(**values, run_verifier=self.mocked_metadata_runner,
+                                                 attestation_runner=self.mocked_signature_runner)
+
+    @staticmethod
+    def mocked_metadata_runner(command, **kwargs):
+        # Test fixtures contain no executable ADB, Mach-O, or full source/legal artifacts.
+        return subprocess.CompletedProcess(command, 0, stdout="test-only", stderr="")
+
+    @staticmethod
+    def mocked_signature_runner(command, **kwargs):
+        # Synthetic test seam only: no production signature verification occurs.
+        subject = pathlib.Path(command[3])
+        statement = {"predicateType": "https://slsa.dev/provenance/v1",
+                     "subject": [{"name": subject.name, "digest": {"sha256": sha(subject.read_bytes())}}]}
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps([
+            {"verificationResult": {"statement": statement}}]), stderr="")
+
+    @contextlib.contextmanager
+    def projection(self, values=None, *, attestation_runner=None, run_verifier=None):
+        # Native metadata is also mocked: fixtures contain no native executables.
+        with mock.patch.object(evidence, "verify_artifact_envelope"):
+            with evidence.project_authenticated_full_artifacts(
+                    **(values or self.inputs()),
+                    attestation_runner=attestation_runner or self.mocked_signature_runner,
+                    run_verifier=run_verifier or self.mocked_metadata_runner) as result:
+                yield result
+
+    def full_files(self, values, target="ios-arm64"):
+        name = evidence._full_name(values["catalog"]["targets"][target])
+        artifact = next(item for item in values["artifacts"] if item["name"] == name)
+        with tarfile.open(fileobj=io.BytesIO(values["full_downloads"][artifact["id"]]), mode="r:gz") as archive:
+            files = {item.name[2:]: (archive.extractfile(item).read(), item.mode)
+                     for item in archive if item.isfile()}
+        return artifact["id"], files
+
+    def test_fresh_workspace_temporary_parent_preserves_projection_and_existing_verification(self):
+        values = self.inputs()
+        original_inputs = copy.deepcopy(values)
+        created = []
+        mkdtemp = tempfile.mkdtemp
+        with tempfile.TemporaryDirectory(prefix="full-evidence-workspace-", dir=ROOT) as temporary:
+            parent = pathlib.Path(temporary)
+
+            def workspace_temporary(*args, **kwargs):
+                kwargs["dir"] = str(parent)
+                base = pathlib.Path(mkdtemp(*args, **kwargs))
+                created.append(base)
+                return str(base)
+
+            with mock.patch.object(evidence.tempfile, "mkdtemp", side_effect=workspace_temporary):
+                with self.projection(values) as (trusted, roots):
+                    for root in roots.values():
+                        base = root.parent.parent
+                        self.assertEqual(base.parent.resolve(), parent.resolve())
+                        self.assertNotIn(base.resolve(), (ROOT.resolve(), *ROOT.resolve().parents))
+                    self.assertEqual((roots["ios-arm64"] / "include/fixture/original.h").read_bytes(),
+                                     b"authenticated header sentinel\n")
+                self.assertTrue(all(not base.exists() for base in created))
+                self.assertEqual(self.run_gate(values), trusted)
+            self.assertEqual(len(created), 2)
+            self.assertTrue(all(not base.exists() for base in created))
+            self.assertEqual(values, original_inputs)
+            self.assertEqual(compute_identities(ROOT, self.catalog), self.identities)
+
+    def test_checkout_or_ancestor_output_has_no_cleanup_authority(self):
+        for protected in (ROOT, ROOT.parent):
+            with self.subTest(protected=str(protected)):
+                # The cleanup spy is deliberately inert: destructive RED must
+                # never delete checkout material, even with a broken guard.
+                with mock.patch.object(evidence.tempfile, "mkdtemp", return_value=str(protected)), \
+                     mock.patch.object(evidence.shutil, "rmtree") as cleanup:
+                    with self.assertRaisesRegex(evidence.FullEvidenceError, "checkout"):
+                        with self.projection():
+                            self.fail("checkout or ancestor was exposed as owned output")
+                    cleanup.assert_not_called()
+
+    def test_projection_exposes_original_full_headers_support_receipts_and_archives_after_all_seven(self):
+        values = self.inputs()
+        verified = []
 
         def attestor(command, **kwargs):
-            path = pathlib.Path(command[3])
-            statement = {"predicateType": "https://slsa.dev/provenance/v1",
-                         "subject": [{"name": path.name, "digest": {"sha256": sha(path.read_bytes())}}]}
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([
-                {"verificationResult": {"statement": statement}}]), stderr="")
+            verified.append(pathlib.Path(command[3]).name)
+            return self.mocked_signature_runner(command, **kwargs)
 
-        with mock.patch.object(evidence, "verify_artifact_envelope"):
-            return evidence.verify_full_evidence(**values, run_verifier=verifier,
-                                                 attestation_runner=attestor)
+        with self.projection(values, attestation_runner=attestor) as (trusted, roots):
+            self.assertEqual(len(verified), 7)
+            self.assertEqual(trusted, self.run_gate(values))
+            self.assertEqual(set(roots), set(values["candidate_archives"]))
+            self.assertEqual(len({root.resolve() for root in roots.values()}), 7)
+            for target, root in roots.items():
+                identifier, files = self.full_files(values, target)
+                self.assertNotIn(root.parent.parent.resolve(), (ROOT.resolve(), *ROOT.resolve().parents))
+                for name, (raw, _) in files.items():
+                    self.assertEqual((root / name).read_bytes(), raw, (target, name))
+                tar_name = evidence._full_name(values["catalog"]["targets"][target]) + ".tar.gz"
+                self.assertEqual((root.parent / tar_name).read_bytes(), values["full_downloads"][identifier])
+            self.assertEqual((roots["ios-arm64"] / "include/fixture/original.h").read_bytes(),
+                             b"authenticated header sentinel\n")
+            self.assertEqual((roots["ios-arm64"] / "share/fixture/support.dat").read_bytes(),
+                             b"authenticated support sentinel\x00")
+            self.assertEqual(os.readlink(roots["ios-arm64"] / "lib/libfixture.dylib"),
+                             "libfixture.1.dylib")
+            owned = [root.parent.parent for root in roots.values()]
+        self.assertTrue(all(not root.exists() for root in owned))
+
+    def test_projection_cleans_its_own_storage_when_caller_raises(self):
+        owned = None
+        with self.assertRaisesRegex(RuntimeError, "caller stopped"):
+            with self.projection() as (_, roots):
+                owned = roots["ios-arm64"].parent.parent
+                raise RuntimeError("caller stopped")
+        self.assertIsNotNone(owned)
+        self.assertFalse(owned.exists())
+
+    def test_projection_rejects_bad_signature_and_subject_or_directory_substitution_before_yield(self):
+        for variant in ("bad-signature", "changed-subject", "subject-symlink", "directory-alias"):
+            paths = []
+            with tempfile.TemporaryDirectory() as temporary:
+                outside = pathlib.Path(temporary)
+                sentinel = outside / "caller-owned"
+                sentinel.write_bytes(b"keep")
+
+                def attestor(command, **kwargs):
+                    subject = pathlib.Path(command[3])
+                    paths.append(subject.parent.parent)
+                    if variant == "bad-signature":
+                        raise subprocess.CalledProcessError(1, command)
+                    if variant == "changed-subject":
+                        subject.write_bytes(b"different signed subject")
+                    elif variant == "subject-symlink":
+                        replacement = outside / subject.name
+                        replacement.write_bytes(subject.read_bytes())
+                        subject.unlink()
+                        subject.symlink_to(replacement)
+                    else:
+                        original = subject.parent
+                        relocated = outside / "relocated-work"
+                        original.rename(relocated)
+                        original.symlink_to(relocated, target_is_directory=True)
+                    return self.mocked_signature_runner(command, **kwargs)
+
+                with self.subTest(variant=variant), self.assertRaises(evidence.FullEvidenceError):
+                    with self.projection(attestation_runner=attestor):
+                        self.fail("uncertain authenticated snapshot was exposed")
+                self.assertTrue(paths)
+                self.assertTrue(all(not path.exists() for path in paths))
+                self.assertEqual(sentinel.read_bytes(), b"keep")
+
+    def test_projection_rejects_invalid_full_members_and_core_mismatch_before_yield(self):
+        for variant in ("mutated-header", "missing-header", "extra-member", "escaping-member",
+                        "symlinked-header", "core-mismatch"):
+            values = self.inputs()
+            identifier, files = self.full_files(values)
+            link = ("lib/libfixture.dylib", "libfixture.1.dylib")
+            if variant == "mutated-header":
+                files["include/fixture/original.h"] = (b"not the checksummed header", 0o644)
+            elif variant == "missing-header":
+                files.pop("include/fixture/original.h")
+            elif variant == "extra-member":
+                files["share/unlisted"] = (b"unlisted", 0o644)
+            elif variant == "escaping-member":
+                files["../escape"] = (b"escape", 0o644)
+            elif variant == "symlinked-header":
+                files.pop("include/fixture/original.h")
+                link = ("include/fixture/original.h", "../../lib/libfixture.1.dylib")
+            else:
+                files["lib/libfixture.1.dylib"] = (b"not the core", 0o755)
+                files["SHA256SUMS"] = ("".join(
+                    f"{sha(data)}  {name}\n" for name, (data, _) in sorted(files.items())
+                    if name != "SHA256SUMS").encode(), 0o644)
+            values["full_downloads"][identifier] = make_tar(files, link=link)
+            with self.subTest(variant=variant), self.assertRaises(evidence.FullEvidenceError):
+                with self.projection(values):
+                    self.fail("invalid full artifact was exposed")
+
+    def test_projection_rejects_header_or_directory_mutation_by_external_metadata_runner(self):
+        for variant in ("header", "checksum-rewrite", "directory-alias"):
+            paths = []
+            with tempfile.TemporaryDirectory() as temporary:
+                outside = pathlib.Path(temporary)
+
+                def verifier(command, **kwargs):
+                    root = pathlib.Path(command[command.index("--stack-root") + 1])
+                    paths.append(root.parent.parent)
+                    if variant == "directory-alias":
+                        relocated = outside / (root.parent.name + "-full")
+                        root.rename(relocated)
+                        root.symlink_to(relocated, target_is_directory=True)
+                    else:
+                        header = root / "include/fixture/original.h"
+                        header.write_bytes(b"untrusted replacement")
+                        if variant == "checksum-rewrite":
+                            checksums = root / "SHA256SUMS"
+                            checksums.write_text(checksums.read_text().replace(
+                                sha(b"authenticated header sentinel\n"), sha(header.read_bytes())))
+                    return subprocess.CompletedProcess(command, 0, stdout="test-only", stderr="")
+
+                with self.subTest(variant=variant), self.assertRaises(evidence.FullEvidenceError):
+                    with self.projection(run_verifier=verifier):
+                        self.fail("mutated original full snapshot was exposed")
+                self.assertTrue(paths)
+                self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_projection_rejects_added_or_changed_links_after_external_metadata_runner(self):
+        for variant in ("extra-header-link", "extra-directory-link", "changed-lib-link"):
+            with tempfile.TemporaryDirectory() as temporary:
+                outside = pathlib.Path(temporary)
+                sentinel = outside / "caller-owned.h"
+                sentinel.write_bytes(b"not authenticated by the full tar")
+
+                def verifier(command, **kwargs):
+                    root = pathlib.Path(command[command.index("--stack-root") + 1])
+                    if variant == "changed-lib-link":
+                        alias = root / "lib/libfixture.dylib"
+                        alias.unlink()
+                        alias.symlink_to(sentinel)
+                    else:
+                        alias = root / "include/fixture" / (
+                            "extra.h" if variant == "extra-header-link" else "extra-directory")
+                        alias.symlink_to(sentinel if variant == "extra-header-link" else outside,
+                                         target_is_directory=variant == "extra-directory-link")
+                    return self.mocked_metadata_runner(command, **kwargs)
+
+                with self.subTest(variant=variant), self.assertRaises(evidence.FullEvidenceError):
+                    with self.projection(run_verifier=verifier):
+                        self.fail("unauthenticated link was exposed")
+                self.assertEqual(sentinel.read_bytes(), b"not authenticated by the full tar")
+
+    def test_projection_cleanup_preserves_foreign_base_replacement_from_signature_runner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            outside = pathlib.Path(temporary)
+            replaced = []
+
+            def attestor(command, **kwargs):
+                subject = pathlib.Path(command[3])
+                result = self.mocked_signature_runner(command, **kwargs)
+                base = subject.parent.parent
+                foreign = outside / "foreign"
+                shutil.copytree(base, foreign)
+                (foreign / "caller-owned").mkdir()
+                (foreign / "caller-owned/sentinel").write_bytes(b"keep foreign tree")
+                base.rename(outside / "original-owned-base")
+                foreign.rename(base)
+                replaced.append(base)
+                return result
+
+            try:
+                with self.assertRaises(evidence.FullEvidenceError):
+                    with self.projection(attestation_runner=attestor):
+                        self.fail("foreign directory replacement was exposed")
+                self.assertEqual(len(replaced), 1)
+                self.assertEqual((replaced[0] / "caller-owned/sentinel").read_bytes(),
+                                 b"keep foreign tree")
+            finally:
+                if replaced and replaced[0].exists():
+                    replaced[0].rename(outside / "preserved-foreign")
+
+    def test_projection_cleanup_preserves_foreign_base_and_original_caller_exception(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            outside = pathlib.Path(temporary)
+            replacement = outside / "foreign"
+            replacement.mkdir()
+            (replacement / "sentinel").write_bytes(b"keep foreign tree")
+            base = None
+            original_error = RuntimeError("original caller error")
+            try:
+                with self.assertRaises(RuntimeError) as caught:
+                    with self.projection() as (_, roots):
+                        base = roots["ios-arm64"].parent.parent
+                        base.rename(outside / "original-owned-base")
+                        replacement.rename(base)
+                        raise original_error
+                self.assertIs(caught.exception, original_error)
+                self.assertIsNotNone(base)
+                self.assertEqual((base / "sentinel").read_bytes(), b"keep foreign tree")
+            finally:
+                if base is not None and base.exists():
+                    base.rename(outside / "preserved-foreign")
 
     def test_seven_signed_full_archives_compare_every_core_member_and_yield_scheduler_evidence(self):
         trusted = self.run_gate()
