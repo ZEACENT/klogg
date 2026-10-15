@@ -13,11 +13,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import ci_environment as ci
 import qualify_ci_analysis as analysis
+import prefetch_adb_helper_sources as transport
 
 BASE = "a" * 40
 HEAD = "b" * 40
@@ -456,7 +458,8 @@ class AnalysisCandidateBoundaryTest(unittest.TestCase):
         self.fail_run = False
         self.forbidden_output = False
 
-    def downloader(self, url, path):
+    def downloader(self, url, path, *, max_bytes):
+        self.assertEqual(max_bytes, analysis.MAX_CODEQL_BUNDLE_BYTES)
         self.downloads.append(url)
         path.write_bytes(self.bundle)
 
@@ -526,6 +529,79 @@ class AnalysisCandidateBoundaryTest(unittest.TestCase):
                 self.assertNotIn("--privileged", command)
                 self.assertFalse(any("target=/klogg-codeql" in value for value in command))
 
+    def test_real_default_codeql_transport_stops_on_the_first_overflow_byte(self):
+        class Response:
+            def __init__(self):
+                self.read_sizes = []
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused):
+                self.closed = True
+
+            def read(self, size):
+                self.read_sizes.append(size)
+                if len(self.read_sizes) == 1:
+                    return b"12345678"
+                if len(self.read_sizes) == 2:
+                    return b"9"
+                raise AssertionError("qualification read after the first overflow byte")
+
+            read1 = read
+
+        response = Response()
+        with mock.patch.object(analysis, "MAX_CODEQL_BUNDLE_BYTES", 8), mock.patch.object(
+            transport.urllib.request, "urlopen", return_value=response
+        ) as opened:
+            with self.assertRaises(transport.DownloadSizeError):
+                self.qualify("codeql", downloader=None)
+        opened.assert_called_once()
+        self.assertEqual(response.read_sizes, [9, 1])
+        self.assertTrue(response.closed)
+        self.assertEqual(self.extractions, [])
+        self.assertFalse(any(command[:2] == ["docker", "run"] for command in self.commands))
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"workspace", "candidate"})
+
+    def test_injected_codeql_oversize_is_rejected_before_hash_or_extraction(self):
+        def oversized(url, path, *, max_bytes):
+            self.assertEqual(max_bytes, 8)
+            path.write_bytes(b"123456789")
+        with mock.patch.object(analysis, "MAX_CODEQL_BUNDLE_BYTES", 8), mock.patch.object(
+            analysis, "file_sha", side_effect=AssertionError("hashed oversized qualification bundle")
+        ) as hashed:
+            with self.assertRaisesRegex(analysis.AnalysisError, "size bound"):
+                self.qualify("codeql", downloader=oversized)
+        hashed.assert_not_called()
+        self.assertEqual(self.extractions, [])
+        self.assertFalse(any(command[:2] == ["docker", "run"] for command in self.commands))
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"workspace", "candidate"})
+
+    def test_real_default_codeql_transport_accepts_exact_bound_with_30_second_socket(self):
+        self.assertEqual(analysis.MAX_CODEQL_BUNDLE_BYTES, 2 * 1024**3)
+        response = io.BytesIO(self.bundle)
+        with mock.patch.object(analysis, "MAX_CODEQL_BUNDLE_BYTES", len(self.bundle)), mock.patch.object(
+            transport.urllib.request, "urlopen", return_value=response
+        ) as opened:
+            result = self.qualify("codeql", downloader=None)
+        opened.assert_called_once()
+        self.assertEqual(opened.call_args.kwargs["timeout"], 30)
+        self.assertTrue(response.closed)
+        self.assertEqual(result["role_materials"], self.materials["codeql"])
+        self.assertEqual(set(result["artifacts"]), {"codeql.sarif"})
+        self.assertTrue(all(not path.exists() for path in self.extractions))
+
+    def test_codeql_downloader_type_error_does_not_retry_without_budget(self):
+        downloader = mock.Mock(side_effect=TypeError("unsupported byte budget"))
+        with self.assertRaisesRegex(TypeError, "unsupported byte budget"):
+            self.qualify("codeql", downloader=downloader)
+        downloader.assert_called_once()
+        self.assertEqual(downloader.call_args.kwargs, {"max_bytes": analysis.MAX_CODEQL_BUNDLE_BYTES})
+        self.assertEqual(self.extractions, [])
+        self.assertFalse(any(command[:2] == ["docker", "run"] for command in self.commands))
+        self.assertFalse(self.output.exists())
+
     def test_codeql_download_is_hash_locked_private_and_only_sarif_evidence_escape(self):
         result = self.qualify("codeql")
         self.assertEqual(self.downloads, [self.materials["codeql"][0]["url"]])
@@ -551,7 +627,8 @@ class AnalysisCandidateBoundaryTest(unittest.TestCase):
         self.assertFalse(any(command[:2] == ["docker", "run"] for command in self.commands))
 
     def test_bad_download_cannot_be_extracted_or_executed(self):
-        def wrong(url, path):
+        def wrong(url, path, *, max_bytes):
+            self.assertEqual(max_bytes, analysis.MAX_CODEQL_BUNDLE_BYTES)
             path.write_bytes(b"tampered bundle")
         with self.assertRaisesRegex(ci.ContractError, "checksum mismatch"):
             self.qualify("codeql", downloader=wrong)

@@ -37,6 +37,7 @@ from prefetch_adb_helper_sources import download, safe_extract
 
 FAMILY = "noble-qt693-analysis"
 ROLES = ("static", "coverage", "codeql")
+MAX_CODEQL_BUNDLE_BYTES = 2 * 1024**3
 ALLOWED_OUTPUTS = {
     "static": {"analysis-evidence.json"},
     "coverage": {"analysis-evidence.json", "coverage-summary.txt", "coverage.json"},
@@ -442,7 +443,10 @@ def qualify(role, candidate_root, workspace, analysis_base_sha, role_materials, 
         if role == "codeql":
             material = policy["profiles"][role]["role_materials"][0]
             archive = private / "codeql-official.tar.gz"
-            downloader(material["url"], archive)
+            downloader(material["url"], archive, max_bytes=MAX_CODEQL_BUNDLE_BYTES)
+            require(archive.is_file() and not archive.is_symlink()
+                    and 0 < archive.stat().st_size <= MAX_CODEQL_BUNDLE_BYTES,
+                    "official CodeQL bundle missing or exceeds size bound")
             require(file_sha(archive) == material["sha256"], "official CodeQL bundle checksum mismatch")
             tools = private / "tools"
             extractor(archive, tools)

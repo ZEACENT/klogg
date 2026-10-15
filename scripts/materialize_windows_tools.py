@@ -18,13 +18,17 @@ import sys
 import tarfile
 import tempfile
 import time
-import urllib.request
+import urllib.error
 import zipfile
+
+from prefetch_adb_helper_sources import download as download_source
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 LOCK = ROOT / "ci/tools/msys2-tools.json"
 PREFIX = "msys64/"
 MAX_ENTRY_SIZE = 128 * 1024 * 1024
+# Compressed package budget; MAX_ENTRY_SIZE bounds an unpacked selected file.
+MAX_PACKAGE_SIZE = 512 * 1024 * 1024
 MAX_SOURCE_SIZE = 512 * 1024 * 1024
 DOWNLOAD_ATTEMPTS = 3
 
@@ -93,9 +97,11 @@ def load_lock(path: pathlib.Path) -> dict:
     return lock
 
 
-def check_archive(path: pathlib.Path, expected: str) -> None:
+def check_archive(path: pathlib.Path, expected: str, *, max_bytes: int) -> None:
     if not path.is_file() or path.is_symlink():
         raise RuntimeError(f"MSYS2 archive missing or not a regular file: {path}")
+    if path.stat().st_size > max_bytes:
+        raise RuntimeError(f"MSYS2 archive exceeds size limit: {path}")
     sha = hashlib.sha256()
     with path.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -104,13 +110,13 @@ def check_archive(path: pathlib.Path, expected: str) -> None:
         raise RuntimeError(f"MSYS2 archive SHA-256 mismatch: {path}")
 
 
-def download(url: str, target: pathlib.Path) -> None:
-    with urllib.request.urlopen(url, timeout=90) as response, target.open("wb") as output:
-        shutil.copyfileobj(response, output)
+def download(url: str, target: pathlib.Path, *, max_bytes: int) -> None:
+    # verified_archive owns the three-attempt/status policy. Do not nest retries.
+    download_source(url, target, attempts=1, max_bytes=max_bytes, socket_timeout=90)
 
 
 def verified_archive(cache: pathlib.Path, entry: dict, *, require_prefetched: bool,
-                     downloader) -> pathlib.Path:
+                     max_bytes: int, downloader) -> pathlib.Path:
     archive = cache / entry["archive_file"]
     if not archive.exists() and not archive.is_symlink():
         if require_prefetched:
@@ -120,7 +126,7 @@ def verified_archive(cache: pathlib.Path, entry: dict, *, require_prefetched: bo
             with tempfile.TemporaryDirectory(prefix="msys2-download-", dir=cache) as temporary:
                 candidate = pathlib.Path(temporary) / entry["archive_file"]
                 try:
-                    (downloader or download)(entry["archive_url"], candidate)
+                    (downloader or download)(entry["archive_url"], candidate, max_bytes=max_bytes)
                 except OSError as error:
                     if isinstance(error, urllib.error.HTTPError):
                         code = error.code
@@ -131,10 +137,10 @@ def verified_archive(cache: pathlib.Path, entry: dict, *, require_prefetched: bo
                         raise RuntimeError(f"MSYS2 download failed after {DOWNLOAD_ATTEMPTS} attempts: {archive}") from error
                     time.sleep(attempt + 1)
                     continue
-                check_archive(candidate, entry["archive_sha256"])
+                check_archive(candidate, entry["archive_sha256"], max_bytes=max_bytes)
                 candidate.replace(archive)
                 break
-    check_archive(archive, entry["archive_sha256"])
+    check_archive(archive, entry["archive_sha256"], max_bytes=max_bytes)
     return archive
 
 
@@ -221,7 +227,7 @@ def materialize(cache: pathlib.Path, destination: pathlib.Path, lock_path: pathl
     files: dict[str, bytes] = {}
     for package in lock["packages"]:
         archive = verified_archive(cache, package, require_prefetched=require_prefetched,
-                                   downloader=downloader)
+                                   max_bytes=MAX_PACKAGE_SIZE, downloader=downloader)
         for name, data in package_contents(archive, package, decompressor or decompress).items():
             output_name = PREFIX + name
             if output_name in files and files[output_name] != data:
@@ -230,7 +236,7 @@ def materialize(cache: pathlib.Path, destination: pathlib.Path, lock_path: pathl
     sources = {}
     for source in lock.get("corresponding_sources", []):
         archive = verified_archive(cache, source, require_prefetched=require_prefetched,
-                                   downloader=downloader)
+                                   max_bytes=MAX_SOURCE_SIZE, downloader=downloader)
         if archive.stat().st_size > MAX_SOURCE_SIZE:
             raise RuntimeError(f"MSYS2 source archive exceeds limit: {archive}")
         sources["corresponding-source/" + source["archive_file"]] = archive

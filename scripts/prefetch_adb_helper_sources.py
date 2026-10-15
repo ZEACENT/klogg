@@ -9,6 +9,7 @@ import contextlib
 import gzip
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -371,14 +372,22 @@ def download(
     cancel_event: Optional[threading.Event] = None,
     *,
     max_bytes: Optional[int] = None,
+    socket_timeout: float = DOWNLOAD_SOCKET_TIMEOUT_SECONDS,
 ) -> None:
     """Atomically download a response, optionally bounding bytes per attempt.
 
     The default preserves existing callers. A bounded response may read one
     overflow byte to distinguish exact-limit EOF; excess bytes are never written.
+    The socket timeout is per operation, not an overall transfer deadline.
     """
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
         raise ValueError("download max_bytes must be a positive integer or None")
+    try:
+        valid_timeout = type(socket_timeout) in (int, float) and socket_timeout > 0 and math.isfinite(socket_timeout)
+    except OverflowError:
+        valid_timeout = False
+    if not valid_timeout:
+        raise ValueError("download socket_timeout must be finite and positive")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
         temporary = pathlib.Path(stream.name)
@@ -389,7 +398,7 @@ def download(
             try:
                 request = urllib.request.Request(url, headers={"User-Agent": "klogg-adb-source-prefetch/1"})
                 with urllib.request.urlopen(
-                    request, timeout=DOWNLOAD_SOCKET_TIMEOUT_SECONDS
+                    request, timeout=socket_timeout
                 ) as response, temporary.open("wb") as output:
                     read_chunk = getattr(response, "read1", response.read)
                     total = 0

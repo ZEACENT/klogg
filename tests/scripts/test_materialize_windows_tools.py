@@ -15,6 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import materialize_windows_tools as tools
+import prefetch_adb_helper_sources as transport
 
 
 class WindowsToolsTests(unittest.TestCase):
@@ -61,15 +62,174 @@ class WindowsToolsTests(unittest.TestCase):
         return tools.materialize(self.cache, self.destination, self.lock,
                                  decompressor=lambda archive: io.BytesIO(self.payload), **kwargs)
 
+    def test_reviewed_caps_distinguish_compressed_archives_and_unpacked_members(self):
+        self.assertEqual(tools.MAX_PACKAGE_SIZE, 512 * 1024 * 1024)
+        self.assertEqual(tools.MAX_SOURCE_SIZE, 512 * 1024 * 1024)
+        self.assertEqual(tools.MAX_ENTRY_SIZE, 128 * 1024 * 1024)
+
+    def test_default_transport_accepts_exact_runtime_and_source_bounds(self):
+        source = b"synthetic corresponding source"
+        source_name = "mingw-w64-ragel-6.10-3.src.tar.zst"
+        self.document["corresponding_sources"] = [{
+            "name": "ragel", "archive_file": source_name,
+            "archive_url": "https://repo.msys2.org/mingw/sources/" + source_name,
+            "archive_sha256": hashlib.sha256(source).hexdigest(),
+            "license_obligation": "synthetic source fixture",
+        }]
+        self.lock.write_text(json.dumps(self.document))
+        responses = [io.BytesIO(self.data), io.BytesIO(source)]
+        with mock.patch.object(tools, "MAX_PACKAGE_SIZE", len(self.data)), mock.patch.object(
+            tools, "MAX_SOURCE_SIZE", len(source)
+        ), mock.patch.object(transport.urllib.request, "urlopen", side_effect=responses) as opened, mock.patch.object(
+            tools, "download_source", wraps=tools.download_source
+        ) as download:
+            self._materialize()
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual([call.kwargs for call in download.call_args_list], [
+            {"attempts": 1, "max_bytes": len(self.data), "socket_timeout": 90},
+            {"attempts": 1, "max_bytes": len(source), "socket_timeout": 90},
+        ])
+        self.assertTrue(all(call.kwargs["timeout"] == 90 for call in opened.call_args_list))
+        self.assertTrue(all(response.closed for response in responses))
+        with zipfile.ZipFile(self.destination) as archive:
+            self.assertEqual(archive.read("corresponding-source/" + source_name), source)
+
+    def test_default_transport_preserves_three_outer_attempts_without_nested_retries(self):
+        bodies = [io.BytesIO(), io.BytesIO()]
+        failures = [urllib.error.HTTPError("https://repo.msys2.org/", code, "transient", {}, body)
+                    for code, body in zip((503, 504), bodies)]
+        with mock.patch.object(transport.urllib.request, "urlopen", side_effect=failures + [io.BytesIO(self.data)]) as opened, mock.patch.object(
+            tools, "download_source", wraps=tools.download_source
+        ) as download, mock.patch.object(tools.time, "sleep") as sleep:
+            self._materialize()
+        self.assertEqual(opened.call_count, 3)
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+        self.assertTrue(all(call.kwargs == {"attempts": 1, "max_bytes": tools.MAX_PACKAGE_SIZE, "socket_timeout": 90}
+                            for call in download.call_args_list))
+        self.assertTrue(all(call.kwargs["timeout"] == 90 for call in opened.call_args_list))
+        self.assertEqual((self.cache / self.filename).read_bytes(), self.data)
+        self.assertTrue(all(body.closed for body in bodies))
+
+    def test_default_transport_preserves_nonretryable_http_statuses(self):
+        for code in (404, 501):
+            with self.subTest(status=code):
+                body = io.BytesIO()
+                failure = urllib.error.HTTPError("https://repo.msys2.org/", code, "permanent", {}, body)
+                with mock.patch.object(transport.urllib.request, "urlopen", side_effect=failure) as opened, mock.patch.object(
+                    tools.time, "sleep", side_effect=AssertionError("permanent failure retried")
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "rejected"):
+                        self._materialize()
+                opened.assert_called_once()
+                self.assertTrue(body.closed)
+                self.assertEqual(list(self.cache.iterdir()), [])
+                self.assertFalse(self.destination.exists())
+
+    def test_default_transport_bounds_runtime_and_corresponding_source_streams(self):
+        class Response:
+            def __init__(self):
+                self.read_sizes = []
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused):
+                self.closed = True
+
+            def read(self, size):
+                self.read_sizes.append(size)
+                if len(self.read_sizes) == 1:
+                    return b"12345678"
+                if len(self.read_sizes) == 2:
+                    return b"9"
+                raise AssertionError("MSYS2 read after the first overflow byte")
+
+            read1 = read
+
+        for source in (False, True):
+            with self.subTest(corresponding_source=source):
+                response = Response()
+                document = json.loads(json.dumps(self.document))
+                source_name = "mingw-w64-ragel-6.10-3.src.tar.zst"
+                if source:
+                    document["corresponding_sources"] = [{
+                        "name": "ragel", "archive_file": source_name,
+                        "archive_url": "https://repo.msys2.org/mingw/sources/" + source_name,
+                        "archive_sha256": hashlib.sha256(b"123456789").hexdigest(),
+                        "license_obligation": "synthetic source fixture",
+                    }]
+                self.lock.write_text(json.dumps(document))
+                cache = self.root / ("source-cache" if source else "runtime-cache")
+                def open_response(request, **kwargs):
+                    address = getattr(request, "full_url", request)
+                    if source and address.endswith(self.filename):
+                        return io.BytesIO(self.data)
+                    return response
+                with mock.patch.object(tools, "MAX_PACKAGE_SIZE", 1024 if source else 8), mock.patch.object(
+                    tools, "MAX_SOURCE_SIZE", 8
+                ), mock.patch.object(transport.urllib.request, "urlopen", side_effect=open_response) as opened, mock.patch.object(
+                    tools.time, "sleep", side_effect=AssertionError("oversize was retried")
+                ):
+                    with self.assertRaises(transport.DownloadSizeError):
+                        tools.materialize(cache, self.destination, self.lock,
+                                          decompressor=lambda archive: io.BytesIO(self.payload))
+                self.assertEqual(opened.call_count, 2 if source else 1)
+                self.assertTrue(all(call.kwargs["timeout"] == 90 for call in opened.call_args_list))
+                self.assertEqual(response.read_sizes, [9, 1])
+                self.assertTrue(response.closed)
+                self.assertFalse(self.destination.exists())
+                self.assertEqual({path.name for path in cache.iterdir()}, {self.filename} if source else set())
+
+    def test_cached_and_injected_oversize_fail_before_hash_or_cache_publication(self):
+        real_sha256 = hashlib.sha256
+        for source in (False, True):
+            for cached in (False, True):
+                with self.subTest(corresponding_source=source, cached=cached):
+                    cache = self.root / ("bounded-{}-{}".format(source, cached))
+                    cache.mkdir()
+                    document = json.loads(json.dumps(self.document))
+                    name = self.filename
+                    if source:
+                        (cache / self.filename).write_bytes(self.data)
+                        name = "mingw-w64-ragel-6.10-3.src.tar.zst"
+                        document["corresponding_sources"] = [{
+                            "name": "ragel", "archive_file": name,
+                            "archive_url": "https://repo.msys2.org/mingw/sources/" + name,
+                            "archive_sha256": real_sha256(b"123456789").hexdigest(),
+                            "license_obligation": "synthetic source fixture",
+                        }]
+                    self.lock.write_text(json.dumps(document))
+                    if cached:
+                        (cache / name).write_bytes(b"123456789")
+                    def download(url, target, *, max_bytes):
+                        self.assertEqual(max_bytes, 8)
+                        target.write_bytes(b"123456789")
+                    prefix_hashers = [real_sha256()] if source else []
+                    with mock.patch.object(tools, "MAX_PACKAGE_SIZE", 1024 if source else 8), mock.patch.object(
+                        tools, "MAX_SOURCE_SIZE", 8
+                    ), mock.patch.object(tools.hashlib, "sha256", side_effect=prefix_hashers + [
+                        AssertionError("hashed oversized MSYS2 archive")
+                    ]) as hashed:
+                        with self.assertRaisesRegex(RuntimeError, "exceeds"):
+                            tools.materialize(cache, self.destination, self.lock, downloader=download,
+                                              decompressor=lambda archive: io.BytesIO(self.payload))
+                    self.assertEqual(hashed.call_count, 1 if source else 0)
+                    self.assertFalse(self.destination.exists())
+                    self.assertEqual((cache / name).exists(), cached)
+                    if cached:
+                        self.assertEqual((cache / name).read_bytes(), b"123456789")
+
     def test_existing_artifact_is_never_overwritten(self):
         self.destination.write_bytes(b"existing artifact")
         with self.assertRaisesRegex(RuntimeError, "already exists"):
-            self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+            self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         self.assertEqual(self.destination.read_bytes(), b"existing artifact")
 
     def test_transient_download_error_retries_without_partial_cache(self):
         attempts = []
-        def downloader(url, target):
+        def downloader(url, target, *, max_bytes):
             attempts.append(url)
             if len(attempts) < 3:
                 target.write_bytes(b"partial")
@@ -108,7 +268,7 @@ class WindowsToolsTests(unittest.TestCase):
             "license_obligation": "GPLv3 corresponding source and build scripts",
         }]
         self.lock.write_text(json.dumps(self.document))
-        def downloader(url, target):
+        def downloader(url, target, *, max_bytes):
             target.write_bytes(source if url.endswith(source_name) else self.data)
         self._materialize(downloader=downloader)
         with zipfile.ZipFile(self.destination) as archive:
@@ -133,7 +293,7 @@ class WindowsToolsTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
 
     def test_verified_download_and_artifact_roundtrip(self):
-        self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+        self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         with zipfile.ZipFile(self.destination) as zip_file:
             self.assertEqual(zip_file.read("msys64/mingw64/bin/ragel.exe"), b"ragel binary")
             self.assertNotIn("msys64/mingw64/bin/gcc.exe", zip_file.namelist())
@@ -145,14 +305,14 @@ class WindowsToolsTests(unittest.TestCase):
         self.members["../escape"] = b"malicious"
         self._make_package()
         with self.assertRaisesRegex(RuntimeError, "path"):
-            self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+            self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         self.assertFalse((self.root / "escape").exists())
         self.assertFalse(self.destination.exists())
 
     def test_license_directories_in_official_archives_are_allowed(self):
         self.members["mingw64/share/licenses/ragel/"] = b""
         self._make_package()
-        self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+        self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         self.assertTrue(self.destination.is_file())
 
     def test_timezone_relative_symlinks_are_materialized_as_bytes(self):
@@ -174,7 +334,7 @@ class WindowsToolsTests(unittest.TestCase):
             hardlink.linkname = "mingw64/share/zoneinfo/Etc/UTC"
             tar.addfile(hardlink)
         self.payload = contents.getvalue()
-        self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+        self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         with zipfile.ZipFile(self.destination) as output:
             self.assertEqual(output.read("msys64/mingw64/share/zoneinfo/UTC"), b"tz bytes")
 
@@ -193,30 +353,30 @@ class WindowsToolsTests(unittest.TestCase):
             tar.addfile(link)
         self.payload = contents.getvalue()
         with self.assertRaisesRegex(RuntimeError, "path"):
-            self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+            self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         self.assertFalse(self.destination.exists())
 
     def test_package_version_is_checked_even_for_hash_verified_archive(self):
         self.members[".PKGINFO"] = f"pkgname = {self.package}\npkgver = 6.10-2\n".encode()
         self._make_package()
         with self.assertRaisesRegex(RuntimeError, "version"):
-            self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+            self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         self.assertFalse(self.destination.exists())
 
     def test_download_sha_failure_does_not_poison_cache(self):
         with self.assertRaisesRegex(RuntimeError, "SHA-256"):
-            self._materialize(downloader=lambda url, target: target.write_bytes(b"invalid"))
+            self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(b"invalid"))
         self.assertFalse((self.cache / self.filename).exists())
 
     def test_unlisted_compiler_executable_is_not_redistributed(self):
         self.members["mingw64/bin/gcc.exe"] = b"compiler"
         self._make_package()
-        self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+        self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         with zipfile.ZipFile(self.destination) as zip_file:
             self.assertNotIn("msys64/mingw64/bin/gcc.exe", zip_file.namelist())
 
     def test_tampered_artifact_and_path_traversal_fail_closed(self):
-        self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+        self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         with zipfile.ZipFile(self.destination) as original:
             content = {name: original.read(name) for name in original.namelist()}
         content["msys64/mingw64/bin/ragel.exe"] = b"tampered"
@@ -235,7 +395,7 @@ class WindowsToolsTests(unittest.TestCase):
             tools.extract_artifact(self.destination, self.root / "installed", self.lock)
 
     def test_zip_symlink_entries_are_rejected_before_install(self):
-        self._materialize(downloader=lambda url, target: target.write_bytes(self.data))
+        self._materialize(downloader=lambda url, target, *, max_bytes: target.write_bytes(self.data))
         with zipfile.ZipFile(self.destination) as original:
             content = {name: original.read(name) for name in original.namelist()}
         with zipfile.ZipFile(self.destination, "w") as archive:

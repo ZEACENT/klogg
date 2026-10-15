@@ -211,6 +211,33 @@ class PrefetchDownloadRetryTest(unittest.TestCase):
 
 
 class PrefetchDownloadBudgetTest(unittest.TestCase):
+    def test_socket_timeout_default_and_overrides_are_forwarded(self):
+        module = load_prefetch_module()
+        for arguments, expected in (({}, 30), ({"socket_timeout": 90}, 90), ({"socket_timeout": 0.25}, 0.25)):
+            response = ObservedRead1Response(b"safe")
+            with self.subTest(timeout=expected), tempfile.TemporaryDirectory() as parent:
+                destination = pathlib.Path(parent) / "archive"
+                with mock.patch.object(module.urllib.request, "urlopen", return_value=response) as opened:
+                    module.download("https://example.invalid/archive", destination, max_bytes=4, **arguments)
+                self.assertEqual(opened.call_args.kwargs["timeout"], expected)
+                self.assertEqual(destination.read_bytes(), b"safe")
+                self.assertTrue(response.closed)
+
+    def test_invalid_socket_timeout_fails_before_filesystem_or_network(self):
+        module = load_prefetch_module()
+        invalid_values = (0, -1, True, False, None, "90", float("nan"), float("inf"), -float("inf"), 10 ** 1000)
+        with tempfile.TemporaryDirectory() as parent:
+            destination = pathlib.Path(parent) / "not-created" / "archive"
+            with mock.patch.object(module.urllib.request, "urlopen") as opened, mock.patch.object(
+                module.tempfile, "NamedTemporaryFile"
+            ) as temporary:
+                for invalid in invalid_values:
+                    with self.subTest(timeout=invalid), self.assertRaisesRegex(ValueError, "finite and positive"):
+                        module.download("https://example.invalid/archive", destination, socket_timeout=invalid)
+                opened.assert_not_called()
+                temporary.assert_not_called()
+                self.assertFalse(destination.parent.exists())
+
     def test_invalid_budget_is_rejected_before_filesystem_or_network_activity(self):
         module = load_prefetch_module()
         with tempfile.TemporaryDirectory() as parent:

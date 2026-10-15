@@ -17,6 +17,8 @@ from prefetch_adb_helper_sources import download as download_source, safe_extrac
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "ci/environments/materials.json"
 EXPECTED_VERSION = 108600
+# Compressed archive budget, separate from the expanded source-tree size.
+MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 
 
 def boost_asset(manifest: pathlib.Path) -> tuple[str, str]:
@@ -36,6 +38,8 @@ def boost_asset(manifest: pathlib.Path) -> tuple[str, str]:
 def check_archive(archive: pathlib.Path, digest: str) -> None:
     if archive.is_symlink() or not archive.is_file():
         raise RuntimeError(f"prefetched Boost archive is missing or not a regular file: {archive}")
+    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise RuntimeError(f"Boost archive exceeds size limit: {archive}")
     actual = hashlib.sha256()
     with archive.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -62,7 +66,7 @@ def materialize(
         # Only publish verified bytes; never leave a partially downloaded cache entry.
         with tempfile.TemporaryDirectory(prefix="boost-download-", dir=archive.parent) as temporary:
             candidate = pathlib.Path(temporary) / "source.tar.bz2"
-            (downloader or download_source)(url, candidate)
+            (downloader or download_source)(url, candidate, max_bytes=MAX_ARCHIVE_BYTES)
             check_archive(candidate, digest)
             candidate.replace(archive)
     check_archive(archive, digest)  # A cache hit is not proof of integrity.
