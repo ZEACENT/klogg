@@ -1946,7 +1946,7 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
     def test_lint_workflow_keeps_the_complete_quality_runner(self):
         workflow = (ROOT / ".github" / "workflows" / "lint.yml").read_text()
         blocks = MODULE.workflow_job_blocks(workflow)
-        self.assertEqual(set(blocks), {"platform-fragile"})
+        self.assertEqual(set(blocks), {"platform-fragile", "source-metadata-probe"})
         steps = [
             MODULE.workflow_step_fields(step)[0]
             for step in MODULE.workflow_step_blocks(blocks["platform-fragile"])

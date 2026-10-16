@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import ci_environment_source_cache as cache
 
 
-class SourceCacheTransportTest(unittest.TestCase):
+class SourceCacheFixture:
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -111,6 +111,8 @@ class SourceCacheTransportTest(unittest.TestCase):
             self.artifact_id, metadata=self.metadata, git_runner=self.git,
         )
 
+
+class SourceCacheTransportTest(SourceCacheFixture, unittest.TestCase):
     def test_explicit_ancestor_artifact_authenticates_only_its_transport(self):
         result = self.authenticate()
         self.assertEqual(result["digest"], self.zip_digest)

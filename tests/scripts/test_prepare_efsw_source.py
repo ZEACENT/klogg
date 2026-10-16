@@ -72,6 +72,46 @@ def read_startup_identity(peer):
     return json.loads(identity)
 
 
+def startup_channel_is_closed(peer):
+    """Observe only the channel; callers must establish owner completion first."""
+    return peer.recv(1) == b""
+
+
+class StartupChannelObservationTest(unittest.TestCase):
+    def test_closed_peer_is_observed_without_a_post_teardown_write(self):
+        class ClosedPeer:
+            reset = False
+
+            def sendall(self, data):
+                self.reset = True
+
+            def recv(self, size):
+                if self.reset:
+                    raise ConnectionResetError(54, "post-close write induced reset")
+                return b""
+
+        peer = ClosedPeer()
+        self.assertTrue(startup_channel_is_closed(peer))
+        self.assertFalse(peer.reset)
+
+    def test_eof_and_data_are_distinct_channel_observations(self):
+        for data, closed in ((b"", True), (b"A", False)):
+            with self.subTest(data=data):
+                peer = mock.Mock()
+                peer.recv.return_value = data
+                self.assertIs(startup_channel_is_closed(peer), closed)
+                peer.recv.assert_called_once_with(1)
+
+    def test_inconclusive_receive_errors_are_not_closed_channel_evidence(self):
+        for error in (socket.timeout("bounded observation expired"),
+                      ConnectionResetError(54, "connection reset")):
+            with self.subTest(error=type(error).__name__):
+                peer = mock.Mock()
+                peer.recv.side_effect = error
+                with self.assertRaises(type(error)):
+                    startup_channel_is_closed(peer)
+
+
 class StartupIdentityTest(unittest.TestCase):
     def test_complete_identity_is_read_through_its_newline(self):
         record = b'{"pid":1,"ppid":2,"group":3}\n'
@@ -100,7 +140,7 @@ class StartupIdentityTest(unittest.TestCase):
 class PrepareEfswSourceTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = pathlib.Path(self.temporary.name)
+        self.root = pathlib.Path(self.temporary.name).resolve()
         # Do not inherit command-scope trust, repository redirects, or Git's
         # ownership-test flags from the caller. No user config is modified.
         self.environment = {
@@ -821,6 +861,24 @@ class PrepareEfswSourceTest(unittest.TestCase):
                 residual += list(destination.parent.glob(".efsw.clone-config-*"))
                 self.assertEqual(residual, [sentinel])
 
+    @unittest.skipIf(os.name == "nt", "The temporary-root alias fixture uses a POSIX directory link")
+    def test_temporary_root_alias_uses_physical_fixture_paths(self):
+        physical_parent = self.root.resolve() / "physical-temporary-parent"
+        physical_parent.mkdir()
+        alias_parent = self.root.resolve() / "aliased-temporary-parent"
+        alias_parent.symlink_to(physical_parent, target_is_directory=True)
+        temporary = tempfile.TemporaryDirectory(dir=alias_parent)
+        self.addCleanup(temporary.cleanup)
+        self.assertNotEqual(pathlib.Path(temporary.name), pathlib.Path(temporary.name).resolve())
+        fixture = PrepareEfswSourceTest("test_reuse_allocates_no_temporary_configuration")
+        with mock.patch.object(tempfile, "TemporaryDirectory", return_value=temporary):
+            fixture.setUp()
+        try:
+            self.assertEqual(fixture.root, pathlib.Path(temporary.name).resolve())
+            fixture.test_reuse_allocates_no_temporary_configuration()
+        finally:
+            fixture.tearDown()
+
     @unittest.skipIf(os.name == "nt", "The controlled owner protocol fixture requires POSIX exec")
     def test_reuse_allocates_no_temporary_configuration(self):
         # Allocation is the contract here, not observational-shim/bootstrap
@@ -1244,11 +1302,10 @@ class PrepareEfswSourceTest(unittest.TestCase):
                 self.assertGreater(observed["pid"], 0)
                 with self.assertRaises(subprocess.TimeoutExpired):
                     future.result(timeout=10)
-                try:
-                    peer.sendall(b"?")
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-                self.assertEqual(peer.recv(1), b"", f"Startup family survived outer timeout: {observed}")
+                # Timeout is reported only after owned reap/group disappearance;
+                # this extra channel observation must not provoke a TCP reset.
+                self.assertTrue(startup_channel_is_closed(peer),
+                                f"Startup channel remained open after owned timeout: {observed}")
         finally:
             # RED cleanup releases only this socket-bound fixture child. Never
             # signal an unreserved numeric PID/group or another user's process.
