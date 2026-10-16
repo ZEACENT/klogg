@@ -2788,10 +2788,10 @@ jobs:
     def test_ci_build_rejects_full_adb_release_closure_consumers(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
-            "          name: adb-helper-package-support\n"
-            "          path: ${{ runner.temp }}/adb-helper-package-support\n",
+            "          name: adb-helper-package-core\n"
+            "          path: ${{ runner.temp }}/adb-helper-package-core\n",
             "          name: adb-helper-legal-assets\n"
-            "          path: ${{ runner.temp }}/adb-helper-package-support\n",
+            "          path: ${{ runner.temp }}/adb-helper-package-core\n",
             1,
         )
         self.assertNotEqual(mutated, workflow)
@@ -2801,9 +2801,80 @@ jobs:
             issues,
         )
         self.assertIn(
-            "CI job BuildAdbLinuxX64 must download artifact adb-helper-package-support",
+            "CI job BuildAdbLinuxX64 must download artifact adb-helper-package-core",
             issues,
         )
+
+    def test_ci_build_accepts_unversioned_adb_core_and_preserves_application_support(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
+        self.assertEqual(MODULE.CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS["adb-helper-package-core"], {
+            "BuildAdbLinuxX64", "BuildAdbLinuxArm64", "BuildAdbWindowsX64",
+            "BuildAdbMacX64", "BuildAdbMacArm64",
+        })
+        self.assertEqual(MODULE.CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS["adb-helper-package-support"], {
+            "LinuxPackages", "MacPackages", "MacArmPackages", "WindowsPackages",
+        })
+
+    def test_ci_build_rejects_versioned_support_as_a_raw_adb_core_fallback(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "          name: adb-helper-package-core\n"
+            "          path: ${{ runner.temp }}/adb-helper-package-core\n",
+            "          name: adb-helper-package-support\n"
+            "          path: ${{ runner.temp }}/adb-helper-package-core\n", 1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        issues = MODULE.ci_build_workflow_issues(mutated)
+        self.assertIn("CI job BuildAdbLinuxX64 must download artifact adb-helper-package-core", issues)
+        self.assertIn("CI job BuildAdbLinuxX64 must not download artifact adb-helper-package-support", issues)
+
+    def test_ci_build_rejects_package_core_in_application_packages(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        block = "\n".join(MODULE.workflow_job_blocks(workflow)["LinuxPackages"])
+        replacement = block.replace("name: adb-helper-package-support", "name: adb-helper-package-core", 1)
+        self.assertNotEqual(replacement, block)
+        mutated = workflow.replace(block, replacement, 1)
+        issues = MODULE.ci_build_workflow_issues(mutated)
+        self.assertIn("CI job LinuxPackages must download artifact adb-helper-package-support", issues)
+        self.assertIn("CI job LinuxPackages must not download artifact adb-helper-package-core", issues)
+
+    def test_ci_build_core_upload_requires_the_legal_producer_not_a_comment_spoof(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        upload = (
+            "      - name: Upload immutable ADB package core\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          name: adb-helper-package-core\n"
+            "          path: prefetch_artifacts/adb-helper-package-core/*\n"
+            "          if-no-files-found: error\n"
+            "          compression-level: 0\n"
+        )
+        self.assertIn(upload, workflow)
+        commented = "\n".join("# " + line for line in upload.splitlines()) + "\n"
+        near_miss = upload.replace("name: adb-helper-package-core\n", "name: adb-helper-package-core-extra\n")
+        for label, replacement in (("missing", ""), ("comment", commented), ("near-miss", near_miss)):
+            with self.subTest(variant=label):
+                mutated = workflow.replace(upload, replacement, 1)
+                self.assertIn(
+                    "CI artifact adb-helper-package-core must be uploaded only by BuildAdbHelperLegalAssets, got []",
+                    MODULE.ci_build_workflow_issues(mutated),
+                )
+
+    def test_ci_build_core_upload_is_secret_neutral_on_all_ordinary_events(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        header = "      - name: Upload immutable ADB package core\n"
+        conditions = [(event, "${{ github.event_name == '" + event + "' }}")
+                      for event in ("pull_request", "push", "workflow_dispatch")]
+        conditions.append(("malformed", "not-a-supported-event-expression"))
+        for event, condition in conditions:
+            with self.subTest(event=event):
+                mutated = workflow.replace(header, header + f"        if: {condition}\n", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertIn(
+                    "CI artifact step BuildAdbHelperLegalAssets uploads adb-helper-package-core must use condition None",
+                    "\n".join(MODULE.ci_build_workflow_issues(mutated)),
+                )
 
     def test_ci_build_rejects_broad_adb_release_closure_upload_conditions(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()

@@ -528,7 +528,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
 
     def build_legal_assets(
         self, repository, archive_root, lock, output, package_support_output=None,
-        version="26.08.27",
+        version="26.08.27", package_core_output=None,
     ):
         command = [
             sys.executable,
@@ -548,6 +548,8 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         ]
         if package_support_output is not None:
             command.extend(("--package-support-output", str(package_support_output)))
+        if package_core_output is not None:
+            command.extend(("--package-core-output", str(package_core_output)))
         return subprocess.run(
             command,
             capture_output=True,
@@ -712,6 +714,79 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             {path.name: archive_sha256(path) for path in output.iterdir()},
         )
 
+    def test_package_core_projection_is_version_independent_without_source_archive(self):
+        repository, archives, lock_path, lock = self.make_legal_fixture()
+        projections = []
+        for version in ("26.08.27", "99.01.01"):
+            with self.subTest(version=version):
+                release = self.root / f"release-{version}"
+                support = self.root / f"support-{version}"
+                core = self.root / f"package-core-{version}"
+                result = self.build_legal_assets(
+                    repository, archives, lock_path, release, support,
+                    version=version, package_core_output=core,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                expected = {
+                    asset[field]: archive_sha256(release / asset[field])
+                    for asset in lock["release_assets"]
+                    if asset["ownership"] == "core"
+                    and asset["distribution"]["package_required"]
+                    for field in ("file_name", "sha256_file")
+                }
+                actual = {path.name: archive_sha256(path) for path in core.iterdir()}
+                self.assertEqual(actual, expected)
+                self.assertFalse((core / "adb-helper-source-archive.tar.gz").exists())
+                self.assertFalse((core / "ADB-HELPER-SOURCE-OFFER.txt").exists())
+                self.assertFalse((core / "adb-helper-overlay-receipt.json").exists())
+                self.assertTrue((support / "ADB-HELPER-SOURCE-OFFER.txt").is_file())
+                if projections:
+                    self.assertEqual(projections[0], actual)
+                projections.append(actual)
+
+    def test_package_overlay_matches_direct_support_without_source_archive_or_acquisition(self):
+        repository, archives, lock_path, lock = self.make_legal_fixture()
+        expected = {}
+        core = self.root / "package-core"
+        core.mkdir()
+        for version in ("26.08.27", "99.01.01"):
+            release = self.root / f"direct-release-{version}"
+            support = self.root / f"direct-support-{version}"
+            result = self.build_legal_assets(
+                repository, archives, lock_path, release, support, version=version,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            expected[version] = {path.name: archive_sha256(path) for path in support.iterdir()}
+            if not any(core.iterdir()):
+                for asset in lock["release_assets"]:
+                    if asset["ownership"] == "core" and asset["distribution"]["package_required"]:
+                        for field in ("file_name", "sha256_file"):
+                            shutil.copyfile(release / asset[field], core / asset[field])
+        overlay_lock = self.root / "overlay-lock.json"
+        shutil.copyfile(lock_path, overlay_lock)
+        pins = self.overlay_pin_arguments(core, overlay_lock, lock)
+        before = {path.name: archive_sha256(path) for path in core.iterdir()}
+        repository.rename(self.root / "unavailable-repository")
+        archives.rename(self.root / "unavailable-archives")
+        for version in expected:
+            with self.subTest(version=version):
+                output = self.root / f"assembled-package-{version}"
+                result = subprocess.run(
+                    [sys.executable, str(LEGAL_SCRIPT), "--package-overlay-only",
+                     "--lock", str(overlay_lock), "--core-root", str(core),
+                     "--version", version, "--base-url", "https://github.com/ZEACENT/klogg",
+                     "--output", str(output), *pins],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(
+                    {path.name: archive_sha256(path) for path in output.iterdir()},
+                    expected[version],
+                )
+                self.assertFalse((output / "adb-helper-source-archive.tar.gz").exists())
+                self.assertFalse((output / "adb-helper-release-assets.json").exists())
+        self.assertEqual({path.name: archive_sha256(path) for path in core.iterdir()}, before)
+
     def write_original_build_receipt(self, core, lock_path, lock, changes=None):
         build_path = core.parent / "original-build.json"
         source_set = core / "adb-helper-source-set-receipt.json"
@@ -747,13 +822,123 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             core, lock_path, lock, build_changes)
         args = argparse.Namespace(
             lock=lock_path, archive_root=None, repository_root=None,
-            core_only=False, overlay_only=True, core_root=core,
+            core_only=False, overlay_only=True, package_overlay_only=False,
+            package_core_output=None, core_root=core,
             build_receipt=build_path, source_set_sha256=source_pin,
             build_receipt_sha256=build_pin,
             output=root / "assembly", package_support_output=root / "support",
             version="99.01.01", base_url="https://github.com/ZEACENT/klogg",
         )
         return args, lock
+
+    def make_package_overlay_fixture(self, *, name=None):
+        args, lock = self.make_overlay_fixture(name=name)
+        for asset in lock["release_assets"]:
+            if asset["ownership"] == "core" and not asset["distribution"]["package_required"]:
+                for field in ("file_name", "sha256_file"):
+                    (args.core_root / asset[field]).unlink()
+        (args.core_root / "adb-helper-release-assets.json").unlink()
+        args.overlay_only = False
+        args.package_overlay_only = True
+        args.package_support_output = None
+        return args, lock
+
+    def test_package_overlay_rejects_bad_receipt_pins_before_output(self):
+        for field, value in (("source_set_sha256", "1" * 64),
+                             ("build_receipt_sha256", "1" * 64),
+                             ("build_receipt", None)):
+            with self.subTest(field=field):
+                args, _ = self.make_package_overlay_fixture(name=field)
+                setattr(args, field, value)
+                with mock.patch.object(sys, "stderr", io.StringIO()):
+                    with self.assertRaises((RuntimeError, SystemExit)):
+                        self.materialize_fixture_overlay(args)
+                self.assertFalse(args.output.exists())
+
+    def test_package_overlay_rejects_full_source_core_and_full_overlay_requires_source(self):
+        args, _ = self.make_overlay_fixture(name="full-input")
+        args.overlay_only = False
+        args.package_overlay_only = True
+        args.package_support_output = None
+        with self.assertRaisesRegex(RuntimeError, "must not contain"):
+            self.materialize_fixture_overlay(args)
+        self.assertFalse(args.output.exists())
+        args, _ = self.make_package_overlay_fixture(name="missing-full-source")
+        args.overlay_only = True
+        args.package_overlay_only = False
+        with self.assertRaisesRegex(RuntimeError, "corresponding source archive"):
+            self.materialize_fixture_overlay(args)
+        self.assertFalse(args.output.exists())
+
+    def test_package_overlay_forbids_acquisition_and_additional_projections(self):
+        for field in ("archive_root", "repository_root", "package_support_output", "package_core_output"):
+            with self.subTest(field=field):
+                args, _ = self.make_package_overlay_fixture(name=field)
+                setattr(args, field, self.root / f"forbidden-{field}")
+                with mock.patch.object(sys, "stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.materialize_fixture_overlay(args)
+                self.assertFalse(args.output.exists())
+                self.assertFalse(getattr(args, field).exists())
+
+    def test_package_overlay_rejects_zero_archive_identity_even_with_matching_pins(self):
+        args, lock = self.make_package_overlay_fixture()
+        module = load_legal_module()
+        source_set = args.core_root / "adb-helper-source-set-receipt.json"
+        receipt = json.loads(source_set.read_text(encoding="utf-8"))
+        receipt["archive"]["sha256"] = "0" * 64
+        source_set.write_text(json.dumps(receipt), encoding="utf-8")
+        module.write_hash(source_set)
+        args.build_receipt, args.source_set_sha256, args.build_receipt_sha256 = (
+            self.write_original_build_receipt(args.core_root, args.lock, lock)
+        )
+        with self.assertRaisesRegex(RuntimeError, "nonzero"):
+            self.materialize_fixture_overlay(args, module)
+        self.assertFalse(args.output.exists())
+
+    @unittest.skipIf(sys.platform == "win32", "requires POSIX symlink creation")
+    def test_package_core_rejects_foreign_output_alias_even_with_identical_bytes(self):
+        args, lock = self.make_overlay_fixture()
+        module = load_legal_module()
+        asset = next(asset for asset in lock["release_assets"]
+                     if asset["ownership"] == "core" and asset["distribution"]["package_required"])
+        name = asset["file_name"]
+        witness = self.root / "foreign-witness"
+        witness.write_bytes((args.core_root / name).read_bytes())
+        before = witness.read_bytes()
+        original_copy = module.copy_checked_asset
+
+        def substitute(source, destination, digest, created, **kwargs):
+            original_copy(source, destination, digest, created, **kwargs)
+            if destination.name == name:
+                destination.unlink()
+                destination.symlink_to(witness)
+
+        with mock.patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]), \
+                mock.patch.object(module, "copy_checked_asset", side_effect=substitute):
+            with self.assertRaisesRegex(RuntimeError, "regular|projection"):
+                module.materialize_package_core(args.core_root, args.output, lock["release_assets"])
+        self.assertEqual(witness.read_bytes(), before)
+        self.assertTrue((args.output / name).is_symlink())
+
+    def test_package_core_rejects_source_changes_after_copy(self):
+        args, lock = self.make_overlay_fixture()
+        module = load_legal_module()
+        asset = next(asset for asset in lock["release_assets"]
+                     if asset["ownership"] == "core" and asset["distribution"]["package_required"])
+        original_copy = module.copy_checked_asset
+
+        def mutate(source, destination, digest, created, **kwargs):
+            original_copy(source, destination, digest, created, **kwargs)
+            if destination.name == asset["file_name"]:
+                source.write_bytes(b"changed after the package core copy")
+
+        with mock.patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]), \
+                mock.patch.object(module, "copy_checked_asset", side_effect=mutate):
+            with self.assertRaisesRegex(RuntimeError, "projection"):
+                module.materialize_package_core(args.core_root, args.output, lock["release_assets"])
+        self.assertEqual((args.core_root / asset["file_name"]).read_bytes(),
+                         b"changed after the package core copy")
 
     def materialize_fixture_overlay(self, args, module=None):
         module = module or load_legal_module()

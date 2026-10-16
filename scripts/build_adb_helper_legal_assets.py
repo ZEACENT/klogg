@@ -278,14 +278,16 @@ def write_source_offer(
 
 
 def write_overlay_receipt(
-    output: pathlib.Path, release_assets: list[dict], version: str, base_url: str
+    output: pathlib.Path, release_assets: list[dict], version: str, base_url: str,
+    *, source_archive_sha256: str | None = None,
 ) -> None:
     by_kind = {asset["kind"]: asset for asset in release_assets}
     source_set_path = output / by_kind["source-set-receipt"]["file_name"]
-    source_archive = output / by_kind["source-archive"]["file_name"]
+    if source_archive_sha256 is None:
+        source_archive_sha256 = sha256(output / by_kind["source-archive"]["file_name"])
     write_source_offer(
         output / by_kind["source-offer"]["file_name"],
-        version, base_url, sha256(source_archive),
+        version, base_url, source_archive_sha256,
     )
     overlay_records = []
     for asset in release_assets:
@@ -381,11 +383,44 @@ def copy_checked_asset(
         raise RuntimeError(f"ADB immutable asset changed while copying: {source.name}")
 
 
+def materialize_package_core(
+    release_root: pathlib.Path, output: pathlib.Path, release_assets: list[dict],
+) -> None:
+    from verify_adb_helper_artifact import require_regular_file
+
+    check_overlay_outputs([output], [release_root])
+    files = {}
+    for asset in release_assets:
+        if asset["ownership"] != "core" or not asset["distribution"]["package_required"]:
+            continue
+        for field in ("file_name", "sha256_file"):
+            path = release_root / asset[field]
+            require_regular_file(path, "ADB package core projection input")
+            files[path.name] = sha256(path)
+    output.mkdir(exist_ok=True)
+    identity = output.stat()
+    output_identity = (identity.st_dev, identity.st_ino)
+    for name, digest in files.items():
+        copy_checked_asset(release_root / name, output / name, digest, {},
+                           output_identity=output_identity)
+    check_overlay_paths([output], [release_root])
+    current = output.stat()
+    if ((current.st_dev, current.st_ino) != output_identity
+            or {path.name for path in output.iterdir()} != set(files)):
+        raise RuntimeError("ADB package core projection changed before completion")
+    for name, digest in files.items():
+        for path in (release_root / name, output / name):
+            require_regular_file(path, "ADB package core projection entry")
+            if sha256(path) != digest:
+                raise RuntimeError("ADB package core projection changed before completion")
+
+
 def materialize_overlay_from_core(
     lock_path: pathlib.Path, lock: dict, release_assets: list[dict],
     core_root: pathlib.Path, output: pathlib.Path,
     package_support_output: pathlib.Path | None, version: str, base_url: str,
     build_receipt_path: pathlib.Path, source_set_sha256: str, build_receipt_sha256: str,
+    *, asset_scope: str = "release",
 ) -> None:
     from verify_adb_helper_artifact import (
         BINARY_BUILD_RECEIPT, VerificationError, find_receipt_asset, has_exact_schema,
@@ -393,6 +428,12 @@ def materialize_overlay_from_core(
         validate_overlay_receipt, validate_source_set_receipt, verify_hash_sidecar,
     )
 
+    if asset_scope not in ("release", "package"):
+        raise RuntimeError("unsupported ADB overlay asset scope")
+    if asset_scope == "package" and package_support_output is not None:
+        raise RuntimeError("package overlay accepts only one package output")
+    output_assets = [asset for asset in release_assets
+                     if asset_scope == "release" or asset["distribution"]["package_required"]]
     # External expected-byte pins and legal checks are not signature
     # authentication, native binary qualification, or publication authority.
     outputs = [output] + ([package_support_output] if package_support_output is not None else [])
@@ -400,7 +441,7 @@ def materialize_overlay_from_core(
     check_overlay_outputs(outputs, inputs)
     if not core_root.is_dir():
         raise RuntimeError("ADB immutable core must be a real directory")
-    core_assets = [asset for asset in release_assets if asset["ownership"] == "core"]
+    core_assets = [asset for asset in output_assets if asset["ownership"] == "core"]
     source_set_asset = next(asset for asset in core_assets if asset["kind"] == "source-set-receipt")
 
     def validate_core(root: pathlib.Path) -> tuple[dict, dict[str, str]]:
@@ -417,7 +458,7 @@ def materialize_overlay_from_core(
             raise RuntimeError("ADB original receipt is not binary-build evidence")
         if build_receipt.get("lock_sha256") != sha256(lock_path):
             raise RuntimeError("ADB original binary-build receipt lock sha256 mismatch")
-        validate_source_set_receipt(lock, lock_path, build_receipt, root, "release")
+        validate_source_set_receipt(lock, lock_path, build_receipt, root, asset_scope)
         files = {}
         for asset in core_assets:
             path = root / asset["file_name"]
@@ -445,22 +486,29 @@ def materialize_overlay_from_core(
                 copy_checked_asset(core_root / name, stage / name, digest, {})
             if validate_core(stage) != (original_build, files):
                 raise RuntimeError("ADB copied immutable core differs from original inputs")
-            write_overlay_receipt(stage, release_assets, version, base_url)
-            write_release_hashes(stage, release_assets, preserve_core_sidecars=True)
-            expected_names = {asset[field] for asset in release_assets
+            archive_hash = None
+            if asset_scope == "package":
+                source_set = read_json(stage / source_set_asset["file_name"], "ADB source-set receipt")
+                archive_hash = source_set["archive"]["sha256"]
+                if archive_hash == "0" * 64:
+                    raise RuntimeError("ADB package overlay source archive identity must be nonzero")
+            write_overlay_receipt(stage, release_assets, version, base_url,
+                                  source_archive_sha256=archive_hash)
+            write_release_hashes(stage, output_assets, preserve_core_sidecars=True)
+            expected_names = {asset[field] for asset in output_assets
                               for field in ("file_name", "sha256_file")}
             index_path = stage / "adb-helper-release-assets.json"
             if {path.name for path in stage.iterdir()} != expected_names | {index_path.name}:
                 raise RuntimeError("ADB release output file coverage mismatch")
             expected_index = [{"kind": asset["kind"], "path": asset["file_name"],
                                "sha256": sha256(stage / asset["file_name"])}
-                              for asset in release_assets]
+                              for asset in output_assets]
             require_regular_file(index_path, "ADB release asset index")
             if json.loads(index_path.read_text(encoding="utf-8")) != expected_index:
                 raise RuntimeError("ADB release asset index mismatch")
             if validate_core(stage) != (original_build, files):
                 raise RuntimeError("ADB staged immutable core differs from original inputs")
-            validate_overlay_receipt(lock, stage, "release", source_set_sha256)
+            validate_overlay_receipt(lock, stage, asset_scope, source_set_sha256)
             release_files = {path.name: sha256(path) for path in stage.iterdir()}
             support_files = {asset[field]: release_files[asset[field]]
                              for asset in release_assets if asset["distribution"]["package_required"]
@@ -476,7 +524,7 @@ def materialize_overlay_from_core(
                 identity = root.stat()
                 output_identity = (identity.st_dev, identity.st_ino)
                 created_roots.append((root, *output_identity, existed))
-                expected = release_files if root == output else support_files
+                expected = release_files if root == output and asset_scope == "release" else support_files
                 for name, digest in expected.items():
                     copy_checked_asset(stage / name, root / name, digest, created,
                                        output_identity=output_identity)
@@ -484,13 +532,13 @@ def materialize_overlay_from_core(
             if (validate_core(core_root) != (original_build, files)
                     or validate_core(output) != (original_build, files)):
                 raise RuntimeError("ADB materialized immutable core differs from original inputs")
-            validate_overlay_receipt(lock, output, "release", source_set_sha256)
+            validate_overlay_receipt(lock, output, asset_scope, source_set_sha256)
             if package_support_output is not None:
                 validate_source_set_receipt(lock, lock_path, original_build,
                                             package_support_output, "package")
                 validate_overlay_receipt(lock, package_support_output, "package", source_set_sha256)
             for root in outputs:
-                expected = release_files if root == output else support_files
+                expected = release_files if root == output and asset_scope == "release" else support_files
                 for name in expected:
                     require_regular_file(root / name, "ADB materialized output asset")
                 if {path.name: sha256(path) for path in root.iterdir()} != expected:
@@ -523,16 +571,19 @@ def main() -> int:
     parser.add_argument("--base-url")
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument("--package-support-output", type=pathlib.Path)
+    parser.add_argument("--package-core-output", type=pathlib.Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--core-only", action="store_true")
     mode.add_argument("--overlay-only", action="store_true")
+    mode.add_argument("--package-overlay-only", action="store_true")
     parser.add_argument("--core-root", type=pathlib.Path)
     parser.add_argument("--build-receipt", type=pathlib.Path)
     parser.add_argument("--source-set-sha256")
     parser.add_argument("--build-receipt-sha256")
     args = parser.parse_args()
+    overlay_only = args.overlay_only or args.package_overlay_only
     pins = (args.source_set_sha256, args.build_receipt_sha256)
-    if args.overlay_only:
+    if overlay_only:
         if not args.build_receipt or any(
             not isinstance(pin, str) or re.fullmatch(r"[0-9a-f]{64}", pin) is None
             or pin == "0" * 64 for pin in pins
@@ -546,9 +597,13 @@ def main() -> int:
             parser.error("core-only accepts neither version, publication URL, nor overlay outputs")
     elif not args.version or not args.base_url:
         parser.error("version and base-url are required when generating an overlay")
-    if args.overlay_only:
+    if overlay_only:
         if not args.core_root or args.archive_root or args.repository_root:
             parser.error("overlay-only requires core-root and forbids source acquisition inputs")
+        if args.package_core_output:
+            parser.error("package-core-output is only available during core generation")
+        if args.package_overlay_only and args.package_support_output:
+            parser.error("package-overlay-only accepts only one package output")
     elif not args.archive_root or not args.repository_root or args.core_root:
         parser.error("core generation requires archive-root and repository-root, not core-root")
 
@@ -556,14 +611,20 @@ def main() -> int:
     base_url = normalize_base_url(args.base_url) if not args.core_only else None
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
     release_assets = release_asset_plan(lock)
-    if args.overlay_only:
+    if overlay_only:
         materialize_overlay_from_core(
             args.lock, lock, release_assets, args.core_root, args.output,
             args.package_support_output, version, base_url,
             args.build_receipt, args.source_set_sha256, args.build_receipt_sha256,
+            asset_scope="package" if args.package_overlay_only else "release",
         )
         return 0
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.package_core_output is not None:
+        boundaries = [args.output, args.archive_root, args.lock]
+        if args.package_support_output is not None:
+            boundaries.append(args.package_support_output)
+        check_overlay_outputs([args.package_core_output], boundaries)
     if args.core_only and any(args.output.iterdir()):
         raise RuntimeError("ADB core output must be empty; stale overlay assets are forbidden")
     by_kind = {asset["kind"]: asset for asset in release_assets}
@@ -751,12 +812,13 @@ def main() -> int:
         write_release_hashes(
             args.output, [asset for asset in release_assets if asset["ownership"] == "core"]
         )
-        return 0
-
-    write_overlay_receipt(args.output, release_assets, version, base_url)
-    write_release_hashes(args.output, release_assets)
-    if args.package_support_output is not None:
-        materialize_package_support(args.output, args.package_support_output, release_assets)
+    else:
+        write_overlay_receipt(args.output, release_assets, version, base_url)
+        write_release_hashes(args.output, release_assets)
+        if args.package_support_output is not None:
+            materialize_package_support(args.output, args.package_support_output, release_assets)
+    if args.package_core_output is not None:
+        materialize_package_core(args.output, args.package_core_output, release_assets)
     return 0
 
 

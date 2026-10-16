@@ -37,6 +37,7 @@
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QSemaphore>
@@ -1795,6 +1796,11 @@ TEST_CASE( "ProcessLiveSourceTransport starts grace only after QProcess started"
                              SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
     transport.startAsync();
 
+    const QPointer<QProcess> process( transport.pendingProcessForTest() );
+    REQUIRE( process );
+    SafeQSignalSpy startedSpy( process.data(), &QProcess::started );
+    SafeQSignalSpy processErrorSpy( process.data(), &QProcess::errorOccurred );
+
     // Hold QProcess in the pre-start phase longer than the post-start grace.
     QTest::qWait( 60 );
     QCoreApplication::processEvents();
@@ -1805,10 +1811,13 @@ TEST_CASE( "ProcessLiveSourceTransport starts grace only after QProcess started"
     transport.releaseStart();
     QElapsedTimer deadline;
     deadline.start();
-    while ( !spyContainsState( stateSpy, LiveSourceTransport::State::Connected )
-            && deadline.elapsed() < 3000 ) {
-        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
+    if ( !spyContainsState( stateSpy, LiveSourceTransport::State::Connected )
+         && !spyContainsState( stateSpy, LiveSourceTransport::State::Error ) ) {
+        (void)stateSpy.wait( 3000 );
     }
+    CAPTURE( deadline.elapsed(), startedSpy.count(), processErrorSpy.count(), stateSpy.count(),
+             errorSpy.count(), transport.lastError().toStdString() );
+    INFO( "process state: " << ( process ? static_cast<int>( process->state() ) : -1 ) );
     REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
 
     transport.stopCurrent();

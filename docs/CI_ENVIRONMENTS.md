@@ -356,6 +356,35 @@ runners, signed **full tar bytes**, candidate/full binary equality, and current
 legal/source material before it can create its eight-file qualification archive.
 A candidate-only receipt is not a signed production lock.
 
+The ordinary ADB legal producer generates its complete release closure only
+once. `build_adb_helper_legal_assets.py --package-core-output` additionally
+projects the package-required immutable core files and checksum sidecars,
+without a source archive, source offer or versioned overlay. The original full
+legal and package-support artifacts keep their publication and application
+package consumers. Only the five raw helper builders consume the new package
+core. Like the existing support route, it omits the corresponding-source
+archive: this split adds neither per-builder archive transfers nor duplicate
+source generation. It establishes an unversioned input boundary, not a measured
+build-speed improvement.
+
+After each raw build creates its original `receipt.json`, the shared build
+action runs `--package-overlay-only` with the received source-set and original
+build receipt SHA-256 pins. It writes a fresh, disjoint package-support root
+before the unchanged package smoke, legal verifier and checksum steps. The
+current version comes from `SaveVersion` through the legal job output, not from
+the immutable core. Assembly accepts no source acquisition inputs and obtains
+the source-offer archive identity from the validated, pinned source-set receipt.
+Package scope rejects the source archive and its sidecar; full `--overlay-only`
+still requires and verifies the actual complete archive. A package projection
+alone does not prove that a corresponding-source asset has been published.
+
+These ADB paths require caller-owned staging. Fresh-output, path, regular-file,
+receipt and hash checks reject stale or changed material; failed core projection
+retains its partial output rather than repairing foreign entries. The existing
+path checks are not atomic isolation against arbitrary concurrent same-UID
+namespace changes. Receipt pins establish cold byte continuity, not signed
+production-core authority or an authenticated cross-run consumer.
+
 The ordinary iOS builder now uses the existing immutable legal-core boundary:
 its disconnected native writer creates a separate original stack, legal
 `--core-only` generation creates an unversioned source/legal core, and

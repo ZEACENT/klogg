@@ -663,7 +663,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIn("source-built ADB helper leaked to portable archive root", package_action)
         self.assertIn("smoke_adb_helper.py", package_action)
 
-    def test_dependency_producer_binds_both_adb_legal_artifacts_by_id(self):
+    def test_dependency_producer_keeps_legal_ids_and_propagates_current_version(self):
         workflow = self.required_text(CI_BUILD)
         legal = CI_MODULE.workflow_job_blocks(workflow)["BuildAdbHelperLegalAssets"]
         outputs = CI_MODULE.workflow_mapping_block(legal, "outputs", 4)
@@ -671,6 +671,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertEqual({key: value for key, (value, _) in outputs.items()}, {
             "support_artifact_id": "${{ steps.upload_adb_support.outputs.artifact-id }}",
             "full_release_artifact_id": "${{ steps.upload_adb_release.outputs.artifact-id }}",
+            "klogg_version": "${{ needs.SaveVersion.outputs.klogg_version }}",
         })
         steps = [CI_MODULE.workflow_step_fields(step) for step in
                  CI_MODULE.workflow_job_steps(workflow)["BuildAdbHelperLegalAssets"]]
@@ -771,7 +772,8 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     for kind, artifact, condition in records.get(job, [])
                     if kind == "downloads"
                 }
-                self.assertIn((package_support, None), downloads)
+                self.assertIn(("adb-helper-package-core", None), downloads)
+                self.assertNotIn(package_support, {artifact for artifact, _ in downloads})
                 self.assertNotIn(full_release, {artifact for artifact, _ in downloads})
 
         package_jobs = {
@@ -810,7 +812,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
 
         self.assertIn("package-support-root:", build_action)
         self.assertNotIn("release-assets-root:", build_action)
-        self.assertIn('--package-support-root "${{ inputs.package-support-root }}"', build_action)
+        self.assertIn('--package-support-root "${{ inputs.package-core-root }}"', build_action)
         self.assertIn("--asset-scope package", build_action)
         self.assertIn(
             '--source-assets-root "${{ inputs.package-support-root }}"', build_action
@@ -821,6 +823,76 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             "package-support-root: ${{ runner.temp }}/adb-helper-package-support",
             workflow,
         )
+
+    def test_ordinary_adb_builders_assemble_package_overlay_after_original_receipt(self):
+        workflow = self.required_text(CI_BUILD)
+        jobs = CI_MODULE.workflow_job_steps(workflow)
+        legal_steps = [CI_MODULE.workflow_step_fields(step) for step in jobs["BuildAdbHelperLegalAssets"]]
+        legal_build = next(fields["run"] for fields, _ in legal_steps
+                           if fields.get("name") == "Verify source closure and build legal assets")
+        self.assertIn("--package-core-output prefetch_artifacts/adb-helper-package-core", legal_build)
+        self.assertEqual(legal_build.count("python3 scripts/build_adb_helper_legal_assets.py"), 1)
+        core_uploads = [(fields, children["with"]) for fields, children in legal_steps
+                        if children.get("with", {}).get("name") == "adb-helper-package-core"]
+        self.assertEqual(len(core_uploads), 1)
+        fields, upload = core_uploads[0]
+        self.assertNotIn("if", fields)
+        self.assertEqual(upload["path"], "prefetch_artifacts/adb-helper-package-core/*")
+        self.assertEqual(upload["if-no-files-found"], "error")
+        self.assertEqual(upload["compression-level"], "0")
+
+        for job in ("BuildAdbLinuxX64", "BuildAdbLinuxArm64", "BuildAdbWindowsX64",
+                    "BuildAdbMacX64", "BuildAdbMacArm64"):
+            with self.subTest(job=job):
+                steps = [CI_MODULE.workflow_step_fields(step) for step in jobs[job]]
+                build_index, (_, children) = next(
+                    (index, entry) for index, entry in enumerate(steps)
+                    if entry[0].get("uses") == "./.github/actions/build-adb-helper"
+                )
+                options = children["with"]
+                self.assertEqual(options["package-core-root"], "${{ runner.temp }}/adb-helper-package-core")
+                self.assertEqual(options["package-support-root"], "${{ runner.temp }}/adb-helper-package-support")
+                self.assertEqual(options["version"], "${{ needs.BuildAdbHelperLegalAssets.outputs.klogg_version }}")
+                self.assertTrue(any(
+                    children.get("with", {}).get("name") == "adb-helper-package-core"
+                    and children["with"].get("path") == options["package-core-root"]
+                    for _, children in steps[:build_index]
+                ))
+
+        action = self.required_text(BUILD_ACTION)
+        body = action.split("  steps:\n", 1)[1]
+        projected = "jobs:\n  Build:\n    steps:\n" + "\n".join("  " + line for line in body.splitlines())
+        steps = [CI_MODULE.workflow_step_fields(step) for step in
+                 CI_MODULE.workflow_job_steps(projected)["Build"]]
+        overlays = [(index, fields) for index, (fields, _) in enumerate(steps)
+                    if "--package-overlay-only" in fields.get("run", "")]
+        self.assertEqual(len(overlays), 1)
+        overlay_index, overlay = overlays[0]
+        self.assertEqual(overlay["shell"], "bash")
+        self.assertNotIn("if", overlay)
+        self.assertNotIn("continue-on-error", overlay)
+        script = overlay["run"]
+        for marker in ('--core-root "$core_root"', '--build-receipt "$receipt"',
+                       '--source-set-sha256 "$(receipt_sha256 "$core_root/adb-helper-source-set-receipt.json")"',
+                       '--build-receipt-sha256 "$(receipt_sha256 "$receipt")"',
+                       '--version "${{ inputs.version }}"',
+                       '--output "${{ inputs.package-support-root }}"',
+                       'core_root="${{ inputs.package-core-root }}"',
+                       'receipt="${{ inputs.artifact-root }}/receipt.json"',
+                       "hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()"):
+            self.assertIn(marker, script)
+        self.assertNotIn("--archive-root", script)
+        self.assertNotIn("--repository-root", script)
+        raw_builds = [(index, fields) for index, (fields, _) in enumerate(steps)
+                      if "scripts/build_adb_helper.py" in fields.get("run", "")]
+        self.assertEqual(len(raw_builds), 3)
+        for index, fields in raw_builds:
+            self.assertLess(index, overlay_index)
+            self.assertIn('--package-support-root "${{ inputs.package-core-root }}"', fields["run"])
+        verify_index = next(index for index, (fields, _) in enumerate(steps)
+                            if fields.get("name") == "Smoke and verify source-built ADB artifact")
+        self.assertLess(overlay_index, verify_index)
+        self.assertIn('--source-assets-root "${{ inputs.package-support-root }}"', steps[verify_index][0]["run"])
 
     def test_adb_artifact_event_projection_keeps_package_validation_on_every_ci_event(self):
         workflow = self.required_text(CI_BUILD)

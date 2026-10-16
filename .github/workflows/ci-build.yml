@@ -677,6 +677,7 @@ jobs:
     outputs:
       support_artifact_id: ${{ steps.upload_adb_support.outputs.artifact-id }}
       full_release_artifact_id: ${{ steps.upload_adb_release.outputs.artifact-id }}
+      klogg_version: ${{ needs.SaveVersion.outputs.klogg_version }}
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     steps:
@@ -704,7 +705,8 @@ jobs:
             --version "$KLOGG_VERSION" \
             --base-url "https://github.com/${GITHUB_REPOSITORY}" \
             --output prefetch_artifacts/adb-helper-release \
-            --package-support-output prefetch_artifacts/adb-helper-package-support
+            --package-support-output prefetch_artifacts/adb-helper-package-support \
+            --package-core-output prefetch_artifacts/adb-helper-package-core
 
       - name: Upload package-required ADB support assets
         id: upload_adb_support
@@ -712,6 +714,14 @@ jobs:
         with:
           name: adb-helper-package-support
           path: prefetch_artifacts/adb-helper-package-support/*
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload immutable ADB package core
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: adb-helper-package-core
+          path: prefetch_artifacts/adb-helper-package-core/*
           if-no-files-found: error
           compression-level: 0
 
@@ -818,8 +828,8 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: adb-helper-package-support
-          path: ${{ runner.temp }}/adb-helper-package-support
+          name: adb-helper-package-core
+          path: ${{ runner.temp }}/adb-helper-package-core
 
       - name: Extract verified source cache while disconnected
         shell: bash
@@ -860,7 +870,9 @@ jobs:
         with:
           target: ${{ env.KLOGG_ADB_HELPER_TARGET }}
           source-root: ${{ runner.temp }}/adb-helper-sources
+          package-core-root: ${{ runner.temp }}/adb-helper-package-core
           package-support-root: ${{ runner.temp }}/adb-helper-package-support
+          version: ${{ needs.BuildAdbHelperLegalAssets.outputs.klogg_version }}
           artifact-root: ${{ runner.temp }}/adb-helper-artifact
           container-image: ${{ env.KLOGG_ADB_CONTAINER_IMAGE }}
 

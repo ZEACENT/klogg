@@ -167,6 +167,7 @@ CI_BUILD_ARTIFACT_PRODUCERS = {
     "linuxdeployqt": "PrefetchLinuxDeployQt",
     "msys2-tools": "PrefetchWindowsTools",
     "adb-helper-source-cache": "PrefetchAdbHelperSources",
+    "adb-helper-package-core": "BuildAdbHelperLegalAssets",
     "adb-helper-package-support": "BuildAdbHelperLegalAssets",
     "adb-helper-legal-assets": "BuildAdbHelperLegalAssets",
     "ios-native-source-cache": "PrefetchIosNativeSources",
@@ -204,12 +205,14 @@ CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS = {
         "BuildAdbMacX64",
         "BuildAdbMacArm64",
     },
-    "adb-helper-package-support": {
+    "adb-helper-package-core": {
         "BuildAdbLinuxX64",
         "BuildAdbLinuxArm64",
         "BuildAdbWindowsX64",
         "BuildAdbMacX64",
         "BuildAdbMacArm64",
+    },
+    "adb-helper-package-support": {
         "LinuxPackages",
         "MacPackages",
         "MacArmPackages",
