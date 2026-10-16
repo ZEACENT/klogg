@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <iostream>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QDir>
 #include <QPointer>
 #include <QProcess>
@@ -46,6 +48,7 @@
 #include "livelogexportservice.h"
 #include "livesourcetransport.h"
 #include "livestate.h"
+#include "process_observation.h"
 #include "streaminglogdata.h"
 #include "test_utils.h"
 
@@ -65,6 +68,42 @@ struct LiveSourceStreamingLogDataTestAccess {
 namespace {
 using Generation = klogg::livecapture::Generation;
 using ClearRequestId = LiveSourceTransport::ClearRequestId;
+
+QString clearWaitDiagnostic( const QObject& owner, Generation generation, ClearRequestId requestId )
+{
+    const auto processes = owner.findChildren<QProcess*>( QString{}, Qt::FindDirectChildrenOnly );
+    auto text = QStringLiteral( "ProcessLiveSourceTransport clear-wait generation=%1 request_id=%2 "
+                                "observer_pid=%3 direct_process_children=%4" )
+        .arg( static_cast<qulonglong>( generation ) ).arg( static_cast<qulonglong>( requestId ) )
+        .arg( QCoreApplication::applicationPid() ).arg( processes.size() );
+    int observed = 0;
+    for ( const auto* process : processes ) {
+        if ( observed == 8 ) {
+            text += QStringLiteral( "\n<truncated>" );
+            break;
+        }
+        text += QStringLiteral( "\nchild[%1] program=%2 %3" ).arg( observed )
+            .arg( process->program().left( 512 ),
+                  klogg::testing::ProcessSnapshot::take( *process ).diagnostic() );
+        ++observed;
+    }
+    return text.size() > 4096 ? text.left( 4084 ) + QStringLiteral( "<truncated>" ) : text;
+}
+
+bool waitForClearCompletion( SafeQSignalSpy& spy, const QObject& owner,
+                             Generation generation, ClearRequestId requestId )
+{
+    const auto completed = spy.safeWait( 3000 );
+    if ( !completed ) {
+        try {
+            std::cerr << clearWaitDiagnostic( owner, generation, requestId ).toStdString() << '\n';
+        }
+        catch ( ... ) {
+            // Diagnostic failure cannot change the original wait result.
+        }
+    }
+    return completed;
+}
 
 static_assert(
     std::is_same<decltype( std::declval<const LiveSourceTransport&>().statistics() ),
@@ -1079,6 +1118,45 @@ TEST_CASE( "LiveSourceTransport statistics reject delivery from retired generati
     REQUIRE( statistics.deliveredChunks == 1u );
 }
 
+TEST_CASE( "Clear wait diagnostics snapshot only directly owned process facts",
+           "[livecapture][transport][contract][clear][process-observation]" )
+{
+    QObject owner;
+    SECTION( "unstarted direct children are distinct from nested processes" )
+    {
+        QProcess direct( &owner );
+        direct.setProgram( QStringLiteral( "direct-clear-%1" ) );
+        QObject nestedOwner( &owner );
+        QProcess nested( &nestedOwner );
+        nested.setProgram( QStringLiteral( "nested-process-not-shown" ) );
+        const auto diagnostic = clearWaitDiagnostic( owner, 17u, 6001u );
+        REQUIRE( diagnostic.contains( QStringLiteral( "generation=17 request_id=6001" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "direct_process_children=1" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "program=direct-clear-%1" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "observer_pid=%1" )
+            .arg( QCoreApplication::applicationPid() ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "primary_state=0" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "primary_reported_pid=0" ) ) );
+        REQUIRE_FALSE( diagnostic.contains( QStringLiteral( "nested-process-not-shown" ) ) );
+    }
+    SECTION( "absence and excess children remain bounded observations" )
+    {
+        REQUIRE( clearWaitDiagnostic( owner, 17u, 6001u ).contains(
+            QStringLiteral( "direct_process_children=0" ) ) );
+        std::vector<std::unique_ptr<QProcess>> children;
+        for ( int i = 0; i < 9; ++i ) {
+            auto process = std::make_unique<QProcess>( &owner );
+            process->setProgram( QStringLiteral( "clear-child-%1" ).arg( i ) );
+            children.push_back( std::move( process ) );
+        }
+        const auto diagnostic = clearWaitDiagnostic( owner, 17u, 6001u );
+        REQUIRE( diagnostic.contains( QStringLiteral( "direct_process_children=9" ) ) );
+        REQUIRE( diagnostic.count( QStringLiteral( "child[" ) ) == 8 );
+        REQUIRE( diagnostic.contains( QStringLiteral( "<truncated>" ) ) );
+        REQUIRE( diagnostic.size() <= 4096 );
+    }
+}
+
 TEST_CASE( "ProcessLiveSourceTransport clear returns before its process result",
            "[livecapture][transport][contract][clear][process]" )
 {
@@ -1090,7 +1168,7 @@ TEST_CASE( "ProcessLiveSourceTransport clear returns before its process result",
     transport.clearRemoteAsync( generation, requestId );
 
     REQUIRE( clearSpy.count() == 0 );
-    REQUIRE( clearSpy.safeWait( 3000 ) );
+    REQUIRE( waitForClearCompletion( clearSpy, transport, generation, requestId ) );
     REQUIRE( clearSpy.count() == 1 );
     REQUIRE( clearSpy.at( 0 ).at( 0 ).toULongLong() == generation );
     REQUIRE( clearSpy.at( 0 ).at( 1 ).toULongLong() == requestId );
@@ -1106,7 +1184,7 @@ TEST_CASE( "Asynchronous clear failures remain request-local",
 
     transport.clearRemoteAsync( 17u, 6001u );
 
-    REQUIRE( clearSpy.safeWait( 3000 ) );
+    REQUIRE( waitForClearCompletion( clearSpy, transport, 17u, 6001u ) );
     REQUIRE_FALSE( clearSpy.at( 0 ).at( 2 ).toBool() );
     REQUIRE_FALSE( clearSpy.at( 0 ).at( 3 ).toString().isEmpty() );
     REQUIRE( transport.lastError().isEmpty() );

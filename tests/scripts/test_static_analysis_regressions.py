@@ -519,7 +519,7 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("catch ( ... )", constructor)
         failure = function_body(source, "bool failStartup(")
         self.assertLess(
-            failure.index("CaptureChildProcessSnapshot::take( process_ )"),
+            failure.index("klogg::testing::ProcessSnapshot::take( process_ )"),
             failure.index("waitForReadyRead( 0 )"),
         )
         self.assertIn("processObservation_.finishedObserved()", failure)
@@ -554,6 +554,28 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         release = function_body(source, "bool releaseAndWait(")
         self.assertIn("createSignalFile( releasePath_ ) && process_.waitForFinished( 5000 )",
                       release)
+
+    def test_failed_clear_wait_reports_facts_without_changing_its_budget(self):
+        source = (ROOT / "tests/unit/live_source_transport_contract_test.cpp").read_text()
+        for name in (
+            "ProcessLiveSourceTransport clear returns before its process result",
+            "Asynchronous clear failures remain request-local",
+        ):
+            case = function_body(source, 'TEST_CASE( "' + name + '"')
+            self.assertIn("waitForClearCompletion( clearSpy, transport,", case)
+            self.assertNotIn("clearSpy.safeWait(", case)
+        wait = function_body(source, "bool waitForClearCompletion(")
+        self.assertEqual(wait.count("spy.safeWait( 3000 )"), 1)
+        self.assertLess(wait.index("spy.safeWait( 3000 )"),
+                        wait.index("clearWaitDiagnostic("))
+        self.assertIn("if ( !completed )", wait)
+        self.assertIn("catch ( ... )", wait)
+        self.assertTrue(wait.rstrip().endswith("return completed;\n}"))
+        snapshot = function_body(source, "QString clearWaitDiagnostic(")
+        self.assertIn("Qt::FindDirectChildrenOnly", snapshot)
+        self.assertIn("klogg::testing::ProcessSnapshot::take( *process )", snapshot)
+        for probe in ("waitForStarted", "waitForReadyRead", "waitForFinished", "kill(", "start("):
+            self.assertNotIn(probe, snapshot)
 
     def test_capture_background_workers_stop_before_qt_teardown(self):
         header = CAPTURESTORE_HEADER.read_text()

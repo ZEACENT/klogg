@@ -21,6 +21,7 @@
 
 #include "test_utils.h"
 #include "capture_child_observation.h"
+#include "process_observation.h"
 
 #include <algorithm>
 #include <array>
@@ -753,28 +754,6 @@ class ChildProcessReleaseGuard {
     QString releasePath_;
 };
 
-struct CaptureChildProcessSnapshot {
-    QProcess::ProcessState state;
-    QProcess::ProcessError error;
-    QString errorText;
-    qint64 reportedPid;
-
-    static CaptureChildProcessSnapshot take( const QProcess& process )
-    {
-        return { process.state(), process.error(), process.errorString(), process.processId() };
-    }
-
-    QString diagnostic() const
-    {
-        const auto boundedError = errorText.size() > 512
-            ? errorText.left( 500 ) + QStringLiteral( "<truncated>" ) : errorText;
-        return QStringLiteral( "primary_state=%1 primary_error=%2 primary_error_text=%3 "
-                               "primary_reported_pid=%4" )
-            .arg( static_cast<int>( state ) ).arg( static_cast<int>( error ) )
-            .arg( boundedError ).arg( reportedPid );
-    }
-};
-
 class CaptureChildProcessObservation {
   public:
     enum class Kind { State, Error, Started, Finished };
@@ -1019,7 +998,7 @@ class ActiveCaptureChild {
     {
         startupFailed_ = true;
         try {
-            const auto primary = CaptureChildProcessSnapshot::take( process_ );
+            const auto primary = klogg::testing::ProcessSnapshot::take( process_ );
             // Failure-only zero-time observations service captured channels.
             // Preserve the earlier error: these probes may set Timedout. Cached
             // Running/empty output alone is not evidence of a live/silent child.
@@ -1039,11 +1018,12 @@ class ActiveCaptureChild {
                 "confirmed_start_reported_pid=%4 %5 observed_state=%6 observed_reported_pid=%7 "
                 "exit_observed=%8 observer_setup_failed=%9" )
                 .arg( QString::fromLatin1( phase ), bounded( process_.program(), 512 ),
-                      bounded( process_.arguments().join( QLatin1Char( ' ' ) ), 1024 ) )
-                .arg( confirmedStartReportedPid_ ).arg( primary.diagnostic() )
-                .arg( static_cast<int>( process_.state() ) ).arg( process_.processId() )
-                .arg( exitObserved ? QStringLiteral( "yes" ) : QStringLiteral( "no" ) )
-                .arg( observationSetupFailed_ );
+                      bounded( process_.arguments().join( QLatin1Char( ' ' ) ), 1024 ),
+                      QString::number( confirmedStartReportedPid_ ), primary.diagnostic(),
+                      QString::number( static_cast<int>( process_.state() ) ),
+                      QString::number( process_.processId() ),
+                      exitObserved ? QStringLiteral( "yes" ) : QStringLiteral( "no" ),
+                      QString::number( observationSetupFailed_ ) );
             if ( exitObserved ) {
                 startupDiagnostic_ += QStringLiteral( " exit_status=%1 exit_code=%2" )
                     .arg( static_cast<int>( process_.exitStatus() ) ).arg( process_.exitCode() );
@@ -1051,11 +1031,11 @@ class ActiveCaptureChild {
             startupDiagnostic_ += QStringLiteral( "\nready_path=%1 ready_exists=%2 ready_is_file=%3 "
                 "ready_size=%4 waited_content=%5\nmarker_path=%6 marker_error=%7 "
                 "marker_info=%8 marker_pid=%9" )
-                .arg( bounded( readyPath_, 512 ) ).arg( readyInfo.exists() )
-                .arg( readyInfo.isFile() ).arg( readyInfo.size() )
-                .arg( bounded( readyContents_, 512 ) ).arg( bounded( markerPath_, 512 ) )
-                .arg( static_cast<int>( markerError_ ) ).arg( markerInfoAvailable_ )
-                .arg( markerPid_ );
+                .arg( bounded( readyPath_, 512 ), QString::number( readyInfo.exists() ),
+                      QString::number( readyInfo.isFile() ), QString::number( readyInfo.size() ),
+                      bounded( readyContents_, 512 ), bounded( markerPath_, 512 ),
+                      QString::number( static_cast<int>( markerError_ ) ),
+                      QString::number( markerInfoAvailable_ ), QString::number( markerPid_ ) );
             startupDiagnostic_ += QStringLiteral( "\nchild_coordination_override=%1 "
                 "parent_coordination_override=%2\nstdout_observed=%3\nstderr_observed=%4" )
                 .arg( bounded( process_.processEnvironment().value(
@@ -1226,7 +1206,7 @@ TEST_CASE( "Capture child observations preserve unconfirmed startup facts",
     CaptureChildProcessObservation observation;
     observation.record( Kind::State, static_cast<int>( QProcess::Starting ), 321 );
     observation.record( Kind::Error, static_cast<int>( QProcess::Timedout ), 321 );
-    const CaptureChildProcessSnapshot primary{ QProcess::Starting, QProcess::Timedout,
+    const klogg::testing::ProcessSnapshot primary{ QProcess::Starting, QProcess::Timedout,
                                                QStringLiteral( "original-timeout" ), 321 };
     const auto primaryDiagnostic = primary.diagnostic();
     REQUIRE( primaryDiagnostic.contains( QStringLiteral( "primary_state=1" ) ) );
@@ -1242,7 +1222,11 @@ TEST_CASE( "Capture child observations preserve unconfirmed startup facts",
     REQUIRE( observation.diagnostic().contains( QStringLiteral( "first_error_event=%1" )
         .arg( static_cast<int>( QProcess::Timedout ) ) ) );
     REQUIRE( primary.diagnostic() == primaryDiagnostic );
-    const CaptureChildProcessSnapshot longPrimary{ QProcess::Starting, QProcess::Timedout,
+    const klogg::testing::ProcessSnapshot literalPrimary{ QProcess::Starting, QProcess::Timedout,
+        QStringLiteral( "literal%1" ), 321 };
+    REQUIRE( literalPrimary.diagnostic().contains(
+        QStringLiteral( "primary_error_text=literal%1 primary_reported_pid=321" ) ) );
+    const klogg::testing::ProcessSnapshot longPrimary{ QProcess::Starting, QProcess::Timedout,
         QString( 513, QLatin1Char( 'x' ) ), 321 };
     REQUIRE( longPrimary.diagnostic().contains( QString( 500, QLatin1Char( 'x' ) )
                                                + QStringLiteral( "<truncated>" ) ) );
@@ -1339,7 +1323,7 @@ TEST_CASE( "Capture child readiness keeps successful and failed startup contract
     }
     SECTION( "owned missing executable" )
     {
-        const auto program = QDir( rootPath ).filePath( QStringLiteral( "missing-child" ) );
+        const auto program = QDir( rootPath ).filePath( QStringLiteral( "missing-child-%1" ) );
         REQUIRE_FALSE( QFileInfo::exists( program ) );
         child.setProgramForTest( program );
         REQUIRE_FALSE( child.startAndWaitUntilReady() );
@@ -1349,6 +1333,7 @@ TEST_CASE( "Capture child readiness keeps successful and failed startup contract
                                          .arg( static_cast<int>( QProcess::FailedToStart ) ) ) );
         REQUIRE( diagnostic.contains( QStringLiteral( "exit_observed=no" ) ) );
         REQUIRE( diagnostic.contains( QStringLiteral( "missing-child" ) ) );
+        CHECK( diagnostic.contains( QStringLiteral( "program=" ) + program ) );
         CHECK( diagnostic.contains( QStringLiteral( "primary_reported_pid=0" ) ) );
         CHECK( diagnostic.contains( QStringLiteral( "observed_process_events=state:" ) ) );
     }

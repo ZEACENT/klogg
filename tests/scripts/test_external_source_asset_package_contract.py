@@ -18,6 +18,8 @@ import unittest
 import urllib.parse
 from unittest import mock
 
+from contract_cli_observation import ContractCliObserver
+
 
 ROOT = pathlib.Path(__file__).parents[2]
 FIXTURE = ROOT / "tests" / "fixtures" / "external_source_asset_package_contract.json"
@@ -40,36 +42,7 @@ PUBLICATION_PREPARER = ROOT / "scripts" / "prepare_source_publication.py"
 RELEASE_DOWNLOAD_RENDERER = ROOT / "scripts" / "render_release_downloads.py"
 
 
-TRACE_CONTRACT_CLI = __name__ == "__main__"
-CONTRACT_CLI_SEQUENCE = 0
-
-
-def run_contract_cli(command, **kwargs):
-    if not TRACE_CONTRACT_CLI:
-        return subprocess.run(command, **kwargs)
-    global CONTRACT_CLI_SEQUENCE
-    CONTRACT_CLI_SEQUENCE += 1
-    sequence = CONTRACT_CLI_SEQUENCE
-    role = "inline" if len(command) > 1 and command[1] == "-c" else pathlib.Path(command[1]).name
-    role = re.sub(r"[^A-Za-z0-9_.-]", "?", role)[:96]
-
-    def observe(state):
-        try:
-            print(f"contract-cli[{sequence}] {state}", file=sys.stderr, flush=True)
-        except Exception:
-            pass
-
-    observe("before role=" + role)
-    try:
-        completed = subprocess.run(command, **kwargs)
-    except subprocess.TimeoutExpired:
-        observe("timeout")
-        raise
-    except BaseException as error:
-        observe("error type=" + type(error).__name__)
-        raise
-    observe(f"returned returncode={completed.returncode}")
-    return completed
+run_contract_cli = ContractCliObserver(enabled=__name__ == "__main__")
 
 
 def required_text(path: pathlib.Path) -> str:
@@ -124,8 +97,8 @@ class ContractCliObservationTest(unittest.TestCase):
                     self.assertGreater(stream.flushes, 0)
                     return completed
 
-                with mock.patch(__name__ + ".TRACE_CONTRACT_CLI", True), \
-                        mock.patch(__name__ + ".CONTRACT_CLI_SEQUENCE", 0), \
+                with mock.patch.object(run_contract_cli, "enabled", True), \
+                        mock.patch.object(run_contract_cli, "sequence", 0), \
                         mock.patch.object(sys, "stderr", stream), \
                         mock.patch.object(subprocess, "run", side_effect=invoke):
                     actual = run_contract_cli(command, timeout=10, capture_output=True)
@@ -146,8 +119,8 @@ class ContractCliObservationTest(unittest.TestCase):
                     self.assertGreater(stream.flushes, 0)
                     raise failure
 
-                with mock.patch(__name__ + ".TRACE_CONTRACT_CLI", True), \
-                        mock.patch(__name__ + ".CONTRACT_CLI_SEQUENCE", 0), \
+                with mock.patch.object(run_contract_cli, "enabled", True), \
+                        mock.patch.object(run_contract_cli, "sequence", 0), \
                         mock.patch.object(sys, "stderr", stream), \
                         mock.patch.object(subprocess, "run", side_effect=invoke):
                     with self.assertRaises(type(failure)) as caught:
@@ -159,7 +132,7 @@ class ContractCliObservationTest(unittest.TestCase):
     def test_imported_discovery_path_is_quiet(self):
         stream = self.ObservedStream()
         completed = subprocess.CompletedProcess(["model-python", "fixture.py"], 0)
-        with mock.patch(__name__ + ".TRACE_CONTRACT_CLI", False), \
+        with mock.patch.object(run_contract_cli, "enabled", False), \
                 mock.patch.object(sys, "stderr", stream), \
                 mock.patch.object(subprocess, "run", return_value=completed) as invoke:
             self.assertIs(run_contract_cli(completed.args, timeout=10), completed)

@@ -1,3 +1,11 @@
+import sys
+
+if __name__ == "__main__":
+    try:
+        print("adb-hardening-contract: importing", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
 import argparse
 import gzip
 import shutil
@@ -6,13 +14,16 @@ import importlib.util
 import io
 import json
 import pathlib
-import subprocess
-import sys
 import tarfile
 import tempfile
 import time
 import unittest
 from unittest import mock
+
+from contract_cli_observation import ContractCliObserver
+
+
+run_contract_cli = ContractCliObserver(enabled=__name__ == "__main__", label="adb-hardening-cli")
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -103,8 +114,9 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         executable.chmod(0o755)
         (artifact_root / "SHA256SUMS").write_text("receipt\n", encoding="utf-8")
         archive = self.root / "artifact.tar.gz"
-        subprocess.run(
+        run_contract_cli(
             ["tar", "-czf", str(archive), "-C", str(artifact_root), "."],
+            role="fixture-tar",
             check=True,
         )
 
@@ -162,7 +174,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         ]
         if extract_root is not None:
             command.extend(("--extract-root", str(extract_root)))
-        return subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+        return run_contract_cli(command, capture_output=True, text=True, timeout=10, check=False)
 
     def test_gitiles_archives_use_canonical_content_identity_in_the_real_lock(self):
         lock = json.loads(LOCK.read_text(encoding="utf-8"))
@@ -550,7 +562,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             command.extend(("--package-support-output", str(package_support_output)))
         if package_core_output is not None:
             command.extend(("--package-core-output", str(package_core_output)))
-        return subprocess.run(
+        return run_contract_cli(
             command,
             capture_output=True,
             text=True,
@@ -666,7 +678,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
     def test_version_overlay_materializes_from_verified_core_without_sources(self):
         repository, archive_root, lock_path, lock = self.make_legal_fixture()
         core = self.root / "immutable-core"
-        core_build = subprocess.run(
+        core_build = run_contract_cli(
             [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
              "--archive-root", str(archive_root), "--repository-root", str(repository),
              "--output", str(core)],
@@ -684,7 +696,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         archive_root.rename(self.root / "unavailable-archives")
         output = self.root / "versioned-assembly"
         support = self.root / "versioned-package-support"
-        overlay_build = subprocess.run(
+        overlay_build = run_contract_cli(
             [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(lock_path),
              "--core-root", str(core), "--version", "99.01.01",
              "--base-url", "https://github.com/ZEACENT/klogg",
@@ -771,7 +783,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         for version in expected:
             with self.subTest(version=version):
                 output = self.root / f"assembled-package-{version}"
-                result = subprocess.run(
+                result = run_contract_cli(
                     [sys.executable, str(LEGAL_SCRIPT), "--package-overlay-only",
                      "--lock", str(overlay_lock), "--core-root", str(core),
                      "--version", version, "--base-url", "https://github.com/ZEACENT/klogg",
@@ -811,7 +823,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         root.mkdir(exist_ok=True)
         repository, archives, lock_path, lock = self.make_legal_fixture(root)
         core = root / "immutable-core"
-        result = subprocess.run(
+        result = run_contract_cli(
             [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
              "--archive-root", str(archives), "--repository-root", str(repository),
              "--output", str(core)],
@@ -950,7 +962,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
 
     def test_overlay_requires_external_pins_before_creating_output(self):
         args, _ = self.make_overlay_fixture()
-        result = subprocess.run(
+        result = run_contract_cli(
             [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(args.lock),
              "--core-root", str(args.core_root), "--version", args.version,
              "--base-url", args.base_url, "--output", str(args.output)],
@@ -1304,7 +1316,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
                      for malformed in ("a" * 63, "A" * 64, "0" * 64))
         for index, inputs in enumerate(cases):
             with self.subTest(case=index):
-                result = subprocess.run(
+                result = run_contract_cli(
                     base + [item for pair in inputs.items() for item in pair],
                     capture_output=True, text=True, check=False, timeout=10,
                 )
@@ -1431,7 +1443,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         output = self.root / "stale-core"
         output.mkdir()
         (output / "ADB-HELPER-SOURCE-OFFER.txt").write_text("old release offer\n")
-        result = subprocess.run(
+        result = run_contract_cli(
             [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
              "--archive-root", str(archive_root), "--repository-root", str(repository),
              "--output", str(output)],
@@ -1443,7 +1455,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
     def test_overlay_only_rejects_core_bytes_even_with_forged_sidecar(self):
         repository, archive_root, lock_path, lock = self.make_legal_fixture()
         core = self.root / "immutable-core"
-        build = subprocess.run(
+        build = run_contract_cli(
             [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
              "--archive-root", str(archive_root), "--repository-root", str(repository),
              "--output", str(core)],
@@ -1456,7 +1468,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         asset.with_name(asset.name + ".sha256").write_text(
             f"{archive_sha256(asset)}  {asset.name}\n", encoding="utf-8"
         )
-        result = subprocess.run(
+        result = run_contract_cli(
             [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(lock_path),
              "--core-root", str(core), "--version", "99.01.01",
              "--base-url", "https://github.com/ZEACENT/klogg",
@@ -2052,4 +2064,4 @@ Dump of file adb.exe
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)
