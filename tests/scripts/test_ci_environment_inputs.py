@@ -722,10 +722,12 @@ esac
     def test_benign_bootstrap_certificate_warning_does_not_block_acquisition(self):
         # The scoped snapshot CA bootstrap runs before ca-certificates exists;
         # apt's informational TLS warning is not an index failure.
-        result, calls, _ = self.run_fake_resolver(
-            apt_status=0,
+        result, calls, inputs = self.run_fake_resolver(
+            bootstrap=True, apt_status=0,
             update_warning="W: https://snapshot.ubuntu.com/ubuntu/20260731T000000Z/dists/jammy/InRelease: No system certificates available. Try installing ca-certificates.")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('bootstrap-config:Acquire::https::snapshot.ubuntu.com::Verify-Peer "false";', calls)
+        self.assertFalse((inputs / ".bootstrap-apt.conf").exists())
         self.assertIn("install", calls)
 
     @unittest.skipUnless(shutil.which("sh"), "requires POSIX shell")

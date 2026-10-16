@@ -1046,6 +1046,15 @@ TEST_CASE( "Capture child readiness keeps successful and failed startup contract
     const auto rootPath = makeTestDir( "capturestore_child_readiness" );
     const auto captureId = makeCaptureId();
     ActiveCaptureChild child( rootPath, captureId, true );
+    bool terminalObserved = false;
+    QObject terminalObservationContext;
+    const auto observeChildExit = [ & ]( QProcess& process, int timeoutMs ) {
+        QObject::connect( &process, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+                          &terminalObservationContext, [ & ] { terminalObserved = true; } );
+        if ( process.state() == QProcess::NotRunning || process.waitForFinished( timeoutMs ) ) {
+            terminalObserved = true;
+        }
+    };
 
     SECTION( "successful real handshake" )
     {
@@ -1078,10 +1087,8 @@ TEST_CASE( "Capture child readiness keeps successful and failed startup contract
     SECTION( "ready failure with causally observed child exit" )
     {
         REQUIRE( QDir{}.mkpath( QDir( rootPath ).filePath( QStringLiteral( "child-ready" ) ) ) );
-        bool terminalObserved = false;
         const auto ready = child.startAndWaitUntilReady( [ & ]( QProcess& process ) {
-            terminalObserved = process.state() == QProcess::NotRunning
-                || process.waitForFinished( 5000 );
+            observeChildExit( process, 5000 );
         } );
         REQUIRE( terminalObserved );
         REQUIRE_FALSE( ready );
@@ -1090,6 +1097,27 @@ TEST_CASE( "Capture child readiness keeps successful and failed startup contract
         REQUIRE( diagnostic.contains( QStringLiteral( "exit_observed=yes" ) ) );
         REQUIRE( diagnostic.contains( QStringLiteral( "FAILED:" ) ) );
         REQUIRE( diagnostic.size() <= 16384 );
+    }
+    SECTION( "exit after an earlier running observation remains observed" )
+    {
+        const auto readyPath = QDir( rootPath ).filePath( QStringLiteral( "child-ready" ) );
+        const auto releasePath = QDir( rootPath ).filePath( QStringLiteral( "child-release" ) );
+        bool initialExitObserved = true;
+        const auto ready = child.startAndWaitUntilReady( [ & ]( QProcess& process ) {
+            REQUIRE_FALSE( waitForPublishedContent( readyPath ).isEmpty() );
+            // Observe while the real child still waits for its release file.
+            observeChildExit( process, 0 );
+            initialExitObserved = terminalObserved;
+            REQUIRE_FALSE( initialExitObserved );
+            REQUIRE( QFile::remove( readyPath ) );
+            REQUIRE( createSignalFile( releasePath ) );
+        } );
+        REQUIRE( terminalObserved );
+        REQUIRE_FALSE( ready );
+        const auto diagnostic = child.startupDiagnostic();
+        REQUIRE( diagnostic.contains( QStringLiteral( "phase=ready-content" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "exit_observed=yes" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "exit_status=0 exit_code=0" ) ) );
     }
     SECTION( "parent marker root deliberately differs from child snapshot" )
     {

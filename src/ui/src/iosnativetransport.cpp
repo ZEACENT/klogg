@@ -15,6 +15,7 @@
 #include <QPointer>
 
 #include <algorithm>
+#include <deque>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -46,80 +47,72 @@ LiveSourceError clearUnsupportedError()
                             "The native relay is read-only and never reports fake clear success." };
 }
 
-bool postQueuedTask( QObject& context, IosNativeTransport::QueuedTask task )
+constexpr char CallbackWakeupSlot[] = "deliverPostedCallback";
+
+bool postQueuedWakeup( QObject& context, const char* method )
 {
-    return QMetaObject::invokeMethod(
-        &context, [ task = std::move( task ) ]() mutable { task(); }, Qt::QueuedConnection );
+    return QMetaObject::invokeMethod( &context, method, Qt::QueuedConnection );
 }
 
 } // namespace
 
-struct IosNativeTransport::CallbackGate final
-    : public std::enable_shared_from_this<IosNativeTransport::CallbackGate> {
+struct IosNativeTransport::CallbackGate final {
+    using Callback = std::function<void( IosNativeTransport& )>;
+
     explicit CallbackGate( QueuedDispatcher value )
         : dispatcher( std::move( value ) )
     {
     }
 
-    template <typename Callback>
     bool post( Callback callback )
     {
-        const auto self = shared_from_this();
         std::lock_guard<std::mutex> lock( mutex );
         if ( transport == nullptr ) {
             return true;
         }
-        // Hold the gate while enqueueing so destruction cannot detach and delete
-        // the QObject between target selection and dispatch. The queued closure
-        // re-checks the raw pointer on the object's own Qt thread.
-        QueuedTask task = [ self, callback = std::move( callback ) ]() mutable {
-            IosNativeTransport* target = nullptr;
-            {
-                std::lock_guard<std::mutex> callbackLock( self->mutex );
-                target = self->transport;
-            }
-            QPointer<IosNativeTransport> guard( target );
-            try {
-                if ( guard ) { callback( *guard ); }
-            } catch ( ... ) {
-                if ( !guard ) { return; }
-                guard->reportDrainFailure();
-                if ( guard && guard->nativeStopped_ ) { guard->completeStopped(); }
-            }
-        };
-
+        // Publish payloads under a C++ mutex before Qt carries only a wakeup.
+        // Hold the gate through dispatch so detach cannot delete its target.
+        pendingCallbacks.push_back( std::move( callback ) );
         constexpr unsigned DispatchAttempts = 2u;
         bool queued = false;
         for ( unsigned attempt = 0u; attempt < DispatchAttempts && !queued; ++attempt ) {
             try {
-                queued = dispatcher( *transport, task );
+                queued = dispatcher( *transport, CallbackWakeupSlot );
             } catch ( ... ) {
                 queued = false;
             }
         }
-        if ( queued ) {
-            return true;
+        if ( !queued ) {
+            // A rejected notification cannot consume the sole queue wakeup.
+            // Preserve the single bounded fallback, without a callable payload.
+            try {
+                queued = postQueuedWakeup( *transport, CallbackWakeupSlot );
+            } catch ( ... ) {
+                queued = false;
+            }
         }
-        // A rejected notification cannot consume the sole non-empty-queue
-        // wakeup. Use the normal Qt dispatcher once as a bounded fallback;
-        // there is no timer, polling loop, or unbounded retry path.
-        return postQueuedTask( *transport, std::move( task ) );
+        if ( !queued ) {
+            pendingCallbacks.pop_back();
+        }
+        return queued;
     }
 
     void detach() noexcept
     {
         std::lock_guard<std::mutex> lock( mutex );
         transport = nullptr;
+        pendingCallbacks.clear();
     }
 
     QueuedDispatcher dispatcher;
     std::mutex mutex;
     IosNativeTransport* transport{ nullptr };
+    std::deque<Callback> pendingCallbacks;
 };
 
 IosNativeTransport::IosNativeTransport( const IosNativeStreamWorkerFactory& workerFactory,
                                         IosNativeStreamConfig config, QObject* parent )
-    : IosNativeTransport( workerFactory, std::move( config ), postQueuedTask, parent )
+    : IosNativeTransport( workerFactory, std::move( config ), postQueuedWakeup, parent )
 {
 }
 
@@ -142,6 +135,31 @@ IosNativeTransport::~IosNativeTransport()
         session_->shutdown();
     }
     session_.reset();
+}
+
+void IosNativeTransport::deliverPostedCallback()
+{
+    const auto gate = callbackGate_;
+    CallbackGate::Callback callback;
+    IosNativeTransport* target = nullptr;
+    {
+        const std::lock_guard<std::mutex> lock( gate->mutex );
+        if ( gate->pendingCallbacks.empty() ) { return; }
+        target = gate->transport;
+        callback = std::move( gate->pendingCallbacks.front() );
+        gate->pendingCallbacks.pop_front();
+    }
+
+    // One callback per wakeup preserves event-loop fairness. Release the gate
+    // before user code, which may synchronously destroy this transport.
+    QPointer<IosNativeTransport> guard( target );
+    try {
+        if ( guard ) { callback( *guard ); }
+    } catch ( ... ) {
+        if ( !guard ) { return; }
+        guard->reportDrainFailure();
+        if ( guard && guard->nativeStopped_ ) { guard->completeStopped(); }
+    }
 }
 
 void IosNativeTransport::start( Generation generation )

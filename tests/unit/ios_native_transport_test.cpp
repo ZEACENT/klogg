@@ -450,14 +450,12 @@ TEST_CASE( "Native queue notification retries one rejected queued dispatch witho
     ScriptedWorkerFactory factory;
     int dispatchAttempts = 0;
     IosNativeTransport::QueuedDispatcher dispatcher
-        = [&dispatchAttempts]( QObject& context, IosNativeTransport::QueuedTask task ) {
+        = [&dispatchAttempts]( QObject& context, const char* method ) {
               ++dispatchAttempts;
               if ( dispatchAttempts == 1 ) {
                   return false;
               }
-              return QMetaObject::invokeMethod(
-                  &context, [ task = std::move( task ) ]() mutable { task(); },
-                  Qt::QueuedConnection );
+              return QMetaObject::invokeMethod( &context, method, Qt::QueuedConnection );
           };
     IosNativeTransport transport( factory, nativeConfig(), std::move( dispatcher ) );
     QByteArray received;
@@ -479,7 +477,7 @@ TEST_CASE( "Native queue notification falls back after a bounded dispatcher reje
     ScriptedWorkerFactory factory;
     int dispatchAttempts = 0;
     IosNativeTransport::QueuedDispatcher dispatcher
-        = [&dispatchAttempts]( QObject&, IosNativeTransport::QueuedTask ) {
+        = [&dispatchAttempts]( QObject&, const char* ) {
               ++dispatchAttempts;
               return false;
           };
@@ -978,6 +976,50 @@ TEST_CASE( "iOS native transport marshals worker callbacks back to its Qt thread
 
     REQUIRE( observerThread.has_value() );
     CHECK( observerThread.value() == guiThread );
+}
+
+TEST_CASE( "iOS native transport consumes worker publication before joining the producer",
+           "[ios][native][transport][threading][publication]" )
+{
+    ScriptedWorkerFactory factory;
+    const auto guiThread = std::this_thread::get_id();
+    std::optional<std::thread::id> observerThread;
+    unsigned connected = 0u;
+    std::mutex releaseMutex;
+    std::condition_variable releaseChanged;
+    bool releaseProducer = false;
+    IosNativeTransport transport( factory, nativeConfig() );
+    QObject::connect( &transport, &LiveSourceTransport::stateChanged, &transport,
+                      [ & ]( Generation, LiveSourceTransport::State state ) {
+                          if ( state == LiveSourceTransport::State::Connected ) {
+                              observerThread = std::this_thread::get_id();
+                              ++connected;
+                          }
+                      }, Qt::DirectConnection );
+    transport.start( 112u );
+    SafeQSignalSpy stateSpy( &transport, &LiveSourceTransport::stateChanged );
+
+    std::thread nativeWorker( [ & ] {
+        factory.publishReady( 0u );
+        std::unique_lock<std::mutex> lock( releaseMutex );
+        releaseChanged.wait( lock, [ & ] { return releaseProducer; } );
+    } );
+    // Joining before delivery would publish the callable through std::thread
+    // synchronization instead of exercising the production queue boundary.
+    const auto observed = stateSpy.safeWait( 5000 );
+    {
+        const std::lock_guard<std::mutex> lock( releaseMutex );
+        releaseProducer = true;
+    }
+    releaseChanged.notify_one();
+    nativeWorker.join();
+
+    REQUIRE( observed );
+    REQUIRE( observerThread.has_value() );
+    CHECK( observerThread.value() == guiThread );
+    CHECK( connected == 1u );
+    drainQtEvents();
+    CHECK( connected == 1u );
 }
 
 TEST_CASE( "iOS native transport contains exceptions at the queued Qt callback boundary",

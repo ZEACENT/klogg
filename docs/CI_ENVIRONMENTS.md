@@ -4,17 +4,39 @@
 
 ## Current status
 
-All six Linux environment families have reviewed digest pins and detached
-evidence in `ci/environments/lock.json` and `ci/environments/evidence/`.
-Ordinary Linux application CI is wired to consume locked environments rather
-than rebuild them on a cold BuildKit cache. The ADB lock/verifier changes first
-invalidated four packaging families, blocking four package jobs plus Jammy
-ASan/LSan and UBSan. The shared Docker build action's optional-metrics fix
-also changes the verification policy for the TSan and analysis families. On
-this checkout **all six** families' old signed receipts fail closed before
-image pull until they are requalified and their pins are reviewed. Do not
-substitute calculated policy hashes for producer evidence. A signed lock from
-an earlier revision is not current-head validation. Evidence-only run
+All six Linux environment families have independently verified digest pins and
+detached evidence in `ci/environments/lock.json` and `ci/environments/evidence/`.
+Their original qualification source is
+`9e3c09ec1d93a437f26c0fa660370a9ee2ad6a1b`, run
+[38853661268](https://github.com/ZEACENT/klogg/actions/runs/38853661268), attempt 1.
+The complete flow passed 55 checks: 25 successful and 30 mode-specific skips;
+all 55 annotation endpoints were empty. Six candidates, ten qualification
+roles, the strict Gate, protected Publisher and anonymous verifier actually
+succeeded in that same source/run/attempt.
+
+Independent verification checked six anonymous OCI manifest/config pairs and
+12 detached signatures. All 31 original pin/evidence proposals were adopted
+byte-for-byte; their source bindings were not rewritten. This replaces the
+earlier source `50b9db1e` authority, not its historical outcome. Metadata and
+signature verification does not claim independent execution of image layers.
+The publication environment uses branch policy; its empty run review history
+is not human PR approval or native-core qualification.
+
+Ordinary Linux application CI consumes these locked environments rather than
+rebuilding them on a cold BuildKit cache. It still rejects changed declared
+recipe or policy bytes before image pull. Never substitute calculated hashes
+for fresh producer evidence, splice successful roles across attempts, or treat
+an earlier source's qualification as current-head application validation.
+Native production-core consumption and controlled C++ reuse measurements
+remain separate, unfinished work.
+
+### Historical qualification and consumer failures
+
+Earlier ADB lock/verifier changes invalidated four packaging families, blocking
+four package jobs plus Jammy ASan/LSan and UBSan. The shared Docker build action's
+optional-metrics change also invalidated TSan and analysis policy. Those stale
+receipts failed closed; later successful publication does not erase the failures.
+Evidence-only run
 `36380763036` built all six candidates, but its Linux package fixture failed
 while fetching an AOSP libusb archive with HTTP 503, so four package roles
 were skipped and no replacement receipt was issued. The PR and fixture now
@@ -37,7 +59,8 @@ host-restored cache Git directory for dubious ownership. Static analysis
 independently rejected C varargs and ignored C output results in the optional
 search-start trace. Coverage and CodeQL profile receipts cannot replace those
 failed roles; the aggregate Gate stopped before artifact downloads and issued
-no six-family qualification. Production signed pins remain unchanged and stale.
+no six-family qualification. At that checkpoint the production pins remained
+unchanged and stale; its partial results were not promoted.
 
 The complete ordinary source `00f1e3e7` audit covers 48 checks across CI Build
 `38146809545`, its three analysis runs and lint: 25 passed, 15 failed and eight
