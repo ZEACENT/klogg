@@ -591,9 +591,27 @@ def materialize(args, lock: dict, version: str | None, base_url: str | None) -> 
             raise
 
 
-def native_stack_inventory(root: pathlib.Path, build_receipt: str) -> tuple[dict, dict, dict]:
-    """Describe the original native writer's files, aliases and directory modes."""
+def native_stack_inventory(root: pathlib.Path, build_receipt: str, *,
+                           legal_files: dict[str, str] | None = None,
+                           receipt_alias: str | None = None) -> tuple[dict, dict, dict]:
+    """Describe native entries, allowing only an explicitly bound full legal view."""
     files, aliases = {}, {}
+    native_receipts = {build_receipt}
+    if receipt_alias is not None:
+        if receipt_alias not in ("ios-native-arm64-build-receipt.json",
+                                 "ios-native-x86_64-build-receipt.json"):
+            raise LegalAssetError("unsupported original native receipt alias")
+        if sha256(checked_input(root, receipt_alias)) != sha256(checked_input(root, build_receipt)):
+            raise LegalAssetError("original native receipt alias differs from build receipt")
+        native_receipts.add(receipt_alias)
+    legal_files = legal_files or {}
+    legal_directories = set()
+    for name in legal_files:
+        validated_relative_path(name, "full legal entry")
+        if name in native_receipts or name.split("/")[0] in ("lib", "include"):
+            raise LegalAssetError("full legal entry collides with original native ownership")
+        legal_directories.update(parent.as_posix() for parent in pathlib.PurePosixPath(name).parents
+                                 if parent.as_posix() != ".")
     root_mode = root.stat().st_mode
     special_permissions = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
     if root_mode & special_permissions:
@@ -604,9 +622,19 @@ def native_stack_inventory(root: pathlib.Path, build_receipt: str) -> tuple[dict
             raise LegalAssetError(f"original native stack requires a real {name} directory")
     for path in sorted(root.rglob("*")):
         name = validated_relative_path(path.relative_to(root).as_posix(), "original native entry")
-        if name != build_receipt and name.split("/")[0] not in ("lib", "include"):
-            raise LegalAssetError(f"unexpected original native stack entry: {name}")
         info = path.lstat()
+        if info.st_mode & special_permissions:
+            raise LegalAssetError("original native stack has unsupported special permissions")
+        if name in legal_files:
+            if not stat.S_ISREG(info.st_mode) or sha256(checked_input(root, name)) != legal_files[name]:
+                raise LegalAssetError(f"full legal entry changed: {name}")
+            continue
+        if name in legal_directories:
+            if not stat.S_ISDIR(info.st_mode):
+                raise LegalAssetError(f"full legal directory changed: {name}")
+            continue
+        if name not in native_receipts and name.split("/")[0] not in ("lib", "include"):
+            raise LegalAssetError(f"unexpected original native stack entry: {name}")
         if stat.S_ISLNK(info.st_mode):
             target = os.readlink(path)
             if path.parent != root / "lib" or not path.name.endswith(".dylib"):
@@ -627,20 +655,29 @@ def native_stack_inventory(root: pathlib.Path, build_receipt: str) -> tuple[dict
             files[name] = (sha256(checked_input(root, name)), stat.S_IMODE(info.st_mode))
         else:
             raise LegalAssetError(f"unsupported original native stack entry: {name}")
-        if info.st_mode & special_permissions:
-            raise LegalAssetError("original native stack has unsupported special permissions")
     return files, aliases, directories
 
 
-def assemble_original_stack(args, lock: dict, version: str, base_url: str) -> None:
-    """Assemble original bytes and a pinned legal overlay, not production authority."""
+def assemble_original_stack(args, lock: dict, version: str, base_url: str, *,
+                            full_release: bool = False) -> None:
+    """Assemble pinned original bytes; full-release authenticity belongs to the caller."""
     if os.name != "posix":
         raise LegalAssetError("native stack assembly requires POSIX file modes and aliases")
     check_output(args.output, (args.stack_root, args.core_root))
     if args.output.exists():
         raise LegalAssetError("assembled native stack output must not already exist")
-    _, dylibs = strict_build_receipt(args.lock, lock, args.stack_root)
-    original = native_stack_inventory(args.stack_root, lock["receipts"]["build"])
+    build, dylibs = strict_build_receipt(args.lock, lock, args.stack_root)
+    full_release_files, receipt_alias = None, None
+    if full_release:
+        receipt_alias = f"ios-native-{build['architecture']}-build-receipt.json"
+        if args.stack_root.resolve() != args.core_root.resolve():
+            raise LegalAssetError("full release requires one original native and legal root")
+        full_release_files = validate_materialization_core(args, lock, args.core_root)
+        for name in (OVERLAY_RECEIPT, "ios-native-source-offer.txt",
+                     "ios-native-lgpl-replacement.txt", "SHA256SUMS"):
+            full_release_files[name] = sha256(checked_input(args.stack_root, name))
+    original = native_stack_inventory(args.stack_root, lock["receipts"]["build"],
+                                      legal_files=full_release_files, receipt_alias=receipt_alias)
     files, aliases, directories = original
     if {name for name in files if name.startswith("lib/")} != {
         "lib/" + item["name"] for item in dylibs
@@ -700,7 +737,8 @@ def assemble_original_stack(args, lock: dict, version: str, base_url: str) -> No
                 raise LegalAssetError("assembled native file mode changed before completion")
             if any(os.readlink(args.output / name) != target for name, target in aliases.items()):
                 raise LegalAssetError("assembled native aliases changed before completion")
-            if native_stack_inventory(args.stack_root, lock["receipts"]["build"]) != original:
+            if native_stack_inventory(args.stack_root, lock["receipts"]["build"],
+                                      legal_files=full_release_files, receipt_alias=receipt_alias) != original:
                 raise LegalAssetError("original native stack changed during assembly")
             for name in sorted(directory_modes, key=len, reverse=True):
                 handle = directory_handles[name]

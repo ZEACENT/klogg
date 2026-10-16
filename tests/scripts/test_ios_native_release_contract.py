@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import importlib.util
@@ -631,6 +632,104 @@ class IosNativeReleaseContractTest(unittest.TestCase):
                                   self.tree_bytes(core)),
                                  (stack_before, original_before, core_before))
 
+    @unittest.skipIf(os.name == "nt", "requires POSIX dylib aliases and artifact modes")
+    def test_full_release_assembly_reuses_original_native_and_legal_bytes(self):
+        for architecture in EXPECTED_THIN_ARTIFACTS:
+            for version in ("26.10.15", "26.10.16"):
+                with self.subTest(architecture=architecture, version=version), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    root = pathlib.Path(temporary)
+                    stack, legal = self.generate_legal_fixture(
+                        root, "26.10.15", "https://example.org/new", architecture)
+                    header = stack / "include" / "fixture" / "api.h"
+                    header.parent.mkdir(parents=True)
+                    header.write_bytes(b"authenticated original header\n")
+                    header.chmod(0o640)
+                    (stack / "include" / "empty").mkdir(mode=0o750)
+                    (stack / "lib" / "libfixture.dylib").chmod(0o755)
+                    (stack / "lib" / "libfixture-alias.dylib").symlink_to("libfixture.dylib")
+                    native_before = self.tree_bytes(stack)
+                    full = root / "full"
+                    shutil.copytree(stack, full, symlinks=True)
+                    shutil.copytree(legal, full, dirs_exist_ok=True)
+                    receipt_alias = f"ios-native-{architecture}-build-receipt.json"
+                    shutil.copy2(full / "ios-native-build-receipt.json", full / receipt_alias)
+                    native_before[receipt_alias] = (full / receipt_alias).read_bytes()
+                    (full / "SHA256SUMS").write_text("".join(
+                        f"{LEGAL_MODULE.sha256(path)}  {path.relative_to(full).as_posix()}\n"
+                        for path in sorted(full.rglob("*"))
+                        if path.is_file() and not path.is_symlink()))
+                    before = self.tree_bytes(full)
+                    _, expected = self.generate_legal_fixture(
+                        root / "expected", version, "https://example.org/new", architecture)
+                    args = argparse.Namespace(
+                        lock=LOCK, stack_root=full, core_root=full, output=root / "assembled",
+                        source_set_sha256=LEGAL_MODULE.sha256(full / "ios-native-source-set-receipt.json"),
+                        legal_receipt_sha256=LEGAL_MODULE.sha256(full / "ios-native-legal-receipt.json"),
+                        build_receipt_sha256=LEGAL_MODULE.sha256(full / "ios-native-build-receipt.json"))
+                    with mock.patch.object(LEGAL_MODULE, "write_deterministic_source_archive",
+                                           side_effect=AssertionError("no source acquisition")), \
+                            mock.patch.object(subprocess, "run",
+                                              side_effect=AssertionError("no native tools")):
+                        LEGAL_MODULE.assemble_original_stack(
+                            args, json.loads(LOCK.read_bytes()), version,
+                            "https://example.org/new", full_release=True)
+                    self.assertEqual(self.tree_bytes(args.output),
+                                     {**native_before, **self.tree_bytes(expected)})
+                    self.assertEqual(self.tree_bytes(full), before)
+                    self.assertEqual((args.output / header.relative_to(stack)).stat().st_mode & 0o777,
+                                     0o640)
+                    self.assertEqual((args.output / "include/empty").stat().st_mode & 0o777, 0o750)
+                    self.assertEqual(os.readlink(args.output / "lib/libfixture-alias.dylib"),
+                                     "libfixture.dylib")
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX original stack assembly")
+    def test_full_release_assembly_rejects_extra_inventory_and_changed_original_overlay(self):
+        for mutation in ("foreign-entry", "changed-overlay", "wrong-receipt-alias"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                stack, legal = self.generate_legal_fixture(root, "26.10.15", "https://example.org/new")
+                (stack / "include").mkdir()
+                full = root / "full"
+                shutil.copytree(stack, full)
+                shutil.copytree(legal, full, dirs_exist_ok=True)
+                receipt_alias = full / "ios-native-arm64-build-receipt.json"
+                shutil.copy2(full / "ios-native-build-receipt.json", receipt_alias)
+                if mutation == "wrong-receipt-alias":
+                    receipt_alias.write_bytes(b"foreign receipt")
+                (full / "SHA256SUMS").write_text("fixture envelope\n")
+                args = argparse.Namespace(
+                    lock=LOCK, stack_root=full, core_root=full, output=root / "assembled",
+                    source_set_sha256=LEGAL_MODULE.sha256(full / "ios-native-source-set-receipt.json"),
+                    legal_receipt_sha256=LEGAL_MODULE.sha256(full / "ios-native-legal-receipt.json"),
+                    build_receipt_sha256=LEGAL_MODULE.sha256(full / "ios-native-build-receipt.json"))
+                if mutation == "foreign-entry":
+                    (full / "licenses/unlisted").write_bytes(b"foreign input")
+                original_copy = LEGAL_MODULE.copy_checked_files
+
+                def copy_then_mutate(source, output, *args, **kwargs):
+                    original_copy(source, output, *args, **kwargs)
+                    if mutation == "changed-overlay" and source == full and output == root / "assembled":
+                        (full / "ios-native-source-offer.txt").write_bytes(b"changed input")
+
+                message = {"foreign-entry": "unexpected original native stack entry",
+                           "changed-overlay": "full legal entry changed",
+                           "wrong-receipt-alias": "receipt alias differs"}[mutation]
+                with mock.patch.object(LEGAL_MODULE, "copy_checked_files", side_effect=copy_then_mutate):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        LEGAL_MODULE.assemble_original_stack(
+                            args, json.loads(LOCK.read_bytes()), "26.10.16",
+                            "https://example.org/new", full_release=True)
+                if mutation == "foreign-entry":
+                    self.assertFalse(args.output.exists())
+                    self.assertEqual((full / "licenses/unlisted").read_bytes(), b"foreign input")
+                elif mutation == "changed-overlay":
+                    self.assertTrue(args.output.is_dir())
+                    self.assertEqual((full / "ios-native-source-offer.txt").read_bytes(), b"changed input")
+                else:
+                    self.assertFalse(args.output.exists())
+                    self.assertEqual(receipt_alias.read_bytes(), b"foreign receipt")
+
     def test_ordinary_ios_builder_assembles_pinned_core_without_changing_artifact_layout(self):
         text = CI_BUILD_WORKFLOW.read_text()
         jobs = CI_MODULE.workflow_mapping_block(text.splitlines(), "jobs", 0)
@@ -809,9 +908,9 @@ class IosNativeReleaseContractTest(unittest.TestCase):
             inventory = LEGAL_MODULE.native_stack_inventory
             observations = 0
 
-            def replace_before_metadata(source, receipt):
+            def replace_before_metadata(source, receipt, *, legal_files=None, receipt_alias=None):
                 nonlocal observations
-                result = inventory(source, receipt)
+                result = inventory(source, receipt, legal_files=legal_files, receipt_alias=receipt_alias)
                 observations += 1
                 if observations == 2:
                     copied = output / "include"

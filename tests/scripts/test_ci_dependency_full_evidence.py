@@ -20,15 +20,20 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import ci_dependency_full_evidence as evidence
 from ci_dependency_core import ADB_RUNTIME, package_core
 from ci_dependency_pipeline import BUILDER_JOBS, compute_identities
+import test_ios_native_release_contract as ios_contract
 
 
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def make_tar(files, *, link=None):
+def make_tar(files, *, link=None, directories=None):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+        for name, mode in (directories or {}).items():
+            item = tarfile.TarInfo("./" + name if name else ".")
+            item.type, item.mode = tarfile.DIRTYPE, mode
+            archive.addfile(item)
         for name, (data, mode) in files.items():
             item = tarfile.TarInfo("./" + name)
             item.mode, item.size = mode, len(data)
@@ -168,6 +173,220 @@ class FullEvidenceTest(unittest.TestCase):
             files = {item.name[2:]: (archive.extractfile(item).read(), item.mode)
                      for item in archive if item.isfile()}
         return artifact["id"], files
+
+    def ios_assembly_inputs(self, root):
+        values = self.inputs()
+        originals = {}
+        fixture = ios_contract.IosNativeReleaseContractTest()
+        for target in ("ios-arm64", "ios-x86_64"):
+            row = values["catalog"]["targets"][target]
+            stack = root / target / "stack"
+            stack.mkdir(parents=True)
+            receipt = {"schema_version": 1, "receipt_kind": "ios-native-build",
+                       "lock_sha256": ios_contract.LEGAL_MODULE.sha256(ios_contract.LOCK),
+                       "architecture": row["target"], "toolchain": row["toolchain"],
+                       "deployment_target": ios_contract.EXPECTED_THIN_ARTIFACTS[row["target"]],
+                       "native_qualified": True, "qualification": "native",
+                       "dylibs": [{"name": "libfixture.dylib",
+                                   "sha256": sha(f"native binary {row['target']}".encode())}]}
+            (stack / "ios-native-build-receipt.json").write_text(json.dumps(receipt) + "\n")
+            stack, legal = fixture.generate_legal_fixture(
+                stack.parent, "26.10.15", "https://example.org/new", row["target"])
+            (stack / "include").mkdir()
+            (stack / "include/empty").mkdir(mode=0o750)
+            (stack / "include/original.h").write_bytes(b"authenticated header\n")
+            shutil.copy2(stack / "ios-native-build-receipt.json",
+                         stack / f"ios-native-{row['target']}-build-receipt.json")
+            (stack / "lib/libfixture.dylib").chmod(0o755)
+            (stack / "lib/libfixture-alias.dylib").symlink_to("libfixture.dylib")
+            core = root / (target + ".tar.gz")
+            binary = root / (target + "-binary")
+            shutil.copytree(stack / "lib", binary / "lib", symlinks=True)
+            package_core(binary, core, component="ios-native", target=row["target"],
+                         core_identity=self.identities[target]["core_identity"])
+            values["candidate_archives"][target] = core.read_bytes()
+            files = {path.relative_to(base).as_posix(): (path.read_bytes(), path.stat().st_mode & 0o777)
+                     for base in (stack, legal) for path in base.rglob("*")
+                     if path.is_file() and not path.is_symlink()}
+            files["SHA256SUMS"] = (("".join(f"{sha(data)}  {name}\n"
+                                            for name, (data, _) in sorted(files.items()))).encode(), 0o644)
+            artifact = next(item for item in values["artifacts"]
+                            if item["name"] == evidence._full_name(row))
+            values["full_downloads"][artifact["id"]] = make_tar(
+                files, link=("lib/libfixture-alias.dylib", "libfixture.dylib"),
+                directories={"": 0o750, "include": 0o755, "include/empty": 0o750, "lib": 0o755})
+            originals[target] = (stack, legal)
+        return values, originals
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX original stack assembly")
+    def test_authenticated_full_roots_assemble_ios_only_after_all_seven_pass(self):
+        for version in ("26.10.15", "26.10.16"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                values, originals = self.ios_assembly_inputs(root)
+                outputs = {target: root / (target + "-assembled") for target in originals}
+                verified = []
+
+                def attestor(command, **kwargs):
+                    self.assertTrue(all(not path.exists() for path in outputs.values()))
+                    verified.append(pathlib.Path(command[3]).name)
+                    return self.mocked_signature_runner(command, **kwargs)
+
+                with mock.patch.object(evidence, "verify_artifact_envelope"):
+                    trusted = evidence.assemble_authenticated_ios_stacks(
+                        **values, outputs=outputs, version=version, base_url="https://example.org/new",
+                        attestation_runner=attestor, run_verifier=self.mocked_metadata_runner)
+                self.assertEqual(len(verified), 7)
+                self.assertEqual(trusted, self.run_gate(values))
+                fixture = ios_contract.IosNativeReleaseContractTest()
+                for target, (stack, legal) in originals.items():
+                    expected = root / (target + "-expected")
+                    shutil.copytree(legal, expected)
+                    ios_contract.LEGAL_MODULE.write_overlay(
+                        expected, json.loads((expected / "ios-native-source-set-receipt.json").read_bytes()),
+                        version, "https://example.org/new")
+                    self.assertEqual(fixture.tree_bytes(outputs[target]),
+                                     {**fixture.tree_bytes(stack), **fixture.tree_bytes(expected)})
+                    self.assertEqual(os.readlink(outputs[target] / "lib/libfixture-alias.dylib"),
+                                     "libfixture.dylib")
+                    self.assertEqual((outputs[target] / "include/original.h").read_bytes(),
+                                     b"authenticated header\n")
+                    self.assertEqual(outputs[target].stat().st_mode & 0o777, 0o750)
+                    self.assertEqual((outputs[target] / "include/empty").stat().st_mode & 0o777, 0o750)
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX original stack assembly")
+    def test_failed_seventh_signature_never_creates_ios_assembly_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            values, originals = self.ios_assembly_inputs(root)
+            outputs = {target: root / (target + "-assembled") for target in originals}
+            seen = []
+
+            def attestor(command, **kwargs):
+                seen.append(command)
+                if len(seen) == 7:
+                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="fixture rejection")
+                return self.mocked_signature_runner(command, **kwargs)
+
+            with mock.patch.object(evidence, "verify_artifact_envelope"):
+                with self.assertRaises(evidence.FullEvidenceError):
+                    evidence.assemble_authenticated_ios_stacks(
+                        **values, outputs=outputs, version="26.10.16", base_url="https://example.org/new",
+                        attestation_runner=attestor, run_verifier=self.mocked_metadata_runner)
+            self.assertEqual(len(seen), 7)
+            self.assertTrue(all(not path.exists() for path in outputs.values()))
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX original stack assembly")
+    def test_authenticated_assembly_preflights_both_outputs_before_writing_either(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            values, originals = self.ios_assembly_inputs(root)
+            outputs = {target: root / (target + "-assembled") for target in originals}
+            outputs["ios-x86_64"].mkdir()
+            witness = outputs["ios-x86_64"] / "foreign"
+            witness.write_bytes(b"must remain unchanged")
+            with mock.patch.object(evidence, "verify_artifact_envelope"):
+                with self.assertRaisesRegex(RuntimeError, "fresh empty directory"):
+                    evidence.assemble_authenticated_ios_stacks(
+                        **values, outputs=outputs, version="26.10.16", base_url="https://example.org/new",
+                        attestation_runner=self.mocked_signature_runner,
+                        run_verifier=self.mocked_metadata_runner)
+            self.assertFalse(outputs["ios-arm64"].exists())
+            self.assertEqual(witness.read_bytes(), b"must remain unchanged")
+
+    def test_authenticated_assembly_rejects_missing_duplicate_and_nested_outputs_before_authentication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for outputs in ({"ios-arm64": root / "one"},
+                            {"ios-arm64": root / "one", "ios-x86_64": root / "one"},
+                            {"ios-arm64": root / "one", "ios-x86_64": root / "one/child"}):
+                with self.subTest(outputs=outputs), mock.patch.object(
+                        evidence, "project_authenticated_full_artifacts") as projection:
+                    with self.assertRaises(evidence.FullEvidenceError):
+                        evidence.assemble_authenticated_ios_stacks(
+                            **self.inputs(), outputs=outputs, version="26.10.16",
+                            base_url="https://example.org/new")
+                    projection.assert_not_called()
+            self.assertEqual(list(root.iterdir()), [])
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX directory mode semantics")
+    def test_full_tar_preserves_authenticated_directory_modes_under_private_umask(self):
+        raw = make_tar({"include/api.h": (b"header\n", 0o640)},
+                       directories={"": 0o750, "include": 0o755, "include/empty": 0o750})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary) / "full"
+            root.mkdir(mode=0o700)
+            previous = os.umask(0o077)
+            try:
+                evidence._unpack_full(raw, root)
+            finally:
+                os.umask(previous)
+            self.assertEqual(root.stat().st_mode & 0o777, 0o750)
+            self.assertEqual((root / "include").stat().st_mode & 0o777, 0o755)
+            self.assertEqual((root / "include/empty").stat().st_mode & 0o777, 0o750)
+            self.assertEqual((root / "include/api.h").stat().st_mode & 0o777, 0o640)
+
+    def test_full_tar_rejects_ambiguous_root_metadata_and_special_directory_permissions(self):
+        for directories in ({"": 0o755, ".": 0o750}, {"": 0o4755}, {"include": 0o2755}):
+            with self.subTest(directories=directories), tempfile.TemporaryDirectory() as temporary:
+                raw = make_tar({"include/api.h": (b"header\n", 0o644)}, directories=directories)
+                with self.assertRaises(evidence.FullEvidenceError):
+                    evidence._unpack_full(raw, pathlib.Path(temporary))
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX directory mode semantics")
+    def test_full_tar_rejects_unreclaimable_directory_modes_before_writing(self):
+        for name, mode in (("", 0o555), ("", 0o000), ("include", 0o555)):
+            with self.subTest(name=name, mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                directory = root / name
+                if name:
+                    directory.mkdir(mode=0o700)
+                raw = make_tar({"include/api.h": (b"header\n", 0o644)}, directories={name: mode})
+                handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    with self.assertRaisesRegex(evidence.FullEvidenceError, "directory permissions"):
+                        evidence._unpack_full(raw, root)
+                    self.assertFalse((root / "include/api.h").exists())
+                finally:
+                    # Only the descriptor of this test's own precreated directory
+                    # is repaired, even when RED made it inaccessible by pathname.
+                    os.fchmod(handle, 0o700)
+                    os.close(handle)
+
+    def test_projection_rejects_unreclaimable_directory_metadata_without_masking_or_retaining_base(self):
+        values = self.inputs()
+        identifier, files = self.full_files(values)
+        values["full_downloads"][identifier] = make_tar(
+            files, link=("lib/libfixture.dylib", "libfixture.1.dylib"),
+            directories={"": 0o555})
+        bases = []
+        original = tempfile.mkdtemp
+
+        def allocate(*args, **kwargs):
+            base = original(*args, **kwargs)
+            bases.append(pathlib.Path(base))
+            return base
+
+        with mock.patch.object(evidence.tempfile, "mkdtemp", side_effect=allocate):
+            with self.assertRaises(evidence.FullEvidenceError) as error:
+                with self.projection(values):
+                    self.fail("unsupported read-only staging root was exposed")
+        self.assertIn("directory permissions", str(error.exception.__cause__))
+        self.assertEqual(len(bases), 1)
+        self.assertFalse(bases[0].exists())
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX directory mode semantics")
+    def test_projection_rechecks_metadata_after_external_verifiers(self):
+        def change_mode(command, **kwargs):
+            root = pathlib.Path(command[command.index("--stack-root") + 1])
+            path = root / "include"
+            path.chmod((path.stat().st_mode & 0o777) ^ 0o020)
+            return self.mocked_metadata_runner(command, **kwargs)
+
+        with self.assertRaises(evidence.FullEvidenceError) as error:
+            with self.projection(run_verifier=change_mode):
+                self.fail("changed authenticated directory metadata was exposed")
+        self.assertIn("metadata changed", str(error.exception.__cause__))
 
     def test_fresh_workspace_temporary_parent_preserves_projection_and_existing_verification(self):
         values = self.inputs()

@@ -15,6 +15,7 @@ its ADB envelope but does not claim that separate qualification step.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import io
@@ -29,6 +30,7 @@ import sys
 import tarfile
 import tempfile
 
+import build_ios_native_legal_assets as ios_legal
 from ci_dependency_catalog import validate_catalog
 from ci_dependency_core import MANIFEST, canonical_adb_mode, verify_core
 from ci_dependency_pipeline import BUILDER_JOBS, BUILDER_WORKFLOW, compute_identities
@@ -206,18 +208,22 @@ def _verified_full_tar(subject: pathlib.Path, bundle: bytes, source: dict,
 
 
 def _unpack_full(raw: bytes, root: pathlib.Path) -> None:
-    """Extract only bounded regular files, directories, and direct iOS dylib aliases."""
+    """Extract bounded files/aliases; directories must permit owned inspection and cleanup."""
     _require(isinstance(raw, bytes) and 0 < len(raw) <= MAX_FULL_TAR_BYTES,
              "missing or oversized full archive bytes")
     try:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
             members = archive.getmembers()
             _require(0 < len(members) <= MAX_MEMBERS, "invalid full tar member count")
-            files, dirs, links = {}, set(), {}
-            size = 0
+            files, dirs, links = {}, {}, {}
+            size, root_mode = 0, None
             for member in members:
                 name = member.name[2:] if member.name.startswith("./") else member.name
                 if name in ("", ".") and member.isdir():
+                    _require(root_mode is None, "duplicate full tar root metadata")
+                    _require(not member.mode & 0o7000 and member.mode & 0o700 == 0o700,
+                             "unsupported full tar directory permissions")
+                    root_mode = member.mode & 0o777
                     continue
                 parts = name.split("/")
                 _require(name and not name.startswith("/") and "\\" not in name
@@ -226,7 +232,9 @@ def _unpack_full(raw: bytes, root: pathlib.Path) -> None:
                          and name not in files and name not in dirs and name not in links,
                          "unsafe or duplicate full tar member")
                 if member.isdir():
-                    dirs.add(name)
+                    _require(not member.mode & 0o7000 and member.mode & 0o700 == 0o700,
+                             "unsupported full tar directory permissions")
+                    dirs[name] = member.mode & 0o777
                 elif member.isfile():
                     size += member.size
                     _require(member.size >= 0 and size <= MAX_UNPACKED_BYTES,
@@ -243,29 +251,48 @@ def _unpack_full(raw: bytes, root: pathlib.Path) -> None:
                     raise FullEvidenceError("unsupported full tar entry type")
             nondirectories = set(files) | set(links)
             _require(all("/".join(name.split("/")[:index]) not in nondirectories
-                         for name in set(files) | dirs | set(links)
+                         for name in set(files) | set(dirs) | set(links)
                          for index in range(1, len(name.split("/")))),
                      "full tar parent is a file or symlink")
             for name in dirs:
                 (root / name).mkdir(parents=True, exist_ok=True)
-            for name, member in files.items():
-                destination = root / name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                source = archive.extractfile(member)
-                _require(source is not None, "unreadable full tar file")
-                with source, destination.open("xb") as output:
-                    remaining = member.size
-                    while remaining:
-                        chunk = source.read(min(1024 * 1024, remaining))
-                        _require(bool(chunk), "truncated full tar member")
-                        output.write(chunk)
-                        remaining -= len(chunk)
-                destination.chmod(member.mode & 0o777)
-            for name, member in links.items():
-                target = posixpath.join(posixpath.dirname(name), member.linkname)
-                _require(target in files and target.startswith("lib/")
-                         and name != target, "dangling or chained full tar symlink")
-                (root / name).symlink_to(member.linkname)
+            with contextlib.ExitStack() as handles:
+                directory_modes = dict(dirs)
+                if root_mode is not None:
+                    directory_modes[""] = root_mode
+                directory_handles = {}
+                if os.name == "posix":
+                    for name in directory_modes:
+                        handle = os.open(root / name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                        handles.callback(os.close, handle)
+                        directory_handles[name] = handle
+                for name, member in files.items():
+                    destination = root / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    source = archive.extractfile(member)
+                    _require(source is not None, "unreadable full tar file")
+                    with source, destination.open("xb") as output:
+                        remaining = member.size
+                        while remaining:
+                            chunk = source.read(min(1024 * 1024, remaining))
+                            _require(bool(chunk), "truncated full tar member")
+                            output.write(chunk)
+                            remaining -= len(chunk)
+                        if os.name == "posix":
+                            os.fchmod(output.fileno(), member.mode & 0o777)
+                        else:
+                            destination.chmod(member.mode & 0o777)
+                for name, member in links.items():
+                    target = posixpath.join(posixpath.dirname(name), member.linkname)
+                    _require(target in files and target.startswith("lib/")
+                             and name != target, "dangling or chained full tar symlink")
+                    (root / name).symlink_to(member.linkname)
+                for name in sorted(directory_handles, key=len, reverse=True):
+                    handle = directory_handles[name]
+                    owned, current = os.fstat(handle), (root / name).lstat()
+                    _require((owned.st_dev, owned.st_ino) == (current.st_dev, current.st_ino),
+                             "full tar directory identity changed")
+                    os.fchmod(handle, directory_modes[name])
     except (tarfile.TarError, EOFError, OSError, OverflowError) as error:
         raise FullEvidenceError("invalid full tar archive") from error
 
@@ -419,6 +446,10 @@ def project_authenticated_full_artifacts(*, repo_root: pathlib.Path, source: dic
             return {path.relative_to(root).as_posix(): os.readlink(path)
                     for path in root.rglob("*") if path.is_symlink()}
 
+        def full_modes(root):
+            return {path.relative_to(root).as_posix(): stat.S_IMODE(path.lstat().st_mode)
+                    for path in (root, *root.rglob("*")) if not path.is_symlink()}
+
         def require_subject(subject, raw):
             _require(subject.is_file() and not subject.is_symlink() and subject.read_bytes() == raw,
                      "signed full tar snapshot changed")
@@ -451,6 +482,7 @@ def project_authenticated_full_artifacts(*, repo_root: pathlib.Path, source: dic
                 _checksum_full(full_root)
                 checksum_bytes = (full_root / "SHA256SUMS").read_bytes()
                 links = full_links(full_root)
+                modes = full_modes(full_root)
                 receipt = _verify_full_metadata(full_root, pathlib.Path(repo_root), row, run_verifier)
                 require_owned_directories(work, full_root)
                 require_subject(subject, full_tar)
@@ -467,12 +499,12 @@ def project_authenticated_full_artifacts(*, repo_root: pathlib.Path, source: dic
             if row["component"] == "ios-native":
                 result[target_id]["toolchain"] = row["toolchain"]
             roots[target_id] = full_root
-            snapshots.append((target_id, row, work, subject, full_tar, full_root, checksum_bytes, links, core))
+            snapshots.append((target_id, row, work, subject, full_tar, full_root, checksum_bytes, links, modes, core))
         _require(ids == set(by_id), "unexpected full artifacts")
         # External runners have now finished. Recheck the original signed
         # subject/envelope, authenticated links, and existing content validators
         # before exposing roots. Checksum envelopes intentionally omit aliases.
-        for target_id, row, work, subject, raw, full_root, checksum_bytes, links, core in snapshots:
+        for target_id, row, work, subject, raw, full_root, checksum_bytes, links, modes, core in snapshots:
             try:
                 require_owned_directories(work, full_root)
                 require_subject(subject, raw)
@@ -480,6 +512,7 @@ def project_authenticated_full_artifacts(*, repo_root: pathlib.Path, source: dic
                 _require(not envelope.is_symlink() and envelope.read_bytes() == checksum_bytes,
                          "original full checksum envelope changed")
                 _require(full_links(full_root) == links, "original full archive symlinks changed")
+                _require(full_modes(full_root) == modes, "original full archive metadata changed")
                 _checksum_full(full_root)
                 _compare_binary_closure(full_root, row, core)
             except (OSError, ValueError, RuntimeError, tarfile.TarError) as error:
@@ -490,6 +523,51 @@ def project_authenticated_full_artifacts(*, repo_root: pathlib.Path, source: dic
         # directory at its old path. Never clean up that replacement.
         if owns_base():
             shutil.rmtree(base)
+
+
+def assemble_authenticated_ios_stacks(*, repo_root: pathlib.Path, source: dict, run: dict,
+                                      attempt_jobs: list, needs: dict, artifacts: list,
+                                      full_downloads: dict, candidate_archives: dict, bundles: dict,
+                                      catalog: dict, workflow_text: str, outputs: dict,
+                                      version: str, base_url: str, run_verifier=subprocess.run,
+                                      attestation_runner=subprocess.run) -> dict:
+    """Assemble new iOS overlays only after the existing seven full checks pass.
+
+    This does not qualify production cores or authenticate separate ADB legal
+    assets. Outputs must be fresh and caller-owned; failures retain partial
+    outputs. No native payload runs or source acquisition occur during assembly.
+    """
+    _require(isinstance(outputs, dict) and set(outputs) == {"ios-arm64", "ios-x86_64"}
+             and all(isinstance(path, (str, pathlib.Path)) for path in outputs.values()),
+             "assembly requires exact two iOS outputs")
+    destinations = {target: pathlib.Path(path) for target, path in outputs.items()}
+    first, second = (path.resolve() for path in destinations.values())
+    _require(first != second and first not in second.parents and second not in first.parents,
+             "iOS assembly outputs must not overlap")
+    version = ios_legal.validate_version(version)
+    base_url = ios_legal.normalize_base_url(base_url)
+    with project_authenticated_full_artifacts(
+            repo_root=repo_root, source=source, run=run, attempt_jobs=attempt_jobs,
+            needs=needs, artifacts=artifacts, full_downloads=full_downloads,
+            candidate_archives=candidate_archives, bundles=bundles, catalog=catalog,
+            workflow_text=workflow_text, run_verifier=run_verifier,
+            attestation_runner=attestation_runner) as (result, roots):
+        # Outputs may not live under the context-owned base that will be removed.
+        bases = tuple({root.parent.parent for root in roots.values()})
+        for output in destinations.values():
+            ios_legal.check_output(output, bases)
+            _require(not output.exists(), "iOS assembly output must not already exist")
+        lock_path = pathlib.Path(repo_root) / "3rdparty/libimobiledevice/libimobiledevice.lock.json"
+        lock = read_json(lock_path, "iOS native lock")
+        for target, output in sorted(destinations.items()):
+            root = roots[target]
+            args = argparse.Namespace(
+                lock=lock_path, stack_root=root, core_root=root, output=output,
+                source_set_sha256=ios_legal.sha256(ios_legal.checked_input(root, ios_legal.SOURCE_SET_RECEIPT)),
+                legal_receipt_sha256=ios_legal.sha256(ios_legal.checked_input(root, lock["receipts"]["legal"])),
+                build_receipt_sha256=ios_legal.sha256(ios_legal.checked_input(root, lock["receipts"]["build"])))
+            ios_legal.assemble_original_stack(args, lock, version, base_url, full_release=True)
+        return result
 
 
 def verify_full_evidence(*, repo_root: pathlib.Path, source: dict, run: dict,

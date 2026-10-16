@@ -408,6 +408,30 @@ reuse still needs a signed companion binding the original headers, receipts,
 corresponding source and legal/support assets to the chosen binary core and
 current qualification policy. No such production lock is activated here.
 
+`ci_dependency_full_evidence.assemble_authenticated_ios_stacks()` provides an
+offline bridge from the existing seven-target full-artifact authentication to
+that assembler. It verifies all seven signed full subjects, scheduler bindings,
+checksums and candidate/full binary closures before either iOS output is created.
+Both output paths are checked together and must be fresh, disjoint from each
+other and outside the context-owned temporary tree. Receipt pins come from the
+original verified full roots; binary-only cores never supply installed headers
+or legal material. Assembly itself neither acquires sources nor executes native
+payloads. Failed output remains partial and must not be published.
+
+The full-release view permits only the original native entries and the bound
+legal/overlay inventory. The exact architecture-specific receipt copy must match
+the canonical build receipt and remains original native content, not ignored
+legal metadata. POSIX extraction restores recorded directory permissions,
+including the archive root, before assembly preserves native file/directory
+permissions and dylib aliases. Full-tar directory modes must retain owner read,
+write and search permission and have no special permission bits; unsupported
+read-only/inaccessible directories are rejected before extraction rather than
+making owned staging impossible to reclaim or repairing a foreign namespace.
+The full projection rechecks file/directory modes
+after external verifiers as well as rechecking bytes and links. This bridge is
+not an ordinary acquisition-free consumer, a signed qualification receipt, a
+production lock, enforced host-tool closure or permission to publish candidates.
+
 The pinned Xcode, SDK path/version, clang, CMake, and Ninja observations are
 necessary but not sufficient for iOS reuse. The dependency-only probe records
 the selected Autotools/pkgconf, Perl, and m4 executable paths, versions, hashes,
