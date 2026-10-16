@@ -508,6 +508,53 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("catch ( ... )", failure)
         self.assertTrue(failure.rstrip().endswith("return false;\n    }"))
 
+    def test_capture_child_process_observers_precede_start_and_preserve_primary(self):
+        source = (ROOT / "tests/unit/capturestore_test.cpp").read_text()
+        constructor = function_body(source, "ActiveCaptureChild(")
+        for signal in ("stateChanged", "errorOccurred", "started", "finished"):
+            self.assertIn("&QProcess::" + signal, constructor)
+        self.assertIn("qOverload<int, QProcess::ExitStatus>", constructor)
+        self.assertIn("&observationContext_", constructor)
+        self.assertIn("noexcept", constructor)
+        self.assertIn("catch ( ... )", constructor)
+        failure = function_body(source, "bool failStartup(")
+        self.assertLess(
+            failure.index("CaptureChildProcessSnapshot::take( process_ )"),
+            failure.index("waitForReadyRead( 0 )"),
+        )
+        self.assertIn("processObservation_.finishedObserved()", failure)
+        self.assertNotIn("started_ &&", failure)
+        fields = source[source.index("QProcess process_;", source.index("class ActiveCaptureChild")):]
+        self.assertLess(fields.index("CaptureChildProcessObservation processObservation_;"),
+                        fields.index("QObject observationContext_;"))
+
+    def test_capture_child_cleanup_reports_original_operation_results(self):
+        source = (ROOT / "tests/unit/capturestore_test.cpp").read_text()
+        cleanup = function_body(source, "~ActiveCaptureChild(")
+        ordered = (
+            "cleanup.releasePublished = createSignalFile( releasePath_ );",
+            "cleanup.initialState = process_.state();",
+            "cleanup.releaseWait = process_.waitForFinished( 5000 );",
+            "cleanup.killAttempted = true;",
+            "process_.kill();",
+            "cleanup.killWait = process_.waitForFinished( 5000 );",
+            "cleanup.finalState = process_.state();",
+            "cleanup.finalReportedPid = process_.processId();",
+            "cleanup.diagnostic()",
+        )
+        for statement in ordered:
+            self.assertIn(statement, cleanup)
+        self.assertEqual([cleanup.index(statement) for statement in ordered],
+                         sorted(cleanup.index(statement) for statement in ordered))
+        self.assertEqual(cleanup.count("waitForFinished( 5000 )"), 2)
+        self.assertEqual(cleanup.count("process_.kill();"), 1)
+        self.assertIn("if ( cleanup.initialState != QProcess::NotRunning )", cleanup)
+        self.assertIn("if ( !*cleanup.releaseWait )", cleanup)
+        self.assertIn("catch ( ... )", cleanup)
+        release = function_body(source, "bool releaseAndWait(")
+        self.assertIn("createSignalFile( releasePath_ ) && process_.waitForFinished( 5000 )",
+                      release)
+
     def test_capture_background_workers_stop_before_qt_teardown(self):
         header = CAPTURESTORE_HEADER.read_text()
         source = CAPTURESTORE_SOURCE.read_text()
