@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import hashlib
 import io
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -497,24 +499,51 @@ def validate_materialization_core(args, lock: dict, core: pathlib.Path) -> dict[
 
 
 def copy_checked_files(source: pathlib.Path, output: pathlib.Path, files: dict[str, str],
-                       created: list[pathlib.Path] | None = None) -> None:
+                       created: list[pathlib.Path] | None = None, *,
+                       modes: dict[str, int] | None = None,
+                       directory_handles: dict[str, int] | None = None) -> None:
     """Stream bounded immutable copies, rejecting changed inputs or copied bytes."""
     total = 0
     for name, expected in files.items():
         path = checked_input(source, name)
         destination = output / name
-        destination.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
-        with path.open("rb") as original, destination.open("xb") as copied:
-            if created is not None:
-                created.append(destination)
-            for chunk in iter(lambda: original.read(1024 * 1024), b""):
-                total += len(chunk)
-                if total > 2 * 1024**3:
-                    raise LegalAssetError("immutable legal core exceeds copy budget")
-                digest.update(chunk)
-                copied.write(chunk)
-        if digest.hexdigest() != expected or sha256(destination) != expected:
+        copied_digest = None
+        with path.open("rb") as original:
+            if directory_handles is None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                stream = destination.open("xb")
+            else:
+                parent, _, leaf = name.rpartition("/")
+                handle = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o666, dir_fd=directory_handles[parent])
+                try:
+                    stream = os.fdopen(handle, "w+b")
+                except BaseException:
+                    os.close(handle)
+                    raise
+            with stream as copied:
+                if created is not None:
+                    created.append(destination)
+                for chunk in iter(lambda: original.read(1024 * 1024), b""):
+                    total += len(chunk)
+                    if total > 2 * 1024**3:
+                        raise LegalAssetError("immutable legal core exceeds copy budget")
+                    digest.update(chunk)
+                    copied.write(chunk)
+                if modes is not None:
+                    # Apply metadata to the exclusively created file, not a path
+                    # another writer could have replaced after copying.
+                    os.fchmod(copied.fileno(), modes[name])
+                if directory_handles is not None:
+                    copied.seek(0)
+                    observed = hashlib.sha256()
+                    for chunk in iter(lambda: copied.read(1024 * 1024), b""):
+                        observed.update(chunk)
+                    copied_digest = observed.hexdigest()
+        if digest.hexdigest() != expected or (
+            copied_digest if directory_handles is not None else sha256(destination)
+        ) != expected:
             raise LegalAssetError(f"immutable legal core changed while copying: {name}")
 
 
@@ -562,6 +591,125 @@ def materialize(args, lock: dict, version: str | None, base_url: str | None) -> 
             raise
 
 
+def native_stack_inventory(root: pathlib.Path, build_receipt: str) -> tuple[dict, dict, dict]:
+    """Describe the original native writer's files, aliases and directory modes."""
+    files, aliases = {}, {}
+    root_mode = root.stat().st_mode
+    special_permissions = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
+    if root_mode & special_permissions:
+        raise LegalAssetError("original native stack has unsupported special permissions")
+    directories = {"": stat.S_IMODE(root_mode)}
+    for name in ("lib", "include"):
+        if (root / name).is_symlink() or not (root / name).is_dir():
+            raise LegalAssetError(f"original native stack requires a real {name} directory")
+    for path in sorted(root.rglob("*")):
+        name = validated_relative_path(path.relative_to(root).as_posix(), "original native entry")
+        if name != build_receipt and name.split("/")[0] not in ("lib", "include"):
+            raise LegalAssetError(f"unexpected original native stack entry: {name}")
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(path)
+            if path.parent != root / "lib" or not path.name.endswith(".dylib"):
+                raise LegalAssetError("only original flat dylib aliases are supported")
+            validated_relative_path(target, "original dylib alias")
+            if "/" in target:
+                raise LegalAssetError("original dylib alias must stay in its lib directory")
+            try:
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise LegalAssetError("original dylib alias has no regular target") from error
+            if resolved.parent != (root / "lib").resolve() or not resolved.is_file():
+                raise LegalAssetError("original dylib alias escapes its native closure")
+            aliases[name] = target
+        elif stat.S_ISDIR(info.st_mode):
+            directories[name] = stat.S_IMODE(info.st_mode)
+        elif stat.S_ISREG(info.st_mode):
+            files[name] = (sha256(checked_input(root, name)), stat.S_IMODE(info.st_mode))
+        else:
+            raise LegalAssetError(f"unsupported original native stack entry: {name}")
+        if info.st_mode & special_permissions:
+            raise LegalAssetError("original native stack has unsupported special permissions")
+    return files, aliases, directories
+
+
+def assemble_original_stack(args, lock: dict, version: str, base_url: str) -> None:
+    """Assemble original bytes and a pinned legal overlay, not production authority."""
+    if os.name != "posix":
+        raise LegalAssetError("native stack assembly requires POSIX file modes and aliases")
+    check_output(args.output, (args.stack_root, args.core_root))
+    if args.output.exists():
+        raise LegalAssetError("assembled native stack output must not already exist")
+    _, dylibs = strict_build_receipt(args.lock, lock, args.stack_root)
+    original = native_stack_inventory(args.stack_root, lock["receipts"]["build"])
+    files, aliases, directories = original
+    if {name for name in files if name.startswith("lib/")} != {
+        "lib/" + item["name"] for item in dylibs
+    }:
+        raise LegalAssetError("native library inventory differs from original build receipt")
+    with tempfile.TemporaryDirectory(prefix=".ios-stack-", dir=args.output.parent) as directory:
+        legal_output = pathlib.Path(directory) / "legal"
+        legal_args = argparse.Namespace(**{**vars(args), "output": legal_output,
+                                           "overlay_only": True})
+        materialize(legal_args, lock, version, base_url)
+        legal_files = {path.relative_to(legal_output).as_posix(): sha256(path)
+                       for path in legal_output.rglob("*") if path.is_file()}
+        legal_directories = {path.relative_to(legal_output).as_posix(): stat.S_IMODE(path.stat().st_mode)
+                             for path in legal_output.rglob("*") if path.is_dir()}
+        directory_modes = {**legal_directories, **directories}
+        expected_directories = set(directory_modes) - {""}
+        if any(name.split("/")[0] in ("lib", "include", lock["receipts"]["build"])
+               for name in set(legal_files) | set(legal_directories)):
+            raise LegalAssetError("legal projection collides with original native stack ownership")
+        # Reserve a fresh private output. Failure deliberately retains partial
+        # output rather than deleting entries another writer may have installed.
+        # The ordinary producer must publish only after this command succeeds.
+        with contextlib.ExitStack() as handles:
+            args.output.mkdir(mode=0o700)
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            handle = os.open(args.output, flags)
+            handles.callback(os.close, handle)
+            directory_handles = {"": handle}
+            for name in sorted(expected_directories, key=lambda value: (value.count("/"), value)):
+                parent, _, leaf = name.rpartition("/")
+                parent_handle = directory_handles[parent]
+                os.mkdir(leaf, mode=0o700, dir_fd=parent_handle)
+                handle = os.open(leaf, flags, dir_fd=parent_handle)
+                handles.callback(os.close, handle)
+                directory_handles[name] = handle
+            copy_checked_files(args.stack_root, args.output,
+                               {name: value[0] for name, value in files.items()},
+                               modes={name: value[1] for name, value in files.items()},
+                               directory_handles=directory_handles)
+            copy_checked_files(legal_output, args.output, legal_files,
+                               directory_handles=directory_handles)
+            for name, target in aliases.items():
+                os.symlink(target, name.split("/")[-1], dir_fd=directory_handles["lib"])
+            expected = {**{name: value[0] for name, value in files.items()}, **legal_files}
+            actual_entries = {path.relative_to(args.output).as_posix()
+                              for path in args.output.rglob("*")}
+            if actual_entries != set(expected) | set(aliases) | expected_directories or any(
+                (args.output / name).is_symlink() or not (args.output / name).is_dir()
+                for name in expected_directories
+            ):
+                raise LegalAssetError("assembled native stack inventory changed before completion")
+            if any(sha256(checked_input(args.output, name)) != digest
+                   for name, digest in expected.items()):
+                raise LegalAssetError("assembled native stack changed before completion")
+            if any(stat.S_IMODE((args.output / name).stat().st_mode) != value[1]
+                   for name, value in files.items()):
+                raise LegalAssetError("assembled native file mode changed before completion")
+            if any(os.readlink(args.output / name) != target for name, target in aliases.items()):
+                raise LegalAssetError("assembled native aliases changed before completion")
+            if native_stack_inventory(args.stack_root, lock["receipts"]["build"]) != original:
+                raise LegalAssetError("original native stack changed during assembly")
+            for name in sorted(directory_modes, key=len, reverse=True):
+                handle = directory_handles[name]
+                owned, current = os.fstat(handle), (args.output / name).lstat()
+                if (owned.st_dev, owned.st_ino) != (current.st_dev, current.st_ino):
+                    raise LegalAssetError("assembled native directory identity changed")
+                os.fchmod(handle, directory_modes[name])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", required=True, type=pathlib.Path)
@@ -574,18 +722,20 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--core-only", action="store_true")
     mode.add_argument("--overlay-only", action="store_true")
+    mode.add_argument("--assemble-stack", action="store_true")
     parser.add_argument("--core-root", type=pathlib.Path)
     parser.add_argument("--source-set-sha256")
     parser.add_argument("--legal-receipt-sha256")
     parser.add_argument("--build-receipt-sha256")
     args = parser.parse_args()
     pins = (args.source_set_sha256, args.legal_receipt_sha256, args.build_receipt_sha256)
-    if args.overlay_only:
+    if args.overlay_only or args.assemble_stack:
+        selected_mode = "assemble-stack" if args.assemble_stack else "overlay-only"
         if not args.core_root or args.archive_root or args.repository_root:
-            parser.error("overlay-only requires core-root and forbids source acquisition inputs")
+            parser.error(f"{selected_mode} requires core-root and forbids source acquisition inputs")
         if any(not isinstance(pin, str) or re.fullmatch(r"[0-9a-f]{64}", pin) is None
                or pin == "0" * 64 for pin in pins):
-            parser.error("overlay-only requires three external immutable receipt SHA-256 pins")
+            parser.error(f"{selected_mode} requires three external immutable receipt SHA-256 pins")
     elif not args.archive_root or not args.repository_root or args.core_root or any(pins):
         parser.error("core generation requires archive-root and repository-root, not reused-core inputs")
     if args.core_only:
@@ -597,7 +747,9 @@ def main() -> int:
             parser.error("version and base-url are required when generating an overlay")
         version, base_url = validate_version(args.version), normalize_base_url(args.base_url)
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
-    if args.core_only or args.overlay_only:
+    if args.assemble_stack:
+        assemble_original_stack(args, lock, version, base_url)
+    elif args.core_only or args.overlay_only:
         materialize(args, lock, version, base_url)
     else:
         args.output.mkdir(parents=True, exist_ok=True)

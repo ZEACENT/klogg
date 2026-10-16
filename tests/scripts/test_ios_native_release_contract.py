@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -568,9 +569,10 @@ class IosNativeReleaseContractTest(unittest.TestCase):
             self.assertTrue((output / "ios-native-overlay-receipt.json").is_file())
             self.assertIn("26.09.28", (output / "ios-native-source-offer.txt").read_text())
 
-    def legal_mode_argv(self, core: pathlib.Path, stack: pathlib.Path, output: pathlib.Path):
+    def legal_mode_argv(self, core: pathlib.Path, stack: pathlib.Path, output: pathlib.Path,
+                        mode: str = "--overlay-only"):
         return [str(LEGAL_SCRIPT), "--lock", str(LOCK), "--core-root", str(core),
-                "--stack-root", str(stack), "--overlay-only", "--version", "26.10.15",
+                "--stack-root", str(stack), mode, "--version", "26.10.15",
                 "--base-url", "https://example.org/new", "--output", str(output),
                 "--source-set-sha256", LEGAL_MODULE.sha256(core / "ios-native-source-set-receipt.json"),
                 "--legal-receipt-sha256", LEGAL_MODULE.sha256(core / "ios-native-legal-receipt.json"),
@@ -579,6 +581,303 @@ class IosNativeReleaseContractTest(unittest.TestCase):
     def tree_bytes(self, root: pathlib.Path):
         return {path.relative_to(root).as_posix(): path.read_bytes()
                 for path in root.rglob("*") if path.is_file()}
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX dylib aliases and artifact modes")
+    def test_assembled_stack_preserves_originals_and_matches_complete_cold_output(self):
+        for architecture in EXPECTED_THIN_ARTIFACTS:
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                stack, original = self.generate_legal_fixture(
+                    root, "26.10.15", "https://example.org/new", architecture)
+                header = stack / "include" / "fixture" / "api.h"
+                header.parent.mkdir(parents=True)
+                header.write_bytes(b"original installed header\n")
+                (stack / "include" / "empty").mkdir()
+                (stack / "lib" / "libfixture.dylib").chmod(0o755)
+                alias = stack / "lib" / "libfixture-alias.dylib"
+                alias.symlink_to("libfixture.dylib")
+                stack_before, original_before = self.tree_bytes(stack), self.tree_bytes(original)
+                core = root / "core"
+                argv = [str(LEGAL_SCRIPT), "--lock", str(LOCK), "--stack-root", str(stack),
+                        "--archive-root", str(root), "--repository-root", str(ROOT),
+                        "--core-only", "--output", str(core)]
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                    LEGAL_MODULE, "write_deterministic_source_archive",
+                    side_effect=lambda path, *_args: path.write_bytes(b"fixed source closure")
+                ), mock.patch.object(LEGAL_MODULE, "extract_legal_file", return_value=b"license\n"):
+                    self.assertEqual(LEGAL_MODULE.main(), 0)
+                core_before = self.tree_bytes(core)
+                output = root / "assembled"
+                argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+                error = io.StringIO()
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                    LEGAL_MODULE, "write_deterministic_source_archive",
+                    side_effect=AssertionError("assembly must not rebuild corresponding source")
+                ), mock.patch.object(LEGAL_MODULE, "extract_legal_file",
+                                     side_effect=AssertionError("assembly must not acquire sources")), \
+                        mock.patch.object(subprocess, "run", side_effect=AssertionError("no native tools")), \
+                        contextlib.redirect_stderr(error):
+                    try:
+                        result = LEGAL_MODULE.main()
+                    except SystemExit as exit_error:
+                        result = exit_error.code
+                self.assertEqual(result, 0, error.getvalue())
+                self.assertEqual(self.tree_bytes(output), {**stack_before, **original_before})
+                self.assertTrue((output / alias.relative_to(stack)).is_symlink())
+                self.assertEqual(os.readlink(output / alias.relative_to(stack)), os.readlink(alias))
+                self.assertTrue((output / "include" / "empty").is_dir())
+                self.assertEqual((output / "lib" / "libfixture.dylib").stat().st_mode & 0o777, 0o755)
+                self.assertEqual((self.tree_bytes(stack), self.tree_bytes(original),
+                                  self.tree_bytes(core)),
+                                 (stack_before, original_before, core_before))
+
+    def test_ordinary_ios_builder_assembles_pinned_core_without_changing_artifact_layout(self):
+        text = CI_BUILD_WORKFLOW.read_text()
+        jobs = CI_MODULE.workflow_mapping_block(text.splitlines(), "jobs", 0)
+        self.assertIsNotNone(jobs)
+        steps = [CI_MODULE.workflow_step_fields(step)[0]
+                 for step in CI_MODULE.workflow_step_blocks(jobs["BuildIosNativeX64"][1])]
+        build = [step for step in steps
+                 if step.get("name") == "Build disconnected thin iOS native stack"]
+        self.assertEqual(len(build), 1)
+        run = build[0]["run"]
+        commands = [shlex.split(line.strip()) for line in run.replace("\\\n", " ").splitlines()
+                    if line.strip().startswith("python3 ")]
+        legal = [command for command in commands
+                 if command[1] == "scripts/build_ios_native_legal_assets.py"]
+        self.assertEqual(len(legal), 2, "ordinary builder must split immutable core and final assembly")
+        core, assembled = legal
+        native = next(command for command in commands
+                      if command[1] == "scripts/build_ios_native_stack.py")
+        def argument(command, flag):
+            return command[command.index(flag) + 1]
+
+        self.assertIn("--core-only", core)
+        self.assertIn("--assemble-stack", assembled)
+        self.assertEqual(argument(native, "--artifact-root"), "$original_root")
+        self.assertEqual(argument(core, "--stack-root"), "$original_root")
+        self.assertEqual(argument(core, "--output"), "$core_root")
+        self.assertEqual(argument(assembled, "--stack-root"), "$original_root")
+        self.assertEqual(argument(assembled, "--core-root"), "$core_root")
+        self.assertEqual(argument(assembled, "--output"), "$stack_root")
+        for flag in ("--source-set-sha256", "--legal-receipt-sha256", "--build-receipt-sha256"):
+            self.assertIn(flag, assembled)
+        self.assertNotIn("--archive-root", assembled)
+        self.assertNotIn("--repository-root", assembled)
+        self.assertIn('stack_root="${{ runner.temp }}/ios-native-stack"', run)
+        self.assertIn('core_root="${{ runner.temp }}/ios-native-legal-core"', run)
+        self.assertIn('original_root="${{ runner.temp }}/ios-native-original"', run)
+        self.assertEqual(ios_startup_ci_issues(text), [])
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX native artifact permission modes")
+    def test_assembled_stack_rejects_unreceipted_libraries_and_special_root_modes(self):
+        for invalid in ("unreceipted-library", "special-root-mode"):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+                (stack / "include").mkdir()
+                if invalid == "unreceipted-library":
+                    (stack / "lib" / "foreign.dylib").write_bytes(b"not in original build receipt")
+                else:
+                    stack.chmod(0o2755)
+                    self.assertTrue(stack.stat().st_mode & 0o2000)
+                before = self.tree_bytes(stack), self.tree_bytes(core)
+                output = root / "assembled"
+                argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+                with mock.patch.object(sys, "argv", argv), self.assertRaises(RuntimeError):
+                    LEGAL_MODULE.main()
+                self.assertFalse(output.exists())
+                self.assertEqual((self.tree_bytes(stack), self.tree_bytes(core)), before)
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX native stack assembly semantics")
+    def test_assembled_stack_rejects_and_preserves_foreign_output_entries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            (stack / "include").mkdir()
+            output = root / "assembled"
+            before = self.tree_bytes(stack), self.tree_bytes(core)
+            argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+            copy = LEGAL_MODULE.copy_checked_files
+
+            def install_foreign_entry(source, destination, files, created=None, **kwargs):
+                if source == stack:
+                    (destination / "foreign.txt").write_bytes(b"foreign output must survive")
+                return copy(source, destination, files, created, **kwargs)
+
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                LEGAL_MODULE, "copy_checked_files", side_effect=install_foreign_entry
+            ), self.assertRaisesRegex(RuntimeError, "inventory"):
+                LEGAL_MODULE.main()
+            self.assertEqual((output / "foreign.txt").read_bytes(), b"foreign output must survive")
+            self.assertEqual((self.tree_bytes(stack), self.tree_bytes(core)), before)
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX native dylib alias validation")
+    def test_assembly_rejects_existing_output_and_escaping_alias_without_repair(self):
+        for invalid in ("existing-output", "escaping-alias"):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+                (stack / "include").mkdir()
+                output = root / "assembled"
+                witness = root / "witness"
+                witness.write_bytes(b"outside immutable inputs")
+                if invalid == "existing-output":
+                    output.mkdir()
+                    (output / "keep").write_bytes(b"foreign existing output")
+                else:
+                    (stack / "lib" / "escape.dylib").symlink_to("../../witness")
+                before = self.tree_bytes(stack), self.tree_bytes(core)
+                argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+                with mock.patch.object(sys, "argv", argv), self.assertRaises(RuntimeError):
+                    LEGAL_MODULE.main()
+                self.assertEqual((self.tree_bytes(stack), self.tree_bytes(core)), before)
+                self.assertEqual(witness.read_bytes(), b"outside immutable inputs")
+                if invalid == "existing-output":
+                    self.assertEqual(self.tree_bytes(output), {"keep": b"foreign existing output"})
+                else:
+                    self.assertFalse(output.exists())
+                    self.assertEqual(os.readlink(stack / "lib" / "escape.dylib"), "../../witness")
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX native stack assembly semantics")
+    def test_assembly_rejects_header_mutation_and_retains_partial_output_without_repair(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            header = stack / "include" / "api.h"
+            header.parent.mkdir()
+            header.write_bytes(b"original installed header")
+            core_before = self.tree_bytes(core)
+            output = root / "assembled"
+            argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+            copy = LEGAL_MODULE.copy_checked_files
+
+            def mutate_before_copy(source, destination, files, created=None, **kwargs):
+                if source == stack:
+                    header.write_bytes(b"changed before copy")
+                    (destination / "foreign.txt").write_bytes(b"foreign partial output")
+                return copy(source, destination, files, created, **kwargs)
+
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                LEGAL_MODULE, "copy_checked_files", side_effect=mutate_before_copy
+            ), self.assertRaisesRegex(RuntimeError, "changed while copying"):
+                LEGAL_MODULE.main()
+            self.assertEqual(header.read_bytes(), b"changed before copy")
+            self.assertEqual(self.tree_bytes(core), core_before)
+            self.assertEqual((output / "foreign.txt").read_bytes(), b"foreign partial output")
+            self.assertFalse((output / "SHA256SUMS").exists())
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX output metadata and symlink semantics")
+    def test_assembly_does_not_chmod_a_foreign_file_substituted_after_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            (stack / "include").mkdir()
+            (stack / "lib" / "libfixture.dylib").chmod(0o755)
+            witness = root / "witness"
+            witness.write_bytes(b"foreign file")
+            witness.chmod(0o600)
+            output = root / "assembled"
+            argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+            copy = LEGAL_MODULE.copy_checked_files
+
+            def replace_after_copy(source, destination, files, created=None, **kwargs):
+                result = copy(source, destination, files, created, **kwargs)
+                if destination == output and source != stack:
+                    copied = output / "lib" / "libfixture.dylib"
+                    copied.unlink()
+                    copied.symlink_to(witness)
+                return result
+
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                LEGAL_MODULE, "copy_checked_files", side_effect=replace_after_copy
+            ), self.assertRaises(RuntimeError):
+                LEGAL_MODULE.main()
+            self.assertEqual(witness.read_bytes(), b"foreign file")
+            self.assertEqual(witness.stat().st_mode & 0o777, 0o600)
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX directory handles and symlink semantics")
+    def test_assembly_keeps_directory_metadata_bound_to_its_created_handle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            (stack / "include").mkdir()
+            witness = root / "foreign-directory"
+            witness.mkdir(mode=0o750)
+            output = root / "assembled"
+            argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+            inventory = LEGAL_MODULE.native_stack_inventory
+            observations = 0
+
+            def replace_before_metadata(source, receipt):
+                nonlocal observations
+                result = inventory(source, receipt)
+                observations += 1
+                if observations == 2:
+                    copied = output / "include"
+                    copied.rmdir()
+                    copied.symlink_to(witness, target_is_directory=True)
+                return result
+
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                LEGAL_MODULE, "native_stack_inventory", side_effect=replace_before_metadata
+            ), self.assertRaisesRegex(RuntimeError, "directory identity changed"):
+                LEGAL_MODULE.main()
+            self.assertEqual(observations, 2)
+            self.assertEqual(witness.stat().st_mode & 0o777, 0o750)
+            self.assertTrue((output / "include").is_symlink())
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX held-directory and alias semantics")
+    def test_assembly_never_writes_through_a_replaced_output_parent(self):
+        for closure in ("lib", "licenses"):
+            with self.subTest(closure=closure), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+                (stack / "include").mkdir()
+                witness = root / "foreign-directory"
+                witness.mkdir()
+                output = root / "assembled"
+                before = self.tree_bytes(stack), self.tree_bytes(core)
+                argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+                copy = LEGAL_MODULE.copy_checked_files
+
+                def replace_parent(source, destination, files, created=None, **kwargs):
+                    if destination == output and (source == stack) == (closure == "lib"):
+                        parent = output / closure
+                        if parent.exists():
+                            parent.rmdir()
+                        parent.symlink_to(witness, target_is_directory=True)
+                    return copy(source, destination, files, created, **kwargs)
+
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                    LEGAL_MODULE, "copy_checked_files", side_effect=replace_parent
+                ), self.assertRaises((RuntimeError, OSError)):
+                    LEGAL_MODULE.main()
+                self.assertEqual(list(witness.iterdir()), [])
+                self.assertEqual((self.tree_bytes(stack), self.tree_bytes(core)), before)
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX native file-mode validation")
+    def test_assembly_rejects_output_mode_changed_after_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            stack, core = self.generate_legal_fixture(root, "26.09.27", "https://example.org/old")
+            (stack / "include").mkdir()
+            (stack / "lib" / "libfixture.dylib").chmod(0o755)
+            output = root / "assembled"
+            argv = self.legal_mode_argv(core, stack, output, "--assemble-stack")
+            copy = LEGAL_MODULE.copy_checked_files
+
+            def change_mode(source, destination, files, created=None, **kwargs):
+                result = copy(source, destination, files, created, **kwargs)
+                if destination == output and source != stack:
+                    (output / "lib" / "libfixture.dylib").chmod(0o600)
+                return result
+
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                LEGAL_MODULE, "copy_checked_files", side_effect=change_mode
+            ), self.assertRaisesRegex(RuntimeError, "mode changed"):
+                LEGAL_MODULE.main()
+            self.assertEqual((stack / "lib" / "libfixture.dylib").stat().st_mode & 0o777, 0o755)
 
     def test_overlay_only_rejects_original_build_bound_to_a_different_source_core(self):
         with tempfile.TemporaryDirectory() as temporary:

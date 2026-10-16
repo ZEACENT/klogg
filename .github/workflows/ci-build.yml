@@ -1600,25 +1600,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          original_root="${{ runner.temp }}/ios-native-original"
+          core_root="${{ runner.temp }}/ios-native-legal-core"
           stack_root="${{ runner.temp }}/ios-native-stack"
           python3 scripts/build_ios_native_stack.py \
             --repository-root "${{ github.workspace }}" \
             --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
             --archive-root "${{ github.workspace }}/ios-native-sources" \
             --work-root "${{ runner.temp }}/ios-native-work" \
-            --artifact-root "$stack_root" \
+            --artifact-root "$original_root" \
             --architecture "${{ env.KLOGG_IOS_ARCHITECTURE }}" \
             --parallel "$(sysctl -n hw.ncpu)"
           python3 scripts/verify_ios_native_stack.py \
             --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
-            --stack-root "$stack_root" \
+            --stack-root "$original_root" \
             --architecture "${{ env.KLOGG_IOS_ARCHITECTURE }}" \
-            --receipt "$stack_root/ios-native-build-receipt.json"
+            --receipt "$original_root/ios-native-build-receipt.json"
           python3 scripts/build_ios_native_legal_assets.py \
             --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
             --archive-root "${{ github.workspace }}/ios-native-sources" \
             --repository-root "${{ github.workspace }}" \
-            --stack-root "$stack_root" \
+            --stack-root "$original_root" \
+            --core-only --output "$core_root"
+          receipt_sha256() {
+            python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$1"
+          }
+          python3 scripts/build_ios_native_legal_assets.py \
+            --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+            --stack-root "$original_root" --core-root "$core_root" \
+            --assemble-stack \
+            --source-set-sha256 "$(receipt_sha256 "$core_root/ios-native-source-set-receipt.json")" \
+            --legal-receipt-sha256 "$(receipt_sha256 "$core_root/ios-native-legal-receipt.json")" \
+            --build-receipt-sha256 "$(receipt_sha256 "$original_root/ios-native-build-receipt.json")" \
             --version "$KLOGG_VERSION" \
             --base-url "https://github.com/${GITHUB_REPOSITORY}" \
             --output "$stack_root"

@@ -356,6 +356,29 @@ runners, signed **full tar bytes**, candidate/full binary equality, and current
 legal/source material before it can create its eight-file qualification archive.
 A candidate-only receipt is not a signed production lock.
 
+The ordinary iOS builder now uses the existing immutable legal-core boundary:
+its disconnected native writer creates a separate original stack, legal
+`--core-only` generation creates an unversioned source/legal core, and
+`build_ios_native_legal_assets.py --assemble-stack` combines that core's pinned
+overlay with the original binaries, installed headers, direct dylib aliases,
+file modes and build receipt. Assembly requires POSIX file-mode/alias support,
+the original source-set, legal and build receipt SHA-256 pins, and a nonexistent
+output separate from both inputs. It rejects undeclared libraries, escaping
+aliases, special permissions,
+changed inputs and unexpected output entries. A failed copy retains partial
+output instead of deleting possible foreign entries; the ordinary workflow
+publishes only after successful assembly and its existing checksum step. Use a
+caller-owned staging parent: child creation, copying, aliases and metadata use
+held directory handles, not a sandbox against arbitrary same-UID changes to
+that parent's bootstrap.
+
+These cold-writer pins establish local byte continuity, not authenticated
+cross-run reuse. The original architecture receipt alias, complete legal
+verification and downstream package layout stay unchanged. True acquisition-free
+reuse still needs a signed companion binding the original headers, receipts,
+corresponding source and legal/support assets to the chosen binary core and
+current qualification policy. No such production lock is activated here.
+
 The pinned Xcode, SDK path/version, clang, CMake, and Ninja observations are
 necessary but not sufficient for iOS reuse. The dependency-only probe records
 the selected Autotools/pkgconf, Perl, and m4 executable paths, versions, hashes,
@@ -402,9 +425,10 @@ against a real publication. Do not dispatch publication or invent seven registry
 digests. A future consumer must verify the reviewed lock, both detached
 Sigstore subjects, current core/policy keys, and exact OCI manifest/blob bytes
 **before** using a core. `stage_core()` currently offers
-POSIX private, no-replace binary staging from an externally authenticated digest;
-it is not a signed consumer, and Windows staging remains blocked until private
-ACL acquisition is audited. Existing ADB/iOS schema-1 build receipts bind the
+private, no-replace binary staging from an externally authenticated digest.
+The Windows path enforces owner-only ACL acquisition and held-handle namespace
+checks; its filesystem contracts do not make it a signed production consumer.
+Existing ADB/iOS schema-1 build receipts bind the
 full source lock and cannot be reinterpreted as cross-version core receipts.
 
 ## Consuming locked environments
