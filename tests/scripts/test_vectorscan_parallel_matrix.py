@@ -27,6 +27,36 @@ class VectorscanParallelMatrixTest(unittest.TestCase):
     def setUpClass(cls):
         cls.source = VECTORSCAN_TEST.read_text()
 
+    def test_child_failure_reports_terminal_state_before_fatal_assertions(self):
+        reporter = function_body(self.source, "void requireSuccessfulChildResult(")
+        diagnostics = reporter[:reporter.index("REQUIRE( result.started )")]
+        for field in ("started", "finished", "exitStatus", "exitCode", "processError"):
+            self.assertIn("result." + field, diagnostics)
+        runner = function_body(self.source, "ChildRunResult runChildProcess(")
+        self.assertIn("result.processError = process.errorString();", runner)
+        self.assertEqual(runner.count("process.start();"), 1)
+
+    def test_child_phases_distinguish_startup_restore_and_teardown(self):
+        main = function_body(self.source, "int main(")
+        self.assertIn('"phase=main_enter"', main)
+        self.assertIn('"phase=qapplication_ready"', main)
+        self.assertLess(main.index('"phase=main_enter"'), main.index("QApplication app"))
+        self.assertLess(main.index("QApplication app"), main.index('"phase=qapplication_ready"'))
+        collection = function_body(self.source, "int runHighlighterCollectionChild(")
+        phases = (
+            "collection_allocator start", "collection_config start",
+            "collection_tempdir complete", "collection_restore start",
+            "collection_restore complete", "collection_match start",
+            "collection_match complete", "collection_teardown start",
+            "collection_teardown complete",
+        )
+        positions = []
+        for phase in phases:
+            marker = f'"phase={phase}" << std::endl;'
+            self.assertIn(marker, collection)
+            positions.append(collection.index(marker))
+        self.assertEqual(positions, sorted(positions))
+
     def test_exhaustive_matrix_preserves_each_allocator_case_and_combination(self):
         builder = function_body(self.source, "buildExhaustiveChildRuns()")
 

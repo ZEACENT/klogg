@@ -164,6 +164,8 @@ Section "Qt Runtime libraries" qtlibs
 SectionEnd
 
 Section "MSVC Runtime libraries" vcruntime
+    ; Required app-local dependencies must not rely on a system redistributable.
+    SectionIn RO
     SetOutPath $INSTDIR
     File release\msvcp140.dll
     File release\msvcp140_1.dll
@@ -201,8 +203,8 @@ SectionEnd
     !insertmacro MUI_DESCRIPTION_TEXT ${klogg} "The core files required to use klogg."
     !insertmacro MUI_DESCRIPTION_TEXT ${qtlibs} "Needed by klogg, you have to install these unless \
 you already have the Qt development kit installed."
-    !insertmacro MUI_DESCRIPTION_TEXT ${vcruntime} "Needed by klogg, you have to install these unless \
-you already have the Microsoft Visual C++ 2017 Redistributable installed."
+    !insertmacro MUI_DESCRIPTION_TEXT ${vcruntime} "Required MSVC runtime libraries, installed in the \
+application directory. No system-wide Visual C++ Redistributable installation is performed."
     !insertmacro MUI_DESCRIPTION_TEXT ${shortcut} "Create a shortcut in the Start menu for klogg."
     !insertmacro MUI_DESCRIPTION_TEXT ${associate} "Make klogg the default viewer for .log files."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END

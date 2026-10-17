@@ -270,6 +270,8 @@ jobs:
           python-version: '3.8'
       - name: Run narrow platform-fragile lint
         run: python3 scripts/lint_platform_fragile.py
+      - name: Verify macOS upload and diagnostics contracts
+        run: python3 tests/scripts/test_ci_release_artifact_upload.py
       - name: Verify release qualification inputs
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release' }}
         shell: bash
@@ -2102,6 +2104,19 @@ jobs:
           echo "ASan+UBSan instrumentation verified in klogg_tests and klogg_itests"
 
       - uses: ./.github/actions/agent-run-tests
+        id: macos_tests
+
+      - name: Upload macOS test diagnostics
+        if: ${{ failure() && steps.macos_tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-${{ env.KLOGG_LABEL }}-test-diagnostics
+          path: |
+            ${{ env.KLOGG_BUILD_ROOT }}/Testing/Temporary/LastTest.log
+            ~/Library/Logs/DiagnosticReports/klogg_vectorscan_tests*.ips
+          if-no-files-found: ignore
+          retention-days: 7
+
       - uses: ./.github/actions/agent-package-mac
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
         with:
@@ -2115,21 +2130,19 @@ jobs:
           notarization-team: ${{ secrets.NOTARIZATION_TEAM }}
           notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: ./.github/actions/upload-release-artifact
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release')) }}
         with:
           name: packages-${{ env.KLOGG_ARTIFACTS_ID }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
-          if-no-files-found: error
           retention-days: 7
           compression-level: 0
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: ./.github/actions/upload-release-artifact
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release')) }}
         with:
           name: symbols-${{ env.KLOGG_ARTIFACTS_ID }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/symbols/*'
-          if-no-files-found: error
           retention-days: 90
           compression-level: 0
 
