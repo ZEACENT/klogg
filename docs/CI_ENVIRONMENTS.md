@@ -501,6 +501,41 @@ checks; its filesystem contracts do not make it a signed production consumer.
 Existing ADB/iOS schema-1 build receipts bind the
 full source lock and cannot be reinterpreted as cross-version core receipts.
 
+## Workflow responsibilities and reuse completion gates
+
+The three reusable workflows are not three alternative ways to build the same
+inputs. Keep their authority boundaries separate:
+
+| Workflow | Role | When to run / retirement condition |
+| --- | --- | --- |
+| CI Environment Producer | Build, qualify and publish locked Linux environments | Only environment/toolchain inputs or qualification policy change; ordinary CI consumes immutable digests. |
+| CI Native Dependency Qualification | Authenticate all seven native targets and their source/legal companions | Core recipe, source, toolchain, architecture or policy changes; application-version overlays must not rebuild a qualified core. Production consumption is not activated yet. |
+| iOS Host Tool Evidence | Unreviewed diagnostic of the missing host-input boundary | Only while establishing the actual host closure. Fold its proven observation implementation into native qualification and retire the standalone diagnostic once both architectures pass. |
+
+All three already share the registered CI Build dispatcher. Merging their YAML
+now neither removes the ordinary native source builds nor proves reuse, and can
+invalidate workflow-bound signer identities and policy hashes. A successful
+local contract suite is not seven-target qualification evidence.
+
+The next native-core milestone must observe or enforce the **real**
+CMake/Ninja/ExternalProject/autogen/Perl/make execution chain, including nested
+processes, interpreter modules, macros, dylibs and the reviewed system/Xcode
+boundary. It requires genuine per-architecture tool bytes, recursive inputs and
+licenses, source/run/attempt binding, and negative undeclared-read/execute tests.
+A tool-tree snapshot or a trivial DTrace capability probe alone is insufficient.
+The catalog schema, core identity, builder receipt and Gate must then accept the
+same reviewed evidence together; deleting either existing refusal is not a fix.
+
+Only after both hosted macOS architectures pass may a fresh seven-target run
+support an independently authenticated protected publisher, detached signatures,
+anonymously verified immutable OCI assets, and a production-lock proposal. A
+signed companion must bind headers, original receipts and legal/source assets to
+the binary core before ordinary CI can use it without acquisition/rebuild. Keep
+application-version source offers in the current-version assembly layer and
+retain helper, application and installer smoke tests. Publication and production
+lock activation require separate approval; no diagnostic or performance-cache
+change grants that authority.
+
 ## Consuming locked environments
 
 Ordinary CI never builds an environment image. Two consumption shapes exist:

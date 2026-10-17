@@ -1180,6 +1180,7 @@ jobs:
           path: ${{ github.workspace }}/tools
 
       - name: Verify and prepare the locked Linux environment
+        id: linux-environment
         uses: ./.github/actions/prepare-linux-environment
         with:
           family: ${{ env.KLOGG_ENV_FAMILY }}
@@ -1230,15 +1231,21 @@ jobs:
         run: |
           echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DFETCHCONTENT_FULLY_DISCONNECTED=ON" >> $GITHUB_ENV
 
+      - name: Configure effective ccache budget
+        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
+        shell: bash
+        run: python3 scripts/ci_ccache.py prepare --label "$KLOGG_LABEL" --github-env "$GITHUB_ENV"
+
       - name: Enable ccache compiler launcher
         if: ${{ env.KLOGG_SANITIZER != 'thread' }}
         shell: sh
         run: |
-          # Vectorscan is added via add_subdirectory, so the launcher setting
-          # propagates to it too. The sanitizer legs run with LTO off, so
-          # ccache covers the whole compile; a warm cache makes the compile
-          # phase ~5x faster regardless of runner CPU contention.
-          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+          # The existing Docker action is qualification-policy-bound. Carry
+          # the effective environment through its existing CMake launcher seam,
+          # overriding old image defaults without rebuilding those images.
+          # Preserve the quotes for that action's inner bash -lc parse.
+          launcher="env;CCACHE_MAXSIZE=$CCACHE_MAXSIZE;CCACHE_COMPILERCHECK=$CCACHE_COMPILERCHECK;CCACHE_COMPRESS=$CCACHE_COMPRESS;CCACHE_COMPRESSLEVEL=$CCACHE_COMPRESSLEVEL;ccache"
+          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_C_COMPILER_LAUNCHER='$launcher' -DCMAKE_CXX_COMPILER_LAUNCHER='$launcher'" >> $GITHUB_ENV
 
       - name: Set sanitizer env (forwarded into the container by docker-run-tests)
         if: ${{ env.KLOGG_SANITIZER }}
@@ -1272,6 +1279,15 @@ jobs:
         with:
           container-suffix: ${{ env.KLOGG_CONTAINER_SUFFIX }}
 
+      - name: Bind build metrics to verified Linux environment
+        env:
+          KLOGG_CI_ENVIRONMENT_IDENTITY: ${{ steps.linux-environment.outputs.image }}
+        shell: bash
+        run: >-
+          python3 scripts/ci_build_observation.py bind-environment
+          --metrics "$KLOGG_BUILD_ROOT/ci-build-metrics-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          --identity "$KLOGG_CI_ENVIRONMENT_IDENTITY"
+
       - name: Upload current-run build metrics
         if: ${{ hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
         continue-on-error: true
@@ -1287,9 +1303,11 @@ jobs:
         if: ${{ env.KLOGG_SANITIZER != 'thread' }}
         shell: bash
         run: |
-          # Exposes the hit/miss ratio so a warm-cache regression is visible in
-          # the job log instead of silently costing a full rebuild every run.
+          # Lifetime counters are diagnostic only; build metrics contain deltas.
+          # Match the compiler launcher's effective settings, not image defaults.
           docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local \
+            --env CCACHE_MAXSIZE --env CCACHE_COMPILERCHECK \
+            --env CCACHE_COMPRESS --env CCACHE_COMPRESSLEVEL \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
             /bin/bash -c 'ccache -s 2>&1 || echo "ccache stats unavailable"'
 
@@ -1366,6 +1384,23 @@ jobs:
           check-container: ${{ env.KLOGG_CHECK_CONTAINER }}
           check-command: ${{ env.KLOGG_CHECK_COMMAND }}
 
+      - name: Bound Linux ccache before save
+        if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}
+        shell: bash
+        run: |
+          docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local \
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
+            python3 /usr/local/scripts/ci_ccache.py trim --label "$KLOGG_LABEL"
+
+      - name: Save ccache for the Linux build
+        if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/.ccache
+          # Only validated master builds seed bounded daily generations.
+          # Transport failures after this point must not discard their cache.
+          key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+
 # Successful pull requests already validate package contents in place. Upload
 # only trusted master outputs and explicit release qualifications; Continuous
 # consumes the master artifacts immediately.
@@ -1386,25 +1421,6 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
-
-      - name: Bound Linux ccache before save
-        if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}
-        shell: bash
-        run: |
-          docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local \
-            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
-            /bin/bash -c 'ccache --set-config=compression=true && ccache --set-config=compression_level=6 && ccache --max-size=250M && ccache --cleanup'
-
-      - name: Save ccache for the Linux build
-        if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ github.workspace }}/.ccache
-          # Cache keys are immutable. The daily v2 generation deliberately lets
-          # the first successful master push seed the day, bounds each entry to
-          # 250M above, and rolls forward without per-commit cache churn. PRs are
-          # restore-only and fall back to the newest retained daily generation.
-          key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
 
   LinuxSanitizers:
     needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]
@@ -2046,13 +2062,15 @@ jobs:
           fi
           echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON $PACKAGE_CMAKE_OPTS ${{ env.KLOGG_CONFIG_CMAKE_OPTS }}" >> $GITHUB_ENV
 
+      - name: Configure effective ccache budget
+        shell: bash
+        run: python3 scripts/ci_ccache.py prepare --label "$KLOGG_LABEL" --github-env "$GITHUB_ENV"
+
       - name: Enable ccache compiler launcher
         shell: sh
         run: |
-          # Same pattern as the Linux legs (see "Enable ccache compiler
-          # launcher" there). CCACHE_BASEDIR strips the workspace prefix from
-          # debug info so a cache entry restored under a different runner
-          # workspace path still hits.
+          # Normalize workspace-relative paths; compiler content (not runner
+          # mtimes) is checked by the shared effective-cache policy.
           echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
           echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
           echo "CCACHE_BASEDIR=${{ github.workspace }}" >> $GITHUB_ENV
@@ -2130,6 +2148,28 @@ jobs:
           notarization-team: ${{ secrets.NOTARIZATION_TEAM }}
           notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
 
+      - name: Bound macOS ccache before save
+        if: ${{ success() && (github.event_name == 'push' || steps.restore-pr-ccache.outcome == 'success') }}
+        shell: sh
+        run: python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"
+
+      - name: Save ccache for the macOS build
+        if: ${{ success() && github.event_name == 'push' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/.ccache
+          # Validate and bound before saving; publication transport runs later.
+          key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+
+      - name: Save own-PR ccache for the macOS build
+        # A successful guarded restore (including a miss) authorizes only this
+        # PR's namespace. Skipped fork/missing-metadata restores cannot save.
+        if: ${{ success() && github.event_name == 'pull_request' && steps.restore-pr-ccache.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}
+
       - uses: ./.github/actions/upload-release-artifact
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release')) }}
         with:
@@ -2145,34 +2185,6 @@ jobs:
           path: '${{ env.KLOGG_BUILD_ROOT }}/symbols/*'
           retention-days: 90
           compression-level: 0
-
-      - name: Bound macOS ccache before save
-        if: ${{ success() && (github.event_name == 'push' || steps.restore-pr-ccache.outcome == 'success') }}
-        shell: sh
-        run: |
-          ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          ccache --max-size=250M
-          ccache --cleanup
-
-      - name: Save ccache for the macOS build
-        if: ${{ success() && github.event_name == 'push' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ github.workspace }}/.ccache
-          # The first successful master push seeds this day's immutable key
-          # after the cache is compressed and bounded to 250M above. Later runs
-          # reuse it instead of creating per-commit entries; PRs never save it.
-          key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
-
-      - name: Save own-PR ccache for the macOS build
-        # A successful guarded restore (including a miss) authorizes only this
-        # PR's namespace. Skipped fork/missing-metadata restores cannot save.
-        if: ${{ success() && github.event_name == 'pull_request' && steps.restore-pr-ccache.outcome == 'success' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}
 
   MacArmPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacArm64, BuildIosNativeArm64, ReleaseQualificationPreflight]
@@ -2408,6 +2420,37 @@ jobs:
         with:
           arch: ${{ env.KLOGG_CONFIG_ARCH }}
 
+      - name: Prepare verified Windows object cache
+        id: windows-cache
+        shell: pwsh
+        run: python3 -I scripts/ci_windows_object_cache.py prepare
+
+      - name: Restore same-namespace Windows objects
+        id: restore-windows-cache
+        if: ${{ steps.windows-cache.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache
+          key: ${{ steps.windows-cache.outputs.primary-key }}
+          restore-keys: ${{ steps.windows-cache.outputs.primary-prefix }}
+
+      - name: Restore master Windows objects for a cold PR
+        id: restore-windows-master-cache
+        if: ${{ steps.windows-cache.outputs.ready == 'true' && github.event_name == 'pull_request' && steps.restore-windows-cache.outputs.cache-matched-key == '' }}
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache
+          key: ${{ steps.windows-cache.outputs.master-key }}
+          restore-keys: ${{ steps.windows-cache.outputs.master-prefix }}
+
+      - name: Activate Windows object cache or use the native compiler
+        id: activate-windows-cache
+        if: ${{ steps.windows-cache.outputs.ready == 'true' }}
+        shell: pwsh
+        run: python3 -I scripts/ci_windows_object_cache.py activate
+
       - name: Add verified MSYS2 tools to PATH
         shell: pwsh
         run: |
@@ -2450,17 +2493,6 @@ jobs:
           fi
 
       - uses: ./.github/actions/agent-build
-
-      - name: Upload current-run build metrics
-        if: ${{ hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
-          path: ${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json
-          if-no-files-found: warn
-          retention-days: 7
-          compression-level: 0
 
       - name: Verify vectorscan config in CMake cache (x64)
         if: ${{ env.KLOGG_CONFIG_ARCH == 'x64' }}
@@ -2913,6 +2945,50 @@ jobs:
           $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release"
           $script = Join-Path $env:GITHUB_WORKSPACE "packaging\windows\verify_ssl.ps1"
           & $script -ReleaseDir $releaseDir -QtVersion $env:KLOGG_QT
+
+      - name: Report and validate Windows object cache
+        id: windows-cache-report
+        if: ${{ always() }}
+        shell: pwsh
+        env:
+          PRIMARY_CACHE_MATCH: ${{ steps.restore-windows-cache.outputs.cache-matched-key }}
+          MASTER_CACHE_MATCH: ${{ steps.restore-windows-master-cache.outputs.cache-matched-key }}
+          PRIMARY_CACHE_OUTCOME: ${{ steps.restore-windows-cache.outcome }}
+          MASTER_CACHE_OUTCOME: ${{ steps.restore-windows-master-cache.outcome }}
+        run: python3 -I scripts/ci_windows_object_cache.py report
+
+      - name: Save validated Windows objects before artifact transport
+        id: save-windows-cache
+        # Helper issues write keys only for master pushes and this PR's namespace.
+        # Dispatch is read-only. Never save build_root, PDB bundles or executables.
+        if: ${{ success() && steps.run-tests.outcome == 'success' && steps.windows-cache-report.outputs.validated == 'true' && steps.windows-cache.outputs.save-key != '' && steps.restore-windows-cache.outputs.cache-matched-key != steps.windows-cache.outputs.save-key }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache
+          key: ${{ steps.windows-cache.outputs.save-key }}
+
+      - name: Upload current-run build metrics
+        if: ${{ always() && hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
+          path: ${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload Windows object cache evidence
+        if: ${{ always() && steps.windows-cache-report.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-object-cache-${{ env.KLOGG_LABEL }}
+          path: ${{ github.workspace }}/windows-object-cache.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ steps.run-tests.outcome == 'success' && env.KLOGG_PACKAGE_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release')) }}

@@ -73,9 +73,10 @@ class NativeBuildMetricsActionTest(unittest.TestCase):
 
     def test_one_native_ci_build_reports_cache_only_where_available(self):
         body = self.bodies["build"]
-        self.assertIn("scripts/ci_build_metrics.py run-build", body)
+        self.assertIn("scripts/ci_build_observation.py run-build", body)
         self.assertEqual(body.count("cmake --build"), 1)
-        self.assertIn('Windows) object_cache=disabled', body)
+        self.assertIn('Windows) object_cache=${KLOGG_WINDOWS_OBJECT_CACHE:-disabled}', body)
+        self.assertIn('--cache-tool "${KLOGG_OBJECT_CACHE_TOOL:-ccache}"', body)
         self.assertIn('object_cache=measured', body)
         self.assertIn('--repo-root "$KLOGG_WORKSPACE"', body)
         self.assertIn('--build-root "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT"', body)
@@ -85,7 +86,7 @@ class NativeBuildMetricsActionTest(unittest.TestCase):
 
 
 class BuildMetricsUploadWorkflowTest(unittest.TestCase):
-    def test_every_native_and_linux_build_uploads_only_its_current_report_before_tests(self):
+    def test_every_build_uploads_only_its_current_report_after_platform_observation(self):
         steps = QUALITY.workflow_job_steps(CI_BUILD.read_text())
         for job in QUALITY.CI_BUILD_PACKAGE_ENABLEMENT:
             with self.subTest(job=job):
@@ -98,11 +99,31 @@ class BuildMetricsUploadWorkflowTest(unittest.TestCase):
                 self.assertEqual(len(builds), 1)
                 self.assertEqual(len(metrics), 1)
                 index, fields, options = metrics[0]
-                self.assertEqual(index, builds[0] + 1)
+                if job.startswith("Linux"):
+                    self.assertEqual(index, builds[0] + 2)
+                    binding, settings = parsed[builds[0] + 1]
+                    self.assertEqual(binding.get("name"), "Bind build metrics to verified Linux environment")
+                    self.assertEqual(settings.get("env"), {"KLOGG_CI_ENVIRONMENT_IDENTITY":
+                                                           "${{ steps.linux-environment.outputs.image }}"})
+                    self.assertIn("scripts/ci_build_observation.py bind-environment", binding.get("run", ""))
+                    self.assertIn('--identity "$KLOGG_CI_ENVIRONMENT_IDENTITY"', binding["run"])
+                    resolver = next(row for row, _ in parsed if row.get("id") == "linux-environment")
+                    self.assertEqual(resolver.get("uses"), "./.github/actions/prepare-linux-environment")
+                elif job.startswith("Windows"):
+                    report = next(position for position, (row, _) in enumerate(parsed)
+                                  if row.get("id") == "windows-cache-report")
+                    self.assertLess(builds[0], report)
+                    self.assertGreater(index, report)
+                    release_upload = next(position for position, (_, settings) in enumerate(parsed)
+                                          if settings.get("with", {}).get("name", "").startswith("packages-"))
+                    self.assertLess(index, release_upload)
+                else:
+                    self.assertEqual(index, builds[0] + 1)
                 self.assertEqual(fields.get("uses"), "actions/upload-artifact@" +
                                  QUALITY.REVIEWED_ACTION_REVISIONS["actions/upload-artifact"])
                 self.assertEqual(fields.get("if"),
-                                 "${{ hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', "
+                                 "${{ " + ("always() && " if job.startswith("Windows") else "") +
+                                 "hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', "
                                  "env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}")
                 self.assertEqual(fields.get("continue-on-error"), "true")
                 self.assertEqual(options, {
@@ -336,10 +357,10 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
             ("if: ${{ success() && github.event_name == 'push' }}",
              "if: ${{ success() && (github.event_name == 'push' || github.event_name == 'pull_request') }}"),
             ("steps.restore-pr-ccache.outcome == 'success'", "true"),
-            ("ccache --max-size=250M", "ccache --max-size=500M"),
-            ("ccache --max-size=250M", ""),
-            ("ccache --max-size=250M", "# ccache --max-size=250M"),
-            ("ccache --max-size=250M", "printf '%s\\n' 'ccache --max-size=250M'"),
+            ('python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"', "ccache --max-size=250M"),
+            ('python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"', ""),
+            ('python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"', "# python3 scripts/ci_ccache.py trim"),
+            ('python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"', "printf '%s\\n' 'python3 scripts/ci_ccache.py trim'"),
         )
         for old, new in mutations:
             with self.subTest(mutation=new):
@@ -373,8 +394,7 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
             bound, _ = self.named(rows, "Bound macOS ccache before save")
             self.assertEqual(bound["shell"], "sh")
             self.assertEqual(QUALITY.active_script_content(bound["run"]).strip(),
-                             "ccache --set-config=compression=true\nccache --set-config=compression_level=6\n"
-                             "ccache --max-size=250M\nccache --cleanup")
+                             'python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"')
             save, options = self.named(rows, "Save ccache for the macOS build")
             self.assertEqual(save["uses"], "actions/cache/save@" + self.REVISION)
             self.assertEqual(save["if"], "${{ success() && github.event_name == 'push' }}")

@@ -477,7 +477,7 @@ jobs:
                 if path.name in ("ci-environments.yml", "ci-dependencies.yml",
                                  "ci-ios-host-evidence.yml"):
                     expected = {"workflow_call"}
-                elif path.name not in ("ci-release.yml", "ci-continuous.yml"):
+                elif path.name not in ("ci-release.yml", "ci-continuous.yml", "ci-cache-cleanup.yml"):
                     expected |= {"push", "pull_request"}
                 self.assertEqual(set(MODULE.workflow_trigger_mapping(text)), expected)
 
@@ -3713,21 +3713,13 @@ jobs:
             mac.index("- uses: ./.github/actions/agent-package-mac"),
         )
 
-    def test_ccache_entries_are_capped_to_the_repository_budget(self):
-        message = "ccache entries must be capped at 250M"
-        good = """\
-jobs:
-  Linux:
-    steps:
-      - run: ccache --max-size=250M && ccache --cleanup
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: linux-ccache-v2-week
-"""
-        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
-        bad = good.replace("--max-size=250M", "--max-size=500M")
-        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
+    def test_ccache_entries_use_the_effective_repository_budget(self):
+        good = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        self.assertEqual(MODULE.ccache_workflow_issues(good), [])
+        bad = good.replace('python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"',
+                           'ccache --max-size=250M && ccache --cleanup')
+        self.assertNotEqual(bad, good)
+        self.assertTrue(MODULE.ccache_workflow_issues(bad))
 
     def test_codeql_requires_pinned_matching_actions_and_timeout(self):
         insecure = """\

@@ -2519,13 +2519,54 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         issues.append("ccache keys must be bounded and must not use github.run_id")
 
     if ".ccache" in active_text and "actions/cache/save@" in active_text:
-        ccache_limits = [
-            int(value)
-            for value in re.findall(r"ccache\s+--max-size=(\d+)M", active_text)
-        ]
-        if not ccache_limits or any(value > 250 for value in ccache_limits):
-            issues.append("ccache entries must be capped at 250M")
+        issues.extend(ccache_workflow_issues(text))
 
+    return issues
+
+
+def ccache_workflow_issues(text: str) -> list[str]:
+    """Verified caches survive upload outages without bypassing qualification."""
+    issues = []
+    jobs = workflow_job_steps(text)
+    for job, test_action, package_action, platform in (
+        ("LinuxPackages", "docker-run-tests", "docker-package", "Linux"),
+        ("MacPackages", "agent-run-tests", "agent-package-mac", "macOS"),
+    ):
+        rows = [workflow_step_fields(step) for step in jobs.get(job, [])]
+        names = {fields.get("name"): index for index, (fields, _) in enumerate(rows)}
+        actions = {fields.get("uses"): index for index, (fields, _) in enumerate(rows)}
+        prepare = names.get("Configure effective ccache budget")
+        trim = names.get(f"Bound {platform} ccache before save")
+        tests = actions.get("./.github/actions/" + test_action)
+        package = actions.get("./.github/actions/" + package_action)
+        build = actions.get("./.github/actions/" + ("docker-build" if platform == "Linux" else "agent-build"))
+        uploads = [index for index, (_, children) in enumerate(rows)
+                   if children.get("with", {}).get("name", "").startswith(("packages-", "symbols-"))]
+        saves = [(index, fields) for index, (fields, children) in enumerate(rows)
+                 if fields.get("uses", "").startswith("actions/cache/save@")
+                 and children.get("with", {}).get("path", "").endswith("/.ccache")]
+        message = f"{job}: ccache requires effective budgets and success-only saves between qualification and upload"
+        if any(value is None for value in (prepare, trim, tests, package, build)) or not uploads or not saves:
+            issues.append(message)
+            continue
+        expected_prepare = 'python3 scripts/ci_ccache.py prepare --label "$KLOGG_LABEL" --github-env "$GITHUB_ENV"'
+        trim_lines = rows[trim][0].get("run", "").strip().splitlines()
+        trim_command = 'python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"'
+        if platform == "Linux":
+            trim_command = 'python3 /usr/local/scripts/ci_ccache.py trim --label "$KLOGG_LABEL"'
+        allowed_save_conditions = {
+            "Linux": {"${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}"},
+            "macOS": {"${{ success() && github.event_name == 'push' }}",
+                      "${{ success() && github.event_name == 'pull_request' && steps.restore-pr-ccache.outcome == 'success' }}"},
+        }
+        if (rows[prepare][0].get("run", "").strip() != expected_prepare
+                or not trim_lines or trim_lines[-1].strip() != trim_command
+                or not prepare < build < tests < package < trim
+                or "always()" in rows[trim][0].get("if", "")
+                or any(not trim < index < min(uploads)
+                       or fields.get("if") not in allowed_save_conditions[platform]
+                       or "continue-on-error" in fields for index, fields in saves)):
+            issues.append(message)
     return issues
 
 

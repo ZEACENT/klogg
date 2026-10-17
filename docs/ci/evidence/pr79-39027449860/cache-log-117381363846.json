@@ -1,0 +1,147 @@
+{
+  "job_id": 117381363846,
+  "job_name": "Linux ubuntu-22.04-asan-lsan [asan]",
+  "run_id": 39027449860,
+  "head_sha": "f4c3d005ca2204b23489855988175ecd6f994e48",
+  "source": "https://api.github.com/repos/ZEACENT/klogg/actions/jobs/117381363846/logs",
+  "log_sha256": "b51c02688ab3701d179fdc29828f523810707f64a0637679deaf66b6d5815867",
+  "note": "Exact selected log lines with original 1-based line numbers; ccache -s totals are accumulated, NOT current-build deltas.",
+  "lines": [
+    {
+      "line": 349,
+      "text": "2026-10-17T11:09:13.1689645Z   path: /home/runner/work/klogg/klogg/.ccache"
+    },
+    {
+      "line": 350,
+      "text": "2026-10-17T11:09:13.1689991Z   key: ubuntu-22.04-asan-lsan-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 351,
+      "text": "2026-10-17T11:09:13.1690336Z   restore-keys: ubuntu-22.04-asan-lsan-ccache-v2-"
+    },
+    {
+      "line": 352,
+      "text": ""
+    },
+    {
+      "line": 353,
+      "text": "2026-10-17T11:09:13.1690646Z   enableCrossOsArchive: false"
+    },
+    {
+      "line": 354,
+      "text": "2026-10-17T11:09:13.1690899Z   fail-on-cache-miss: false"
+    },
+    {
+      "line": 355,
+      "text": "2026-10-17T11:09:13.1691137Z   lookup-only: false"
+    },
+    {
+      "line": 371,
+      "text": "2026-10-17T11:09:13.1696421Z ##[endgroup]"
+    },
+    {
+      "line": 372,
+      "text": "2026-10-17T11:09:13.4709464Z Cache hit for: ubuntu-22.04-asan-lsan-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 373,
+      "text": "2026-10-17T11:09:14.6309231Z Received 88080384 of 132594709 (66.4%), 83.7 MBs/sec"
+    },
+    {
+      "line": 374,
+      "text": "2026-10-17T11:09:14.9210813Z Received 132594709 of 132594709 (100.0%), 97.8 MBs/sec"
+    },
+    {
+      "line": 375,
+      "text": "2026-10-17T11:09:14.9214110Z Cache Size: ~126 MB (132594709 B)"
+    },
+    {
+      "line": 376,
+      "text": "2026-10-17T11:09:14.9257125Z [command]/usr/bin/tar -xf /home/runner/work/_temp/59c41d8f-4a8d-4b6b-90e1-859b4333fc82/cache.tzst -P -C /home/runner/work/klogg/klogg --use-compress-program unzstd"
+    },
+    {
+      "line": 377,
+      "text": "2026-10-17T11:09:15.1875110Z Cache restored successfully"
+    },
+    {
+      "line": 378,
+      "text": "2026-10-17T11:09:15.2245969Z Cache restored from key: ubuntu-22.04-asan-lsan-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 379,
+      "text": "2026-10-17T11:09:15.2508246Z Prepare all required actions"
+    },
+    {
+      "line": 380,
+      "text": "2026-10-17T11:09:15.2568314Z ##[group]Run ./.github/actions/prepare-workspace-env"
+    },
+    {
+      "line": 381,
+      "text": "2026-10-17T11:09:15.2568638Z with:"
+    },
+    {
+      "line": 382,
+      "text": "2026-10-17T11:09:15.2568826Z   arch: x64"
+    },
+    {
+      "line": 1954,
+      "text": "2026-10-17T11:10:27.7203431Z Summary:"
+    },
+    {
+      "line": 1955,
+      "text": "2026-10-17T11:10:27.7204129Z   Hits:             712 / 1436 (49.58 %)"
+    },
+    {
+      "line": 1956,
+      "text": "2026-10-17T11:10:27.7204641Z     Direct:         700 / 1436 (48.75 %)"
+    },
+    {
+      "line": 1957,
+      "text": "2026-10-17T11:10:27.7205145Z     Preprocessed:    12 /  736 (1.63 %)"
+    },
+    {
+      "line": 1958,
+      "text": "2026-10-17T11:10:27.7205583Z   Misses:           724"
+    },
+    {
+      "line": 1959,
+      "text": "2026-10-17T11:10:27.7205997Z     Direct:         736"
+    },
+    {
+      "line": 1960,
+      "text": "2026-10-17T11:10:27.7206361Z     Preprocessed:   724"
+    },
+    {
+      "line": 1961,
+      "text": "2026-10-17T11:10:27.7206743Z Primary storage:"
+    },
+    {
+      "line": 1962,
+      "text": "2026-10-17T11:10:27.7207129Z   Hits:            1413 / 2872 (49.20 %)"
+    },
+    {
+      "line": 1963,
+      "text": "2026-10-17T11:10:27.7207567Z   Misses:          1459"
+    },
+    {
+      "line": 1964,
+      "text": "2026-10-17T11:10:27.7209619Z   Cache size (GB): 0.14 / 2.00 (6.91 %)"
+    },
+    {
+      "line": 1965,
+      "text": "2026-10-17T11:10:27.7209971Z "
+    },
+    {
+      "line": 1966,
+      "text": "2026-10-17T11:10:27.7210271Z Use the -v/--verbose option for more details."
+    },
+    {
+      "line": 1967,
+      "text": "2026-10-17T11:10:27.8075303Z ##[group]Run docker run --pull=never --rm \\"
+    },
+    {
+      "line": 1968,
+      "text": "2026-10-17T11:10:27.8075718Z \u001b[36;1mdocker run --pull=never --rm \\\u001b[0m"
+    }
+  ]
+}

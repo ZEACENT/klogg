@@ -1,0 +1,615 @@
+{
+  "job_id": 117381363909,
+  "job_name": "macOS intel-qt6-first-party-tsan [tsan]",
+  "run_id": 39027449860,
+  "head_sha": "f4c3d005ca2204b23489855988175ecd6f994e48",
+  "source": "https://api.github.com/repos/ZEACENT/klogg/actions/jobs/117381363909/logs",
+  "log_sha256": "1d86d244381dc70c56ab2de852ecb3beee6fdede9566fc09b969051590ed6bb8",
+  "note": "Exact selected log lines with original 1-based line numbers; ccache -s totals are accumulated, NOT current-build deltas.",
+  "lines": [
+    {
+      "line": 349,
+      "text": "2026-10-17T11:08:33.1574670Z   path: /Users/runner/work/klogg/klogg/.ccache"
+    },
+    {
+      "line": 350,
+      "text": "2026-10-17T11:08:33.1575400Z   key: intel-qt6-first-party-tsan-ccache-pr-v1-79-2026-10-17"
+    },
+    {
+      "line": 351,
+      "text": "2026-10-17T11:08:33.1576190Z   restore-keys: intel-qt6-first-party-tsan-ccache-pr-v1-79-"
+    },
+    {
+      "line": 352,
+      "text": "2026-10-17T11:08:33.1576850Z   enableCrossOsArchive: false"
+    },
+    {
+      "line": 353,
+      "text": "2026-10-17T11:08:33.1577320Z   fail-on-cache-miss: false"
+    },
+    {
+      "line": 354,
+      "text": "2026-10-17T11:08:33.1577760Z   lookup-only: false"
+    },
+    {
+      "line": 355,
+      "text": "2026-10-17T11:08:33.1578140Z env:"
+    },
+    {
+      "line": 373,
+      "text": "2026-10-17T11:08:33.1589400Z ##[endgroup]"
+    },
+    {
+      "line": 374,
+      "text": "2026-10-17T11:08:33.4428700Z Cache not found for input keys: intel-qt6-first-party-tsan-ccache-pr-v1-79-2026-10-17, intel-qt6-first-party-tsan-ccache-pr-v1-79-"
+    },
+    {
+      "line": 375,
+      "text": "2026-10-17T11:08:33.4588740Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+    },
+    {
+      "line": 376,
+      "text": "2026-10-17T11:08:33.4589520Z with:"
+    },
+    {
+      "line": 377,
+      "text": "2026-10-17T11:08:33.4589930Z   path: /Users/runner/work/klogg/klogg/.ccache"
+    },
+    {
+      "line": 378,
+      "text": "2026-10-17T11:08:33.4590570Z   key: intel-qt6-first-party-tsan-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 379,
+      "text": "2026-10-17T11:08:33.4591280Z   restore-keys: intel-qt6-first-party-tsan-ccache-v2-"
+    },
+    {
+      "line": 380,
+      "text": ""
+    },
+    {
+      "line": 381,
+      "text": "2026-10-17T11:08:33.4591900Z   enableCrossOsArchive: false"
+    },
+    {
+      "line": 382,
+      "text": "2026-10-17T11:08:33.4592380Z   fail-on-cache-miss: false"
+    },
+    {
+      "line": 383,
+      "text": "2026-10-17T11:08:33.4592830Z   lookup-only: false"
+    },
+    {
+      "line": 402,
+      "text": "2026-10-17T11:08:33.4604370Z ##[endgroup]"
+    },
+    {
+      "line": 403,
+      "text": "2026-10-17T11:08:33.7177810Z Cache not found for input keys: intel-qt6-first-party-tsan-ccache-v2-2026-10-17, intel-qt6-first-party-tsan-ccache-v2-"
+    },
+    {
+      "line": 404,
+      "text": "2026-10-17T11:08:33.7386540Z ##[group]Run actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+    },
+    {
+      "line": 405,
+      "text": "2026-10-17T11:08:33.7387370Z with:"
+    },
+    {
+      "line": 406,
+      "text": "2026-10-17T11:08:33.7387770Z   name: boost-root"
+    },
+    {
+      "line": 407,
+      "text": "2026-10-17T11:08:33.7388440Z   path: /Users/runner/work/klogg/klogg/prefetch_artifacts"
+    },
+    {
+      "line": 567,
+      "text": "2026-10-17T11:08:46.0608410Z ##[group]Restoring from GitHub cloud cache using key '1808092541' into '/Users/runner/work/_temp/1808092541'"
+    },
+    {
+      "line": 568,
+      "text": "2026-10-17T11:08:46.1094440Z Cache hit for: 1808092541"
+    },
+    {
+      "line": 569,
+      "text": "2026-10-17T11:08:47.1816980Z Received 71067196 of 75261500 (94.4%), 67.7 MBs/sec"
+    },
+    {
+      "line": 570,
+      "text": "2026-10-17T11:08:48.1841520Z Received 71067196 of 75261500 (94.4%), 33.8 MBs/sec"
+    },
+    {
+      "line": 571,
+      "text": "2026-10-17T11:08:49.1886100Z Received 71067196 of 75261500 (94.4%), 22.5 MBs/sec"
+    },
+    {
+      "line": 572,
+      "text": "2026-10-17T11:08:50.1872240Z Received 71067196 of 75261500 (94.4%), 16.9 MBs/sec"
+    },
+    {
+      "line": 575,
+      "text": "2026-10-17T11:08:50.3532600Z [command]/usr/local/bin/gtar -xf /Users/runner/work/_temp/2deb4651-2218-428b-b27b-44a19431a540/cache.tzst -P -C /Users/runner/work/klogg/klogg --delay-directory-restore --use-compress-program unzstd"
+    },
+    {
+      "line": 576,
+      "text": "2026-10-17T11:08:53.4850670Z Cache restored successfully"
+    },
+    {
+      "line": 577,
+      "text": "2026-10-17T11:08:53.4895510Z Cloud cache hit."
+    },
+    {
+      "line": 578,
+      "text": "2026-10-17T11:08:53.4896500Z ##[endgroup]"
+    },
+    {
+      "line": 579,
+      "text": "2026-10-17T11:08:53.4897230Z ##[group]Add CMake and Ninja to PATH"
+    },
+    {
+      "line": 580,
+      "text": "2026-10-17T11:08:53.4898200Z CMake path: '/Users/runner/work/_temp/1808092541/cmake-3.31.6-macos-universal/CMake.app/Contents/bin/'"
+    },
+    {
+      "line": 581,
+      "text": "2026-10-17T11:08:53.4904200Z Ninja path: '/Users/runner/work/_temp/1808092541'"
+    },
+    {
+      "line": 816,
+      "text": "2026-10-17T11:09:03.5487510Z 6.9.3"
+    },
+    {
+      "line": 817,
+      "text": "2026-10-17T11:09:03.6744410Z Cache hit for: install-qt-action-mac-25.6.0-desktop-clang_64-6.9.3-/Users/runner/work/klogg/Qt-==1.0.*-==3.3.*-qt5compat-qtimageformats-qtbase-icu-qtsvg-qttools-qttranslations"
+    },
+    {
+      "line": 818,
+      "text": "2026-10-17T11:09:04.7158320Z Received 134217728 of 150416545 (89.2%), 127.7 MBs/sec"
+    },
+    {
+      "line": 819,
+      "text": "2026-10-17T11:09:04.8198880Z Received 150416545 of 150416545 (100.0%), 129.7 MBs/sec"
+    },
+    {
+      "line": 820,
+      "text": "2026-10-17T11:09:04.8220940Z Cache Size: ~143 MB (150416545 B)"
+    },
+    {
+      "line": 821,
+      "text": "2026-10-17T11:09:04.8288580Z [command]/usr/local/bin/gtar -xf /Users/runner/work/_temp/d9bfb34e-d38d-46e5-a559-4295a04a1faf/cache.tzst -P -C /Users/runner/work/klogg/klogg --delay-directory-restore --use-compress-program unzstd"
+    },
+    {
+      "line": 822,
+      "text": "2026-10-17T11:09:11.0650540Z Cache restored successfully"
+    },
+    {
+      "line": 823,
+      "text": "2026-10-17T11:09:11.0752230Z Automatic cache hit with key \"install-qt-action-mac-25.6.0-desktop-clang_64-6.9.3-/Users/runner/work/klogg/Qt-==1.0.*-==3.3.*-qt5compat-qtimageformats-qtbase-icu-qtsvg-qttools-qttranslations\""
+    },
+    {
+      "line": 824,
+      "text": "2026-10-17T11:09:11.1296100Z ##[end-action id=__self.__jurplel_install-qt-action.__jurplel_install-qt-action;outcome=success;conclusion=success;duration_ms=17353]"
+    },
+    {
+      "line": 825,
+      "text": "2026-10-17T11:09:11.1317330Z ##[end-action id=__self.__jurplel_install-qt-action;outcome=success;conclusion=success;duration_ms=17608]"
+    },
+    {
+      "line": 826,
+      "text": "2026-10-17T11:09:11.1323590Z ##[start-action display=Set Boost root;id=__self.__run_2]"
+    },
+    {
+      "line": 827,
+      "text": "2026-10-17T11:09:11.1365980Z ##[group]Run echo \"BOOST_ROOT=$GITHUB_WORKSPACE/3rdparty/boost\" >> \"$GITHUB_ENV\""
+    },
+    {
+      "line": 3382,
+      "text": "2026-10-17T11:30:49.6186870Z ##[endgroup]"
+    },
+    {
+      "line": 3383,
+      "text": "2026-10-17T11:30:49.6642100Z Cacheable calls:    722 / 722 (100.0%)"
+    },
+    {
+      "line": 3384,
+      "text": "2026-10-17T11:30:49.6647370Z   Hits:               1 / 722 ( 0.14%)"
+    },
+    {
+      "line": 3385,
+      "text": "2026-10-17T11:30:49.6648840Z     Direct:           0 /   1 ( 0.00%)"
+    },
+    {
+      "line": 3386,
+      "text": "2026-10-17T11:30:49.6649520Z     Preprocessed:     1 /   1 (100.0%)"
+    },
+    {
+      "line": 3387,
+      "text": "2026-10-17T11:30:49.6651030Z   Misses:           721 / 722 (99.86%)"
+    },
+    {
+      "line": 3388,
+      "text": "2026-10-17T11:30:49.6652710Z Local storage:"
+    },
+    {
+      "line": 3389,
+      "text": "2026-10-17T11:30:49.6655170Z   Cache size (GiB): 0.1 / 5.0 ( 1.87%)"
+    },
+    {
+      "line": 3390,
+      "text": "2026-10-17T11:30:49.6655770Z   Hits:               1 / 722 ( 0.14%)"
+    },
+    {
+      "line": 3391,
+      "text": "2026-10-17T11:30:49.6656360Z   Misses:           721 / 722 (99.86%)"
+    },
+    {
+      "line": 3392,
+      "text": "2026-10-17T11:30:49.6751150Z Prepare all required actions"
+    },
+    {
+      "line": 3393,
+      "text": "2026-10-17T11:30:49.6819000Z ##[group]Run ./.github/actions/agent-run-tests"
+    },
+    {
+      "line": 3394,
+      "text": "2026-10-17T11:30:49.6819690Z env:"
+    },
+    {
+      "line": 3395,
+      "text": "2026-10-17T11:30:49.6820160Z   KLOGG_CI_IMAGE_PREFIX: zeacent/klogg"
+    },
+    {
+      "line": 4343,
+      "text": "2026-10-17T11:32:03.5373740Z 33: observed_process_events=state:1:pid=0,state:2:pid=64743,started:0:pid=64743,state:0:pid=64743,finished:1:pid=0"
+    },
+    {
+      "line": 4344,
+      "text": "2026-10-17T11:32:04.4332530Z 37: 2026-10-17T11:32:04 critical [153501] [LogFilteredData::findLogDataLine@835] Index too big in LogFilteredData: 51 cache size 51"
+    },
+    {
+      "line": 4345,
+      "text": "2026-10-17T11:32:04.6508320Z 37: 2026-10-17T11:32:04 critical [153501] [LogFilteredData::findLogDataLine@835] Index too big in LogFilteredData: 500 cache size 51"
+    },
+    {
+      "line": 4346,
+      "text": "2026-10-17T11:32:06.7723130Z 37: 2026-10-17T11:32:06 critical [153501] [HsRegularExpression::HsRegularExpression(const klogg::vector &)::(anonymous class)::operator()@335] Failed to compile pattern Pattern matches empty buffer; use HS_FLAG_ALLOWEMPTY to enable support."
+    },
+    {
+      "line": 4347,
+      "text": "2026-10-17T11:32:06.7755700Z 37: 2026-10-17T11:32:06 critical [153501] [HsRegularExpression::HsRegularExpression(const klogg::vector &)::(anonymous class)::operator()@335] Failed to compile pattern Pattern matches empty buffer; use HS_FLAG_ALLOWEMPTY to enable support."
+    },
+    {
+      "line": 4348,
+      "text": "2026-10-17T11:32:06.7950400Z 37: 2026-10-17T11:32:06 critical [153501] [HsRegularExpression::HsRegularExpression(const klogg::vector &)::(anonymous class)::operator()@335] Failed to compile pattern Missing close parenthesis for group started at index 0."
+    },
+    {
+      "line": 4349,
+      "text": "2026-10-17T11:32:06.7957320Z 37: 2026-10-17T11:32:06 critical [153501] [HsRegularExpression::HsRegularExpression(const klogg::vector &)::(anonymous class)::operator()@335] Failed to compile pattern Missing close parenthesis for group started at index 0."
+    },
+    {
+      "line": 4913,
+      "text": "2026-10-17T11:32:15.6356180Z 37: 2026-10-17T11:32:15 warning [153501] [unknown@0] This plugin does not support propagateSizeHints()"
+    },
+    {
+      "line": 4914,
+      "text": "2026-10-17T11:32:15.9322610Z 37: 2026-10-17T11:32:15 critical [153501] [LogFilteredData::findLogDataLine@835] Index too big in LogFilteredData: 1 cache size 1"
+    },
+    {
+      "line": 4915,
+      "text": "2026-10-17T11:32:15.9324430Z 37: 2026-10-17T11:32:15 critical [153501] [LogFilteredData::findLogDataLine@835] Index too big in LogFilteredData: 2 cache size 1"
+    },
+    {
+      "line": 4916,
+      "text": "2026-10-17T11:32:15.9326400Z 37: 2026-10-17T11:32:15 critical [153501] [LogFilteredData::findLogDataLine@835] Index too big in LogFilteredData: 3 cache size 1"
+    },
+    {
+      "line": 4917,
+      "text": "2026-10-17T11:32:15.9329200Z 37: 2026-10-17T11:32:15 critical [153501] [LogFilteredData::findLogDataLine@835] Index too big in LogFilteredData: 4 cache size 1"
+    },
+    {
+      "line": 4918,
+      "text": "2026-10-17T11:32:15.9871930Z 37: 2026-10-17T11:32:15 critical [153501] [SessionInfo::retrieveFromStorage@100] Unknown version of session, ignoring it..."
+    },
+    {
+      "line": 4919,
+      "text": "2026-10-17T11:32:16.1247500Z 37: 2026-10-17T11:32:16 critical [153501] [SessionInfo::retrieveFromStorage@100] Unknown version of session, ignoring it..."
+    },
+    {
+      "line": 4920,
+      "text": "2026-10-17T11:32:16.3945890Z 37: 2026-10-17T11:32:16 critical [153501] [SessionInfo::retrieveFromStorage@100] Unknown version of session, ignoring it..."
+    },
+    {
+      "line": 4921,
+      "text": "2026-10-17T11:32:16.6607220Z 37: 2026-10-17T11:32:16 critical [153501] [SessionInfo::retrieveFromStorage@100] Unknown version of session, ignoring it..."
+    },
+    {
+      "line": 6233,
+      "text": "2026-10-17T11:34:00.8569510Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredData::updateSearchResultsCache@669] LogFilteredData: caching results for key \"new\"_0_2"
+    },
+    {
+      "line": 6234,
+      "text": "2026-10-17T11:34:00.8572380Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredData::updateSearchResultsCache@679] LogFilteredData: cache size 0"
+    },
+    {
+      "line": 6235,
+      "text": "2026-10-17T11:34:00.8575560Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredData::handleSearchProgressed@742] Matches size \"0.01 \", marks size \"0.01 \", union size \"0.01 \""
+    },
+    {
+      "line": 6236,
+      "text": "2026-10-17T11:34:00.8578190Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredDataWorker::interrupt@618] Search interruption requested"
+    },
+    {
+      "line": 6237,
+      "text": "2026-10-17T11:34:00.8580430Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredData::runSearch@162] Search cache key: \"new\"_0_2"
+    },
+    {
+      "line": 6238,
+      "text": "2026-10-17T11:34:00.8582280Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredData::runSearch@169] Got result from cache"
+    },
+    {
+      "line": 6252,
+      "text": "2026-10-17T11:34:00.8781370Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredData::updateSearchResultsCache@669] LogFilteredData: caching results for key \"new\"_0_2"
+    },
+    {
+      "line": 6253,
+      "text": "2026-10-17T11:34:00.8784070Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredData::updateSearchResultsCache@679] LogFilteredData: cache size 1"
+    },
+    {
+      "line": 6254,
+      "text": "2026-10-17T11:34:00.8785750Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredData::handleSearchProgressed@742] Matches size \"0.02 \", marks size \"0.01 \", union size \"0.02 \""
+    },
+    {
+      "line": 6255,
+      "text": "2026-10-17T11:34:00.8787330Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredDataWorker::interrupt@618] Search interruption requested"
+    },
+    {
+      "line": 6256,
+      "text": "2026-10-17T11:34:00.8788640Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredDataWorker::interrupt@618] Search interruption requested"
+    },
+    {
+      "line": 6257,
+      "text": "2026-10-17T11:34:00.8790010Z 33: 2026-10-17T11:34:00 info [152585] [LogFilteredDataWorker::interrupt@618] Search interruption requested"
+    },
+    {
+      "line": 6317,
+      "text": "2026-10-17T11:34:01.6031820Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::updateSearchResultsCache@669] LogFilteredData: caching results for key \"ERROR\"_0_10000"
+    },
+    {
+      "line": 6318,
+      "text": "2026-10-17T11:34:01.6033980Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::updateSearchResultsCache@679] LogFilteredData: cache size 1000"
+    },
+    {
+      "line": 6319,
+      "text": "2026-10-17T11:34:01.6035660Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::handleSearchProgressed@742] Matches size \"1.98 KiB\", marks size \"0.01 \", union size \"1.98 KiB\""
+    },
+    {
+      "line": 6320,
+      "text": "2026-10-17T11:34:01.6103740Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 15000 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6321,
+      "text": "2026-10-17T11:34:01.6170660Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 20000 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6322,
+      "text": "2026-10-17T11:34:01.6172960Z 33: 2026-10-17T11:34:01 info [166123] [SearchOperation::doSearch@762] Searching from line 9999 to 20000"
+    },
+    {
+      "line": 6360,
+      "text": "2026-10-17T11:34:01.7076400Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::updateSearchResultsCache@669] LogFilteredData: caching results for key \"ERROR\"_0_1000"
+    },
+    {
+      "line": 6361,
+      "text": "2026-10-17T11:34:01.7078260Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::updateSearchResultsCache@679] LogFilteredData: cache size 100"
+    },
+    {
+      "line": 6362,
+      "text": "2026-10-17T11:34:01.7079940Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::handleSearchProgressed@742] Matches size \"0.22 \", marks size \"0.01 \", union size \"0.22 \""
+    },
+    {
+      "line": 6363,
+      "text": "2026-10-17T11:34:01.7081800Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 1000 to 1010 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6364,
+      "text": "2026-10-17T11:34:01.7147600Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 1000 to 1020 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6365,
+      "text": "2026-10-17T11:34:01.7512770Z 33: 2026-10-17T11:34:01 info [166133] [SearchOperation::doSearch@762] Searching from line 999 to 1030"
+    },
+    {
+      "line": 6385,
+      "text": "2026-10-17T11:34:01.8869080Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::updateSearchResultsCache@669] LogFilteredData: caching results for key \"ERROR\"_0_10000"
+    },
+    {
+      "line": 6386,
+      "text": "2026-10-17T11:34:01.8870730Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::updateSearchResultsCache@679] LogFilteredData: cache size 1000"
+    },
+    {
+      "line": 6387,
+      "text": "2026-10-17T11:34:01.8872390Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredData::handleSearchProgressed@742] Matches size \"1.98 KiB\", marks size \"0.01 \", union size \"1.98 KiB\""
+    },
+    {
+      "line": 6388,
+      "text": "2026-10-17T11:34:01.9130750Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 10001 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6389,
+      "text": "2026-10-17T11:34:01.9197870Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 15001 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6390,
+      "text": "2026-10-17T11:34:01.9268910Z 33: 2026-10-17T11:34:01 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 20001 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6430,
+      "text": "2026-10-17T11:34:02.1524770Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::updateSearchResultsCache@669] LogFilteredData: caching results for key \"ERROR\"_0_10000"
+    },
+    {
+      "line": 6431,
+      "text": "2026-10-17T11:34:02.1526500Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::updateSearchResultsCache@679] LogFilteredData: cache size 1000"
+    },
+    {
+      "line": 6432,
+      "text": "2026-10-17T11:34:02.1528150Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::handleSearchProgressed@742] Matches size \"1.98 KiB\", marks size \"0.01 \", union size \"1.98 KiB\""
+    },
+    {
+      "line": 6433,
+      "text": "2026-10-17T11:34:02.1530060Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 10500 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6434,
+      "text": "2026-10-17T11:34:02.1538140Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 11000 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6435,
+      "text": "2026-10-17T11:34:02.1545630Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 11500 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6458,
+      "text": "2026-10-17T11:34:02.2519320Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::updateSearchResultsCache@669] LogFilteredData: caching results for key \"ERROR\"_0_10000"
+    },
+    {
+      "line": 6459,
+      "text": "2026-10-17T11:34:02.2520960Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::updateSearchResultsCache@679] LogFilteredData: cache size 1000"
+    },
+    {
+      "line": 6460,
+      "text": "2026-10-17T11:34:02.2522610Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::handleSearchProgressed@742] Matches size \"1.98 KiB\", marks size \"0.01 \", union size \"1.98 KiB\""
+    },
+    {
+      "line": 6461,
+      "text": "2026-10-17T11:34:02.2789700Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 30000 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6462,
+      "text": "2026-10-17T11:34:02.3918710Z 33: 2026-10-17T11:34:02 info [166147] [SearchOperation::doSearch@762] Searching from line 9999 to 30000"
+    },
+    {
+      "line": 6463,
+      "text": "2026-10-17T11:34:02.3920750Z 33: 2026-10-17T11:34:02 info [166147] [SearchOperation::doSearch@796] Using 1 matching threads (range=20001 chunk=10000)"
+    },
+    {
+      "line": 6496,
+      "text": "2026-10-17T11:34:02.5549150Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::updateSearchResultsCache@669] LogFilteredData: caching results for key \"ERROR\"_0_10000"
+    },
+    {
+      "line": 6497,
+      "text": "2026-10-17T11:34:02.5550880Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::updateSearchResultsCache@679] LogFilteredData: cache size 1000"
+    },
+    {
+      "line": 6498,
+      "text": "2026-10-17T11:34:02.5552580Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredData::handleSearchProgressed@742] Matches size \"1.98 KiB\", marks size \"0.01 \", union size \"1.98 KiB\""
+    },
+    {
+      "line": 6499,
+      "text": "2026-10-17T11:34:02.6049370Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 20000 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6500,
+      "text": "2026-10-17T11:34:02.6526860Z 33: 2026-10-17T11:34:02 info [152585] [LogFilteredDataWorker::updateSearch@362] Live search update requested from 10000 to 30000 (async dispatch, gen 2)"
+    },
+    {
+      "line": 6501,
+      "text": "2026-10-17T11:34:02.6530920Z 33: 2026-10-17T11:34:02 info [166153] [SearchOperation::doSearch@762] Searching from line 9999 to 30000"
+    },
+    {
+      "line": 7407,
+      "text": "2026-10-17T11:36:31.0251260Z \u001b[36;1mccache --set-config=compression=true\u001b[0m"
+    },
+    {
+      "line": 7408,
+      "text": "2026-10-17T11:36:31.0251890Z \u001b[36;1mccache --set-config=compression_level=6\u001b[0m"
+    },
+    {
+      "line": 7409,
+      "text": "2026-10-17T11:36:31.0252450Z \u001b[36;1mccache --max-size=250M\u001b[0m"
+    },
+    {
+      "line": 7410,
+      "text": "2026-10-17T11:36:31.0252900Z \u001b[36;1mccache --cleanup\u001b[0m"
+    },
+    {
+      "line": 7411,
+      "text": "2026-10-17T11:36:31.0484870Z shell: /bin/sh -e {0}"
+    },
+    {
+      "line": 7412,
+      "text": "2026-10-17T11:36:31.0485300Z env:"
+    },
+    {
+      "line": 7453,
+      "text": "2026-10-17T11:36:31.0515820Z ##[endgroup]"
+    },
+    {
+      "line": 7454,
+      "text": "2026-10-17T11:36:31.1476930Z Set cache size limit to 250.0 MB"
+    },
+    {
+      "line": 7455,
+      "text": "2026-10-17T11:36:31.3827620Z Removed data:  0 bytes"
+    },
+    {
+      "line": 7456,
+      "text": "2026-10-17T11:36:31.3828550Z Removed files: 0"
+    },
+    {
+      "line": 7457,
+      "text": "2026-10-17T11:36:31.4007590Z ##[group]Run actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+    },
+    {
+      "line": 7458,
+      "text": "2026-10-17T11:36:31.4008630Z with:"
+    },
+    {
+      "line": 7459,
+      "text": "2026-10-17T11:36:31.4009240Z   path: /Users/runner/work/klogg/klogg/.ccache"
+    },
+    {
+      "line": 7460,
+      "text": "2026-10-17T11:36:31.4010030Z   key: intel-qt6-first-party-tsan-ccache-pr-v1-79-2026-10-17"
+    },
+    {
+      "line": 7461,
+      "text": "2026-10-17T11:36:31.4010780Z   enableCrossOsArchive: false"
+    },
+    {
+      "line": 7462,
+      "text": "2026-10-17T11:36:31.4011500Z env:"
+    },
+    {
+      "line": 7463,
+      "text": "2026-10-17T11:36:31.4011950Z   KLOGG_CI_IMAGE_PREFIX: zeacent/klogg"
+    },
+    {
+      "line": 7464,
+      "text": "2026-10-17T11:36:31.4012550Z   KLOGG_VERSION: 26.10.17.1320"
+    },
+    {
+      "line": 7506,
+      "text": "2026-10-17T11:36:33.7613100Z Sent 96032169 of 96032169 (100.0%), 67.6 MBs/sec"
+    },
+    {
+      "line": 7507,
+      "text": "2026-10-17T11:36:33.8471490Z Cache saved with key: intel-qt6-first-party-tsan-ccache-pr-v1-79-2026-10-17"
+    },
+    {
+      "line": 7508,
+      "text": "2026-10-17T11:36:33.8763690Z Post job cleanup."
+    },
+    {
+      "line": 7509,
+      "text": "2026-10-17T11:36:33.8772500Z ##[start-action display=Install Qt;id=__35f17b2a-2479-44fe-866e-b2b9e401caf3.__jurplel_install-qt-action]"
+    },
+    {
+      "line": 7510,
+      "text": "2026-10-17T11:36:33.9008100Z Post job cleanup."
+    },
+    {
+      "line": 7511,
+      "text": "2026-10-17T11:36:33.9013550Z ##[start-action display=Setup Python;id=__35f17b2a-2479-44fe-866e-b2b9e401caf3.__jurplel_install-qt-action.__actions_setup-python]"
+    }
+  ]
+}

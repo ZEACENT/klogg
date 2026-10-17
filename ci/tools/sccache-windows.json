@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "version": "0.18.0",
+  "archive_url": "https://github.com/mozilla/sccache/releases/download/v0.18.0/sccache-v0.18.0-x86_64-pc-windows-msvc.zip",
+  "archive_sha256": "8965c74d5e8a225244f741e18ad2f3f504f48228dc1bac948fc22761a348363d",
+  "member": "sccache-v0.18.0-x86_64-pc-windows-msvc/sccache.exe",
+  "license": "Apache-2.0",
+  "cache_budget_bytes": {
+    "x64-qt6": 1073741824,
+    "x86-qt5": 536870912,
+    "x64-qt6-asan": 2147483648
+  }
+}

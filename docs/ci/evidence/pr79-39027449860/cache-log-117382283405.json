@@ -1,0 +1,151 @@
+{
+  "job_id": 117382283405,
+  "job_name": "Linux ubuntu-22.04-deb [vs-gen]",
+  "run_id": 39027449860,
+  "head_sha": "f4c3d005ca2204b23489855988175ecd6f994e48",
+  "source": "https://api.github.com/repos/ZEACENT/klogg/actions/jobs/117382283405/logs",
+  "log_sha256": "337c901c5660abb57026c659607f3ef62c4a3ce53ce85341dce2edaa7ab53dd0",
+  "note": "Exact selected log lines with original 1-based line numbers; ccache -s totals are accumulated, NOT current-build deltas.",
+  "lines": [
+    {
+      "line": 535,
+      "text": "2026-10-17T11:14:24.8907221Z   path: /home/runner/work/klogg/klogg/.ccache"
+    },
+    {
+      "line": 536,
+      "text": "2026-10-17T11:14:24.8907570Z   key: ubuntu-22.04-deb-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 537,
+      "text": "2026-10-17T11:14:24.8907922Z   restore-keys: ubuntu-22.04-deb-ccache-v2-"
+    },
+    {
+      "line": 538,
+      "text": ""
+    },
+    {
+      "line": 539,
+      "text": "2026-10-17T11:14:24.8908251Z   enableCrossOsArchive: false"
+    },
+    {
+      "line": 540,
+      "text": "2026-10-17T11:14:24.8908538Z   fail-on-cache-miss: false"
+    },
+    {
+      "line": 541,
+      "text": "2026-10-17T11:14:24.8908820Z   lookup-only: false"
+    },
+    {
+      "line": 562,
+      "text": "2026-10-17T11:14:24.8916769Z ##[endgroup]"
+    },
+    {
+      "line": 563,
+      "text": "2026-10-17T11:14:25.1375124Z Cache hit for: ubuntu-22.04-deb-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 564,
+      "text": "2026-10-17T11:14:26.2709649Z Received 134217728 of 409897975 (32.7%), 127.9 MBs/sec"
+    },
+    {
+      "line": 565,
+      "text": "2026-10-17T11:14:27.2798244Z Received 394264576 of 409897975 (96.2%), 187.5 MBs/sec"
+    },
+    {
+      "line": 566,
+      "text": "2026-10-17T11:14:27.4774296Z Received 409897975 of 409897975 (100.0%), 177.0 MBs/sec"
+    },
+    {
+      "line": 567,
+      "text": "2026-10-17T11:14:27.4776466Z Cache Size: ~391 MB (409897975 B)"
+    },
+    {
+      "line": 568,
+      "text": "2026-10-17T11:14:27.4894998Z [command]/usr/bin/tar -xf /home/runner/work/_temp/91137359-c670-43a7-9070-1e26d9efa77a/cache.tzst -P -C /home/runner/work/klogg/klogg --use-compress-program unzstd"
+    },
+    {
+      "line": 569,
+      "text": "2026-10-17T11:14:27.9702533Z Cache restored successfully"
+    },
+    {
+      "line": 570,
+      "text": "2026-10-17T11:14:28.0313025Z Cache restored from key: ubuntu-22.04-deb-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 571,
+      "text": "2026-10-17T11:14:28.0444328Z Prepare all required actions"
+    },
+    {
+      "line": 572,
+      "text": "2026-10-17T11:14:28.0505262Z ##[group]Run ./.github/actions/prepare-workspace-env"
+    },
+    {
+      "line": 573,
+      "text": "2026-10-17T11:14:28.0505619Z with:"
+    },
+    {
+      "line": 574,
+      "text": "2026-10-17T11:14:28.0505925Z   arch: x64"
+    },
+    {
+      "line": 2475,
+      "text": "2026-10-17T11:20:42.7530159Z Summary:"
+    },
+    {
+      "line": 2476,
+      "text": "2026-10-17T11:20:42.7530568Z   Hits:             947 / 1906 (49.69 %)"
+    },
+    {
+      "line": 2477,
+      "text": "2026-10-17T11:20:42.7531062Z     Direct:         938 / 1906 (49.21 %)"
+    },
+    {
+      "line": 2478,
+      "text": "2026-10-17T11:20:42.7532298Z     Preprocessed:     9 /  968 (0.93 %)"
+    },
+    {
+      "line": 2479,
+      "text": "2026-10-17T11:20:42.7532674Z   Misses:           959"
+    },
+    {
+      "line": 2480,
+      "text": "2026-10-17T11:20:42.7532962Z     Direct:         968"
+    },
+    {
+      "line": 2481,
+      "text": "2026-10-17T11:20:42.7533234Z     Preprocessed:   959"
+    },
+    {
+      "line": 2482,
+      "text": "2026-10-17T11:20:42.7533504Z Primary storage:"
+    },
+    {
+      "line": 2483,
+      "text": "2026-10-17T11:20:42.7533771Z   Hits:            1886 / 3812 (49.48 %)"
+    },
+    {
+      "line": 2484,
+      "text": "2026-10-17T11:20:42.7534065Z   Misses:          1926"
+    },
+    {
+      "line": 2485,
+      "text": "2026-10-17T11:20:42.7534335Z   Cache size (GB): 0.42 / 2.00 (21.04 %)"
+    },
+    {
+      "line": 2486,
+      "text": "2026-10-17T11:20:42.7534530Z "
+    },
+    {
+      "line": 2487,
+      "text": "2026-10-17T11:20:42.7534700Z Use the -v/--verbose option for more details."
+    },
+    {
+      "line": 2488,
+      "text": "2026-10-17T11:20:42.8465377Z Prepare all required actions"
+    },
+    {
+      "line": 2489,
+      "text": "2026-10-17T11:20:42.8520867Z ##[group]Run ./.github/actions/docker-run-tests"
+    }
+  ]
+}

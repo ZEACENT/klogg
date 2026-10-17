@@ -1,0 +1,866 @@
+{
+  "build_comparisons": [
+    {
+      "cold": {
+        "max_ms": null,
+        "p50_ms": null,
+        "samples": 0
+      },
+      "complete": false,
+      "current_run_cache_hit_percent": [],
+      "identity": {
+        "arch": null,
+        "build_type": null,
+        "cache_tool": "ccache",
+        "cmake_options": null,
+        "compilers": null,
+        "config": null,
+        "environment": null,
+        "object_cache": "measured",
+        "sha": null
+      },
+      "issues": [
+        "missing SHA/toolchain/environment/architecture/configuration identity",
+        "missing or duplicate run/attempt sample",
+        "requires at least one cold and three distinct comparable warm runs"
+      ],
+      "warm": {
+        "max_ms": null,
+        "p50_ms": null,
+        "samples": 0
+      }
+    },
+    {
+      "cold": {
+        "max_ms": null,
+        "p50_ms": null,
+        "samples": 0
+      },
+      "complete": false,
+      "current_run_cache_hit_percent": [],
+      "identity": {
+        "arch": null,
+        "build_type": null,
+        "cache_tool": null,
+        "cmake_options": null,
+        "compilers": null,
+        "config": null,
+        "environment": null,
+        "object_cache": "disabled",
+        "sha": null
+      },
+      "issues": [
+        "missing SHA/toolchain/environment/architecture/configuration identity",
+        "missing or duplicate run/attempt sample",
+        "requires at least one cold and three distinct comparable warm runs"
+      ],
+      "warm": {
+        "max_ms": null,
+        "p50_ms": null,
+        "samples": 0
+      }
+    }
+  ],
+  "runs": [
+    {
+      "api_envelope_seconds": 3037.0,
+      "build_metrics": [
+        {
+          "artifact_id": 12100410627,
+          "artifact_name": "build-metrics-x64-qt6-vs-avx2",
+          "build_wall_ms": 1574000,
+          "current_run_cache_hit_percent": null,
+          "object_cache": "disabled",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099886085,
+          "artifact_name": "build-metrics-intel-qt6-first-party-tsan-tsan",
+          "build_wall_ms": 1155925,
+          "current_run_cache_hit_percent": 0.13850415512465375,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099796034,
+          "artifact_name": "build-metrics-ubuntu-26.04-deb-vs-gen",
+          "build_wall_ms": 453977,
+          "current_run_cache_hit_percent": 99.3704092339979,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099521066,
+          "artifact_name": "build-metrics-ubuntu-24.04-deb-vs-gen",
+          "build_wall_ms": 386818,
+          "current_run_cache_hit_percent": 99.36908517350157,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099441511,
+          "artifact_name": "build-metrics-x64-qt6-asan-asan",
+          "build_wall_ms": 851234,
+          "current_run_cache_hit_percent": null,
+          "object_cache": "disabled",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099438485,
+          "artifact_name": "build-metrics-intel-qt6-vs-gen",
+          "build_wall_ms": 1562776,
+          "current_run_cache_hit_percent": 0.4155124653739612,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099400987,
+          "artifact_name": "build-metrics-ubuntu-22.04-asan-lsan-asan",
+          "build_wall_ms": 59777,
+          "current_run_cache_hit_percent": 99.16434540389972,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099236650,
+          "artifact_name": "build-metrics-ubuntu-20.04-appimage-vs-gen",
+          "build_wall_ms": 337029,
+          "current_run_cache_hit_percent": 99.3704092339979,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099212607,
+          "artifact_name": "build-metrics-ubuntu-22.04-deb-vs-gen",
+          "build_wall_ms": 356183,
+          "current_run_cache_hit_percent": 99.3704092339979,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099193120,
+          "artifact_name": "build-metrics-x86-qt5-QTRegex",
+          "build_wall_ms": 791953,
+          "current_run_cache_hit_percent": null,
+          "object_cache": "disabled",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099053703,
+          "artifact_name": "build-metrics-ubuntu-22.04-tsan-tsan",
+          "build_wall_ms": 519432,
+          "current_run_cache_hit_percent": null,
+          "object_cache": "disabled",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12099014956,
+          "artifact_name": "build-metrics-arm64-qt6-vs-arm64",
+          "build_wall_ms": 581862,
+          "current_run_cache_hit_percent": 84.72222222222223,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12098959884,
+          "artifact_name": "build-metrics-intel-qt6-asan-ubsan-asan-ubsan",
+          "build_wall_ms": 187356,
+          "current_run_cache_hit_percent": 99.16897506925208,
+          "object_cache": "measured",
+          "provenance": null
+        },
+        {
+          "artifact_id": 12098408970,
+          "artifact_name": "build-metrics-ubuntu-22.04-ubsan-ubsan",
+          "build_wall_ms": 69898,
+          "current_run_cache_hit_percent": 99.16434540389972,
+          "object_cache": "measured",
+          "provenance": null
+        }
+      ],
+      "collection_errors": [],
+      "critical_path": {
+        "definition": "longest dependency chain of execution durations; excludes queue",
+        "execution_seconds": 3014.0,
+        "job_ids": [
+          "117381133116",
+          "117381147647",
+          "117381229746",
+          "117381351286",
+          "117383775211",
+          "117390218181"
+        ]
+      },
+      "head_sha": "f4c3d005ca2204b23489855988175ecd6f994e48",
+      "initial_queue_seconds": 0.0,
+      "jobs": [
+        {
+          "conclusion": "success",
+          "execution_seconds": 75.0,
+          "id": "117381132997",
+          "name": "Release and platform-fragile preflight",
+          "needs_wait_seconds": 0.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 63.0,
+            "package": null,
+            "prepare": 7.0,
+            "test": null,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 4.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 23.0,
+          "id": "117381133115",
+          "name": "Prefetch Windows MSYS2 tools",
+          "needs_wait_seconds": 0.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 17.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": 4.0
+          },
+          "pre_start_seconds": 4.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 2.0,
+          "id": "117381133116",
+          "name": "Native dependency dispatch preflight",
+          "needs_wait_seconds": 0.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 1.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": null
+          },
+          "pre_start_seconds": 4.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 11.0,
+          "id": "117381133158",
+          "name": "Prefetch Boost",
+          "needs_wait_seconds": 0.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 6.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": 4.0
+          },
+          "pre_start_seconds": 4.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 8.0,
+          "id": "117381133160",
+          "name": "Prefetch Windows Qt 5 OpenSSL",
+          "needs_wait_seconds": 0.0,
+          "phases_seconds": {
+            "cache": 1.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 2.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 4.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 35.0,
+          "id": "117381133229",
+          "name": "Prefetch CPM cache",
+          "needs_wait_seconds": 0.0,
+          "phases_seconds": {
+            "cache": 24.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 3.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": 5.0
+          },
+          "pre_start_seconds": 4.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 4.0,
+          "id": "117381133322",
+          "name": "Prefetch linuxdeployqt",
+          "needs_wait_seconds": 0.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 1.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 4.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 24.0,
+          "id": "117381147647",
+          "name": "Prefetch locked ADB helper source closure",
+          "needs_wait_seconds": 6.0,
+          "phases_seconds": {
+            "cache": 0.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 16.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": 5.0
+          },
+          "pre_start_seconds": 9.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 6.0,
+          "id": "117381147651",
+          "name": "Resolve build version",
+          "needs_wait_seconds": 6.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 3.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 9.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 8.0,
+          "id": "117381147669",
+          "name": "Prefetch locked iOS native sources",
+          "needs_wait_seconds": 6.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 4.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 8.0,
+          "queue_after_ready_seconds": 2.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 299.0,
+          "id": "117381181356",
+          "name": "iOS native stack arm64",
+          "needs_wait_seconds": 16.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 284.0,
+            "package": null,
+            "prepare": 4.0,
+            "test": null,
+            "upload": 7.0
+          },
+          "pre_start_seconds": 25.0,
+          "queue_after_ready_seconds": 9.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 449.0,
+          "id": "117381181390",
+          "name": "iOS native stack x86_64",
+          "needs_wait_seconds": 16.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 423.0,
+            "package": null,
+            "prepare": 6.0,
+            "test": null,
+            "upload": 6.0
+          },
+          "pre_start_seconds": 22.0,
+          "queue_after_ready_seconds": 6.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 39.0,
+          "id": "117381229746",
+          "name": "Build ADB helper legal assets",
+          "needs_wait_seconds": 33.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 21.0,
+            "package": null,
+            "prepare": 12.0,
+            "test": null,
+            "upload": 3.0
+          },
+          "pre_start_seconds": 36.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 305.0,
+          "id": "117381351265",
+          "name": "Source-built ADB helper macos-arm64",
+          "needs_wait_seconds": 75.0,
+          "phases_seconds": {
+            "cache": 14.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 248.0,
+            "package": null,
+            "prepare": 32.0,
+            "test": null,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 85.0,
+          "queue_after_ready_seconds": 10.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 792.0,
+          "id": "117381351286",
+          "name": "Source-built ADB helper macos-x86_64",
+          "needs_wait_seconds": 75.0,
+          "phases_seconds": {
+            "cache": 31.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 736.0,
+            "package": null,
+            "prepare": 10.0,
+            "test": null,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 82.0,
+          "queue_after_ready_seconds": 7.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 304.0,
+          "id": "117381351303",
+          "name": "Source-built ADB helper linux-x86_64",
+          "needs_wait_seconds": 75.0,
+          "phases_seconds": {
+            "cache": 9.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 278.0,
+            "package": null,
+            "prepare": 10.0,
+            "test": null,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 79.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 215.0,
+          "id": "117381351339",
+          "name": "Source-built ADB helper linux-arm64",
+          "needs_wait_seconds": 75.0,
+          "phases_seconds": {
+            "cache": 7.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 201.0,
+            "package": null,
+            "prepare": 4.0,
+            "test": null,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 81.0,
+          "queue_after_ready_seconds": 6.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 578.0,
+          "id": "117381351364",
+          "name": "Source-built ADB helper windows-x86_64",
+          "needs_wait_seconds": 75.0,
+          "phases_seconds": {
+            "cache": 18.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 526.0,
+            "package": null,
+            "prepare": 25.0,
+            "test": null,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 78.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 1589.0,
+          "id": "117381363806",
+          "name": "Windows x64-qt6 ASan [asan]",
+          "needs_wait_seconds": 79.0,
+          "phases_seconds": {
+            "cache": 12.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 886.0,
+            "other": 15.0,
+            "package": null,
+            "prepare": 119.0,
+            "test": 553.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 82.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 1254.0,
+          "id": "117381363842",
+          "name": "Windows x86-qt5 [QTRegex]",
+          "needs_wait_seconds": 79.0,
+          "phases_seconds": {
+            "cache": 16.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 821.0,
+            "other": 15.0,
+            "package": null,
+            "prepare": 142.0,
+            "test": 254.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 82.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 483.0,
+          "id": "117381363846",
+          "name": "Linux ubuntu-22.04-asan-lsan [asan]",
+          "needs_wait_seconds": 79.0,
+          "phases_seconds": {
+            "cache": 14.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 71.0,
+            "other": 4.0,
+            "package": null,
+            "prepare": 46.0,
+            "test": 343.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 82.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 794.0,
+          "id": "117381363884",
+          "name": "Linux ubuntu-22.04-tsan [tsan]",
+          "needs_wait_seconds": 79.0,
+          "phases_seconds": {
+            "cache": 10.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 532.0,
+            "other": 3.0,
+            "package": null,
+            "prepare": 47.0,
+            "test": 198.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 82.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 1705.0,
+          "id": "117381363909",
+          "name": "macOS intel-qt6-first-party-tsan [tsan]",
+          "needs_wait_seconds": 79.0,
+          "phases_seconds": {
+            "cache": 13.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 1197.0,
+            "other": 22.0,
+            "package": null,
+            "prepare": 128.0,
+            "test": 342.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 83.0,
+          "queue_after_ready_seconds": 4.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 945.0,
+          "id": "117381363939",
+          "name": "macOS intel-qt6-asan-ubsan [asan-ubsan]",
+          "needs_wait_seconds": 79.0,
+          "phases_seconds": {
+            "cache": 38.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 270.0,
+            "other": 39.0,
+            "package": null,
+            "prepare": 242.0,
+            "test": 348.0,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 341.0,
+          "queue_after_ready_seconds": 262.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 295.0,
+          "id": "117381363949",
+          "name": "Linux ubuntu-22.04-ubsan [ubsan]",
+          "needs_wait_seconds": 79.0,
+          "phases_seconds": {
+            "cache": 13.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 79.0,
+            "other": 4.0,
+            "package": null,
+            "prepare": 48.0,
+            "test": 147.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 82.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 792.0,
+          "id": "117382283400",
+          "name": "Linux ubuntu-26.04-deb [vs-gen]",
+          "needs_wait_seconds": 383.0,
+          "phases_seconds": {
+            "cache": 18.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 471.0,
+            "other": 5.0,
+            "package": 80.0,
+            "prepare": 57.0,
+            "test": 155.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 386.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 687.0,
+          "id": "117382283405",
+          "name": "Linux ubuntu-22.04-deb [vs-gen]",
+          "needs_wait_seconds": 383.0,
+          "phases_seconds": {
+            "cache": 18.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 373.0,
+            "other": 3.0,
+            "package": 90.0,
+            "prepare": 51.0,
+            "test": 148.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 386.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 723.0,
+          "id": "117382283406",
+          "name": "Linux ubuntu-24.04-deb [vs-gen]",
+          "needs_wait_seconds": 383.0,
+          "phases_seconds": {
+            "cache": 19.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 404.0,
+            "other": 6.0,
+            "package": 92.0,
+            "prepare": 51.0,
+            "test": 148.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 386.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 674.0,
+          "id": "117382283415",
+          "name": "Linux ubuntu-20.04-appimage [vs-gen]",
+          "needs_wait_seconds": 383.0,
+          "phases_seconds": {
+            "cache": 16.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 353.0,
+            "other": 3.0,
+            "package": 91.0,
+            "prepare": 61.0,
+            "test": 146.0,
+            "upload": 1.0
+          },
+          "pre_start_seconds": 386.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 1031.0,
+          "id": "117382305858",
+          "name": "macOS arm64-qt6 [vs-arm64]",
+          "needs_wait_seconds": 390.0,
+          "phases_seconds": {
+            "cache": 15.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 612.0,
+            "other": 25.0,
+            "package": 67.0,
+            "prepare": 72.0,
+            "test": 235.0,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 396.0,
+          "queue_after_ready_seconds": 6.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 2108.0,
+          "id": "117383118152",
+          "name": "Windows x64-qt6 [vs-avx2]",
+          "needs_wait_seconds": 656.0,
+          "phases_seconds": {
+            "cache": 13.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 1609.0,
+            "other": 18.0,
+            "package": 79.0,
+            "prepare": 132.0,
+            "test": 252.0,
+            "upload": 2.0
+          },
+          "pre_start_seconds": 659.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 2155.0,
+          "id": "117383775211",
+          "name": "macOS intel-qt6 [vs-gen]",
+          "needs_wait_seconds": 874.0,
+          "phases_seconds": {
+            "cache": 22.0,
+            "compile": null,
+            "configure": null,
+            "configure_compile": 1604.0,
+            "other": 27.0,
+            "package": 92.0,
+            "prepare": 145.0,
+            "test": 256.0,
+            "upload": 4.0
+          },
+          "pre_start_seconds": 877.0,
+          "queue_after_ready_seconds": 3.0
+        },
+        {
+          "conclusion": "success",
+          "execution_seconds": 2.0,
+          "id": "117390218181",
+          "name": "ci-gate",
+          "needs_wait_seconds": 3032.0,
+          "phases_seconds": {
+            "cache": null,
+            "compile": null,
+            "configure": null,
+            "configure_compile": null,
+            "other": 0.0,
+            "package": null,
+            "prepare": null,
+            "test": null,
+            "upload": null
+          },
+          "pre_start_seconds": 3034.0,
+          "queue_after_ready_seconds": 2.0
+        }
+      ],
+      "observed_wall_seconds": 3036.0,
+      "run_attempt": 1,
+      "run_id": 39027449860,
+      "successful": true,
+      "sum_job_seconds": 18414.0
+    }
+  ],
+  "schema_version": 1
+}
