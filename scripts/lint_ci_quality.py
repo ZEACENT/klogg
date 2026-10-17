@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import itertools
 import json
 import math
@@ -50,21 +49,6 @@ LIST_ITEM_RE = re.compile(r"^(?P<indent>\s*)-(?:\s+|$)")
 KEY_VALUE_RE = re.compile(r"^(?P<indent>\s*)(?:-\s*)?(?P<key>[\w-]+):\s*(?P<value>.*)$")
 BROAD_SUPPRESSION_RE = re.compile(
     r"^(?:race|leak):.*\*(?:Qt|tbb|mimalloc|glib)\*", re.MULTILINE
-)
-BROAD_CPPCHECK_IDS = (
-    "functionStatic",
-    "noExplicitConstructor",
-    "returnByReference",
-    "constParameterPointer",
-    "constParameterReference",
-    "constVariable",
-    "shadowFunction",
-    "variableScope",
-    "unreadVariable",
-    "assignBoolToFloat",
-    "useStlAlgorithm",
-    "useInitializationList",
-    "missingOverride",
 )
 
 CI_BUILD_REQUIRED_JOBS = {
@@ -2918,51 +2902,6 @@ def shell_tokens(command: str) -> list[str]:
         return []
 
 
-def xargs_bash_script_index(tokens: list[str]) -> int | None:
-    if not tokens or tokens[0] != "xargs":
-        return None
-
-    seen_null = False
-    seen_max_args = False
-    seen_parallel = False
-    index = 1
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "-0" and not seen_null:
-            seen_null = True
-            index += 1
-        elif token == "-n" and not seen_max_args and index + 1 < len(tokens):
-            if tokens[index + 1] != "1":
-                return None
-            seen_max_args = True
-            index += 2
-        elif token == "-P" and not seen_parallel and index + 1 < len(tokens):
-            seen_parallel = True
-            index += 2
-        elif token == "bash":
-            if (
-                not seen_null
-                or not seen_max_args
-                or index + 1 >= len(tokens)
-                or tokens[index + 1] != "-c"
-            ):
-                return None
-            return index + 2
-        else:
-            return None
-    return None
-
-
-def clang_tidy_consumes_xargs_argument(script: str) -> bool:
-    tokens = shell_tokens(script)
-    if not tokens or tokens[0] != "clang-tidy":
-        return False
-    for control in (";", "&&", "||", "\n"):
-        if control in tokens:
-            tokens = tokens[: tokens.index(control)]
-    return bool(tokens) and tokens[-1] in {"$1", "${1}"}
-
-
 def cmake_cache_assignments(tokens: list[str], name: str) -> list[str]:
     assignments: list[str] = []
     for index, token in enumerate(tokens):
@@ -2979,18 +2918,6 @@ def cmake_cache_assignments(tokens: list[str], name: str) -> list[str]:
     return assignments
 
 
-def cmake_unsets_cache_entry(tokens: list[str], name: str) -> bool:
-    for index, token in enumerate(tokens):
-        pattern = None
-        if token == "-U" and index + 1 < len(tokens):
-            pattern = tokens[index + 1]
-        elif token.startswith("-U"):
-            pattern = token[2:]
-        if pattern and fnmatch.fnmatchcase(name, pattern):
-            return True
-    return False
-
-
 def option_value(tokens: list[str], option: str) -> str | None:
     try:
         index = tokens.index(option)
@@ -3003,17 +2930,6 @@ def unique_option_value(tokens: list[str], option: str) -> str | None:
     if tokens.count(option) != 1:
         return None
     return option_value(tokens, option)
-
-
-def unique_cmake_option_value(tokens: list[str], option: str) -> str | None:
-    values: list[str] = []
-    for index, token in enumerate(tokens):
-        if token == option and index + 1 < len(tokens):
-            values.append(tokens[index + 1])
-        elif token.startswith(option) and token != option:
-            value = token[len(option) :]
-            values.append(value[1:] if value.startswith("=") else value)
-    return values[0] if len(values) == 1 else None
 
 
 def yaml_scalar_body_lines(lines: list[str]) -> set[int]:
@@ -3865,266 +3781,190 @@ def windows_package_action_issues(text: str) -> list[str]:
     return []
 
 
+SHARED_ANALYSIS_PHASE_MESSAGE = (
+    "shared analysis phases must delegate with exact context and fail closed"
+)
+
+# Workflow-owned event resolution, not analyzer execution policy. The ratchet
+# must run after the complete fail-closed resolver, never inside a branch.
+COVERAGE_EVENT_RESOLVER = """\
+set -euo pipefail
+case "$EVENT_NAME" in
+  pull_request) base_sha="$PR_BASE_SHA" ;;
+  push) base_sha="$PUSH_BASE_SHA" ;;
+  workflow_dispatch) base_sha=$(git rev-parse HEAD^ 2>/dev/null || true) ;;
+  *) echo "::error::unsupported coverage ratchet event: $EVENT_NAME"; exit 1 ;;
+esac
+if [ -z "$base_sha" ] || [[ "$base_sha" =~ ^0+$ ]]; then
+  echo "::error::coverage ratchet base is unavailable for $EVENT_NAME"
+  exit 1
+fi
+if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+  git fetch --no-tags origin "$base_sha"
+fi
+if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+  echo "::error::coverage ratchet base commit $base_sha is unavailable"
+  exit 1
+fi
+"""
+
+
+def shared_analysis_phase_issues(text: str, role: str) -> list[str]:
+    """Validate actual run-step commands against the closed shared phase API.
+
+    Standalone delegation keeps failure propagation and ordering structural;
+    analyzer options and execution policy belong to the shared runner's tests.
+    Report publication and event-base resolution have exact fail-closed command
+    sequences, so additional shell control flow cannot skip or mask a phase.
+    """
+    common = {"--role": role, "--workspace": "$KLOGG_WORKSPACE",
+              "--build-dir": "$KLOGG_BUILD_ROOT"}
+    scope = {"--analysis-mode": "$KLOGG_ANALYSIS_MODE",
+             "--analysis-base-sha": "${KLOGG_ANALYSIS_BASE:-}"}
+    jobs = {"--jobs": "$(nproc)"}
+    if role == "static":
+        job = "static-analysis"
+        phases = {
+            "Configure (generate compile_commands.json)": ("configure", common),
+            "Generate Qt UI headers for analysis": ("static-prepare", {**common, **jobs}),
+            "Run clang-tidy": ("static-tidy", {**common, **scope, **jobs,
+                                               "--clang-tidy-diff": "$CLANG_TIDY_DIFF"}),
+            "Run cppcheck (warning+style over src/)": ("static-cppcheck", {**common, **scope}),
+        }
+    else:
+        job = "coverage"
+        phases = {
+            "Configure (Debug + coverage)": ("configure", {**common,
+                "--cpm-source-cache": "$KLOGG_CPM_SOURCE_CACHE"}),
+            "Build tests": ("coverage-build", {**common, **jobs}),
+            "Run tests": ("coverage-test", {**common, **jobs}),
+            "Generate coverage report": ("coverage-report", {**common,
+                "--report-dir": "$KLOGG_WORKSPACE/coverage_report"}),
+            "Enforce coverage ratchet": ("coverage-ratchet", {
+                "--role": role, "--workspace": "$GITHUB_WORKSPACE",
+                "--report-dir": "$GITHUB_WORKSPACE/coverage_report",
+                "--analysis-base-sha": "$base_sha"}),
+        }
+    failure = [SHARED_ANALYSIS_PHASE_MESSAGE]
+    try:
+        all_steps = workflow_job_steps(text)
+    except ValueError:
+        return failure
+    job_block = workflow_job_blocks(text).get(job)
+    if job_block is None:
+        return failure
+    job_indent = len(job_block[0]) - len(job_block[0].lstrip())
+    if (workflow_mapping_block(job_block, job, job_indent) is None
+            or workflow_job_direct_value(job_block, "if") is not None
+            or workflow_job_direct_value(job_block, "continue-on-error") not in {None, "false"}):
+        return failure
+    seen = []
+    runner = ["sh", "scripts/run_linux_analysis.sh"]
+    obsolete_tools = {"cmake", "ctest", "gcovr", "clang-tidy", "cppcheck"}
+    obsolete_scripts = {"scripts/first_party_compile_units.py",
+                        "scripts/filter_compile_database.py",
+                        "scripts/run_changed_clang_tidy.py",
+                        "scripts/enforce_coverage_ratchet.py"}
+    for owner, steps in all_steps.items():
+        for step in steps:
+            fields, children = workflow_step_fields(step)
+            name = fields.get("name")
+            is_phase = owner == job and name in phases
+            if not is_phase:
+                if name == "Build first-party clang-tidy TU list":
+                    return failure
+                try:
+                    invocations = literal_shell_invocations(fields.get("run", ""))
+                except ValueError:
+                    return failure
+                for command in invocations:
+                    if (command[:2] == runner
+                            or (owner == job and (command[0] in obsolete_tools
+                                or (command[0] == "python3" and len(command) > 1
+                                    and command[1] in obsolete_scripts)))):
+                        return failure
+                continue
+            phase, expected = phases[name]
+            required_fields = {"name", "shell", "run"}
+            if phase == "coverage-ratchet":
+                required_fields.add("env")
+                if children.get("env") != {
+                    "EVENT_NAME": "${{ github.event_name }}",
+                    "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+                    "PUSH_BASE_SHA": "${{ github.event.before }}",
+                }:
+                    return failure
+            # Turn the list item's dash into indentation to reuse the strict
+            # mapping parser: quoted keys and YAML merges must not hide an if,
+            # error mask, or a duplicate field from the simple field reader.
+            mapping = workflow_mapping_block(
+                ["phase:", step[0].replace("-", " ", 1), *step[1:]], "phase", 0
+            )
+            if (mapping is None or set(mapping) != required_fields
+                    or fields.get("shell") != "bash"):
+                return failure
+            commands = environment_shell_commands(step)
+            if phase == "coverage-ratchet":
+                resolver = environment_shell_commands(
+                    ["- run: |"] + ["    " + line for line in COVERAGE_EVENT_RESOLVER.splitlines()]
+                )
+                if commands[:len(resolver)] != resolver:
+                    return failure
+                commands = commands[len(resolver):]
+            elif phase == "coverage-report":
+                if (not commands or commands[0] != ["set", "-euo", "pipefail"]
+                        or commands[-1] != ["cp", "-R", "$KLOGG_WORKSPACE/coverage_report", "$GITHUB_WORKSPACE/"]):
+                    return failure
+                commands = commands[1:-1]
+            elif commands and commands[0] == ["set", "-euo", "pipefail"]:
+                commands = commands[1:]
+            if len(commands) != 1 or commands[0][:3] != runner + [phase]:
+                return failure
+            arguments = commands[0][3:]
+            if len(arguments) % 2:
+                return failure
+            options = dict(zip(arguments[::2], arguments[1::2]))
+            if len(options) * 2 != len(arguments) or options != expected:
+                return failure
+            # POSIX shlex intentionally erases quotes. Preserve the original
+            # words too: '$VAR' is literal data, and unquoted $VAR can split or
+            # glob. Neither is the required single expanded context argument.
+            raw_calls = [command for command in shell_commands("\n".join(step))
+                         if shell_tokens(command)[:3] == runner + [phase]]
+            if len(raw_calls) != 1:
+                return failure
+            try:
+                raw_words = shlex.split(raw_calls[0], posix=False)
+            except ValueError:
+                return failure
+            if len(raw_words) != len(commands[0]) or any(
+                value.startswith("$") and raw_words[index] != f'"{value}"'
+                for index, value in enumerate(commands[0])
+            ):
+                return failure
+            seen.append(name)
+    return [] if seen == list(phases) else failure
+
+
 def static_analysis_workflow_issues(text: str) -> list[str]:
-    commands = shell_commands(text)
-    issues: list[str] = []
-
-    expected_producer = [
-        "python3",
-        "scripts/first_party_compile_units.py",
-        "$KLOGG_BUILD_ROOT/compile_commands.json",
-        "$KLOGG_WORKSPACE/src",
-        "--null",
-        ">",
-        "tidy_files.nul",
-    ]
-    tidy_scope_commands = [
-        command for command in commands if shell_tokens(command) == expected_producer
-    ]
-    if len(tidy_scope_commands) != 1 or any(
-        command.startswith("find src ") and "tidy_files.txt" in command
-        for command in commands
-    ):
-        issues.append(
-            "clang-tidy TU scope must come from the configured compile database"
-        )
-
-    if "/tmp/cc_src.json" in text:
-        has_cppcheck_unit_list = any(
-            tokens[:2] == ["python3", "scripts/first_party_compile_units.py"]
-            and "$KLOGG_BUILD_ROOT/compile_commands.json" in tokens
-            and "$KLOGG_WORKSPACE/src" in tokens
-            and "--null" in tokens
-            and option_value(tokens, ">") == "/tmp/cppcheck_files.nul"
-            for command in commands
-            if (tokens := shell_tokens(command))
-        )
-        has_cppcheck_database_filter = any(
-            tokens[:2] == ["python3", "scripts/filter_compile_database.py"]
-            and tokens[2:6]
-            == [
-                "$KLOGG_BUILD_ROOT/compile_commands.json",
-                "$KLOGG_WORKSPACE",
-                "/tmp/cppcheck_files.nul",
-                "/tmp/cc_src.json",
-            ]
-            for command in commands
-            if (tokens := shell_tokens(command))
-        )
-        if not has_cppcheck_unit_list or not has_cppcheck_database_filter:
-            issues.append(
-                "cppcheck TU scope must resolve relative compile database entries"
-            )
-
-    strict_consumers = []
-    strict_runners = []
-    report_only_consumers = []
-    for command in commands:
-        tokens = shell_tokens(command)
-        if (
-            len(tokens) >= 2
-            and tokens[:2]
-            == ["python3", "scripts/run_changed_clang_tidy.py"]
-            and unique_option_value(tokens, "--base")
-            in {"${{ github.event.pull_request.base.sha }}", "$KLOGG_ANALYSIS_BASE"}
-            and unique_option_value(tokens, "--build-dir") == "$KLOGG_BUILD_ROOT"
-            and unique_option_value(tokens, "--clang-tidy-diff")
-            == "$CLANG_TIDY_DIFF"
-            and not any(control in tokens for control in ("&&", "||", ";"))
-        ):
-            strict_runners.append(command)
-
-        script_index = xargs_bash_script_index(tokens)
-        if (
-            script_index is None
-            or option_value(tokens, "<") != "tidy_files.nul"
-            or tokens.count("<") != 1
-            or tokens.count("-c") != 1
-        ):
-            continue
-        if (
-            script_index + 2 >= len(tokens)
-            or tokens[script_index + 1] != "_"
-            or tokens[script_index + 2] != "<"
-        ):
-            continue
-        script = tokens[script_index].strip()
-        if not script.startswith("clang-tidy ") or not clang_tidy_consumes_xargs_argument(
-            script
-        ):
-            continue
-        if (
-            '--line-filter="$TIDY_LINE_FILTER"' in script
-            and not any(control in script for control in (";", "&&", "||", "\n"))
-            and not any(control in tokens for control in ("&&", "||", ";"))
-        ):
-            strict_consumers.append(command)
-        if (
-            "--line-filter" not in script
-            and "--warnings-as-errors" not in script
-            and not any(control in script for control in (";", "&&", "||", "\n"))
-            and not any(control in tokens for control in ("&&", "||", ";"))
-        ):
-            report_only_consumers.append(command)
-
-    if (
-        len(strict_consumers) + len(strict_runners) != 1
-        or len(report_only_consumers) != 1
-        or any("tidy_files.txt" in command for command in commands)
-    ):
-        issues.append(
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers"
-        )
-
-    cmake_commands = []
-    for command in commands:
-        tokens = shell_tokens(command)
-        if tokens and tokens[0] == "cmake" and "--build" not in tokens:
-            cmake_commands.append(tokens)
-    sentry_configures = [
-        tokens
-        for tokens in cmake_commands
-        if unique_cmake_option_value(tokens, "-S") == "$KLOGG_WORKSPACE"
-        and unique_cmake_option_value(tokens, "-B") == "$KLOGG_BUILD_ROOT"
-        and "-P" not in tokens
-    ]
-    sentry_assignments = [
-        value
-        for tokens in sentry_configures
-        for value in cmake_cache_assignments(tokens, "KLOGG_USE_SENTRY")
-    ]
-    later_sentry_commands = [
-        tokens
-        for tokens in cmake_commands
-        if tokens not in sentry_configures
-        and unique_cmake_option_value(tokens, "-B") == "$KLOGG_BUILD_ROOT"
-        and "-P" not in tokens
-    ]
-    sentry_unset = any(
-        cmake_unsets_cache_entry(tokens, "KLOGG_USE_SENTRY")
-        for tokens in sentry_configures
-    )
-    cmake_true_values = {"1", "ON", "TRUE", "YES", "Y"}
-    if (
-        len(sentry_configures) != 1
-        or len(sentry_assignments) != 1
-        or sentry_assignments[-1] not in cmake_true_values
-        or later_sentry_commands
-        or sentry_unset
-    ):
-        issues.append("static analysis must configure optional Sentry production code")
-
-    vectorscan_assignments = [
-        value
-        for tokens in sentry_configures
-        for value in cmake_cache_assignments(tokens, "KLOGG_USE_VECTORSCAN")
-    ]
-    vectorscan_unset = any(
-        cmake_unsets_cache_entry(tokens, "KLOGG_USE_VECTORSCAN")
-        for tokens in sentry_configures
-    )
-    if (
-        len(vectorscan_assignments) != 1
-        or vectorscan_assignments[-1] not in cmake_true_values
-        or later_sentry_commands
-        or vectorscan_unset
-    ):
-        issues.append(
-            "static analysis must configure optional Vectorscan production code"
-        )
-
-    cpm_source_caches = [
-        value
-        for tokens in sentry_configures
-        for value in cmake_cache_assignments(tokens, "CPM_SOURCE_CACHE")
-    ]
-    fully_disconnected = [
-        value
-        for tokens in sentry_configures
-        for value in cmake_cache_assignments(
-            tokens, "FETCHCONTENT_FULLY_DISCONNECTED"
-        )
-    ]
-    if (
-        cpm_source_caches != ["$KLOGG_WORKSPACE/CPM_CACHE"]
-        or fully_disconnected != ["ON"]
-    ):
-        issues.append(
-            "static analysis configure must use the prefetched CPM cache fully disconnected"
-        )
-
-    full_audit_isolated = all(
-        marker in text
-        for marker in (
-            "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}",
-            "cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}",
-            'if [ "$KLOGG_ANALYSIS_MODE" = "full-report" ]; then',
-            'pull_request) base_sha="$PR_BASE_SHA"',
-            'push) base_sha="$PUSH_BASE_SHA"',
-            'MANUAL_BASE_SHA: ${{ inputs.base-sha }}',
-            'git fetch --no-tags origin "$base_sha"',
-        )
-    )
-    if (
-        report_only_consumers
-        and "github.event_name" in text
-        and "pull_request" in text
-        and not full_audit_isolated
-    ):
+    issues = shared_analysis_phase_issues(text, "static")
+    # Event policy remains in the workflow. Full audits must not cancel strict
+    # PR/push qualification; only an explicit manual mode may report findings.
+    if not all(marker in text for marker in (
+        "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}",
+        "cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}",
+        'if [ "$MANUAL_MODE" = "full-report" ]; then',
+        'pull_request) base_sha="$PR_BASE_SHA"',
+        'push) base_sha="$PUSH_BASE_SHA"',
+        'MANUAL_BASE_SHA: ${{ inputs.base-sha }}',
+        'git fetch --no-tags origin "$base_sha"',
+    )):
         issues.append("clang-tidy findings must fail both pull requests and master pushes")
-
-    # A PR that deletes a src/ file must not feed the deleted path to
-    # clang-tidy/cppcheck: both tools fail on the nonexistent file and the
-    # gate breaks for an unrelated reason. Every changed-path discovery
-    # (`git diff --name-only`) must therefore exclude deleted files.
-    for command in commands:
-        tokens = shell_tokens(command)
-        if (
-            "diff" in tokens
-            and "--name-only" in tokens
-            and "--diff-filter=d" not in tokens
-        ):
-            issues.append(
-                "changed-path discovery must exclude deleted files (--diff-filter=d)"
-            )
-            break
-
     return issues
 
 
-def coverage_build_targets(command: str) -> set[str]:
-    tokens = shell_tokens(command)
-    if not tokens or tokens[:2] != ["cmake", "--build"]:
-        return set()
-    for control in ("&&", "||", ";", "|"):
-        if control in tokens:
-            tokens = tokens[: tokens.index(control)]
-    target_index = None
-    for option in ("-t", "--target"):
-        if option in tokens:
-            target_index = tokens.index(option) + 1
-            break
-    if target_index is None:
-        return set()
-    targets = set()
-    for token in tokens[target_index:]:
-        if token.startswith("-"):
-            break
-        targets.add(token)
-    return targets
-
-
 def coverage_workflow_issues(text: str) -> list[str]:
-    issues: list[str] = []
-    commands = shell_commands(text)
-    gcovr_commands = [command for command in commands if command.startswith("gcovr ")]
-    gcovr_tokens = [shell_tokens(command) for command in gcovr_commands]
-    if len(gcovr_commands) != 2 or any(
-        unique_option_value(tokens, "--filter") != "^src/"
-        for tokens in gcovr_tokens
-    ):
-        issues.append("gcovr must include root-relative src/ paths in every report pass")
-
+    issues = shared_analysis_phase_issues(text, "coverage")
     if (
         "EVENT_NAME: ${{ github.event_name }}" not in text
         or 'git fetch --no-tags origin "$base_sha"' not in text
@@ -4136,59 +3976,6 @@ def coverage_workflow_issues(text: str) -> list[str]:
         )
     ):
         issues.append("coverage ratchet must fail closed on the event base commit")
-
-    if len(gcovr_commands) == 2:
-        html_reports = []
-        json_reports = []
-        for command in gcovr_commands:
-            tokens = shell_tokens(command)
-            output = unique_option_value(tokens, "-o")
-            if (
-                "--html-details" in tokens
-                and "--print-summary" in tokens
-                and output == "coverage_report/index.html"
-            ):
-                html_reports.append(command)
-            if "--json" in tokens and output == "coverage_report/coverage.json":
-                json_reports.append(command)
-        if len(html_reports) != 1 or len(json_reports) != 1:
-            issues.append(
-                "coverage must produce the authoritative HTML summary and JSON report"
-            )
-
-    build_targets = set()
-    for command in commands:
-        build_targets.update(coverage_build_targets(command))
-    for target in ("klogg", "klogg_grep", "klogg_test_build"):
-        if target not in build_targets:
-            issues.append(f"coverage build must include target {target}")
-
-    negative_hits_option = "--gcov-ignore-parse-errors"
-    negative_hits_value = "negative_hits.warn_once_per_file"
-    if len(gcovr_commands) != 2 or any(
-        tokens.count(negative_hits_option) != 1
-        or option_value(tokens, negative_hits_option) != negative_hits_value
-        for tokens in gcovr_tokens
-    ):
-        issues.append(
-            "every coverage report must narrowly handle GCC's negative branch-hit bug"
-        )
-    if any(
-        negative_hits_option in tokens
-        and (
-            tokens.count(negative_hits_option) != 1
-            or option_value(tokens, negative_hits_option) != negative_hits_value
-        )
-        for tokens in gcovr_tokens
-    ):
-        issues.append(
-            "coverage may ignore only negative_hits.warn_once_per_file parse errors"
-        )
-    if any(
-        any(control in tokens for control in ("&&", "||", ";"))
-        for tokens in gcovr_tokens
-    ):
-        issues.append("coverage report generation must fail closed")
     return issues
 
 
@@ -4856,8 +4643,65 @@ def continuous_release_workflow_issues(text: str) -> list[str]:
         issues.append("release publishers must share one lossless serialized concurrency group")
     if "cancel-in-progress: false" not in text:
         issues.append("continuous release transaction must not be canceled in progress")
-    if "${{ failure() || cancelled() }}" not in text:
-        issues.append("continuous release rollback must cover failure and cancellation")
+    publish_steps = workflow_step_blocks(publish or [])
+    parsed_steps = [workflow_step_fields(step) for step in publish_steps]
+    preflights = [
+        index for index, (fields, _) in enumerate(parsed_steps)
+        if fields.get("name") == "Verify continuous publisher PAT"
+    ]
+    preflight_valid = preflights == [1]
+    if preflight_valid:
+        fields, children = parsed_steps[1]
+        active_run = [
+            active.strip() for line in fields.get("run", "").splitlines()
+            if (active := strip_yaml_comment(line))
+        ]
+        # Exact executable statements keep comments, echo spoofs, and ignored
+        # failures from satisfying this deliberately narrow authentication gate.
+        preflight_valid = (
+            parsed_steps[0][0].get("uses", "").startswith("actions/checkout@")
+            and workflow_step_direct_fields_are_unique(publish_steps[1])
+            and set(fields) == {"name", "shell", "env", "run"}
+            and fields.get("shell") == "bash"
+            and children == {"env": {"GITHUB_TOKEN": RELEASE_PUBLISHER_TOKEN_DIRECTIVE}}
+            and active_run == [
+                "set -euo pipefail",
+                'echo "::notice::Continuous publishing requires KLOGG_GITHUB_TOKEN in repository Actions secrets: configure a valid PAT with repo and workflow scopes."',
+                RELEASE_PUBLISHER_TOKEN_GUARD,
+                "if ! gh api --method GET /user >/dev/null; then",
+                'echo "::error::KLOGG_GITHUB_TOKEN authentication failed. Check or replace the repository Actions secret with a valid PAT with repo and workflow scopes."',
+                "exit 1",
+                "fi",
+            ]
+        )
+    if not preflight_valid:
+        issues.append(
+            "continuous publisher must authenticate its PAT read-only immediately after checkout"
+        )
+    rollback_steps = [
+        (step, fields) for step, (fields, _) in zip(publish_steps, parsed_steps)
+        if fields.get("name") == "Roll back failed continuous promotion"
+    ]
+    candidate_steps = [
+        fields for fields, _ in parsed_steps
+        if fields.get("id") == "candidate_release"
+    ]
+    rollback_condition = (
+        "${{ (failure() || cancelled()) && "
+        "(steps.candidate_release.outcome == 'success' || "
+        "steps.candidate_release.outcome == 'failure' || "
+        "steps.candidate_release.outcome == 'cancelled') }}"
+    )
+    if (
+        len(rollback_steps) != 1
+        or not workflow_step_direct_fields_are_unique(rollback_steps[0][0])
+        or rollback_steps[0][1].get("if") != rollback_condition
+        or len(candidate_steps) != 1
+        or candidate_steps[0].get("name") != "Create continuous candidate draft"
+    ):
+        issues.append(
+            "continuous release rollback must cover failure and cancellation only after candidate creation was attempted"
+        )
     rollback = text.partition("- name: Roll back failed continuous promotion")[2]
     if (
         "releases/tags/${candidate_tag}" not in rollback
@@ -5420,35 +5264,17 @@ def check_repo(root: Path) -> list[str]:
             static_text, expensive_job="static-analysis"
         )
     )
-    if (
-        'python3 "$CLANG_TIDY_DIFF"' not in static_text
-        and '--clang-tidy-diff "$CLANG_TIDY_DIFF"' not in static_text
-    ):
-        issues.append(
-            ".github/workflows/static-analysis.yml: clang-tidy-diff must use the discovered Ubuntu tool path"
-        )
     changed_tidy_runner = (root / "scripts" / "run_changed_clang_tidy.py").read_text()
     for extension in (".cxx", ".hh", ".hxx"):
         if extension not in changed_tidy_runner:
             issues.append(
                 f"scripts/run_changed_clang_tidy.py: static analysis must include {extension} files"
             )
-    if not re.search(
-        r"git(?: -c core\.quotePath=false)? diff --name-only -z", static_text
-    ):
-        issues.append(
-            ".github/workflows/static-analysis.yml: changed paths must use NUL-delimited Git output"
-        )
     header_filter = (root / ".clang-tidy").read_text()
     if ".*/klogg/src/.*\\.(h|hh|hpp|hxx)$" not in header_filter:
         issues.append(
             ".clang-tidy: header filter must admit headers in new first-party modules"
         )
-    for diagnostic_id in BROAD_CPPCHECK_IDS:
-        if re.search(rf"--suppress={re.escape(diagnostic_id)}(?:\s|\\|$)", static_text):
-            issues.append(
-                f".github/workflows/static-analysis.yml: cppcheck suppression {diagnostic_id} must be location-qualified"
-            )
     issues.extend(
         cppcheck_suppression_issues(
             (root / "tests" / "cppcheck_suppressions.txt").read_text()

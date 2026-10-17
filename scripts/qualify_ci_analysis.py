@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Execute real static, coverage and CodeQL candidate qualification.
+"""Share analysis phases between ordinary CI and candidate qualification.
 
+The inside phases execute the same profile and tool policy for both callers;
+only the complete qualification path emits analysis evidence.
 This helper emits analysis evidence, NOT a qualification receipt or attestation.
 The workflow issues its receipt only after this command succeeds. Candidate bytes
 must already have been verified and loaded by prepare-candidate. We recheck the
@@ -119,10 +121,15 @@ def role_environment(workspace, role):
     return document, environment
 
 
-def configure(role, workspace, build, runner, environment, document):
+def configure(role, workspace, build, runner, environment, document, *, cpm_source_cache=None):
     require(not build.exists(), "fresh analysis build directory is required")
     options = profiles.profile_configuration(document, FAMILY, role)["cmake_options"]
     options = [value.replace("@WORKSPACE@", str(workspace)) for value in options]
+    if cpm_source_cache is not None:
+        # Ordinary coverage uses a private checkout but the original prefetched
+        # cache. This is a path input, not a second set of configure policy.
+        options = ["-DCPM_SOURCE_CACHE=" + str(cpm_source_cache) if value.startswith("-DCPM_SOURCE_CACHE=")
+                   else value for value in options]
     def enabled(name):
         values = [match.group(1) for option in options
                   for match in [re.fullmatch(r"-D" + name + r"(?::[A-Za-z_]+)?=(.*)", option)] if match]
@@ -164,53 +171,111 @@ def _cppcheck(workspace, database, strict):
     return command
 
 
-def static_analysis(workspace, build, work, base, runner, environment, jobs):
+def require_base(base):
+    require(isinstance(base, str) and re.fullmatch(r"[0-9a-f]{40}", base) is not None
+            and base != "0" * 40, "analysis requires a full nonzero base SHA")
+
+
+def require_static_mode(mode, base):
+    require(mode in ("full-report", "changed-strict"), "static analysis requires an explicit analysis mode")
+    if mode == "changed-strict":
+        require_base(base)
+
+
+def static_prepare(workspace, build, runner, environment, jobs):
     execute(runner, ["cmake", "--build", build, "--target", "klogg_ui_autogen", "generate_version", "-j" + str(jobs)],
             cwd=workspace, env=environment)
+
+
+def static_database(workspace, build):
     database = read_json(build / "compile_commands.json")
     require(isinstance(database, list), "compile database must be an array")
     units = first_party_compile_units(database, workspace / "src")
-    require(bool(units), "full static analysis requires first-party translation units")
+    require(bool(units), "static analysis requires first-party translation units")
+    return database, units
+
+
+def static_tidy(workspace, build, mode, base, runner, environment, jobs, *, clang_tidy_diff=None):
+    require_static_mode(mode, base)
+    if mode == "changed-strict":
+        command = ["python3", workspace / "scripts/run_changed_clang_tidy.py", "--base", base,
+                   "--build-dir", build, "--jobs", str(jobs)]
+        if clang_tidy_diff is not None:
+            command += ["--clang-tidy-diff", clang_tidy_diff]
+        execute(runner, command, cwd=workspace, env=environment)
+        return
+    _, units = static_database(workspace, build)
     def tidy(path):
         return execute(runner, ["clang-tidy", "-p", build, "--extra-arg=-Wno-unknown-warning-option", path],
                        cwd=workspace, env=environment)
-    # Full audit preserves the existing report-only diagnostic policy. Tool and
-    # configuration errors are fatal; changed-line qualification below is strict.
+    # Full audit reports legacy diagnostics, but tool/configuration errors remain
+    # fatal. Qualification composes this with the same strict phase used by CI.
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         list(pool.map(tidy, units))
-    full_project = work / "cppcheck-full.json"
-    _filtered_database(database, units, full_project, workspace)
-    execute(runner, _cppcheck(workspace, full_project, False), cwd=workspace, env=environment)
-    execute(runner, ["python3", workspace / "scripts/run_changed_clang_tidy.py", "--base", base,
-                     "--build-dir", build, "--jobs", str(jobs)], cwd=workspace, env=environment)
-    changed = execute(runner, ["git", "-c", "core.quotePath=false", "diff", "--name-only", "-z", "--diff-filter=d", base, "HEAD", "--", "src/"],
-                      cwd=workspace, env=environment, emit_stdout=False).stdout.split("\0")
-    headers = [path for path in changed if pathlib.Path(path).suffix.lower() in (".h", ".hh", ".hpp", ".hxx")]
-    sources = {str((workspace / path).resolve()) for path in changed if pathlib.Path(path).suffix.lower() in (".c", ".cc", ".cpp", ".cxx")}
-    selected = units if headers else [pathlib.Path(path) for path in sorted(sources)]
+
+
+def static_cppcheck(workspace, build, mode, base, runner, environment):
+    require_static_mode(mode, base)
+    database, units = static_database(workspace, build)
+    headers = []
+    selected = units
+    strict = mode == "changed-strict"
+    if strict:
+        changed = execute(runner, ["git", "-c", "core.quotePath=false", "diff", "--name-only", "-z", "--diff-filter=d", base, "HEAD", "--", "src/"],
+                          cwd=workspace, env=environment, emit_stdout=False).stdout.split("\0")
+        headers = [path for path in changed if pathlib.Path(path).suffix.lower() in (".h", ".hh", ".hpp", ".hxx")]
+        sources = {str((workspace / path).resolve()) for path in changed if pathlib.Path(path).suffix.lower() in (".c", ".cc", ".cpp", ".cxx")}
+        selected = units if headers else [pathlib.Path(path) for path in sorted(sources)]
     if selected:
-        project = work / "cppcheck-changed.json"
+        # Keep scratch data in the caller's private build, never shared /tmp names.
+        project = build / ("cppcheck-changed.json" if strict else "cppcheck-full.json")
         _filtered_database(database, selected, project, workspace)
-        execute(runner, _cppcheck(workspace, project, True), cwd=workspace, env=environment)
-    return {"full_first_party_units": len(units), "full_clang_tidy": True, "full_cppcheck": True,
-            "changed_clang_tidy_strict": True, "changed_source_units": len(selected), "changed_headers": len(headers),
-            "changed_cppcheck_strict": bool(selected)}
+        execute(runner, _cppcheck(workspace, project, strict), cwd=workspace, env=environment)
+    return {"first_party_units": len(units), "selected_units": len(selected), "changed_headers": len(headers)}
 
 
-def coverage_analysis(workspace, build, work, base, runner, environment, jobs):
+def static_analysis(workspace, build, base, runner, environment, jobs):
+    static_prepare(workspace, build, runner, environment, jobs)
+    static_tidy(workspace, build, "full-report", base, runner, environment, jobs)
+    full = static_cppcheck(workspace, build, "full-report", base, runner, environment)
+    static_tidy(workspace, build, "changed-strict", base, runner, environment, jobs)
+    changed = static_cppcheck(workspace, build, "changed-strict", base, runner, environment)
+    return {"full_first_party_units": full["first_party_units"], "full_clang_tidy": True, "full_cppcheck": True,
+            "changed_clang_tidy_strict": True, "changed_source_units": changed["selected_units"],
+            "changed_headers": changed["changed_headers"], "changed_cppcheck_strict": bool(changed["selected_units"])}
+
+
+def coverage_build(workspace, build, runner, environment, jobs):
     execute(runner, ["cmake", "--build", build, "-t", "klogg", "klogg_grep", "klogg_test_build", "-j" + str(jobs)],
             cwd=workspace, env=environment)
+
+
+def coverage_test(build, runner, environment, jobs):
     execute(runner, ["ctest", "--output-on-failure", "--parallel", str(jobs)], cwd=build, env=environment)
-    report = work / "coverage_report"
-    report.mkdir()
+
+
+def coverage_report(workspace, build, report, runner, environment):
+    report.mkdir(parents=True, exist_ok=True)
     common = ["gcovr", "--root", workspace, "--filter", "^src/", "--gcov-ignore-parse-errors", "negative_hits.warn_once_per_file"]
     summary = execute(runner, common + ["--html-details", "--html-self-contained", "--html-title", "Klogg line/branch coverage",
                                        "-o", report / "index.html", "--print-summary", build], cwd=workspace, env=environment).stdout
     (report / "summary.txt").write_text(summary, encoding="utf-8")
     execute(runner, common + ["--json", "--json-pretty", "-o", report / "coverage.json", build], cwd=workspace, env=environment)
+
+
+def coverage_ratchet(workspace, report, base, runner, environment):
+    require_base(base)
     execute(runner, ["python3", workspace / "scripts/enforce_coverage_ratchet.py", "--summary", report / "summary.txt",
                      "--line-floor", ".github/baselines/coverage-line.txt", "--branch-floor", ".github/baselines/coverage-branch.txt",
                      "--base-sha", base], cwd=workspace, env=environment)
+
+
+def coverage_analysis(workspace, build, work, base, runner, environment, jobs):
+    coverage_build(workspace, build, runner, environment, jobs)
+    coverage_test(build, runner, environment, jobs)
+    report = work / "coverage_report"
+    coverage_report(workspace, build, report, runner, environment)
+    coverage_ratchet(workspace, report, base, runner, environment)
     return {"ctest_all": True, "build_targets": ["klogg", "klogg_grep", "klogg_test_build"], "ratchet_base": base}
 
 
@@ -351,8 +416,7 @@ def run_analysis(role, workspace, work_root, output, analysis_base_sha, *, codeq
     runner = subprocess.run if runner is None else runner
     workspace, work_root, output = (pathlib.Path(path).resolve() for path in (workspace, work_root, output))
     require(role in ROLES, "unknown analysis role")
-    require(isinstance(analysis_base_sha, str) and re.fullmatch(r"[0-9a-f]{40}", analysis_base_sha) is not None
-            and analysis_base_sha != "0" * 40, "analysis requires a full nonzero base SHA")
+    require_base(analysis_base_sha)
     require(type(jobs) is int and jobs > 0, "analysis jobs must be positive")
     require(output != work_root and output not in work_root.parents and work_root not in output.parents,
             "result directory must be separate from private analysis work")
@@ -371,7 +435,7 @@ def run_analysis(role, workspace, work_root, output, analysis_base_sha, *, codeq
     build = (workspace / build_root) if role == "coverage" else (work_root / build_root)
     configure(role, workspace, build, runner, environment, document)
     if role == "static":
-        checks = static_analysis(workspace, build, work_root, analysis_base_sha, runner, environment, jobs)
+        checks = static_analysis(workspace, build, analysis_base_sha, runner, environment, jobs)
     elif role == "coverage":
         checks = coverage_analysis(workspace, build, work_root, analysis_base_sha, runner, environment, jobs)
         shutil.copyfile(work_root / "coverage_report/summary.txt", output / "coverage-summary.txt")
@@ -482,13 +546,19 @@ def main(argv=None):
     inside = bool(arguments and arguments[0] == "inside")
     parser = argparse.ArgumentParser(description=__doc__)
     if inside:
-        parser.add_argument("phase", choices=("configure", "codeql-prebuild", "codeql-trace-build", "qualify"))
+        parser.add_argument("phase", choices=("configure", "static-prepare", "static-tidy", "static-cppcheck",
+                                              "coverage-build", "coverage-test", "coverage-report", "coverage-ratchet",
+                                              "codeql-prebuild", "codeql-trace-build", "qualify"))
     parser.add_argument("--role", choices=ROLES, required=True)
     parser.add_argument("--workspace", type=pathlib.Path, required=True)
     parser.add_argument("--analysis-base-sha")
     parser.add_argument("--output", type=pathlib.Path)
     if inside:
         parser.add_argument("--build-dir", type=pathlib.Path)
+        parser.add_argument("--cpm-source-cache", type=pathlib.Path)
+        parser.add_argument("--analysis-mode", choices=("full-report", "changed-strict"))
+        parser.add_argument("--clang-tidy-diff")
+        parser.add_argument("--report-dir", type=pathlib.Path)
         parser.add_argument("--work-root", type=pathlib.Path)
         parser.add_argument("--codeql-root", type=pathlib.Path)
         parser.add_argument("--expected-codeql-version")
@@ -507,14 +577,38 @@ def main(argv=None):
             run_analysis(args.role, args.workspace, args.work_root, args.output, args.analysis_base_sha,
                          codeql_root=args.codeql_root, expected_codeql_version=args.expected_codeql_version, jobs=args.jobs)
         else:
-            require(args.build_dir is not None, "shared analysis phase requires --build-dir")
-            workspace, build = args.workspace.resolve(), args.build_dir.resolve()
+            require(args.jobs > 0, "analysis jobs must be positive")
+            workspace = args.workspace.resolve()
             document, environment = role_environment(workspace, args.role)
+            if args.phase != "configure":
+                require(args.phase.startswith(args.role + "-"), "analysis phase does not match its role")
+            report = args.report_dir.resolve() if args.report_dir is not None else None
+            if args.phase in ("coverage-report", "coverage-ratchet"):
+                require(report is not None, "coverage reporting requires --report-dir")
+            if args.phase == "coverage-ratchet":
+                coverage_ratchet(workspace, report, args.analysis_base_sha, subprocess.run, environment)
+                return 0
+            require(args.build_dir is not None, "shared analysis phase requires --build-dir")
+            build = args.build_dir.resolve()
             if args.phase == "configure":
-                configure(args.role, workspace, build, subprocess.run, environment, document)
+                cache = args.cpm_source_cache.resolve() if args.cpm_source_cache is not None else None
+                configure(args.role, workspace, build, subprocess.run, environment, document, cpm_source_cache=cache)
+                return 0
+            require(build.is_dir(), "analysis build directory has not been configured")
+            if args.phase == "static-prepare":
+                static_prepare(workspace, build, subprocess.run, environment, args.jobs)
+            elif args.phase == "static-tidy":
+                static_tidy(workspace, build, args.analysis_mode, args.analysis_base_sha, subprocess.run, environment,
+                            args.jobs, clang_tidy_diff=args.clang_tidy_diff)
+            elif args.phase == "static-cppcheck":
+                static_cppcheck(workspace, build, args.analysis_mode, args.analysis_base_sha, subprocess.run, environment)
+            elif args.phase == "coverage-build":
+                coverage_build(workspace, build, subprocess.run, environment, args.jobs)
+            elif args.phase == "coverage-test":
+                coverage_test(build, subprocess.run, environment, args.jobs)
+            elif args.phase == "coverage-report":
+                coverage_report(workspace, build, report, subprocess.run, environment)
             else:
-                require(args.role == "codeql", "prebuild/trace phases are CodeQL-only")
-                require(build.is_dir(), "CodeQL build directory has not been configured")
                 function = codeql_prebuild if args.phase == "codeql-prebuild" else codeql_trace_build
                 function(workspace, build, subprocess.run, environment)
         return 0
