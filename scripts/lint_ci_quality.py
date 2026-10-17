@@ -1631,8 +1631,14 @@ def ci_build_environment_mode_issues(text: str) -> list[str]:
         name = workflow_job_direct_value(blocks[job], "name") or ""
         expected_name = (CI_BUILD_NATIVE_NAME_PREFIX + CI_BUILD_NATIVE_NAMES[job]
                          if job in CI_BUILD_NATIVE_JOBS else CI_BUILD_PRODUCER_NAME_PREFIX)
-        if name != expected_name and not (job not in CI_BUILD_NATIVE_JOBS
-                                           and name.startswith(expected_name)):
+        # A post-gate publisher is never required validation. Keep its skipped
+        # name readable even when GitHub does not evaluate name expressions.
+        if job in CI_BUILD_POST_GATE_JOBS:
+            fields = workflow_mapping_block(blocks[job], job, 2)
+            if fields is None or fields.get("name", (None,))[0] != "Dispatch Continuous publisher":
+                issues.append("CI post-gate dispatch must have the stable display name: Dispatch Continuous publisher")
+        elif name != expected_name and not (job not in CI_BUILD_NATIVE_JOBS
+                                             and name.startswith(expected_name)):
             issues.append("CI producer mode must distinguish every skipped ordinary check name: " + job)
         if job == "ci-gate" and name != CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate":
             issues.append("CI ordinary required gate name must remain exactly ci-gate")

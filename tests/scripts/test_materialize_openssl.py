@@ -42,7 +42,17 @@ class OpenSslTests(unittest.TestCase):
         self.root = pathlib.Path(self.temp.name).resolve()
         self.archive = self.root / "openssl.zip"
         self.lock = self.root / "lock.json"
-        self.document = json.loads((ROOT / "ci/tools/openssl-qt5.json").read_text())
+        self.document = {
+            "schema_version": 2,
+            "archive": {"file_name": "openssl.zip", "size_bytes": 1, "sha256": "0" * 64},
+            "version": dict(openssl.VERSION), "limits": dict(openssl.LIMITS),
+            "runtime": {arch: {name: {} for name in names} for arch, names in openssl.RUNTIME.items()},
+            "transport": {"repository": "ZEACENT/klogg", "repository_id": 123,
+                          "release_id": 456, "tag": "openssl-qt5-1.1.1w-input-v1",
+                          "asset_id": 789, "asset_name": "openssl.zip",
+                          "url": "https://github.com/ZEACENT/klogg/releases/download/"
+                                 "openssl-qt5-1.1.1w-input-v1/openssl.zip"},
+        }
         self.members = {"openssl-1.1/version.txt": b"OpenSSL_1_1_1w-0-ge04bd3433f\n"}
         for arch in ("x86", "x64"):
             self.members["openssl-1.1/" + arch + "/include/openssl/opensslv.h"] = (
@@ -76,63 +86,58 @@ class OpenSslTests(unittest.TestCase):
         with self.assertRaisesRegex(openssl.OpenSslError, pattern):
             openssl.verify_archive(self.archive, self.lock)
 
-    def provenance(self):
+    def release_metadata(self):
         origin = self.document["transport"]
-        repository = {"id": origin["repository_id"], "full_name": origin["repository"]}
-        run = {"id": origin["run_id"], "head_sha": origin["head_sha"], "head_branch": origin["branch"],
-               "event": origin["event"], "path": origin["workflow"], "run_attempt": 2,
-               "repository": repository, "head_repository": repository, "conclusion": "failure"}
-        attempt = dict(run, run_attempt=1, run_started_at="2026-09-27T09:30:51Z")
-        upload = {"name": "Run actions/upload-artifact@" + "a" * 40, "status": "completed",
-                  "conclusion": "success", "started_at": origin["upload_started_at"],
-                  "completed_at": origin["upload_completed_at"]}
-        job = {"id": origin["producer_id"], "name": origin["producer_name"], "run_id": origin["run_id"],
-               "run_attempt": 1, "head_sha": origin["head_sha"], "status": "completed",
-               "conclusion": "success", "started_at": origin["producer_started_at"],
-               "completed_at": origin["producer_completed_at"], "steps": [upload]}
-        artifact = {"id": origin["artifact_id"], "name": origin["artifact_name"], "expired": False,
-                    "digest": origin["artifact_digest"], "size_in_bytes": origin["artifact_metadata_size"],
-                    "created_at": origin["artifact_created_at"], "expires_at": origin["artifact_expires_at"],
-                    "workflow_run": {"id": origin["run_id"], "repository_id": origin["repository_id"],
-                                     "head_repository_id": origin["repository_id"],
-                                     "head_branch": origin["branch"], "head_sha": origin["head_sha"]}}
-        prefix = "repos/ZEACENT/klogg/actions/"
-        run_path = prefix + "runs/" + str(origin["run_id"])
-        return {prefix + "artifacts/" + str(origin["artifact_id"]): artifact,
-                run_path: run, run_path + "/attempts/1": attempt,
-                run_path + "/attempts/1/jobs?per_page=100": {"total_count": 1, "jobs": [job]},
-                prefix + "jobs/" + str(origin["producer_id"]): copy.deepcopy(job)}
+        asset = {"id": origin["asset_id"], "name": origin["asset_name"], "state": "uploaded",
+                 "size": self.document["archive"]["size_bytes"],
+                 "digest": "sha256:" + self.document["archive"]["sha256"],
+                 "browser_download_url": origin["url"]}
+        prefix = "repos/" + origin["repository"]
+        return {
+            prefix: {"id": origin["repository_id"], "full_name": origin["repository"]},
+            prefix + "/releases/" + str(origin["release_id"]): {
+                "id": origin["release_id"], "tag_name": origin["tag"], "draft": False,
+                "assets": [copy.deepcopy(asset)]},
+            prefix + "/releases/assets/" + str(origin["asset_id"]): asset,
+        }
 
     def authenticate(self, responses):
         with mock.patch.object(openssl, "metadata", side_effect=responses.__getitem__):
-            return openssl.authenticate_artifact(self.document, now=datetime.datetime(
-                2026, 10, 11, tzinfo=datetime.timezone.utc))
+            return openssl.authenticate_release(self.document)
 
-    def outer_fixture(self, entries=None):
+    def cold_fixture(self):
         raw = self.archive.read_bytes()
-        output = io.BytesIO()
-        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as wrapper:
-            for name, data in entries or [("openssl.zip", raw)]:
-                wrapper.writestr(name, data)
-        self.document["transport"]["artifact_digest"] = "sha256:" + digest(output.getvalue())
-        self.save_lock()
         self.archive.unlink()
-        return output.getvalue()
+        return raw
 
-    def acquire(self, outer, downloader=None):
-        responses = self.provenance()
-        authenticate = openssl.authenticate_artifact
-        def download(artifact_id, archive, **options):
-            self.assertEqual(artifact_id, 10928159537)
-            self.assertEqual(options, {"limit": 32 * 1024 * 1024, "timeout": 900})
-            archive.write_bytes(outer)
+    def acquire(self, raw, downloader=None, responses=None):
+        responses = self.release_metadata() if responses is None else responses
+        def download(url, archive, **options):
+            self.assertEqual(url, self.document["transport"]["url"])
+            deadline = options.pop("cancel_event")
+            self.assertFalse(deadline.is_set())
+            self.assertEqual(options, {"max_bytes": self.document["archive"]["size_bytes"],
+                                       "attempts": 1, "socket_timeout": 30})
+            self.assertEqual(archive.parent.parent, self.root)
+            self.assertTrue(archive.parent.name.startswith(".klogg-openssl-acquire-"))
+            self.assertEqual(stat.S_IMODE(archive.parent.stat().st_mode), 0o700)
+            self.assertEqual(list(archive.parent.iterdir()), [])
+            archive.write_bytes(raw)
         with mock.patch.object(openssl.sys, "platform", "linux"), mock.patch.dict(
                 os.environ, {"GH_TOKEN": "synthetic-read-only-token"}), mock.patch.object(
-                openssl, "metadata", side_effect=responses.__getitem__), mock.patch.object(
-                openssl, "download_artifact_zip", side_effect=downloader or download), mock.patch.object(
-                openssl, "authenticate_artifact", side_effect=lambda lock: authenticate(
-                    lock, now=datetime.datetime(2026, 10, 11, tzinfo=datetime.timezone.utc))):
+                openssl, "metadata", side_effect=responses.__getitem__) as get, mock.patch.object(
+                openssl, "download_source", side_effect=downloader or download):
             openssl.acquire(self.archive, self.lock)
+        self.assertEqual({call.args[0] for call in get.call_args_list}, set(responses))
+
+    def test_release_cold_acquisition_works_after_historical_actions_expiry(self):
+        raw = self.cold_fixture()
+        future = datetime.datetime(2027, 1, 1, tzinfo=datetime.timezone.utc)
+        with mock.patch("datetime.datetime", wraps=datetime.datetime) as clock:
+            clock.now.return_value = future
+            self.acquire(raw)
+        self.assertEqual(self.archive.read_bytes(), raw)
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"openssl.zip", "lock.json"})
 
     def test_valid_generated_archive_is_accepted(self):
         openssl.verify_archive(self.archive, self.lock)
@@ -159,9 +164,7 @@ class OpenSslTests(unittest.TestCase):
             get.assert_not_called()
         self.assertEqual(self.archive.read_bytes(), b"<html>cached transport error</html>")
 
-    def test_verified_cache_is_token_free_and_usable_after_transport_expiry(self):
-        self.document["transport"]["artifact_expires_at"] = "2026-09-28T09:30:51Z"
-        self.save_lock()
+    def test_verified_cache_is_token_free_without_release_metadata(self):
         raw = self.archive.read_bytes()
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(openssl, "metadata") as get:
             openssl.acquire(self.archive, self.lock)
@@ -194,7 +197,21 @@ class OpenSslTests(unittest.TestCase):
                                      (("archive",), "sha256", "A" * 64),
                                      (("limits",), "entries", 262),
                                      (("runtime", "x86"), "unexpected.dll", {}),
-                                     (("transport",), "attempt", 2)):
+                                     ((), "schema_version", 1),
+                                     (("transport",), "artifact_id", 789),
+                                     (("transport",), "repository", "attacker/klogg"),
+                                     (("transport",), "repository_id", True),
+                                     (("transport",), "repository_id", 0),
+                                     (("transport",), "release_id", "456"),
+                                     (("transport",), "release_id", 2 ** 63),
+                                     (("transport",), "asset_id", -1),
+                                     (("transport",), "asset_id", 789.0),
+                                     (("transport",), "tag", "latest"),
+                                     (("transport",), "tag", None),
+                                     (("transport",), "asset_name", "other.zip"),
+                                     (("transport",), "url", "https://attacker.invalid/openssl.zip"),
+                                     (("transport",), "url", "https://github.com/ZEACENT/klogg/releases/"
+                                      "latest/download/openssl.zip")):
             with self.subTest(key=key, value=value):
                 original = copy.deepcopy(self.document)
                 target = self.document
@@ -449,35 +466,33 @@ class OpenSslTests(unittest.TestCase):
                 openssl.materialize(self.archive, self.lock, "x86", destination)
         self.assertTrue(binary_dir.is_dir(), "cleanup deleted another actor's directory replacement")
 
-    def test_original_producer_succeeds_even_when_run_failed_and_later_attempt_exists(self):
-        self.authenticate(self.provenance())
+    def test_release_authentication_allows_unrelated_provenance_and_license_sidecars(self):
+        responses = self.release_metadata()
+        release = next(value for path, value in responses.items() if path.endswith("/456"))
+        release["assets"].append({"id": 790, "name": "provenance.json"})
+        self.authenticate(responses)
 
     def test_metadata_substitutions_are_rejected(self):
-        original = self.provenance()
-        paths = list(original)
-        cases = [(paths[0], ("digest",), "sha256:" + "b" * 64),
-                 (paths[0], ("id",), 10928159538), (paths[0], ("expired",), True),
-                 (paths[0], ("created_at",), "2026-09-27T09:31:38Z"),
-                 (paths[0], ("expires_at",), "2026-12-27T09:30:51Z"),
-                 (paths[0], ("size_in_bytes",), 15795727),
-                 (paths[0], ("workflow_run", "repository_id"), 1),
-                 (paths[0], ("workflow_run", "head_repository_id"), 1),
-                 (paths[0], ("workflow_run", "head_sha"), "b" * 40),
-                 (paths[1], ("repository", "full_name"), "attacker/klogg"),
-                 (paths[1], ("head_repository", "id"), 1),
-                 (paths[1], ("head_branch",), "master"),
-                 (paths[1], ("path",), ".github/workflows/other.yml"),
-                 (paths[1], ("event",), "push"),
-                 (paths[2], ("run_attempt",), 2),
-                 (paths[2], ("head_sha",), "b" * 40),
-                 (paths[2], ("run_started_at",), "2026-09-27T09:31:39Z"),
-                 (paths[4], ("id",), 108643159517),
-                 (paths[4], ("run_attempt",), 2),
-                 (paths[4], ("started_at",), "2026-09-27T15:00:00Z"),
-                 (paths[4], ("conclusion",), "failure"),
-                 (paths[4], ("head_sha",), "b" * 40)]
+        original = self.release_metadata()
+        repository_path, release_path, asset_path = original
+        cases = [(repository_path, ("id",), 124),
+                 (repository_path, ("id",), "123"),
+                 (repository_path, ("full_name",), "attacker/klogg"),
+                 (release_path, ("id",), 457),
+                 (release_path, ("id",), "456"),
+                 (release_path, ("tag_name",), "latest"),
+                 (release_path, ("draft",), True),
+                 (release_path, ("draft",), 0)]
+        for fields, changed in ((("id",), 790), (("id",), "789"),
+                                (("name",), "other.zip"), (("state",), "open"),
+                                (("size",), self.document["archive"]["size_bytes"] + 1),
+                                (("size",), True), (("digest",), None),
+                                (("digest",), "sha256:" + "b" * 64),
+                                (("browser_download_url",), "https://attacker.invalid/openssl.zip")):
+            cases.append((asset_path, fields, changed))
+            cases.append((release_path, ("assets", 0) + fields, changed))
         for path, fields, changed in cases:
-            with self.subTest(fields=fields, changed=changed):
+            with self.subTest(path=path, fields=fields, changed=changed):
                 responses = copy.deepcopy(original)
                 target = responses[path]
                 for field in fields[:-1]:
@@ -486,60 +501,61 @@ class OpenSslTests(unittest.TestCase):
                 with self.assertRaises(openssl.OpenSslError):
                     self.authenticate(responses)
 
-    def test_actual_retained_artifact_metadata_matches_lock_but_carried_job_does_not(self):
-        retained = ROOT / "build_root_crash_collector_draft/openssl-recovery-provenance.json"
-        if not retained.is_file():
-            self.skipTest("retained local provenance is not committed")
-        responses = self.provenance()
-        artifact_path = next(iter(responses))
-        responses[artifact_path] = json.loads(retained.read_text())
-        self.authenticate(responses)
-        jobs_path = next(path for path in responses if path.endswith("/jobs?per_page=100"))
-        responses[jobs_path]["jobs"][0].update(id=108643159517, run_attempt=2)
-        with self.assertRaisesRegex(openssl.OpenSslError, "producer"):
-            self.authenticate(responses)
+    def test_malformed_metadata_and_missing_identity_fields_fail_closed(self):
+        original = self.release_metadata()
+        for path, response in original.items():
+            for malformed in (None, [], "metadata", 1):
+                with self.subTest(path=path, malformed=malformed):
+                    responses = copy.deepcopy(original)
+                    responses[path] = malformed
+                    with self.assertRaises(openssl.OpenSslError):
+                        self.authenticate(responses)
+            for field in response:
+                with self.subTest(path=path, missing=field):
+                    responses = copy.deepcopy(original)
+                    del responses[path][field]
+                    with self.assertRaises(openssl.OpenSslError):
+                        self.authenticate(responses)
 
-    def test_incomplete_duplicate_and_carried_forward_job_lists_are_rejected(self):
-        for mutation in ("truncated", "missing", "duplicate", "carried", "malformed"):
+    def test_missing_malformed_and_duplicate_release_associations_are_rejected(self):
+        for mutation in ("missing", "unrelated", "duplicate", "duplicate-id", "duplicate-name",
+                         "not-list", "not-object", "bad-id", "bad-name", "missing-id"):
             with self.subTest(mutation=mutation):
-                responses = self.provenance()
-                listing = next(value for path, value in responses.items() if path.endswith("/jobs?per_page=100"))
-                if mutation == "truncated":
-                    listing["total_count"] = 101
-                elif mutation == "missing":
-                    listing.update(total_count=0, jobs=[])
+                responses = self.release_metadata()
+                release = next(value for path, value in responses.items() if path.endswith("/456"))
+                asset = release["assets"][0]
+                if mutation == "missing":
+                    release["assets"] = []
+                elif mutation == "unrelated":
+                    release["assets"] = [dict(asset, id=790, name="provenance.json")]
                 elif mutation == "duplicate":
-                    listing["jobs"] *= 2
-                    listing["total_count"] = 2
-                elif mutation == "carried":
-                    listing["jobs"][0].update(id=108643159517, run_attempt=2)
+                    release["assets"] *= 2
+                elif mutation == "duplicate-id":
+                    release["assets"].append(dict(asset, name="provenance.json"))
+                elif mutation == "duplicate-name":
+                    release["assets"].append(dict(asset, id=790))
+                elif mutation == "not-list":
+                    release["assets"] = {"asset": asset}
+                elif mutation == "not-object":
+                    release["assets"].append(None)
+                elif mutation == "bad-id":
+                    release["assets"].append({"id": True, "name": "provenance.json"})
+                elif mutation == "bad-name":
+                    release["assets"].append({"id": 790, "name": []})
                 else:
-                    listing["jobs"] = [None]
+                    del asset["id"]
                 with self.assertRaises(openssl.OpenSslError):
                     self.authenticate(responses)
 
-    def test_failed_missing_ambiguous_or_out_of_window_upload_rejected(self):
-        for mutation in ("failure", "missing", "duplicate", "time"):
-            with self.subTest(mutation=mutation):
-                responses = self.provenance()
-                producer = responses[next(path for path in responses if "/jobs/" in path)]
-                if mutation == "failure":
-                    producer["steps"][0]["conclusion"] = "failure"
-                elif mutation == "missing":
-                    producer["steps"] = []
-                elif mutation == "duplicate":
-                    producer["steps"] *= 2
-                else:
-                    producer["steps"][0]["completed_at"] = "2026-09-27T09:31:36Z"
-                with self.assertRaisesRegex(openssl.OpenSslError, "upload"):
-                    self.authenticate(responses)
-
-    def test_expiry_uses_current_time_not_only_metadata_flag(self):
-        with mock.patch.object(openssl, "metadata") as get:
-            with self.assertRaisesRegex(openssl.OpenSslError, "expired"):
-                openssl.authenticate_artifact(self.document, now=datetime.datetime(
-                    2026, 12, 26, 9, 30, 51, tzinfo=datetime.timezone.utc))
-            get.assert_not_called()
+    def test_failed_authentication_never_downloads_or_publishes(self):
+        raw = self.cold_fixture()
+        responses = self.release_metadata()
+        responses["repos/ZEACENT/klogg/releases/456"]["draft"] = True
+        download = mock.Mock()
+        with self.assertRaises(openssl.OpenSslError):
+            self.acquire(raw, downloader=download, responses=responses)
+        download.assert_not_called()
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"lock.json"})
 
     def test_cold_acquisition_requires_token_and_linux_without_metadata_calls(self):
         self.archive.unlink()
@@ -552,67 +568,119 @@ class OpenSslTests(unittest.TestCase):
             with self.assertRaisesRegex(openssl.OpenSslError, "Ubuntu"):
                 openssl.acquire(self.archive, self.lock)
 
-    def test_cold_acquisition_verifies_outer_and_inner_before_no_overwrite_link(self):
-        expected = self.archive.read_bytes()
-        outer = self.outer_fixture()
-        self.assertNotEqual(len(outer), self.document["transport"]["artifact_metadata_size"])
-        self.acquire(outer)
-        self.assertEqual(self.archive.read_bytes(), expected)
-        self.assertEqual({path.name for path in self.root.iterdir()}, {"openssl.zip", "lock.json"})
-
-    def test_unexpected_outer_inventory_is_not_silently_relaxed(self):
+    def test_downloaded_size_hash_and_zip_failures_never_publish_or_retry(self):
         original = self.archive.read_bytes()
-        for entries in ([("openssl.zip", original), ("extra.txt", b"extra")],
-                        [("directory/", b""), ("openssl.zip", original)],
-                        [("other.zip", original)], [("../openssl.zip", original)]):
-            with self.subTest(names=[name for name, _ in entries]):
-                if not self.archive.exists():
-                    self.archive.write_bytes(original)
-                outer = self.outer_fixture(entries)
-                with self.assertRaises(openssl.OpenSslError):
-                    self.acquire(outer)
-                self.assertFalse(self.archive.exists())
+        cases = [(original[:-1], "size mismatch", False),
+                 (original + b"excess", "byte limit", False),
+                 (original[:-1] + bytes([original[-1] ^ 1]), "SHA-256 mismatch", False),
+                 (b"<html>transport error</html>", "invalid OpenSSL ZIP", True)]
+        for raw, pattern, repin in cases:
+            with self.subTest(pattern=pattern):
+                if repin:
+                    self.archive.write_bytes(raw)
+                    self.pin_fixture()
+                self.archive.unlink(missing_ok=True)
+                download = mock.Mock(side_effect=lambda url, path, **options: path.write_bytes(raw))
+                with self.assertRaisesRegex(openssl.OpenSslError, pattern):
+                    self.acquire(raw, download)
+                download.assert_called_once()
                 self.assertEqual({path.name for path in self.root.iterdir()}, {"lock.json"})
 
-    def test_outer_digest_and_inner_crc_failures_leave_no_input_or_staging(self):
-        expected = self.archive.read_bytes()
-        outer = self.outer_fixture()
-        with self.assertRaisesRegex(openssl.OpenSslError, "outer artifact SHA-256"):
-            self.acquire(outer + b"corruption")
-        self.assertFalse(self.archive.exists())
-        self.archive.write_bytes(expected)
-        outer = self.outer_fixture([("openssl.zip", b"<html>transport error</html>")])
-        with self.assertRaisesRegex(openssl.OpenSslError, "archive size mismatch"):
-            self.acquire(outer)
+    def test_downloaded_archive_crc_is_checked_before_publication(self):
+        name = "openssl-1.1/unused.txt"
+        self.members[name] = b"unique unselected CRC payload"
+        self.write_fixture()
+        raw = self.archive.read_bytes().replace(self.members[name], b"X" * len(self.members[name]))
+        self.archive.write_bytes(raw)
+        self.pin_fixture()
+        self.archive.unlink()
+        with self.assertRaisesRegex(openssl.OpenSslError, "CRC"):
+            self.acquire(raw)
         self.assertEqual({path.name for path in self.root.iterdir()}, {"lock.json"})
 
-    def test_transport_failure_cleanup_and_single_attempt_no_integrity_retry(self):
-        outer = self.outer_fixture()
-        def fail(artifact_id, path, **options):
-            path.write_bytes(outer[:10])
-            raise openssl.TransportError("deadline or actual-byte limit exceeded")
-        failed = mock.Mock(side_effect=fail)
-        with self.assertRaisesRegex(openssl.OpenSslError, "deadline or actual-byte"):
-            self.acquire(outer, failed)
-        failed.assert_called_once()
-        self.assertFalse(self.archive.exists())
+    def test_transport_failure_cleanup_and_single_attempt(self):
+        raw = self.cold_fixture()
+        for failure in (OSError("connection interrupted"),
+                        RuntimeError("download exceeds byte limit"),
+                        KeyboardInterrupt("cancelled")):
+            with self.subTest(failure=failure):
+                def fail(url, path, **options):
+                    path.write_bytes(raw[:10])
+                    raise failure
+                failed = mock.Mock(side_effect=fail)
+                expected = KeyboardInterrupt if isinstance(failure, KeyboardInterrupt) else openssl.OpenSslError
+                with self.assertRaisesRegex(expected, str(failure)):
+                    self.acquire(raw, failed)
+                failed.assert_called_once()
+                self.assertEqual({path.name for path in self.root.iterdir()}, {"lock.json"})
+
+    def test_transfer_deadline_cancels_between_reads_with_openssl_error_and_cleanup(self):
+        raw = self.cold_fixture()
+        clock = [100.0]
+        def download(url, path, **options):
+            cancellation = options.get("cancel_event")
+            self.assertIsNotNone(cancellation, "download must receive the transfer deadline")
+            self.assertFalse(cancellation.is_set())
+            path.write_bytes(raw[:10])
+            clock[0] = 999.999
+            self.assertFalse(cancellation.is_set())
+            clock[0] = 1000.0
+            self.assertTrue(cancellation.is_set())
+            raise RuntimeError("ADB source prefetch cancelled")
+        with mock.patch("time.monotonic", side_effect=lambda: clock[0]), mock.patch.object(
+                openssl.os, "link") as publish:
+            with self.assertRaisesRegex(openssl.OpenSslError, "OpenSSL download exceeded deadline"):
+                self.acquire(raw, downloader=download)
+            publish.assert_not_called()
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"lock.json"})
+
+    def test_elapsed_deadline_after_verification_prevents_publication(self):
+        raw = self.cold_fixture()
+        clock = [100.0]
+        verify = openssl._verify_bytes
+        def finish_verification(content, lock):
+            result = verify(content, lock)
+            clock[0] = 1000.0
+            return result
+        with mock.patch("time.monotonic", side_effect=lambda: clock[0]), mock.patch.object(
+                openssl, "_verify_bytes", side_effect=finish_verification), mock.patch.object(
+                openssl.os, "link") as publish:
+            with self.assertRaisesRegex(openssl.OpenSslError, "OpenSSL download exceeded deadline"):
+                self.acquire(raw)
+            publish.assert_not_called()
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"lock.json"})
+
+    def test_metadata_transport_failure_stops_without_download_or_fallback(self):
+        self.archive.unlink()
+        with mock.patch.object(openssl.sys, "platform", "linux"), mock.patch.dict(
+                os.environ, {"GH_TOKEN": "synthetic-read-only-token"}), mock.patch.object(
+                openssl, "metadata", side_effect=openssl.TransportError("metadata unavailable")) as get, mock.patch.object(
+                openssl, "download_source") as download:
+            with self.assertRaisesRegex(openssl.OpenSslError, "metadata unavailable"):
+                openssl.acquire(self.archive, self.lock)
+            get.assert_called_once_with("repos/ZEACENT/klogg")
+            download.assert_not_called()
         self.assertEqual({path.name for path in self.root.iterdir()}, {"lock.json"})
 
     def test_racing_acquisition_destination_is_not_overwritten_or_cleaned(self):
-        outer = self.outer_fixture()
+        raw = self.cold_fixture()
         original_link = os.link
         def race(source, target):
             self.archive.write_bytes(b"other actor")
             return original_link(source, target)
         with mock.patch.object(openssl.os, "link", side_effect=race):
             with self.assertRaisesRegex(openssl.OpenSslError, "already exists"):
-                self.acquire(outer)
+                self.acquire(raw)
         self.assertEqual(self.archive.read_bytes(), b"other actor")
         self.assertEqual({path.name for path in self.root.iterdir()}, {"openssl.zip", "lock.json"})
 
     def test_retained_authentic_archive_verifies_and_materializes_both_architectures(self):
-        archive = ROOT / "build_root_crash_collector_draft/openssl-recovery-36309613109/openssl.zip"
-        if not archive.is_file():
+        configured = os.environ.get("KLOGG_OPENSSL_TEST_ARCHIVE")
+        archive = pathlib.Path(configured) if configured else (
+            ROOT / "build_root_crash_collector_draft/openssl-recovery-36309613109/openssl.zip")
+        if configured:
+            self.assertTrue(archive.is_file(), "KLOGG_OPENSSL_TEST_ARCHIVE must name an existing archive")
+        elif not archive.is_file():
             self.skipTest("retained authentic archive is not committed")
         lock = ROOT / "ci/tools/openssl-qt5.json"
         authentic = openssl.load_lock(lock)

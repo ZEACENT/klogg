@@ -1,10 +1,9 @@
-"""Verify pinned OpenSSL input, recover its temporary transport, or stage two DLLs.
+"""Verify pinned OpenSSL input, acquire its release asset, or stage two DLLs.
 
-Historical Actions provenance authenticates transport, not vendor signatures or
-current-source qualification. Verification and materialization are offline.
+Release identity authenticates transport, not vendor signatures or current-source
+qualification. Verification and materialization are offline.
 """
 import argparse
-import datetime
 import hashlib
 import io
 import json
@@ -14,14 +13,15 @@ import re
 import stat
 import sys
 import tempfile
+import time
 import zipfile
 
-from ci_actions_transport import TransportError, download_artifact_zip, metadata
+from ci_actions_transport import TransportError, metadata
 from pe_identity import architecture_from_pe
+from prefetch_adb_helper_sources import download as download_source
 
 MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
-MAX_OUTER_BYTES = 32 * 1024 * 1024
-DOWNLOAD_TIMEOUT = 900
+DOWNLOAD_BUDGET_SECONDS = 900
 CHUNK_BYTES = 1024 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 RUNTIME = {
@@ -32,12 +32,9 @@ VERSION = {"vendor": "OpenSSL 1.1.1w", "version_txt": "OpenSSL_1_1_1w-0-ge04bd34
            "number": "0x1010117fL", "text": "OpenSSL 1.1.1w  11 Sep 2023"}
 LIMITS = {"entries": 261, "expanded_bytes": 64 * 1024 * 1024,
           "member_bytes": 16 * 1024 * 1024, "marker_bytes": 64 * 1024}
-TRANSPORT_KEYS = {
-    "repository", "repository_id", "workflow", "event", "branch", "run_id", "attempt",
-    "head_sha", "producer_id", "producer_name", "producer_started_at", "producer_completed_at",
-    "upload_started_at", "upload_completed_at", "artifact_id", "artifact_name",
-    "artifact_created_at", "artifact_expires_at", "artifact_metadata_size", "artifact_digest",
-}
+REPOSITORY = "ZEACENT/klogg"
+RELEASE_TAG = "openssl-qt5-1.1.1w-input-v1"
+TRANSPORT_KEYS = {"repository", "repository_id", "release_id", "tag", "asset_id", "asset_name", "url"}
 
 
 class OpenSslError(RuntimeError):
@@ -67,16 +64,6 @@ def _object(value, keys, label):
 
 def _positive(value, ceiling, label):
     require(type(value) is int and 0 < value <= ceiling, "invalid lock " + label)
-
-
-def _timestamp(value):
-    require(type(value) is str and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value)
-            is not None, "invalid provenance timestamp")
-    try:
-        return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=datetime.timezone.utc)
-    except ValueError as error:
-        raise OpenSslError("invalid provenance timestamp") from error
 
 
 def _regular_bytes(path, limit):
@@ -112,7 +99,7 @@ def load_lock(path):
     except (ValueError, UnicodeError) as error:
         raise OpenSslError("invalid lock JSON") from error
     _object(lock, ("schema_version", "archive", "version", "limits", "runtime", "transport"), "root")
-    require(type(lock["schema_version"]) is int and lock["schema_version"] == 1,
+    require(type(lock["schema_version"]) is int and lock["schema_version"] == 2,
             "invalid lock schema version")
     archive = lock["archive"]
     _object(archive, ("file_name", "size_bytes", "sha256"), "archive")
@@ -135,25 +122,12 @@ def load_lock(path):
                     is not None, "invalid lock DLL digest")
     origin = lock["transport"]
     _object(origin, TRANSPORT_KEYS, "transport")
-    for key in ("repository_id", "run_id", "attempt", "producer_id", "artifact_id",
-                "artifact_metadata_size"):
+    for key in ("repository_id", "release_id", "asset_id"):
         _positive(origin[key], 2 ** 63 - 1, key)
-    for key in TRANSPORT_KEYS - {"repository_id", "run_id", "attempt", "producer_id",
-                                 "artifact_id", "artifact_metadata_size"}:
-        require(type(origin[key]) is str and bool(origin[key]), "invalid lock transport " + key)
-    require(origin["repository"] == "ZEACENT/klogg"
-            and origin["workflow"] == ".github/workflows/ci-build.yml"
-            and origin["event"] == "pull_request" and origin["attempt"] == 1
-            and origin["producer_name"] == "Prefetch Windows Qt 5 OpenSSL"
-            and origin["artifact_name"] == "openssl-archive"
-            and re.fullmatch(r"[A-Za-z0-9._/-]+", origin["branch"]) is not None
-            and re.fullmatch(r"[0-9a-f]{40}", origin["head_sha"]) is not None
-            and re.fullmatch(r"sha256:[0-9a-f]{64}", origin["artifact_digest"]) is not None,
-            "invalid lock transport identity")
-    require(_timestamp(origin["producer_started_at"]) <= _timestamp(origin["upload_started_at"])
-            <= _timestamp(origin["artifact_created_at"]) <= _timestamp(origin["upload_completed_at"])
-            <= _timestamp(origin["producer_completed_at"]) < _timestamp(origin["artifact_expires_at"]),
-            "invalid lock transport time window")
+    require(origin["repository"] == REPOSITORY and origin["tag"] == RELEASE_TAG
+            and origin["asset_name"] == archive["file_name"]
+            and origin["url"] == "https://github.com/" + REPOSITORY + "/releases/download/"
+            + RELEASE_TAG + "/" + archive["file_name"], "invalid lock transport identity")
     return lock
 
 
@@ -269,61 +243,31 @@ def _equal(document, expected, label):
             and document[key] == value for key, value in expected.items()), "substituted " + label)
 
 
-def authenticate_artifact(lock, now=None):
-    """Authenticate the original successful producer, not the latest run conclusion."""
+def authenticate_release(lock):
+    """Bind the exact uploaded asset to the pinned repository and published release."""
     origin = lock["transport"]
-    now = now or datetime.datetime.now(datetime.timezone.utc)
-    require(now.tzinfo is not None and now < _timestamp(origin["artifact_expires_at"]),
-            "pinned OpenSSL transport has expired; verified offline bytes remain usable")
-    prefix = "repos/" + origin["repository"] + "/actions/"
-    run_path = prefix + "runs/" + str(origin["run_id"])
-    artifact = metadata(prefix + "artifacts/" + str(origin["artifact_id"]))
-    run = metadata(run_path)
-    attempt = metadata(run_path + "/attempts/" + str(origin["attempt"]))
-    listing = metadata(run_path + "/attempts/{}/jobs?per_page=100".format(origin["attempt"]))
-    producer = metadata(prefix + "jobs/" + str(origin["producer_id"]))
-    _equal(artifact, {"id": origin["artifact_id"], "name": origin["artifact_name"], "expired": False,
-                      "size_in_bytes": origin["artifact_metadata_size"], "digest": origin["artifact_digest"],
-                      "created_at": origin["artifact_created_at"], "expires_at": origin["artifact_expires_at"]},
-           "artifact metadata")
-    _equal(artifact.get("workflow_run"), {"id": origin["run_id"], "repository_id": origin["repository_id"],
-           "head_repository_id": origin["repository_id"], "head_branch": origin["branch"],
-           "head_sha": origin["head_sha"]}, "artifact run")
-    run_identity = {"id": origin["run_id"], "head_sha": origin["head_sha"], "head_branch": origin["branch"],
-                    "event": origin["event"], "path": origin["workflow"]}
-    for label, response in (("run", run), ("explicit attempt", attempt)):
-        _equal(response, run_identity, label)
-        for field in ("repository", "head_repository"):
-            _equal(response.get(field), {"id": origin["repository_id"], "full_name": origin["repository"]},
-                   label + " " + field)
-    require(type(run.get("run_attempt")) is int and run["run_attempt"] >= origin["attempt"],
-            "substituted run attempt")
-    _equal(attempt, {"run_attempt": origin["attempt"]}, "explicit attempt")
-    require(type(listing) is dict and type(listing.get("jobs")) is list
-            and type(listing.get("total_count")) is int
-            and listing["total_count"] == len(listing["jobs"]) <= 100
-            and all(type(job) is dict and type(job.get("id")) is int for job in listing["jobs"])
-            and len({job["id"] for job in listing["jobs"]}) == len(listing["jobs"]),
-            "producer job list is incomplete or malformed")
-    matches = [job for job in listing["jobs"] if job.get("name") == origin["producer_name"]]
-    require(len(matches) == 1, "original producer job is missing or ambiguous")
-    job_identity = {"id": origin["producer_id"], "name": origin["producer_name"],
-                    "run_id": origin["run_id"], "run_attempt": origin["attempt"],
-                    "head_sha": origin["head_sha"], "status": "completed", "conclusion": "success",
-                    "started_at": origin["producer_started_at"], "completed_at": origin["producer_completed_at"]}
-    for job in (matches[0], producer):
-        _equal(job, job_identity, "original producer job")
-        steps = job.get("steps")
-        require(type(steps) is list and all(type(step) is dict for step in steps), "producer upload steps missing")
-        uploads = [step for step in steps if type(step.get("name")) is str
-                   and re.fullmatch(r"Run actions/upload-artifact@[0-9a-f]{40}", step["name"]) is not None]
-        require(len(uploads) == 1, "original producer upload is missing or ambiguous")
-        _equal(uploads[0], {"status": "completed", "conclusion": "success",
-               "started_at": origin["upload_started_at"], "completed_at": origin["upload_completed_at"]},
-               "producer upload")
-    require(_timestamp(attempt.get("run_started_at")) <= _timestamp(origin["producer_started_at"]),
-            "producer is outside original attempt time window")
-    return artifact
+    prefix = "repos/" + origin["repository"]
+    _equal(metadata(prefix), {"id": origin["repository_id"], "full_name": origin["repository"]},
+           "release repository")
+    release = metadata(prefix + "/releases/" + str(origin["release_id"]))
+    _equal(release, {"id": origin["release_id"], "tag_name": origin["tag"], "draft": False},
+           "release identity")
+    assets = release.get("assets")
+    require(type(assets) is list
+            and all(type(asset) is dict and type(asset.get("id")) is int and asset["id"] > 0
+                    and type(asset.get("name")) is str and bool(asset["name"]) for asset in assets)
+            and len({asset["id"] for asset in assets}) == len(assets)
+            and len({asset["name"] for asset in assets}) == len(assets),
+            "release asset list is malformed or ambiguous")
+    matches = [asset for asset in assets if asset["id"] == origin["asset_id"]]
+    require(len(matches) == 1, "pinned asset does not belong to release")
+    expected = {"id": origin["asset_id"], "name": origin["asset_name"], "state": "uploaded",
+                "size": lock["archive"]["size_bytes"], "digest": "sha256:" + lock["archive"]["sha256"],
+                "browser_download_url": origin["url"]}
+    _equal(matches[0], expected, "release asset association")
+    asset = metadata(prefix + "/releases/assets/" + str(origin["asset_id"]))
+    _equal(asset, expected, "release asset metadata")
+    return asset
 
 
 def _safe_parent(path):
@@ -338,6 +282,19 @@ def _safe_parent(path):
                 "output parent is not a non-reparse directory")
 
 
+class _DownloadDeadline:
+    """Cancellation predicate checked between reads, not a mid-read interruption."""
+
+    def __init__(self):
+        self.expires_at = time.monotonic() + DOWNLOAD_BUDGET_SECONDS
+
+    def is_set(self):
+        return time.monotonic() >= self.expires_at
+
+    def check(self):
+        require(not self.is_set(), "OpenSSL download exceeded deadline")
+
+
 def acquire(archive, lock_path):
     archive = pathlib.Path(archive).absolute()
     lock = load_lock(lock_path)
@@ -348,29 +305,24 @@ def acquire(archive, lock_path):
     require(bool(os.environ.get("GH_TOKEN")), "GH_TOKEN is required only for cold acquisition")
     _safe_parent(archive.parent)
     try:
-        authenticate_artifact(lock)
+        authenticate_release(lock)
         with tempfile.TemporaryDirectory(prefix=".klogg-openssl-acquire-", dir=str(archive.parent)) as scratch:
-            outer = pathlib.Path(scratch) / "actions.zip"
-            download_artifact_zip(lock["transport"]["artifact_id"], outer,
-                                  limit=MAX_OUTER_BYTES, timeout=DOWNLOAD_TIMEOUT)
-            raw_outer = _regular_bytes(outer, MAX_OUTER_BYTES)
-            require(hashlib.sha256(raw_outer).hexdigest() == lock["transport"]["artifact_digest"][7:],
-                    "outer artifact SHA-256 mismatch")
-            with zipfile.ZipFile(io.BytesIO(raw_outer)) as wrapper:
-                infos = _inventory(wrapper, {"entries": 1, "member_bytes": lock["archive"]["size_bytes"],
-                                             "expanded_bytes": lock["archive"]["size_bytes"]})
-                require(len(infos) == 1 and infos[0].filename == "openssl.zip" and not infos[0].is_dir(),
-                        "unexpected outer artifact inventory")
-                raw = _member_bytes(wrapper, infos[0], lock["archive"]["size_bytes"])
-            _verify_bytes(raw, lock)
             staged = pathlib.Path(scratch) / "openssl.zip"
-            with staged.open("xb") as output:
-                output.write(raw)
+            deadline = _DownloadDeadline()
+            try:
+                download_source(lock["transport"]["url"], staged, max_bytes=lock["archive"]["size_bytes"],
+                                attempts=1, socket_timeout=30, cancel_event=deadline)
+            except RuntimeError:
+                deadline.check()
+                raise
+            deadline.check()
+            _verify_bytes(_regular_bytes(staged, lock["archive"]["size_bytes"]), lock)
+            deadline.check()
             try:
                 os.link(str(staged), str(archive))
             except FileExistsError as error:
                 raise OpenSslError("archive destination already exists; refusing overwrite") from error
-    except (TransportError, OSError, zipfile.BadZipFile, RuntimeError) as error:
+    except (TransportError, OSError, RuntimeError) as error:
         if isinstance(error, OpenSslError):
             raise
         raise OpenSslError("OpenSSL acquisition failed: " + str(error)) from error

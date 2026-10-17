@@ -67,14 +67,18 @@ hashes and PE identities. Windows consumption installs only the two selected
 runtime DLLs after complete verification; it does not unpack the vendor SDK.
 Qt 6 and the native iOS source-built OpenSSL closure do not use this input.
 
-FireDaemon no longer provides the configured 1.1.1 download. The temporary
-recovery source is an authenticated, fixed historical GitHub Actions artifact,
-not a mutable latest-success selection or independent vendor-signature proof.
-It expires at **2026-12-26T09:30:51Z**. Valid pinned cached bytes can be verified
-offline after that date, but cold availability requires a separately approved,
-licensed durable source. A cache is not a permanent mirror or qualification
-receipt. This preserves the existing legacy version; it does not assert a
-current security-support lifetime or authorize a vendor/version upgrade.
+FireDaemon no longer provides the configured 1.1.1 download. The unchanged
+archive is retained in the separately approved, non-Latest
+[dependency release](https://github.com/ZEACENT/klogg/releases/tag/openssl-qt5-1.1.1w-input-v1).
+The lock binds the repository, release and asset identities plus the archive
+size and SHA-256. Cold acquisition no longer depends on an expiring Actions
+artifact or a mutable latest-success selection. The release preserves the
+original OpenSSL/SSLeay license, acknowledgments, historical origin record and
+checksums; it is not independent vendor-signature proof or new qualification.
+CI only reads this release; it does not automatically publish or replace it.
+Caches remain optional accelerators. This preserves the existing legacy version;
+it does not assert a current security-support lifetime or authorize a
+vendor/version upgrade.
 See [CI input verification](CI_ENVIRONMENTS.md#windows-qt-5-runtime-input).
 
 ## Android capture helper

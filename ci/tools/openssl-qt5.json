@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "archive": {
     "file_name": "openssl.zip",
     "size_bytes": 15897774,
@@ -42,23 +42,10 @@
   "transport": {
     "repository": "ZEACENT/klogg",
     "repository_id": 1094649085,
-    "workflow": ".github/workflows/ci-build.yml",
-    "event": "pull_request",
-    "branch": "worktree-master-ci-fail",
-    "run_id": 36309613109,
-    "attempt": 1,
-    "head_sha": "3078e13d9c397def2db804c6a2154f11ad5fcd8b",
-    "producer_id": 108592990081,
-    "producer_name": "Prefetch Windows Qt 5 OpenSSL",
-    "producer_started_at": "2026-09-27T09:31:33Z",
-    "producer_completed_at": "2026-09-27T09:31:38Z",
-    "upload_started_at": "2026-09-27T09:31:35Z",
-    "upload_completed_at": "2026-09-27T09:31:37Z",
-    "artifact_id": 10928159537,
-    "artifact_name": "openssl-archive",
-    "artifact_created_at": "2026-09-27T09:31:37Z",
-    "artifact_expires_at": "2026-12-26T09:30:51Z",
-    "artifact_metadata_size": 15795726,
-    "artifact_digest": "sha256:828b44a92e7f2547bf098969ab7bc8a6270a3ea994a8c2f5a44820c851382b7a"
+    "release_id": 415601829,
+    "tag": "openssl-qt5-1.1.1w-input-v1",
+    "asset_id": 649642882,
+    "asset_name": "openssl.zip",
+    "url": "https://github.com/ZEACENT/klogg/releases/download/openssl-qt5-1.1.1w-input-v1/openssl.zip"
   }
 }

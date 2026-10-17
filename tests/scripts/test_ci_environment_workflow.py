@@ -352,6 +352,63 @@ else:
         self.assertEqual(QUALITY.ci_build_openssl_issues(text), [])
 
 
+class PostGateDisplayNameTest(unittest.TestCase):
+    NAME = "Dispatch Continuous publisher"
+    ISSUE = "CI post-gate dispatch must have the stable display name: Dispatch Continuous publisher"
+
+    def with_name_fields(self, fields):
+        text = CI_BUILD.read_text()
+        block = QUALITY.workflow_job_blocks(text)["DispatchContinuous"]
+        name_line = next(line for line in block if line.startswith("    name:"))
+        return mutate_job(text, "DispatchContinuous", name_line, fields)
+
+    def test_skipped_dispatch_has_readable_name_without_expression_evaluation(self):
+        block = QUALITY.workflow_job_blocks(CI_BUILD.read_text())["DispatchContinuous"]
+        # GitHub can skip a job before evaluating its display-name expression.
+        self.assertEqual(QUALITY.workflow_job_direct_value(block, "name"), self.NAME)
+
+    def test_stable_post_gate_name_is_valid_without_weakening_required_names(self):
+        text = self.with_name_fields('    name: "' + self.NAME + '"')
+        self.assertEqual(QUALITY.ci_build_environment_mode_issues(text), [])
+        gate = QUALITY.workflow_job_blocks(text)["ci-gate"]
+        self.assertEqual(QUALITY.workflow_job_direct_value(gate, "name"), PREFIX + "ci-gate")
+
+    def test_dynamic_missing_spoofed_or_ambiguous_post_gate_name_is_rejected(self):
+        for fields in (
+            '    name: "' + PREFIX + self.NAME + '"',
+            '    name: "${{ github.event_name }} ' + self.NAME + '"',
+            '    name: "' + self.NAME + ' changed"',
+            '    # name: "' + self.NAME + '"',
+            '    env:\n      name: "' + self.NAME + '"',
+            '    name: ""',
+            '    name: "' + self.NAME + '"\n    name: "other"',
+        ):
+            with self.subTest(fields=fields):
+                self.assertIn(self.ISSUE, QUALITY.ci_build_environment_mode_issues(self.with_name_fields(fields)))
+
+    def test_dispatch_event_projections_remain_successful_trusted_master_push_only(self):
+        text = CI_BUILD.read_text()
+        triggers = QUALITY.workflow_trigger_mapping(text)
+        block = QUALITY.workflow_job_blocks(text)["DispatchContinuous"]
+        condition = QUALITY.workflow_job_direct_value(block, "if")
+        for event, ref, trusted, result, expected in (
+            ("pull_request", "refs/pull/77/merge", True, "success", False),
+            ("push", "refs/heads/master", True, "success", True),
+            ("push", "refs/heads/feature", True, "success", False),
+            ("push", "refs/heads/master", False, "success", False),
+            ("push", "refs/heads/master", True, "failure", False),
+            ("push", "refs/heads/master", True, "skipped", False),
+            ("workflow_dispatch", "refs/heads/master", True, "success", False),
+            ("schedule", "refs/heads/master", True, "success", False),
+        ):
+            with self.subTest(event=event, ref=ref, trusted=trusted, result=result):
+                expression = (condition.replace("success()", repr(result == "success"))
+                              .replace("needs.ci-gate.result", repr(result))
+                              .replace("github.event.repository.full_name == github.repository", repr(trusted))
+                              .replace("github.ref", repr(ref)))
+                self.assertEqual(event in triggers and bool(event_expression(expression, event, "off")), expected)
+
+
 class EnvironmentBootstrapTest(unittest.TestCase):
     def test_macos_application_jobs_pin_hosts_and_xcode_before_shared_configuration(self):
         text = CI_BUILD.read_text()
@@ -518,7 +575,7 @@ class EnvironmentBootstrapTest(unittest.TestCase):
 
     def test_skipped_producer_mode_jobs_cannot_emit_ordinary_required_check_names(self):
         blocks = QUALITY.workflow_job_blocks(CI_BUILD.read_text())
-        for job in QUALITY.CI_BUILD_REQUIRED_JOBS:
+        for job in QUALITY.CI_BUILD_REQUIRED_JOBS - QUALITY.CI_BUILD_POST_GATE_JOBS:
             with self.subTest(job=job):
                 name = QUALITY.workflow_job_direct_value(blocks[job], "name")
                 prefix = NATIVE_PREFIX if job in QUALITY.CI_BUILD_NATIVE_JOBS else PREFIX
@@ -543,7 +600,7 @@ class EnvironmentBootstrapTest(unittest.TestCase):
                  ("push", "publish", "qualify", True))
         for event, environment_mode, dependency_mode, ordinary in cases:
             with self.subTest(event=event, environment_mode=environment_mode, dependency_mode=dependency_mode):
-                for job in QUALITY.CI_BUILD_REQUIRED_JOBS:
+                for job in QUALITY.CI_BUILD_REQUIRED_JOBS - QUALITY.CI_BUILD_POST_GATE_JOBS:
                     fields = blocks[job]
                     name = QUALITY.workflow_job_direct_value(fields, "name")
                     native = job in QUALITY.CI_BUILD_NATIVE_JOBS
@@ -553,9 +610,6 @@ class EnvironmentBootstrapTest(unittest.TestCase):
                     should_prefix = event == "workflow_dispatch" and (environment_mode != "off" or
                                     (dependency_mode != "off" and not native))
                     self.assertEqual(actual.startswith("[producer-mode skipped] "), should_prefix)
-                    if job == "DispatchContinuous":
-                        self.assertIn("github.event_name == 'push'", QUALITY.workflow_job_direct_value(fields, "if"))
-                        continue
                     condition = QUALITY.workflow_job_direct_value(fields, "if")
                     native_selected = event == "workflow_dispatch" and dependency_mode in {"qualify", "publish"}
                     selected = ordinary or (native and native_selected and
@@ -566,7 +620,7 @@ class EnvironmentBootstrapTest(unittest.TestCase):
 
     def test_every_ordinary_name_shadow_mutation_is_rejected(self):
         text = CI_BUILD.read_text()
-        for job in QUALITY.CI_BUILD_REQUIRED_JOBS:
+        for job in QUALITY.CI_BUILD_REQUIRED_JOBS - QUALITY.CI_BUILD_POST_GATE_JOBS:
             with self.subTest(job=job):
                 prefix = NATIVE_PREFIX if job in QUALITY.CI_BUILD_NATIVE_JOBS else PREFIX
                 mutated = mutate_job(text, job, prefix, "")

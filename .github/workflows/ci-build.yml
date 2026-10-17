@@ -2983,7 +2983,7 @@ jobs:
           echo "CI passed: $results"
 
   DispatchContinuous:
-    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Dispatch Continuous publisher"
+    name: "Dispatch Continuous publisher"
     needs: [ci-gate]
     if: >-
       ${{

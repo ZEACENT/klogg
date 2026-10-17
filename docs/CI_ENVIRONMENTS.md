@@ -168,26 +168,39 @@ restore prefix; a corrupt exact hit, including a reported hit with no archive,
 fails instead of acquiring another source. Existing destinations are never
 silently overwritten. Consumers remain offline and Qt 5-only.
 
-Cold recovery reads fixed artifact `10928159537` from run `36309613109`, head
-`3078e13d9c397def2db804c6a2154f11ad5fcd8b`, original **attempt 1**, producer
-`108592990081`. That successful upload created the artifact at
-`2026-09-27T09:31:37Z`. Attempt 2's carried-forward job record and successful
-historical x86 consumer do not substitute for original production or qualify
-current code. The outer Actions artifact digest and inner vendor ZIP digest
-are different byte layers and are checked separately. Only job-local read
-permissions and an acquisition-step token are used; fork restrictions are not
-bypassed. The ordinary transient input upload is not a durable publication.
-The shared Actions transport remains a declared verification-file dependency
-of every Linux package role that binds the ADB source-cache wrapper. Moving
-code into a shared module must not remove its bytes from qualification policy;
-existing signed evidence remains stale rather than being relabeled.
+Cold acquisition reads the fixed `openssl.zip` asset from the separately
+approved, non-Latest
+[dependency release](https://github.com/ZEACENT/klogg/releases/tag/openssl-qt5-1.1.1w-input-v1).
+Schema 2 pins repository ID `1094649085`, release ID `415601829`, asset ID
+`649642882`, the exact tag and canonical download URL. Acquisition checks the
+repository identity, non-draft release, release membership and independently
+queried asset metadata before a size-bounded download. Full offline verification
+still precedes no-overwrite publication. There is no fallback to a historical
+Actions artifact, an unverified cache, or a different OpenSSL version.
 
-The retained artifact expires at **2026-12-26T09:30:51Z**. Expiry limits cold
-retrieval, not offline verification of already pinned bytes. Cache eviction or
-artifact removal can still prevent a cold build; maintainers must separately
-approve a licensed durable source before losing availability. No automatic
-version/vendor change, permanent SDK mirror, receipt relabeling, or protected
-publication is authorized by this recovery.
+The archive remains byte-identical to the original input (15,897,774 bytes,
+SHA-256 `1870b15bf6749e65ffbbadf52cdff3ee0e9f02943550bf4395574bb432af3eb8`).
+Its original OpenSSL/SSLeay license is retained inside the archive and as a
+release sidecar, together with acknowledgments, checksums and the historical
+Actions origin record. Before this one-time preservation, artifact `10928159537`
+from run `36309613109`, original attempt 1, producer `108592990081` was
+independently authenticated and both outer and inner byte layers were verified.
+That evidence records origin, not vendor-signature proof or current-source
+qualification. Routine cold acquisition does not need those historical APIs.
+
+The former Actions artifact expires at **2026-12-26T09:30:51Z**; the release
+asset has no Actions retention deadline. Administrators can still delete a
+release or asset, so this is not a claim of immutable hosting. Never replace an
+asset in place: any input change needs a separately reviewed release and lock.
+CI only consumes the durable input with job-local read permissions and an
+acquisition-step token; it cannot publish a replacement. Fork restrictions are
+not bypassed. The ordinary transient upload supplies the Windows job in the
+same run, while the cache is only an accelerator. No application version,
+OpenSSL version, runtime DLL identity, or publication permission changes.
+
+The shared transport and source-download helpers retain their existing Linux
+qualification-policy bindings; this migration does not modify those helper
+bytes or relabel signed evidence.
 
 Run the fast offline regression guard from the repository root:
 
@@ -197,9 +210,13 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/lint_ci_quality.py
 ```
 
 These guards cover the producer/consumer boundary absent from local macOS
-application builds. They do not replace fresh Windows x86 compilation, actual
-native dump/unit/UI execution, six-environment qualification, or independent
-native-core qualification. The x86 CI leg currently disables packaging, so its
+application builds, including cold acquisition after the former artifact's
+expiry, substituted release identities, and corrupt/oversized downloads. To
+exercise the original binary input too, set `KLOGG_OPENSSL_TEST_ARCHIVE` to the
+absolute path of an independently downloaded archive when running the OpenSSL
+test module; an explicit missing fixture fails rather than silently skipping.
+They do not replace fresh Windows x86 compilation, actual native dump/unit/UI
+execution, six-environment qualification, or independent native-core qualification. The x86 CI leg currently disables packaging, so its
 passing tests must not be described as TLS package qualification.
 
 ## Ownership

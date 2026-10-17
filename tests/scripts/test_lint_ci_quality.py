@@ -3495,8 +3495,8 @@ jobs:
         self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
         post_gate_message = "CI post-gate job DispatchContinuous must directly need only ci-gate"
         wrong_need = workflow.replace(
-            "  DispatchContinuous:\n    name: \"" + MODULE.CI_BUILD_PRODUCER_NAME_PREFIX + "Dispatch Continuous publisher\"\n    needs: [ci-gate]",
-            "  DispatchContinuous:\n    name: \"" + MODULE.CI_BUILD_PRODUCER_NAME_PREFIX + "Dispatch Continuous publisher\"\n    needs: [LinuxPackages]",
+            '  DispatchContinuous:\n    name: "Dispatch Continuous publisher"\n    needs: [ci-gate]',
+            '  DispatchContinuous:\n    name: "Dispatch Continuous publisher"\n    needs: [LinuxPackages]',
             1,
         )
         self.assertIn(post_gate_message, MODULE.ci_build_workflow_issues(wrong_need))
