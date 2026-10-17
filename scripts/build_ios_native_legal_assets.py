@@ -75,7 +75,9 @@ def write_deterministic_source_archive(
     repository_root: pathlib.Path,
 ) -> None:
     with output.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+        # Python's default compression level differs between runner images.
+        # Both native producers must hash identical corresponding-source bytes.
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=9) as compressed:
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
                 add_file(archive, lock_path, "libimobiledevice.lock.json")
                 for source in lock["sources"]:

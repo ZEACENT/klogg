@@ -3472,6 +3472,91 @@ jobs:
             MODULE.continuous_release_workflow_issues(unguarded_draft_deletion),
         )
 
+    def test_continuous_pat_preflight_contract_rejects_bypasses(self):
+        workflow = (ROOT / ".github/workflows/ci-continuous.yml").read_text()
+        message = (
+            "continuous publisher must authenticate its PAT read-only immediately after checkout"
+        )
+        name = "      - name: Verify continuous publisher PAT\n"
+        self.assertIn(name, workflow)
+        start = workflow.index(name)
+        end = workflow.index("      - name:", start + len(name))
+        preflight = workflow[start:end]
+        self.assertNotIn(message, MODULE.continuous_release_workflow_issues(workflow))
+        mutations = {
+            "missing": workflow.replace(preflight, "", 1),
+            "comment spoof": workflow.replace(
+                preflight, "".join("# " + line for line in preflight.splitlines(True)), 1
+            ),
+            "late": workflow.replace(preflight, "", 1).replace(
+                "      - name: Create continuous candidate draft", preflight
+                + "      - name: Create continuous candidate draft", 1
+            ),
+        }
+        for label, old, new in (
+            ("app token", "${{ secrets.KLOGG_GITHUB_TOKEN }}", "${{ github.token }}"),
+            ("conditional", "        shell: bash", "        if: false\n        shell: bash"),
+            ("soft failure", "        shell: bash", "        continue-on-error: true\n        shell: bash"),
+            ("duplicate key", "        shell: bash", "        shell: sh\n        shell: bash"),
+            ("write request", "--method GET", "--method POST"),
+            ("commented request", "          if ! gh api", "          # if ! gh api"),
+            ("string spoof", "          if ! gh api --method GET /user >/dev/null; then",
+             "          echo 'if ! gh api --method GET /user >/dev/null; then'"),
+            ("ignored auth failure", "            exit 1", "            exit 0"),
+            ("malformed block", "        run: |", "        run: invalid"),
+        ):
+            changed = preflight.replace(old, new)
+            self.assertNotEqual(changed, preflight, label)
+            mutations[label] = workflow.replace(preflight, changed, 1)
+        for label, changed in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertIn(message, MODULE.continuous_release_workflow_issues(changed))
+
+    def test_continuous_rollback_requires_an_attempted_candidate(self):
+        workflow = (ROOT / ".github/workflows/ci-continuous.yml").read_text()
+        message = (
+            "continuous release rollback must cover failure and cancellation only after candidate creation was attempted"
+        )
+        condition = (
+            "${{ (failure() || cancelled()) && "
+            "(steps.candidate_release.outcome == 'success' || "
+            "steps.candidate_release.outcome == 'failure' || "
+            "steps.candidate_release.outcome == 'cancelled') }}"
+        )
+        name = "      - name: Roll back failed continuous promotion\n"
+        start = workflow.index(name)
+        end = workflow.index("      - name:", start + len(name))
+        rollback = workflow[start:end]
+        actual_condition = MODULE.workflow_step_fields(rollback.splitlines())[0]["if"]
+        self.assertEqual(actual_condition, condition)
+        self.assertNotIn(message, MODULE.continuous_release_workflow_issues(workflow))
+        for bad_condition in (
+            "${{ failure() || cancelled() }}",  # Preparation failure: nothing to undo.
+            "${{ failure() }}",  # Cancellation must also clean up.
+            condition.replace("(failure() || cancelled()) && ", ""),  # Implicit success().
+            condition.replace("'failure'", "'skipped'"),
+            condition.replace(" || steps.candidate_release.outcome == 'cancelled'", ""),
+            "${{ (failure() || cancelled()) && steps.candidate_release.outputs.id != '' }}",
+            "${{ (failure() || cancelled()) && steps.candidate_release.outcome != 'skipped' }}",
+            "${{ invalid expression }}",
+        ):
+            with self.subTest(condition=bad_condition):
+                changed = rollback.replace(condition, bad_condition, 1)
+                # A comment cannot supply a missing condition or status check.
+                changed += f"        # if: {condition}\n"
+                self.assertIn(message, MODULE.continuous_release_workflow_issues(
+                    workflow.replace(rollback, changed, 1)
+                ))
+        for changed in (
+            rollback.replace(f"        if: {condition}\n", ""),
+            rollback.replace("        shell: bash", "        if: false\n        shell: bash"),
+        ):
+            self.assertIn(message, MODULE.continuous_release_workflow_issues(
+                workflow.replace(rollback, changed, 1)
+            ))
+        renamed_candidate = workflow.replace("id: candidate_release", "id: other_candidate", 1)
+        self.assertIn(message, MODULE.continuous_release_workflow_issues(renamed_candidate))
+
     def test_ci_dispatches_continuous_only_after_successful_master_gate(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         needs = MODULE.workflow_job_needs(workflow)

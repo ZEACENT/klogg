@@ -4815,8 +4815,65 @@ def continuous_release_workflow_issues(text: str) -> list[str]:
         issues.append("release publishers must share one lossless serialized concurrency group")
     if "cancel-in-progress: false" not in text:
         issues.append("continuous release transaction must not be canceled in progress")
-    if "${{ failure() || cancelled() }}" not in text:
-        issues.append("continuous release rollback must cover failure and cancellation")
+    publish_steps = workflow_step_blocks(publish or [])
+    parsed_steps = [workflow_step_fields(step) for step in publish_steps]
+    preflights = [
+        index for index, (fields, _) in enumerate(parsed_steps)
+        if fields.get("name") == "Verify continuous publisher PAT"
+    ]
+    preflight_valid = preflights == [1]
+    if preflight_valid:
+        fields, children = parsed_steps[1]
+        active_run = [
+            active.strip() for line in fields.get("run", "").splitlines()
+            if (active := strip_yaml_comment(line))
+        ]
+        # Exact executable statements keep comments, echo spoofs, and ignored
+        # failures from satisfying this deliberately narrow authentication gate.
+        preflight_valid = (
+            parsed_steps[0][0].get("uses", "").startswith("actions/checkout@")
+            and workflow_step_direct_fields_are_unique(publish_steps[1])
+            and set(fields) == {"name", "shell", "env", "run"}
+            and fields.get("shell") == "bash"
+            and children == {"env": {"GITHUB_TOKEN": RELEASE_PUBLISHER_TOKEN_DIRECTIVE}}
+            and active_run == [
+                "set -euo pipefail",
+                'echo "::notice::Continuous publishing requires KLOGG_GITHUB_TOKEN in repository Actions secrets: configure a valid PAT with repo and workflow scopes."',
+                RELEASE_PUBLISHER_TOKEN_GUARD,
+                "if ! gh api --method GET /user >/dev/null; then",
+                'echo "::error::KLOGG_GITHUB_TOKEN authentication failed. Check or replace the repository Actions secret with a valid PAT with repo and workflow scopes."',
+                "exit 1",
+                "fi",
+            ]
+        )
+    if not preflight_valid:
+        issues.append(
+            "continuous publisher must authenticate its PAT read-only immediately after checkout"
+        )
+    rollback_steps = [
+        (step, fields) for step, (fields, _) in zip(publish_steps, parsed_steps)
+        if fields.get("name") == "Roll back failed continuous promotion"
+    ]
+    candidate_steps = [
+        fields for fields, _ in parsed_steps
+        if fields.get("id") == "candidate_release"
+    ]
+    rollback_condition = (
+        "${{ (failure() || cancelled()) && "
+        "(steps.candidate_release.outcome == 'success' || "
+        "steps.candidate_release.outcome == 'failure' || "
+        "steps.candidate_release.outcome == 'cancelled') }}"
+    )
+    if (
+        len(rollback_steps) != 1
+        or not workflow_step_direct_fields_are_unique(rollback_steps[0][0])
+        or rollback_steps[0][1].get("if") != rollback_condition
+        or len(candidate_steps) != 1
+        or candidate_steps[0].get("name") != "Create continuous candidate draft"
+    ):
+        issues.append(
+            "continuous release rollback must cover failure and cancellation only after candidate creation was attempted"
+        )
     rollback = text.partition("- name: Roll back failed continuous promotion")[2]
     if (
         "releases/tags/${candidate_tag}" not in rollback
