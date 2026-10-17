@@ -2794,9 +2794,10 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
         offset = 0
         for _ in range(3):
             name_position = workflow.index(symbol_name, offset)
-            upload_start = workflow.rfind("      - uses: actions/upload-artifact@", 0, name_position)
+            upload_start = workflow.rfind("\n      - ", 0, name_position)
             upload_end = workflow.find("\n      - ", name_position)
             upload = workflow[upload_start : upload_end if upload_end >= 0 else len(workflow)]
+            self.assertRegex(upload, r"^\n      - uses: (?:actions/upload-artifact@|\./\.github/actions/upload-release-artifact\n)")
             self.assertIn("github.event_name == 'push'", upload)
             self.assertIn("inputs.qualification-mode == 'release'", upload)
             self.assertIn("compression-level: 0", upload)
@@ -2814,9 +2815,10 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
             with self.subTest(job=job.splitlines()[0].strip()):
                 self.assertNotIn("Package tarball for upload", job)
                 name_position = job.index(upload_name)
-                upload_start = job.rfind("      - uses: actions/upload-artifact@", 0, name_position)
+                upload_start = job.rfind("\n      - ", 0, name_position)
                 upload_end = job.find("\n      - ", name_position)
                 upload = job[upload_start : upload_end if upload_end >= 0 else len(job)]
+                self.assertRegex(upload, r"^\n      - uses: (?:actions/upload-artifact@|\./\.github/actions/upload-release-artifact\n)")
                 self.assertIn("github.event_name == 'push'", upload)
                 self.assertIn("inputs.qualification-mode == 'release'", upload)
                 self.assertIn("retention-days: 7", upload)

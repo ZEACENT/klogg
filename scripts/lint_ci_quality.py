@@ -1061,7 +1061,8 @@ def workflow_artifact_records(
                 continue
             if artifact_condition_is_statically_false(condition, condition_values):
                 continue
-            if action.startswith("actions/upload-artifact@"):
+            if (action.startswith("actions/upload-artifact@")
+                    or action == "./.github/actions/upload-release-artifact"):
                 job_records.append(("uploads", artifact_name, condition))
             elif action.startswith("actions/download-artifact@"):
                 job_records.append(("downloads", artifact_name, condition))
@@ -2321,7 +2322,9 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             upload = children.get("with", {})
             upload_name = upload.get("name", "")
             upload_path = upload.get("path", "").replace("\\", "/")
-            if not uses.startswith("actions/upload-artifact@") or not (
+            is_upload = (uses.startswith("actions/upload-artifact@")
+                         or uses == "./.github/actions/upload-release-artifact")
+            if not is_upload or not (
                 upload_name.startswith(("packages-", "symbols-"))
                 or "/packages/" in upload_path
                 or "/symbols/" in upload_path
@@ -4934,6 +4937,14 @@ def exact_platform_fragile_steps(
             {},
         ),
     ]
+    if release_qualification:
+        expected_setup.append((
+            {
+                "name": "Verify macOS upload and diagnostics contracts",
+                "run": "python3 tests/scripts/test_ci_release_artifact_upload.py",
+            },
+            {},
+        ))
     if len(parsed) != len(expected_setup) + int(release_qualification):
         return False
     for (fields, children), (required_fields, required_children) in zip(

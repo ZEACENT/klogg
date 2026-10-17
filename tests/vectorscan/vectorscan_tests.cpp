@@ -92,6 +92,7 @@ struct ChildRunResult {
     QProcess::ExitStatus exitStatus = QProcess::NormalExit;
     int exitCode = -1;
     QString output;
+    QString processError;
 };
 
 #if defined(Q_OS_WIN) && defined(_MSC_VER)
@@ -906,25 +907,37 @@ int runHighlighterCompileChild( const std::vector<int>& indexes, AllocatorMode a
 
 int runHighlighterCollectionChild( const std::vector<int>& indexes, AllocatorMode allocator )
 {
+    std::cout << "phase=collection_allocator start" << std::endl;
     const auto allocatorResult = configureHsAllocator( allocator );
     if ( allocatorResult != HS_SUCCESS ) {
         std::cerr << "hs_set_allocator failed rc=" << allocatorResult << std::endl;
         return 39;
     }
+    std::cout << "phase=collection_config start" << std::endl;
     initializeProductLikeTestState();
 
     QTemporaryDir tempDir( QDir::tempPath() + QStringLiteral( "/vectorscan-collection-XXXXXX" ) );
     if ( !tempDir.isValid() ) {
         return 40;
     }
+    std::cout << "phase=collection_tempdir complete" << std::endl;
 
-    auto collection = loadHighlighterCollection(
-        tempDir.filePath( QStringLiteral( "collection.ini" ) ), indexes );
-    HighlightedMatchRanges matches;
-    const auto matchType = collection.currentActiveSet().matchLine( regressionSampleLine(), matches );
-    if ( matchType == HighlighterMatchType::NoMatch || matches.empty() ) {
-        return 41;
+    {
+        std::cout << "phase=collection_restore start" << std::endl;
+        auto collection = loadHighlighterCollection(
+            tempDir.filePath( QStringLiteral( "collection.ini" ) ), indexes );
+        std::cout << "phase=collection_restore complete" << std::endl;
+        HighlightedMatchRanges matches;
+        std::cout << "phase=collection_match start" << std::endl;
+        const auto matchType
+            = collection.currentActiveSet().matchLine( regressionSampleLine(), matches );
+        std::cout << "phase=collection_match complete" << std::endl;
+        if ( matchType == HighlighterMatchType::NoMatch || matches.empty() ) {
+            return 41;
+        }
+        std::cout << "phase=collection_teardown start" << std::endl;
     }
+    std::cout << "phase=collection_teardown complete" << std::endl;
 
     std::cout << "highlighter collection restore ok indexes="
               << joinIndexes( indexes ).toStdString() << std::endl;
@@ -980,7 +993,7 @@ ChildRunResult runChildProcess( const ChildOptions& options )
 
     result.started = process.waitForStarted();
     if ( !result.started ) {
-        result.output = process.errorString();
+        result.processError = process.errorString();
         return result;
     }
 
@@ -988,6 +1001,7 @@ ChildRunResult runChildProcess( const ChildOptions& options )
     result.output = QString::fromUtf8( process.readAllStandardOutput() );
     result.exitStatus = process.exitStatus();
     result.exitCode = process.exitCode();
+    result.processError = process.errorString();
     return result;
 }
 
@@ -1053,6 +1067,7 @@ std::vector<ChildRunResult> runChildProcesses(
 
         child->completed = true;
         child->timeout.stop();
+        child->result.processError = child->process.errorString();
         results[ childIndex ] = child->result;
         --activeChildCount;
 
@@ -1157,6 +1172,10 @@ void requireSuccessfulChildResult( const ChildOptions& options, const ChildRunRe
     INFO( "child case=" << childCaseName( options.childCase ).toStdString() << " allocator="
                         << allocatorName( options.allocator ).toStdString() << " indexes="
                         << joinIndexes( options.indexes ).toStdString() );
+    INFO( "child started=" << result.started << " finished=" << result.finished
+                            << " exit_status=" << static_cast<int>( result.exitStatus )
+                            << " exit_code=" << result.exitCode
+                            << " process_error=" << result.processError.toStdString() );
     INFO( "child output:\n" << result.output.toStdString() );
 
     REQUIRE( result.started );
@@ -1325,7 +1344,9 @@ TEST_CASE( "Windows VectorScan regression search space exits cleanly",
 
 int main( int argc, char* argv[] )
 {
+    std::cerr << "phase=main_enter" << std::endl;
     QApplication app( argc, argv );
+    std::cerr << "phase=qapplication_ready" << std::endl;
 
     logging::enableLogging( true, logging::LogLevel::Warning );
     configureTestTempDir();
