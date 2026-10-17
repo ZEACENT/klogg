@@ -1,0 +1,666 @@
+diff --git a/src/efsw/DirectoryIoLifetime.hpp b/src/efsw/DirectoryIoLifetime.hpp
+new file mode 100644
+--- /dev/null
++++ b/src/efsw/DirectoryIoLifetime.hpp
+@@ -0,0 +1,145 @@
++#ifndef EFSW_DIRECTORYIOLIFETIME_HPP
++#define EFSW_DIRECTORYIOLIFETIME_HPP
++
++#include <cstddef>
++#include <cstdint>
++#include <unordered_map>
++
++namespace efsw {
++
++class DirectoryIoLifetime {
++  public:
++	struct Token {
++		Token( void* tokenValue = nullptr, std::uint64_t tokenGeneration = 0 ) :
++			value( tokenValue ), generation( tokenGeneration ) {}
++
++		void* value;
++		std::uint64_t generation;
++	};
++
++	enum class Completion {
++		Ignored,
++		Retired,
++		Failed,
++		Dispatch
++	};
++
++	Token registerWatch( void* value ) {
++		if ( value == nullptr || mEntries.find( value ) != mEntries.end() )
++			return Token{};
++
++		const std::uint64_t generation = ++mNextGeneration;
++		mEntries.emplace( value, Entry{ generation, true, false, false } );
++		return Token{ value, generation };
++	}
++
++	bool beginSubmission( Token token ) {
++		Entry* entry = find( token );
++		if ( entry == nullptr || !entry->active || entry->pending )
++			return false;
++
++		entry->pending = true;
++		return true;
++	}
++
++	bool submissionFailed( Token token ) {
++		Entry* entry = find( token );
++		if ( entry == nullptr || !entry->pending )
++			return false;
++
++		entry->pending = false;
++		entry->active = false;
++		return readyToDestroy( token );
++	}
++
++	bool retire( Token token ) {
++		Entry* entry = find( token );
++		if ( entry == nullptr || !entry->active )
++			return false;
++
++		entry->active = false;
++		return entry->pending;
++	}
++
++	Completion completionDequeued( Token token, bool succeeded ) {
++		Entry* entry = find( token );
++		if ( entry == nullptr || !entry->pending )
++			return Completion::Ignored;
++
++		entry->pending = false;
++		entry->dispatching = true;
++		if ( !succeeded && entry->active ) {
++			entry->active = false;
++			return Completion::Failed;
++		}
++		if ( entry->active )
++			return Completion::Dispatch;
++
++		return Completion::Retired;
++	}
++
++	bool dispatchAllowed( Token token ) const {
++		const Entry* entry = find( token );
++		return entry != nullptr && entry->active && entry->dispatching;
++	}
++
++	bool finishDispatch( Token token ) {
++		Entry* entry = find( token );
++		if ( entry == nullptr || !entry->dispatching )
++			return false;
++
++		entry->dispatching = false;
++		return readyToDestroy( token );
++	}
++
++	bool readyToDestroy( Token token ) const {
++		const Entry* entry = find( token );
++		return entry != nullptr && !entry->active && !entry->pending && !entry->dispatching;
++	}
++
++	bool destroy( Token token ) {
++		if ( !readyToDestroy( token ) )
++			return false;
++
++		mEntries.erase( token.value );
++		return true;
++	}
++
++	std::size_t retiredCount() const {
++		std::size_t count = 0;
++		for ( const auto& entry : mEntries ) {
++			if ( !entry.second.active )
++				++count;
++		}
++		return count;
++	}
++
++  private:
++	struct Entry {
++		std::uint64_t generation;
++		bool active;
++		bool pending;
++		bool dispatching;
++	};
++
++	Entry* find( Token token ) {
++		auto it = mEntries.find( token.value );
++		if ( it == mEntries.end() || it->second.generation != token.generation )
++			return nullptr;
++		return &it->second;
++	}
++
++	const Entry* find( Token token ) const {
++		auto it = mEntries.find( token.value );
++		if ( it == mEntries.end() || it->second.generation != token.generation )
++			return nullptr;
++		return &it->second;
++	}
++
++	std::unordered_map<void*, Entry> mEntries;
++	std::uint64_t mNextGeneration = 0;
++};
++
++} // namespace efsw
++
++#endif
+diff --git a/src/efsw/WatcherWin32.hpp b/src/efsw/WatcherWin32.hpp
+--- a/src/efsw/WatcherWin32.hpp
++++ b/src/efsw/WatcherWin32.hpp
+@@ -1,6 +1,7 @@
+ #ifndef EFSW_WATCHERWIN32_HPP
+ #define EFSW_WATCHERWIN32_HPP
+ 
++#include <efsw/DirectoryIoLifetime.hpp>
+ #include <efsw/FileInfo.hpp>
+ #include <efsw/FileWatcherImpl.hpp>
+ #include <vector>
+@@ -28,6 +29,8 @@
+ struct WatcherStructWin32 {
+ 	OVERLAPPED Overlapped;
+ 	WatcherWin32* Watch;
++	DirectoryIoLifetime* Lifetime;
++	DirectoryIoLifetime::Token LifetimeToken;
+ };
+ 
+ struct sLastModifiedEvent {
+@@ -37,7 +40,7 @@
+ 
+ RefreshResult RefreshWatch( WatcherStructWin32* pWatch );
+ 
+-void CALLBACK WatchCallback( DWORD dwNumberOfBytesTransfered, LPOVERLAPPED lpOverlapped );
++bool CALLBACK WatchCallback( DWORD dwNumberOfBytesTransfered, LPOVERLAPPED lpOverlapped );
+ 
+ void DestroyWatch( WatcherStructWin32* pWatch );
+ 
+diff --git a/src/efsw/WatcherWin32.cpp b/src/efsw/WatcherWin32.cpp
+--- a/src/efsw/WatcherWin32.cpp
++++ b/src/efsw/WatcherWin32.cpp
+@@ -28,10 +28,10 @@
+ typedef EFSW_FILE_NOTIFY_EXTENDED_INFORMATION_EX* EFSW_PFILE_NOTIFY_EXTENDED_INFORMATION_EX;
+ 
+ typedef BOOL( WINAPI* EFSW_LPREADDIRECTORYCHANGESEXW )( HANDLE hDirectory, LPVOID lpBuffer,
+-												   DWORD nBufferLength, BOOL bWatchSubtree,
+-												   DWORD dwNotifyFilter, LPDWORD lpBytesReturned,
+-												   LPOVERLAPPED lpOverlapped, LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+-												   DWORD ReadDirectoryNotifyInformationClass );
++															   DWORD nBufferLength, BOOL bWatchSubtree,
++																   DWORD dwNotifyFilter, LPDWORD lpBytesReturned,
++																   LPOVERLAPPED lpOverlapped, LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
++																   DWORD ReadDirectoryNotifyInformationClass );
+ 
+ static EFSW_LPREADDIRECTORYCHANGESEXW pReadDirectoryChangesExW = NULL;
+ 
+@@ -51,10 +51,13 @@
+ 	}
+ }
+ 
+-void WatchCallbackOld( WatcherWin32* pWatch ) {
++void WatchCallbackOld( WatcherWin32* pWatch, WatcherStructWin32* tWatch ) {
+ 	PFILE_NOTIFY_INFORMATION pNotify;
+ 	size_t offset = 0;
+ 	do {
++		if ( !tWatch->Lifetime->dispatchAllowed( tWatch->LifetimeToken ) )
++			return;
++
+ 		bool skip = false;
+ 
+ 		pNotify = (PFILE_NOTIFY_INFORMATION)&pWatch->Buffer[offset];
+@@ -68,8 +71,8 @@
+ 		std::string nfile( count, '\0' );
+ 
+ 		count = WideCharToMultiByte( CP_UTF8, 0, pNotify->FileName,
+-									 pNotify->FileNameLength / sizeof( WCHAR ), &nfile[0], count,
+-									 NULL, NULL );
++								 pNotify->FileNameLength / sizeof( WCHAR ), &nfile[0], count,
++								 NULL, NULL );
+ 
+ 		if ( FILE_ACTION_MODIFIED == pNotify->Action ) {
+ 			FileInfo fifile( std::string( pWatch->DirName ) + nfile );
+@@ -84,16 +87,18 @@
+ 			pWatch->LastModifiedEvent.file = fifile;
+ 		}
+ 
+-		if ( !skip ) {
++		if ( !skip && tWatch->Lifetime->dispatchAllowed( tWatch->LifetimeToken ) )
+ 			pWatch->Watch->handleAction( pWatch, nfile, pNotify->Action );
+-		}
+ 	} while ( pNotify->NextEntryOffset != 0 );
+ }
+ 
+-void WatchCallbackEx( WatcherWin32* pWatch ) {
++void WatchCallbackEx( WatcherWin32* pWatch, WatcherStructWin32* tWatch ) {
+ 	EFSW_PFILE_NOTIFY_EXTENDED_INFORMATION_EX pNotify;
+ 	size_t offset = 0;
+ 	do {
++		if ( !tWatch->Lifetime->dispatchAllowed( tWatch->LifetimeToken ) )
++			return;
++
+ 		bool skip = false;
+ 
+ 		pNotify = (EFSW_PFILE_NOTIFY_EXTENDED_INFORMATION_EX)&pWatch->Buffer[offset];
+@@ -107,8 +112,8 @@
+ 		std::string nfile( count, '\0' );
+ 
+ 		count = WideCharToMultiByte( CP_UTF8, 0, pNotify->FileName,
+-									 pNotify->FileNameLength / sizeof( WCHAR ), &nfile[0], count,
+-									 NULL, NULL );
++								 pNotify->FileNameLength / sizeof( WCHAR ), &nfile[0], count,
++								 NULL, NULL );
+ 
+ 		if ( FILE_ACTION_MODIFIED == pNotify->Action ) {
+ 			FileInfo fifile( std::string( pWatch->DirName ) + nfile );
+@@ -138,50 +143,51 @@
+ 			}
+ 
+ 			if ( oldFile.empty() ) {
+-				pWatch->Watch->handleAction( pWatch, nfile, FILE_ACTION_ADDED );
++				if ( tWatch->Lifetime->dispatchAllowed( tWatch->LifetimeToken ) )
++					pWatch->Watch->handleAction( pWatch, nfile, FILE_ACTION_ADDED );
+ 				skip = true;
+-			} else {
++			} else if ( tWatch->Lifetime->dispatchAllowed( tWatch->LifetimeToken ) ) {
+ 				pWatch->Watch->handleAction( pWatch, oldFile, FILE_ACTION_RENAMED_OLD_NAME );
+ 			}
+ 		}
+ 
+-		if ( !skip ) {
++		if ( !skip && tWatch->Lifetime->dispatchAllowed( tWatch->LifetimeToken ) )
+ 			pWatch->Watch->handleAction( pWatch, nfile, pNotify->Action );
+-		}
+ 	} while ( pNotify->NextEntryOffset != 0 );
+ }
+ 
+ /// Unpacks events and passes them to a user defined callback.
+-void CALLBACK WatchCallback( DWORD dwNumberOfBytesTransfered, LPOVERLAPPED lpOverlapped ) {
+-	if ( NULL == lpOverlapped ) {
+-		return;
+-	}
++bool CALLBACK WatchCallback( DWORD dwNumberOfBytesTransfered, LPOVERLAPPED lpOverlapped ) {
++	if ( NULL == lpOverlapped )
++		return false;
+ 
+ 	WatcherStructWin32* tWatch = (WatcherStructWin32*)lpOverlapped;
+ 	WatcherWin32* pWatch = tWatch->Watch;
+-
+-	if ( dwNumberOfBytesTransfered == 0 ) {
+-		if ( nullptr != pWatch && !pWatch->StopNow ) {
+-			RefreshWatch( tWatch );
+-		} else {
+-			return;
+-		}
+-	}
++	if ( pWatch == nullptr || tWatch->Lifetime == nullptr ||
++		 !tWatch->Lifetime->dispatchAllowed( tWatch->LifetimeToken ) )
++		return false;
++
++	if ( dwNumberOfBytesTransfered == 0 )
++		return RefreshWatch( tWatch ) != RefreshResult::Failed;
+ 
+ 	// Fork watch depending on the Windows API supported
+-	if ( pWatch->Extended ) {
+-		WatchCallbackEx( pWatch );
+-	} else {
+-		WatchCallbackOld( pWatch );
+-	}
+-
+-	if ( !pWatch->StopNow ) {
+-		RefreshWatch( tWatch );
+-	}
++	if ( pWatch->Extended )
++		WatchCallbackEx( pWatch, tWatch );
++	else
++		WatchCallbackOld( pWatch, tWatch );
++
++	if ( tWatch->Lifetime->dispatchAllowed( tWatch->LifetimeToken ) )
++		return RefreshWatch( tWatch ) != RefreshResult::Failed;
++
++	return true;
+ }
+ 
+ /// Refreshes the directory monitoring.
+ RefreshResult RefreshWatch( WatcherStructWin32* pWatch ) {
++	if ( pWatch == nullptr || pWatch->Watch == nullptr || pWatch->Lifetime == nullptr ||
++		 !pWatch->Lifetime->beginSubmission( pWatch->LifetimeToken ) )
++		return RefreshResult::Failed;
++
+ 	initReadDirectoryChangesEx();
+ 
+ 	bool bRet = false;
+@@ -190,9 +196,9 @@
+ 
+ 	if ( pReadDirectoryChangesExW ) {
+ 		bRet = pReadDirectoryChangesExW( pWatch->Watch->DirHandle, pWatch->Watch->Buffer.data(),
+-									  (DWORD)pWatch->Watch->Buffer.size(), pWatch->Watch->Recursive,
+-									  pWatch->Watch->NotifyFilter, NULL, &pWatch->Overlapped,
+-										 NULL, EFSW_ReadDirectoryNotifyExtendedInformation ) != 0;
++										  (DWORD)pWatch->Watch->Buffer.size(), pWatch->Watch->Recursive,
++										  pWatch->Watch->NotifyFilter, NULL, &pWatch->Overlapped,
++										  NULL, EFSW_ReadDirectoryNotifyExtendedInformation ) != 0;
+ 		if ( bRet ) {
+ 			ret = RefreshResult::SucessEx;
+ 			pWatch->Watch->Extended = true;
+@@ -210,6 +216,7 @@
+ 	}
+ 
+ 	if ( !bRet ) {
++		pWatch->Lifetime->submissionFailed( pWatch->LifetimeToken );
+ 		std::string error = std::to_string( GetLastError() );
+ 		Errors::Log::createLastError( Errors::WatcherFailed, error );
+ 	}
+@@ -217,26 +224,31 @@
+ 	return ret;
+ }
+ 
+-/// Stops monitoring a directory.
++/// Releases storage after the final completion has been dequeued and dispatched.
+ void DestroyWatch( WatcherStructWin32* pWatch ) {
+ 	if ( pWatch ) {
+ 		WatcherWin32* tWatch = pWatch->Watch;
+-		tWatch->StopNow = true;
+-		CancelIoEx( pWatch->Watch->DirHandle, &pWatch->Overlapped );
+-		CloseHandle( pWatch->Watch->DirHandle );
+-		efSAFE_DELETE_ARRAY( pWatch->Watch->DirName );
+-		efSAFE_DELETE( pWatch->Watch );
++		if ( tWatch ) {
++			if ( tWatch->DirHandle != INVALID_HANDLE_VALUE )
++				CloseHandle( tWatch->DirHandle );
++			efSAFE_DELETE_ARRAY( tWatch->DirName );
++			efSAFE_DELETE( tWatch );
++		}
+ 		efSAFE_DELETE( pWatch );
+ 	}
+ }
+ 
+-/// Starts monitoring a directory.
++/// Allocates and associates a directory handle. The caller records ownership before submitting I/O.
+ WatcherStructWin32* CreateWatch( LPCWSTR szDirectory, bool recursive,
+-								 DWORD bufferSize, DWORD notifyFilter, HANDLE iocp ) {
++									 DWORD bufferSize, DWORD notifyFilter, HANDLE iocp ) {
+ 	WatcherStructWin32* tWatch = new WatcherStructWin32();
+-	WatcherWin32* pWatch = new WatcherWin32(bufferSize);
+-	if (tWatch)
+-		tWatch->Watch = pWatch;
++	WatcherWin32* pWatch = new WatcherWin32( bufferSize );
++	if ( tWatch == nullptr || pWatch == nullptr ) {
++		efSAFE_DELETE( pWatch );
++		efSAFE_DELETE( tWatch );
++		return NULL;
++	}
++	tWatch->Watch = pWatch;
+ 
+ 	pWatch->DirHandle = CreateFileW(
+ 		szDirectory, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+@@ -246,14 +258,12 @@
+ 		 CreateIoCompletionPort( pWatch->DirHandle, iocp, 0, 1 ) ) {
+ 		pWatch->NotifyFilter = notifyFilter;
+ 		pWatch->Recursive = recursive;
+-
+-		if ( RefreshResult::Failed != RefreshWatch( tWatch ) ) {
+-			return tWatch;
+-		}
+-	}
+-
+-	CloseHandle( pWatch->DirHandle );
+-	efSAFE_DELETE( pWatch->Watch );
++		return tWatch;
++	}
++
++	if ( pWatch->DirHandle != INVALID_HANDLE_VALUE )
++		CloseHandle( pWatch->DirHandle );
++	efSAFE_DELETE( pWatch );
+ 	efSAFE_DELETE( tWatch );
+ 	return NULL;
+ }
+diff --git a/src/efsw/FileWatcherWin32.hpp b/src/efsw/FileWatcherWin32.hpp
+--- a/src/efsw/FileWatcherWin32.hpp
++++ b/src/efsw/FileWatcherWin32.hpp
+@@ -7,6 +7,8 @@
+ 
+ #include <efsw/WatcherWin32.hpp>
+ #include <map>
++#include <memory>
++#include <unordered_map>
+ #include <unordered_set>
+ #include <vector>
+ 
+@@ -61,7 +63,21 @@
+ 	void removeWatch( WatcherStructWin32* watch );
+ 
+   private:
++	struct RetiredWatchDeleter {
++		void operator()( WatcherStructWin32* watch ) const;
++	};
++
++	typedef std::unique_ptr<WatcherStructWin32, RetiredWatchDeleter> RetiredWatch;
++	typedef std::unordered_map<WatcherStructWin32*, RetiredWatch> RetiredWatches;
++
++	void retireWatch( WatcherStructWin32* watch );
++	void releaseIfReady( WatcherStructWin32* watch );
++	void consumeCompletion( BOOL succeeded, DWORD bytesTransferred, OVERLAPPED* overlapped );
++	void drainRetiredCompletions();
+ 	void run();
++
++	DirectoryIoLifetime mLifetime;
++	RetiredWatches mRetiredWatches;
+ };
+ 
+ } // namespace efsw
+diff --git a/src/efsw/FileWatcherWin32.cpp b/src/efsw/FileWatcherWin32.cpp
+--- a/src/efsw/FileWatcherWin32.cpp
++++ b/src/efsw/FileWatcherWin32.cpp
+@@ -2,7 +2,6 @@
+ #include <efsw/FileWatcherWin32.hpp>
+ #include <efsw/Lock.hpp>
+ #include <efsw/String.hpp>
+-#include <efsw/System.hpp>
+ 
+ #if EFSW_PLATFORM == EFSW_PLATFORM_WIN32
+ 
+@@ -15,18 +14,24 @@
+ 		mInitOK = true;
+ }
+ 
++void FileWatcherWin32::RetiredWatchDeleter::operator()( WatcherStructWin32* watch ) const {
++	DestroyWatch( watch );
++}
++
+ FileWatcherWin32::~FileWatcherWin32() {
+ 	mInitOK = false;
+-
+-	if ( mIOCP && mIOCP != INVALID_HANDLE_VALUE ) {
++	removeAllWatches();
++
++	if ( mThread != NULL ) {
+ 		PostQueuedCompletionStatus( mIOCP, 0, reinterpret_cast<ULONG_PTR>( this ), NULL );
+-	}
+-
+-	efSAFE_DELETE( mThread );
+-
+-	removeAllWatches();
+-
+-	if ( mIOCP )
++		efSAFE_DELETE( mThread );
++	}
++
++	// A Thread object can exist even when native startup failed. After the
++	// worker has joined (or its no-op wait returned), the caller owns draining.
++	drainRetiredCompletions();
++
++	if ( mIOCP && mIOCP != INVALID_HANDLE_VALUE )
+ 		CloseHandle( mIOCP );
+ }
+ 
+@@ -71,8 +76,18 @@
+ 	watch->Watch->Listener = watcher;
+ 	watch->Watch->DirName = new char[dir.length() + 1];
+ 	strcpy( watch->Watch->DirName, dir.c_str() );
++	watch->Lifetime = &mLifetime;
++	watch->LifetimeToken = mLifetime.registerWatch( watch );
++	if ( watch->LifetimeToken.value == nullptr ) {
++		DestroyWatch( watch );
++		return Errors::Log::createLastError( Errors::FileNotFound, dir );
++	}
+ 
+ 	mWatches.insert( watch );
++	if ( RefreshWatch( watch ) == RefreshResult::Failed ) {
++		retireWatch( watch );
++		return Errors::Log::createLastError( Errors::FileNotFound, dir );
++	}
+ 
+ 	return watchid;
+ }
+@@ -84,7 +99,7 @@
+ 
+ 	for ( ; iter != mWatches.end(); ++iter ) {
+ 		if ( directory == ( *iter )->Watch->DirName ) {
+-			removeWatch( *iter );
++			retireWatch( *iter );
+ 			break;
+ 		}
+ 	}
+@@ -98,7 +113,7 @@
+ 	for ( ; iter != mWatches.end(); ++iter ) {
+ 		// Find the watch ID
+ 		if ( ( *iter )->Watch->ID == watchid ) {
+-			removeWatch( *iter );
++			retireWatch( *iter );
+ 			return;
+ 		}
+ 	}
+@@ -106,9 +121,26 @@
+ 
+ void FileWatcherWin32::removeWatch( WatcherStructWin32* watch ) {
+ 	Lock lock( mWatchesLock );
+-
+-	DestroyWatch( watch );
+-	mWatches.erase( watch );
++	retireWatch( watch );
++}
++
++void FileWatcherWin32::retireWatch( WatcherStructWin32* watch ) {
++	if ( watch == NULL || mWatches.erase( watch ) == 0 )
++		return;
++
++	watch->Watch->StopNow = true;
++	const bool pending = mLifetime.retire( watch->LifetimeToken );
++	mRetiredWatches.emplace( watch, RetiredWatch( watch ) );
++	if ( pending )
++		CancelIoEx( watch->Watch->DirHandle, &watch->Overlapped );
++	releaseIfReady( watch );
++}
++
++void FileWatcherWin32::releaseIfReady( WatcherStructWin32* watch ) {
++	if ( mLifetime.readyToDestroy( watch->LifetimeToken ) &&
++		 mLifetime.destroy( watch->LifetimeToken ) ) {
++		mRetiredWatches.erase( watch );
++	}
+ }
+ 
+ void FileWatcherWin32::watch() {
+@@ -120,40 +152,70 @@
+ 
+ void FileWatcherWin32::removeAllWatches() {
+ 	Lock lock( mWatchesLock );
+-
+-	Watches::iterator iter = mWatches.begin();
+-
+-	for ( ; iter != mWatches.end(); ++iter ) {
+-		DestroyWatch( ( *iter ) );
+-	}
+-
+-	mWatches.clear();
++	while ( !mWatches.empty() )
++		retireWatch( *mWatches.begin() );
++}
++
++void FileWatcherWin32::consumeCompletion( BOOL succeeded, DWORD bytesTransferred,
++										 OVERLAPPED* overlapped ) {
++	if ( overlapped == NULL )
++		return;
++
++	WatcherStructWin32* watch = reinterpret_cast<WatcherStructWin32*>( overlapped );
++	if ( mWatches.find( watch ) == mWatches.end() && mRetiredWatches.find( watch ) == mRetiredWatches.end() )
++		return;
++
++	const DirectoryIoLifetime::Completion completion =
++		mLifetime.completionDequeued( watch->LifetimeToken, succeeded != FALSE );
++	if ( completion == DirectoryIoLifetime::Completion::Ignored )
++		return;
++
++	if ( completion == DirectoryIoLifetime::Completion::Failed )
++		retireWatch( watch );
++	else if ( completion == DirectoryIoLifetime::Completion::Dispatch &&
++			  !WatchCallback( bytesTransferred, overlapped ) )
++		retireWatch( watch );
++
++	if ( mLifetime.finishDispatch( watch->LifetimeToken ) )
++		releaseIfReady( watch );
++}
++
++void FileWatcherWin32::drainRetiredCompletions() {
++	while ( mLifetime.retiredCount() != 0 ) {
++		DWORD numOfBytes = 0;
++		OVERLAPPED* overlapped = NULL;
++		ULONG_PTR completionKey = 0;
++		const BOOL succeeded = GetQueuedCompletionStatus( mIOCP, &numOfBytes, &completionKey,
++			&overlapped, INFINITE );
++		if ( overlapped != NULL ) {
++			Lock lock( mWatchesLock );
++			consumeCompletion( succeeded, numOfBytes, overlapped );
++		}
++	}
+ }
+ 
+ void FileWatcherWin32::run() {
+-	do {
+-		if ( mInitOK && !mWatches.empty() ) {
+-			DWORD numOfBytes = 0;
+-			OVERLAPPED* ov = NULL;
+-			ULONG_PTR compKey = 0;
+-			BOOL res = FALSE;
+-
+-			while ( ( res = GetQueuedCompletionStatus( mIOCP, &numOfBytes, &compKey, &ov,
+-													   INFINITE ) ) != FALSE ) {
+-				if ( compKey != 0 && compKey == reinterpret_cast<ULONG_PTR>( this ) ) {
+-					break;
+-				} else {
+-					Lock lock( mWatchesLock );
+-					if (mWatches.find( (WatcherStructWin32*)ov ) != mWatches.end())
+-						WatchCallback( numOfBytes, ov );
+-				}
+-			}
+-		} else {
+-			System::sleep( 10 );
+-		}
+-	} while ( mInitOK );
+-
+-	removeAllWatches();
++	bool stopRequested = false;
++	for ( ;; ) {
++		DWORD numOfBytes = 0;
++		OVERLAPPED* overlapped = NULL;
++		ULONG_PTR completionKey = 0;
++		const BOOL succeeded = GetQueuedCompletionStatus( mIOCP, &numOfBytes, &completionKey,
++			&overlapped, INFINITE );
++
++		if ( completionKey == reinterpret_cast<ULONG_PTR>( this ) && overlapped == NULL ) {
++			stopRequested = true;
++		} else if ( overlapped != NULL ) {
++			Lock lock( mWatchesLock );
++			consumeCompletion( succeeded, numOfBytes, overlapped );
++		}
++
++		if ( stopRequested ) {
++			Lock lock( mWatchesLock );
++			if ( mLifetime.retiredCount() == 0 )
++				return;
++		}
++	}
+ }
+ 
+ void FileWatcherWin32::handleAction( Watcher* watch, const std::string& filename,

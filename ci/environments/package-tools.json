@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "linuxdeployqt": {
+    "repository": "probonopd/linuxdeployqt",
+    "release_id": 222620006,
+    "tag": "11",
+    "asset_id": 260471530,
+    "asset_name": "linuxdeployqt-continuous-x86_64.AppImage",
+    "size": 17192128,
+    "sha256": "65192b29bee5f8da8820672aeee91f217896b08ca6236c84d996813129fb3510",
+    "url": "https://github.com/probonopd/linuxdeployqt/releases/download/11/linuxdeployqt-continuous-x86_64.AppImage"
+  }
+}

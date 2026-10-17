@@ -82,7 +82,7 @@ class LiveCaptureBenchmarkContractTest(unittest.TestCase):
     def test_process_heavy_contract_has_isolated_ctest_timeout(self):
         cmake = TESTS_CMAKE.read_text(encoding="utf-8")
         shared_timeout = re.search(
-            r"set_tests_properties\((.*?)PROPERTIES TIMEOUT 60\s*\)",
+            r"set_tests_properties\(([^)]*?)PROPERTIES TIMEOUT 60\s*\)",
             cmake,
             re.DOTALL,
         )

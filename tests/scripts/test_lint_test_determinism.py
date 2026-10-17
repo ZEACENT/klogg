@@ -169,14 +169,14 @@ class PerfBudgetRuleTest(unittest.TestCase):
 
     def test_marked_budget_in_tagged_case_is_allowed(self):
         findings = scan(
-            self.CASE % 'CHECK( elapsedMs < 200 ); // lint-allow: perf-budget'
+            self.CASE % 'CHECK( elapsedMs < 200 ); // lint-allow: perf-budget -- Local speed budget.'
         )
         self.assertEqual(findings, [])
 
     def test_budget_outside_perf_tagged_case_is_flagged(self):
         text = (
             'TEST_CASE( "fast path", "[capture]" )\n{\n'
-            'CHECK( elapsedMs < 200 ); // lint-allow: perf-budget\n}\n'
+            'CHECK( elapsedMs < 200 ); // lint-allow: perf-budget -- Local speed budget.\n}\n'
         )
         findings = scan(text)
         self.assertEqual([f.rule for f in findings], ["perf-budget-needs-perf-tag"])
@@ -243,7 +243,7 @@ class PerfBudgetRuleTest(unittest.TestCase):
             'TEST_CASE( "fast path", "[.perf]" )\n{\n'
             'REQUIRE(\n'
             '    bestElapsedMs\n'
-            '    < 200 ); // lint-allow: perf-budget\n'
+            '    < 200 ); // lint-allow: perf-budget -- Local speed budget.\n'
             '}\n'
         )
         self.assertEqual(scan(text), [])
@@ -251,6 +251,157 @@ class PerfBudgetRuleTest(unittest.TestCase):
     def test_elapsed_lower_bound_is_not_a_budget(self):
         findings = scan(self.CASE % 'CHECK( timer.elapsed() >= 1 );')
         self.assertEqual(findings, [])
+
+    def test_negated_elapsed_comparison_is_not_a_budget(self):
+        # CHECK_FALSE( elapsed < minimum ) demands a *minimum* duration, so it
+        # is a correctness assertion that must keep running in the default CI
+        # run rather than being pushed behind a [.perf] tag.
+        for snippet in (
+            'CHECK_FALSE( timer.elapsed() < 50 );',
+            'REQUIRE_FALSE( timer.elapsed() < 50 );',
+            'CHECK_FALSE( std::chrono::steady_clock::now() - started < 50ms );',
+        ):
+            self.assertEqual(scan(self.CASE % snippet), [], snippet)
+
+
+class PerfBudgetMacroRuleTest(unittest.TestCase):
+    def test_unmarked_macro_call_site_is_flagged(self):
+        findings = scan('KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );')
+        self.assertEqual([f.rule for f in findings], ["perf-budget-unmarked"])
+
+    def test_marked_macro_call_site_is_allowed(self):
+        self.assertEqual(
+            scan(
+                'KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 ); '
+                '// lint-allow: perf-budget -- Local speed budget.'
+            ),
+            [],
+        )
+
+    def test_line_wrapped_macro_with_marker_is_allowed(self):
+        text = (
+            'KLOGG_CHECK_PERF_BUDGET(\n'
+            '    elapsedMs\n'
+            '    < 200 );  // lint-allow: perf-budget -- Local speed budget.\n'
+        )
+        self.assertEqual(scan(text), [])
+
+    def test_macro_definition_is_not_a_call_site(self):
+        text = (
+            '#define KLOGG_CHECK_PERF_BUDGET( expr )\\\n'
+            '    do {                                \\\n'
+            '        CHECK( expr );                  \\\n'
+            '    } while ( 0 )\n'
+        )
+        self.assertEqual(scan(text), [])
+
+    def test_marker_does_not_silence_plain_budget_rule(self):
+        # A marked plain assertion inside an untagged case still reports the
+        # missing [.perf] tag.
+        text = (
+            'TEST_CASE( "fast path", "[capture]" )\n{\n'
+            'CHECK( elapsedMs < 200 ); // lint-allow: perf-budget -- Local speed budget.\n}\n'
+        )
+        self.assertEqual([f.rule for f in scan(text)], ["perf-budget-needs-perf-tag"])
+
+
+class PerfBudgetMarkerContractTest(unittest.TestCase):
+    CASE = 'TEST_CASE( "fast path", "[.perf]" )\n{\n%s\n}\n'
+    ASSERTIONS = (
+        ("CHECK", "perf-budget-assertion"),
+        ("KLOGG_CHECK_PERF_BUDGET", "perf-budget-unmarked"),
+    )
+
+    def assert_marker_findings(self, template, allowed=False):
+        for assertion, rule in self.ASSERTIONS:
+            with self.subTest(assertion=assertion, template=template):
+                findings = scan(self.CASE % template.replace("ASSERT", assertion))
+                self.assertEqual(
+                    [finding.rule for finding in findings], [] if allowed else [rule]
+                )
+
+    def test_bare_marker_is_rejected(self):
+        self.assert_marker_findings(
+            'ASSERT( elapsedMs < 200 ); // lint-allow: perf-budget'
+        )
+
+    def test_empty_or_whitespace_reason_is_rejected(self):
+        for reason in ("", " ", "\t  "):
+            self.assert_marker_findings(
+                'ASSERT( elapsedMs < 200 ); // lint-allow: perf-budget --' + reason
+            )
+
+    def test_reason_without_delimiter_is_rejected(self):
+        self.assert_marker_findings(
+            'ASSERT( elapsedMs < 200 ); // lint-allow: perf-budget local speed only'
+        )
+
+    def test_reason_cannot_be_borrowed_from_next_line(self):
+        self.assert_marker_findings(
+            'ASSERT( // lint-allow: perf-budget -- \t\n'
+            '    elapsedMs < 200 ); // Local speed budget.'
+        )
+
+    def test_reasoned_marker_on_assertion_line_is_allowed(self):
+        self.assert_marker_findings(
+            'ASSERT( elapsedMs < 200 ); '
+            '// lint-allow: perf-budget -- Local speed budget.',
+            allowed=True,
+        )
+
+    def test_reasoned_marker_inside_multiline_assertion_is_allowed(self):
+        self.assert_marker_findings(
+            'ASSERT(\n'
+            '    // lint-allow: perf-budget -- Local speed budget.\n'
+            '    elapsedMs < 200 );',
+            allowed=True,
+        )
+
+    def test_quoted_reason_is_allowed(self):
+        self.assert_marker_findings(
+            'ASSERT( elapsedMs < 200 ); '
+            '// lint-allow: perf-budget -- "Fast" is local; CI checks completion.',
+            allowed=True,
+        )
+
+    def test_unmatched_quote_in_comment_does_not_hide_marker(self):
+        self.assert_marker_findings(
+            '// This test\'s speed is local.\n'
+            'ASSERT( elapsedMs < 200 ); '
+            '// lint-allow: perf-budget -- It\'s a local speed budget.',
+            allowed=True,
+        )
+
+    def test_string_literal_marker_is_rejected(self):
+        self.assert_marker_findings(
+            'ASSERT( elapsedMs < 200 ); '
+            'const char* spoof = "// lint-allow: perf-budget -- Not a comment.";'
+        )
+
+    def test_raw_string_literal_marker_is_rejected(self):
+        for literal in (
+            'R"tag(// lint-allow: perf-budget -- Not a comment.)tag"',
+            'R"tag(\n// lint-allow: perf-budget -- Not a comment.\n)tag"',
+        ):
+            self.assert_marker_findings(
+                'ASSERT( elapsedMs < 200 && accepts( ' + literal + ' ) );'
+            )
+
+    def test_marker_outside_assertion_span_is_rejected(self):
+        marker = '// lint-allow: perf-budget -- A different assertion.\n'
+        assertion = 'ASSERT( elapsedMs < 200 );\n'
+        self.assert_marker_findings(marker + assertion)
+        self.assert_marker_findings(assertion + marker)
+
+    def test_diagnostics_show_required_reason_format(self):
+        for assertion, rule in self.ASSERTIONS:
+            with self.subTest(assertion=assertion):
+                findings = scan(self.CASE % f'{assertion}( elapsedMs < 200 );')
+                self.assertEqual([finding.rule for finding in findings], [rule])
+                self.assertIn(
+                    '// lint-allow: perf-budget -- <nonempty reason>',
+                    findings[0].message,
+                )
 
 
 class ScopeTest(unittest.TestCase):
@@ -266,6 +417,21 @@ class ScopeTest(unittest.TestCase):
 
 
 class RepoScanTest(unittest.TestCase):
+    def test_real_call_site_with_reason_removed_is_flagged(self):
+        path = REPO_ROOT / "tests/unit/capturestore_test.cpp"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        call = 'KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );'
+        line_index = next(
+            index for index, line in enumerate(lines) if call in line
+        )
+        lines[line_index] = lines[line_index].split("// lint-allow: perf-budget")[0]
+        lines[line_index] += '// lint-allow: perf-budget'
+        findings = lint.check_text("\n".join(lines), path)
+        self.assertIn(
+            ("perf-budget-unmarked", line_index + 1),
+            [(finding.rule, finding.line) for finding in findings],
+        )
+
     def test_repository_tree_has_no_findings(self):
         findings = lint.scan_repository(REPO_ROOT)
         self.assertEqual(

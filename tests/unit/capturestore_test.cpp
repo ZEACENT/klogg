@@ -20,8 +20,11 @@
 #include <catch2/catch.hpp>
 
 #include "test_utils.h"
+#include "capture_child_observation.h"
+#include "process_observation.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -32,7 +35,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <QCoreApplication>
 #include <QDir>
@@ -230,6 +235,16 @@ class CaptureStoreTestAccess {
             timeoutMs );
     }
 
+    static std::vector<int> capturePathGateWaits()
+    {
+        return CaptureStore::capturePathGateWaitsForTesting();
+    }
+
+    static void clearCapturePathGateWaits()
+    {
+        CaptureStore::clearCapturePathGateWaitsForTesting();
+    }
+
     static bool hasCapturePathCoordinationOwnership( const CaptureStore& store )
     {
         return store.hasCapturePathCoordinationOwnershipForTesting();
@@ -371,6 +386,35 @@ QString makeTestDir( const QString& prefix )
 QString makeCaptureId()
 {
     return QUuid::createUuid().toString( QUuid::WithoutBraces );
+}
+
+// The gate timeout is a functional contract, not a speed budget: a contended
+// gate must be waited on for the *configured* timeout instead of a hardcoded
+// default. Asserting it on the timeout that reached the gate keeps the check
+// active on every CI leg, which a wall-clock bound cannot do --
+// KLOGG_CHECK_PERF_BUDGET never evaluates its expression unless
+// KLOGG_PERF_GATES is set, and CI never sets it. Callers clear the record
+// immediately before the operation under test and snapshot it before restoring
+// the configured timeout, so every recorded value belongs to that window.
+// The label names the window; a window may also contain a contending store's
+// acquisition, which consults the same configured value.
+void requireConfiguredGateTimeoutWasUsed( const char* operation,
+                                          const std::vector<int>& gateWaits,
+                                          int expectedTimeoutMs )
+{
+    std::string rendered;
+    for ( const auto waitMs : gateWaits ) {
+        if ( !rendered.empty() ) {
+            rendered += ", ";
+        }
+        rendered += std::to_string( waitMs );
+    }
+    INFO( operation << " gate waits (ms): [" << rendered << "], expected "
+                    << expectedTimeoutMs );
+    REQUIRE_FALSE( gateWaits.empty() );
+    for ( const auto waitMs : gateWaits ) {
+        REQUIRE( waitMs == expectedTimeoutMs );
+    }
 }
 
 QStringList segmentFiles( const QString& capturePath )
@@ -710,6 +754,114 @@ class ChildProcessReleaseGuard {
     QString releasePath_;
 };
 
+class CaptureChildProcessObservation {
+  public:
+    enum class Kind { State, Error, Started, Finished };
+
+    void record( Kind kind, int value, qint64 reportedPid, int detail = 0 ) noexcept
+    {
+        if ( reportedPid != 0 ) {
+            lastNonzeroReportedPid_ = reportedPid;
+        }
+        if ( kind == Kind::Error && !firstError_ ) {
+            firstError_ = value;
+        }
+        if ( kind == Kind::Started ) {
+            startedObserved_ = true;
+        }
+        if ( kind == Kind::Finished ) {
+            finishedObserved_ = true;
+            finishedCode_ = value;
+            finishedStatus_ = detail;
+        }
+        if ( count_ < events_.size() ) {
+            events_[ count_++ ] = { kind, value, reportedPid };
+        }
+        else {
+            truncated_ = true;
+        }
+    }
+
+    bool finishedObserved() const noexcept
+    {
+        return finishedObserved_;
+    }
+
+    QString diagnostic() const
+    {
+        auto text = QStringLiteral( "observed_started_signal=%1 observed_finished_signal=%2 "
+            "last_nonzero_reported_pid=%3 first_error_event=%4 process_events_truncated=%5" )
+            .arg( startedObserved_ ? QStringLiteral( "yes" ) : QStringLiteral( "no" ) )
+            .arg( finishedObserved_ ? QStringLiteral( "yes" ) : QStringLiteral( "no" ) )
+            .arg( lastNonzeroReportedPid_ )
+            .arg( firstError_ ? QString::number( *firstError_ ) : QStringLiteral( "none" ) )
+            .arg( truncated_ ? QStringLiteral( "yes" ) : QStringLiteral( "no" ) );
+        if ( finishedObserved_ ) {
+            text += QStringLiteral( " finished_exit_code=%1 finished_exit_status=%2" )
+                .arg( finishedCode_ ).arg( finishedStatus_ );
+        }
+        text += QStringLiteral( "\nobserved_process_events=" );
+        if ( count_ == 0 ) {
+            text += QStringLiteral( "none" );
+        }
+        for ( std::size_t i = 0; i < count_; ++i ) {
+            const auto& event = events_[ i ];
+            const auto name = event.kind == Kind::State ? "state"
+                : event.kind == Kind::Error ? "error"
+                : event.kind == Kind::Started ? "started" : "finished";
+            if ( i != 0 ) {
+                text += QLatin1Char( ',' );
+            }
+            text += QStringLiteral( "%1:%2:pid=%3" ).arg( QString::fromLatin1( name ) )
+                .arg( event.value ).arg( event.reportedPid );
+        }
+        return text;
+    }
+
+  private:
+    struct Event {
+        Kind kind = Kind::State;
+        int value = 0;
+        qint64 reportedPid = 0;
+    };
+    std::array<Event, 16> events_{};
+    std::size_t count_ = 0;
+    qint64 lastNonzeroReportedPid_ = 0;
+    std::optional<int> firstError_;
+    int finishedCode_ = 0;
+    int finishedStatus_ = 0;
+    bool startedObserved_ = false;
+    bool finishedObserved_ = false;
+    bool truncated_ = false;
+};
+
+struct CaptureChildCleanupObservation {
+    bool releasePublished = false;
+    QProcess::ProcessState initialState = QProcess::NotRunning;
+    std::optional<bool> releaseWait;
+    bool killAttempted = false;
+    std::optional<bool> killWait;
+    QProcess::ProcessState finalState = QProcess::NotRunning;
+    qint64 finalReportedPid = 0;
+
+    QString diagnostic() const
+    {
+        const auto waitResult = []( const std::optional<bool>& result ) {
+            return result.has_value()
+                ? ( *result ? QStringLiteral( "true" ) : QStringLiteral( "false" ) )
+                : QStringLiteral( "not-attempted" );
+        };
+        return QStringLiteral( "ActiveCaptureChild cleanup_after_failure release_published=%1 "
+            "initial_state=%2 release_wait=%3 kill_attempted=%4 kill_wait=%5 "
+            "final_state=%6 final_reported_pid=%7" )
+            .arg( releasePublished ? QStringLiteral( "yes" ) : QStringLiteral( "no" ) )
+            .arg( static_cast<int>( initialState ) ).arg( waitResult( releaseWait ) )
+            .arg( killAttempted ? QStringLiteral( "yes" ) : QStringLiteral( "no" ) )
+            .arg( waitResult( killWait ) ).arg( static_cast<int>( finalState ) )
+            .arg( finalReportedPid );
+    }
+};
+
 class ActiveCaptureChild {
   public:
     ActiveCaptureChild( QString rootPath, QString captureId, bool spillSegment )
@@ -720,6 +872,8 @@ class ActiveCaptureChild {
         environment.insert( QStringLiteral( "KLOGG_TEST_PRESERVE_TEMP_DIR" ),
                             QStringLiteral( "1" ) );
         environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_ROOT" ), rootPath );
+        environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_PHASES" ),
+                            QStringLiteral( "1" ) );
         environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_ID" ), captureId );
         environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_READY" ), readyPath_ );
         environment.insert( QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_RELEASE" ), releasePath_ );
@@ -732,36 +886,95 @@ class ActiveCaptureChild {
         process_.setArguments(
             { QStringLiteral( "-platform" ), QStringLiteral( "offscreen" ),
               QStringLiteral( "CaptureStore child holds active process marker" ) } );
+        try {
+            using Kind = CaptureChildProcessObservation::Kind;
+            QObject::connect( &process_, &QProcess::stateChanged, &observationContext_,
+                [ this ]( QProcess::ProcessState state ) noexcept {
+                    processObservation_.record( Kind::State, static_cast<int>( state ),
+                                                process_.processId() );
+                } );
+            QObject::connect( &process_, &QProcess::errorOccurred, &observationContext_,
+                [ this ]( QProcess::ProcessError error ) noexcept {
+                    processObservation_.record( Kind::Error, static_cast<int>( error ),
+                                                process_.processId() );
+                } );
+            QObject::connect( &process_, &QProcess::started, &observationContext_,
+                [ this ]() noexcept {
+                    processObservation_.record( Kind::Started, 0, process_.processId() );
+                } );
+            QObject::connect( &process_, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+                &observationContext_, [ this ]( int code, QProcess::ExitStatus status ) noexcept {
+                    processObservation_.record( Kind::Finished, code, process_.processId(),
+                                                static_cast<int>( status ) );
+                } );
+        }
+        catch ( ... ) {
+            // Best-effort observers cannot replace the original handshake.
+            observationSetupFailed_ = true;
+        }
     }
 
     ~ActiveCaptureChild()
     {
-        createSignalFile( releasePath_ );
-        if ( process_.state() != QProcess::NotRunning && !process_.waitForFinished( 5000 ) ) {
-            process_.kill();
-            process_.waitForFinished( 5000 );
+        CaptureChildCleanupObservation cleanup;
+        cleanup.releasePublished = createSignalFile( releasePath_ );
+        cleanup.initialState = process_.state();
+        if ( cleanup.initialState != QProcess::NotRunning ) {
+            cleanup.releaseWait = process_.waitForFinished( 5000 );
+            if ( !*cleanup.releaseWait ) {
+                cleanup.killAttempted = true;
+                process_.kill();
+                cleanup.killWait = process_.waitForFinished( 5000 );
+            }
+        }
+        cleanup.finalState = process_.state();
+        cleanup.finalReportedPid = process_.processId();
+        if ( startupFailed_ ) {
+            try {
+                // Report actual Qt operations, not native reap or family quiescence.
+                std::cerr << cleanup.diagnostic().toStdString() << '\n'
+                          << processObservation_.diagnostic().toStdString() << '\n';
+            }
+            catch ( ... ) {
+                // Reporting cannot skip or replay the original cleanup operations.
+            }
         }
     }
 
-    bool startAndWaitUntilReady()
+    bool startAndWaitUntilReady(
+        const std::function<void( QProcess& )>& beforeReadinessForTest = {} )
     {
         process_.start();
         if ( !process_.waitForStarted( 5000 ) ) {
-            return false;
+            return failStartup( "start" );
+        }
+        confirmedStartReportedPid_ = process_.processId();
+        if ( beforeReadinessForTest ) {
+            beforeReadinessForTest( process_ );
         }
         // Readiness is the published identity, not the file's existence;
         // cache the content read inside the wait so captureIdentity()
         // needs no second open.
         readyContents_ = waitForPublishedContent( readyPath_ );
         if ( readyContents_.isEmpty() ) {
-            return false;
+            return failStartup( "ready-content" );
         }
         // The parent's maintenance judges foreign markers through
         // QLockFile::getLockInfo. Under sanitizer load that record can be
         // unreadable for longer than the production grace window, so wait
         // until the child's marker record satisfies the exact coherence
         // check the parent will apply before asserting on it.
-        return waitUntilMarkerRecordCoherent();
+        return waitUntilMarkerRecordCoherent() || failStartup( "marker-coherence" );
+    }
+
+    void setProgramForTest( const QString& program )
+    {
+        process_.setProgram( program );
+    }
+
+    QString startupDiagnostic() const
+    {
+        return startupDiagnostic_;
     }
 
     QString captureIdentity() const
@@ -781,6 +994,70 @@ class ActiveCaptureChild {
     }
 
   private:
+    bool failStartup( const char* phase )
+    {
+        startupFailed_ = true;
+        try {
+            const auto primary = klogg::testing::ProcessSnapshot::take( process_ );
+            // Failure-only zero-time observations service captured channels.
+            // Preserve the earlier error: these probes may set Timedout. Cached
+            // Running/empty output alone is not evidence of a live/silent child.
+            process_.waitForReadyRead( 0 );
+            process_.waitForFinished( 0 );
+            const auto exitObserved = processObservation_.finishedObserved();
+            const auto bounded = []( const QString& text, int limit ) {
+                return text.size() > limit
+                    ? text.left( limit - 12 ) + QStringLiteral( "<truncated>" ) : text;
+            };
+            const auto output = []( const QByteArray& bytes ) {
+                return QString::fromUtf8( bytes.left( 4096 ) )
+                    + ( bytes.size() > 4096 ? QStringLiteral( "<truncated>" ) : QString{} );
+            };
+            const QFileInfo readyInfo{ readyPath_ };
+            startupDiagnostic_ = QStringLiteral( "ActiveCaptureChild phase=%1 program=%2 args=%3 "
+                "confirmed_start_reported_pid=%4 %5 observed_state=%6 observed_reported_pid=%7 "
+                "exit_observed=%8 observer_setup_failed=%9" )
+                .arg( QString::fromLatin1( phase ), bounded( process_.program(), 512 ),
+                      bounded( process_.arguments().join( QLatin1Char( ' ' ) ), 1024 ),
+                      QString::number( confirmedStartReportedPid_ ), primary.diagnostic(),
+                      QString::number( static_cast<int>( process_.state() ) ),
+                      QString::number( process_.processId() ),
+                      exitObserved ? QStringLiteral( "yes" ) : QStringLiteral( "no" ),
+                      QString::number( observationSetupFailed_ ) );
+            if ( exitObserved ) {
+                startupDiagnostic_ += QStringLiteral( " exit_status=%1 exit_code=%2" )
+                    .arg( static_cast<int>( process_.exitStatus() ) ).arg( process_.exitCode() );
+            }
+            startupDiagnostic_ += QStringLiteral( "\nready_path=%1 ready_exists=%2 ready_is_file=%3 "
+                "ready_size=%4 waited_content=%5\nmarker_path=%6 marker_error=%7 "
+                "marker_info=%8 marker_pid=%9" )
+                .arg( bounded( readyPath_, 512 ), QString::number( readyInfo.exists() ),
+                      QString::number( readyInfo.isFile() ), QString::number( readyInfo.size() ),
+                      bounded( readyContents_, 512 ), bounded( markerPath_, 512 ),
+                      QString::number( static_cast<int>( markerError_ ) ),
+                      QString::number( markerInfoAvailable_ ), QString::number( markerPid_ ) );
+            startupDiagnostic_ += QStringLiteral( "\nchild_coordination_override=%1 "
+                "parent_coordination_override=%2\nstdout_observed=%3\nstderr_observed=%4" )
+                .arg( bounded( process_.processEnvironment().value(
+                          QStringLiteral( "KLOGG_CAPTURE_COORDINATION_ROOT" ) ), 512 ),
+                      bounded( qEnvironmentVariable( "KLOGG_CAPTURE_COORDINATION_ROOT" ), 512 ),
+                      output( process_.readAllStandardOutput() ),
+                      output( process_.readAllStandardError() ) );
+            startupDiagnostic_ += QLatin1Char( '\n' ) + processObservation_.diagnostic();
+            startupDiagnostic_ += QLatin1Char( '\n' )
+                + klogg::testing::captureChildPhaseSnapshot(
+                    process_.processEnvironment().value(
+                        QStringLiteral( "KLOGG_CAPTURESTORE_CHILD_ROOT" ) ) );
+            startupDiagnostic_ = bounded( startupDiagnostic_, 16384 );
+            std::cerr << startupDiagnostic_.toStdString() << '\n';
+        }
+        catch ( ... ) {
+            // Diagnostic faults cannot turn the original readiness refusal into
+            // success or replace it with an exception.
+        }
+        return false;
+    }
+
     bool waitUntilMarkerRecordCoherent()
     {
         const auto coordinationRoot = captureCoordinationRoot();
@@ -793,19 +1070,23 @@ class ActiveCaptureChild {
                           readyContents_.toUtf8(), QCryptographicHash::Sha256 )
                           .toHex() ) )
                 .arg( process_.processId() ) );
+        markerPath_ = markerPath;
         QElapsedTimer deadline;
         deadline.start();
         while ( deadline.elapsed() < 5000 ) {
             QLockFile probe( markerPath );
             probe.setStaleLockTime( 0 );
-            if ( !probe.tryLock( 0 ) ) {
-                qint64 lockProcessId = 0;
+            const auto acquired = probe.tryLock( 0 );
+            markerError_ = probe.error();
+            markerInfoAvailable_ = false;
+            markerPid_ = 0;
+            if ( !acquired ) {
                 QString hostname;
                 QString applicationName;
-                if ( probe.getLockInfo( &lockProcessId, &hostname,
-                        &applicationName )
-                     && lockProcessId
-                         == static_cast<qint64>( process_.processId() ) ) {
+                markerInfoAvailable_ = probe.getLockInfo( &markerPid_, &hostname,
+                                                         &applicationName );
+                if ( markerInfoAvailable_
+                     && markerPid_ == static_cast<qint64>( process_.processId() ) ) {
                     return true;
                 }
             }
@@ -821,8 +1102,297 @@ class ActiveCaptureChild {
     QString readyPath_;
     QString releasePath_;
     QString readyContents_;
+    QString startupDiagnostic_;
+    QString markerPath_;
+    QLockFile::LockError markerError_ = QLockFile::NoError;
+    qint64 markerPid_ = 0;
+    qint64 confirmedStartReportedPid_ = 0;
+    bool markerInfoAvailable_ = false;
+    bool observationSetupFailed_ = false;
+    bool startupFailed_ = false;
+    CaptureChildProcessObservation processObservation_;
+    // Destroy this first to disconnect callbacks before their captured state.
+    QObject observationContext_;
 };
 } // namespace
+
+TEST_CASE( "Capture child phase records are bounded and opt in",
+           "[capturestore][child-phase-observation]" )
+{
+    using namespace klogg::testing;
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const ScopedEnvironmentVariable rootGuard{ "KLOGG_CAPTURESTORE_CHILD_ROOT",
+                                                root.path().toUtf8() };
+    const ScopedEnvironmentVariable enabledGuard{ "KLOGG_CAPTURESTORE_CHILD_PHASES", "1" };
+
+    SECTION( "exact allowlisted phases round trip" )
+    {
+        QStringList expected;
+        for ( std::size_t i = 0; i < CaptureChildPhaseNames.size(); ++i ) {
+            recordCaptureChildPhase( static_cast<CaptureChildPhase>( i ) );
+            const auto token = QString::fromLatin1( CaptureChildPhaseNames[ i ] );
+            expected.append( token );
+            QFile record( root.filePath( QStringLiteral( ".child-phase-" ) + token ) );
+            REQUIRE( record.open( QIODevice::ReadOnly ) );
+            const auto contents = record.read( 65 );
+            REQUIRE( contents == token.toLatin1() + '\n' );
+            REQUIRE( contents.size() <= 64 );
+        }
+        REQUIRE( captureChildPhaseSnapshot( root.path() )
+                 == QStringLiteral( "observed_child_phases=" ) + expected.join( QLatin1Char( ',' ) ) );
+        REQUIRE( captureChildPhaseSnapshot( root.path() ).size() <= 512 );
+    }
+    SECTION( "disabled or unknown phases create nothing" )
+    {
+        {
+            const ScopedEnvironmentVariable disabled{ "KLOGG_CAPTURESTORE_CHILD_PHASES", "" };
+            recordCaptureChildPhase( CaptureChildPhase::MainEnter );
+        }
+        recordCaptureChildPhase( static_cast<CaptureChildPhase>( 255 ) );
+        REQUIRE( QDir( root.path() ).entryList( QDir::Files | QDir::Hidden ).isEmpty() );
+    }
+    SECTION( "existing records are never replaced" )
+    {
+        QFile record( root.filePath( QStringLiteral( ".child-phase-main-enter" ) ) );
+        REQUIRE( record.open( QIODevice::WriteOnly | QIODevice::NewOnly ) );
+        REQUIRE( record.write( "owned\n" ) == 6 );
+        record.close();
+        REQUIRE_NOTHROW( recordCaptureChildPhase( CaptureChildPhase::MainEnter ) );
+        REQUIRE( record.open( QIODevice::ReadOnly ) );
+        REQUIRE( record.readAll() == QByteArrayLiteral( "owned\n" ) );
+        REQUIRE( captureChildPhaseSnapshot( root.path() )
+                 == QStringLiteral( "observed_child_phases=none" ) );
+    }
+    SECTION( "missing roots and directory destinations are harmless refusals" )
+    {
+        {
+            const ScopedEnvironmentVariable missing{ "KLOGG_CAPTURESTORE_CHILD_ROOT",
+                root.filePath( QStringLiteral( "missing" ) ).toUtf8() };
+            REQUIRE_NOTHROW( recordCaptureChildPhase( CaptureChildPhase::MainEnter ) );
+            REQUIRE_FALSE( QFileInfo::exists( root.filePath( QStringLiteral( "missing" ) ) ) );
+        }
+        REQUIRE( QDir( root.path() ).mkdir( QStringLiteral( ".child-phase-main-enter" ) ) );
+        REQUIRE_NOTHROW( recordCaptureChildPhase( CaptureChildPhase::MainEnter ) );
+        REQUIRE( captureChildPhaseSnapshot( root.path() )
+                 == QStringLiteral( "observed_child_phases=none" ) );
+    }
+}
+
+TEST_CASE( "Capture child phase snapshots accept only complete known records",
+           "[capturestore][child-phase-observation]" )
+{
+    using namespace klogg::testing;
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto contents = GENERATE( QByteArrayLiteral( "main-enter\n" ),
+        QByteArrayLiteral( "main-enter" ), QByteArrayLiteral( "main-enter\nextra" ),
+        QByteArrayLiteral( "VERY_SECRET_UNKNOWN_PHASE\n" ), QByteArray( 1024, 'x' ) );
+    QFile record( root.filePath( QStringLiteral( ".child-phase-main-enter" ) ) );
+    REQUIRE( record.open( QIODevice::WriteOnly | QIODevice::NewOnly ) );
+    REQUIRE( record.write( contents ) == contents.size() );
+    record.close();
+    const auto snapshot = captureChildPhaseSnapshot( root.path() );
+    REQUIRE( snapshot == ( contents == QByteArrayLiteral( "main-enter\n" )
+        ? QStringLiteral( "observed_child_phases=main-enter" )
+        : QStringLiteral( "observed_child_phases=none" ) ) );
+    REQUIRE_FALSE( snapshot.contains( QStringLiteral( "VERY_SECRET" ) ) );
+}
+
+TEST_CASE( "Capture child observations preserve unconfirmed startup facts",
+           "[capturestore][child-process-observation]" )
+{
+    using Kind = CaptureChildProcessObservation::Kind;
+    CaptureChildProcessObservation observation;
+    observation.record( Kind::State, static_cast<int>( QProcess::Starting ), 321 );
+    observation.record( Kind::Error, static_cast<int>( QProcess::Timedout ), 321 );
+    const klogg::testing::ProcessSnapshot primary{ QProcess::Starting, QProcess::Timedout,
+                                               QStringLiteral( "original-timeout" ), 321 };
+    const auto primaryDiagnostic = primary.diagnostic();
+    REQUIRE( primaryDiagnostic.contains( QStringLiteral( "primary_state=1" ) ) );
+    REQUIRE( primaryDiagnostic.contains( QStringLiteral( "primary_reported_pid=321" ) ) );
+    REQUIRE( primaryDiagnostic.contains( QStringLiteral( "original-timeout" ) ) );
+    REQUIRE( observation.diagnostic().contains( QStringLiteral( "observed_started_signal=no" ) ) );
+    REQUIRE_FALSE( observation.finishedObserved() );
+
+    // Synthetic records test the observation contract, not a native timeout or reap.
+    observation.record( Kind::State, static_cast<int>( QProcess::NotRunning ), 0 );
+    observation.record( Kind::Error, static_cast<int>( QProcess::ReadError ), 0 );
+    REQUIRE_FALSE( observation.finishedObserved() );
+    REQUIRE( observation.diagnostic().contains( QStringLiteral( "first_error_event=%1" )
+        .arg( static_cast<int>( QProcess::Timedout ) ) ) );
+    REQUIRE( primary.diagnostic() == primaryDiagnostic );
+    const klogg::testing::ProcessSnapshot literalPrimary{ QProcess::Starting, QProcess::Timedout,
+        QStringLiteral( "literal%1" ), 321 };
+    REQUIRE( literalPrimary.diagnostic().contains(
+        QStringLiteral( "primary_error_text=literal%1 primary_reported_pid=321" ) ) );
+    const klogg::testing::ProcessSnapshot longPrimary{ QProcess::Starting, QProcess::Timedout,
+        QString( 513, QLatin1Char( 'x' ) ), 321 };
+    REQUIRE( longPrimary.diagnostic().contains( QString( 500, QLatin1Char( 'x' ) )
+                                               + QStringLiteral( "<truncated>" ) ) );
+    observation.record( Kind::Finished, 23, 0, static_cast<int>( QProcess::CrashExit ) );
+    REQUIRE( observation.finishedObserved() );
+    REQUIRE( observation.diagnostic().contains( QStringLiteral( "finished_exit_code=23" ) ) );
+    REQUIRE( observation.diagnostic().contains( QStringLiteral( "last_nonzero_reported_pid=321" ) ) );
+}
+
+TEST_CASE( "Capture child observations remain bounded without dropping terminal facts",
+           "[capturestore][child-process-observation]" )
+{
+    using Kind = CaptureChildProcessObservation::Kind;
+    CaptureChildProcessObservation observation;
+    for ( int i = 0; i < 32; ++i ) {
+        observation.record( Kind::State, static_cast<int>( QProcess::Starting ), 321 );
+    }
+    observation.record( Kind::Error, static_cast<int>( QProcess::Timedout ), 321 );
+    observation.record( Kind::Error, static_cast<int>( QProcess::ReadError ), 0 );
+    observation.record( Kind::Started, 0, 321 );
+    observation.record( Kind::Finished, 23, 0, static_cast<int>( QProcess::CrashExit ) );
+    const auto diagnostic = observation.diagnostic();
+    REQUIRE( diagnostic.contains( QStringLiteral( "process_events_truncated=yes" ) ) );
+    REQUIRE( diagnostic.count( QStringLiteral( "state:" ) ) == 16 );
+    REQUIRE( diagnostic.contains( QStringLiteral( "observed_started_signal=yes" ) ) );
+    REQUIRE( observation.finishedObserved() );
+    REQUIRE( diagnostic.contains( QStringLiteral( "finished_exit_code=23" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "finished_exit_status=%1" )
+        .arg( static_cast<int>( QProcess::CrashExit ) ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "first_error_event=%1" )
+        .arg( static_cast<int>( QProcess::Timedout ) ) ) );
+    REQUIRE( diagnostic.size() < 4096 );
+}
+
+TEST_CASE( "Capture child cleanup observations distinguish unattempted and failed waits",
+           "[capturestore][child-process-observation]" )
+{
+    CaptureChildCleanupObservation cleanup;
+    auto diagnostic = cleanup.diagnostic();
+    REQUIRE( diagnostic.contains( QStringLiteral( "release_wait=not-attempted" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "kill_wait=not-attempted" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "kill_attempted=no" ) ) );
+
+    // These are reported Qt operation outcomes, not OS reap or family-liveness evidence.
+    cleanup.initialState = QProcess::Starting;
+    cleanup.releaseWait = false;
+    cleanup.killAttempted = true;
+    cleanup.killWait = false;
+    cleanup.finalState = QProcess::Starting;
+    cleanup.finalReportedPid = 321;
+    diagnostic = cleanup.diagnostic();
+    REQUIRE( diagnostic.contains( QStringLiteral( "release_published=no" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "release_wait=false" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "kill_attempted=yes" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "kill_wait=false" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "final_state=1 final_reported_pid=321" ) ) );
+
+    cleanup.releasePublished = true;
+    cleanup.releaseWait = true;
+    cleanup.killAttempted = false;
+    cleanup.killWait.reset();
+    cleanup.finalState = QProcess::NotRunning;
+    cleanup.finalReportedPid = 0;
+    diagnostic = cleanup.diagnostic();
+    REQUIRE( diagnostic.contains( QStringLiteral( "release_published=yes" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "release_wait=true" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "kill_attempted=no" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "kill_wait=not-attempted" ) ) );
+    REQUIRE( diagnostic.contains( QStringLiteral( "final_state=0 final_reported_pid=0" ) ) );
+}
+
+TEST_CASE( "Capture child readiness keeps successful and failed startup contracts",
+           "[capturestore][maintenance-lifecycle]" )
+{
+    const auto rootPath = makeTestDir( "capturestore_child_readiness" );
+    const auto captureId = makeCaptureId();
+    ActiveCaptureChild child( rootPath, captureId, true );
+    bool terminalObserved = false;
+    QObject terminalObservationContext;
+    const auto observeChildExit = [ & ]( QProcess& process, int timeoutMs ) {
+        QObject::connect( &process, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+                          &terminalObservationContext, [ & ] { terminalObserved = true; } );
+        if ( process.state() == QProcess::NotRunning || process.waitForFinished( timeoutMs ) ) {
+            terminalObserved = true;
+        }
+    };
+
+    SECTION( "successful real handshake" )
+    {
+        REQUIRE( child.startAndWaitUntilReady() );
+        REQUIRE_FALSE( child.captureIdentity().isEmpty() );
+        REQUIRE( child.startupDiagnostic().isEmpty() );
+        REQUIRE( child.releaseAndWait() );
+    }
+    SECTION( "owned missing executable" )
+    {
+        const auto program = QDir( rootPath ).filePath( QStringLiteral( "missing-child-%1" ) );
+        REQUIRE_FALSE( QFileInfo::exists( program ) );
+        child.setProgramForTest( program );
+        REQUIRE_FALSE( child.startAndWaitUntilReady() );
+        const auto diagnostic = child.startupDiagnostic();
+        REQUIRE( diagnostic.contains( QStringLiteral( "phase=start" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "primary_error=%1" )
+                                         .arg( static_cast<int>( QProcess::FailedToStart ) ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "exit_observed=no" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "missing-child" ) ) );
+        CHECK( diagnostic.contains( QStringLiteral( "program=" ) + program ) );
+        CHECK( diagnostic.contains( QStringLiteral( "primary_reported_pid=0" ) ) );
+        CHECK( diagnostic.contains( QStringLiteral( "observed_process_events=state:" ) ) );
+    }
+    SECTION( "owned ready path is a directory" )
+    {
+        REQUIRE( QDir{}.mkpath( QDir( rootPath ).filePath( QStringLiteral( "child-ready" ) ) ) );
+        REQUIRE_FALSE( child.startAndWaitUntilReady() );
+        const auto diagnostic = child.startupDiagnostic();
+        REQUIRE( diagnostic.contains( QStringLiteral( "phase=ready-content" ) ) );
+        REQUIRE( diagnostic.size() <= 16384 );
+    }
+    SECTION( "ready failure with causally observed child exit" )
+    {
+        REQUIRE( QDir{}.mkpath( QDir( rootPath ).filePath( QStringLiteral( "child-ready" ) ) ) );
+        const auto ready = child.startAndWaitUntilReady( [ & ]( QProcess& process ) {
+            observeChildExit( process, 5000 );
+        } );
+        REQUIRE( terminalObserved );
+        REQUIRE_FALSE( ready );
+        const auto diagnostic = child.startupDiagnostic();
+        REQUIRE( diagnostic.contains( QStringLiteral( "phase=ready-content" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "exit_observed=yes" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "FAILED:" ) ) );
+        REQUIRE( diagnostic.size() <= 16384 );
+    }
+    SECTION( "exit after an earlier running observation remains observed" )
+    {
+        const auto readyPath = QDir( rootPath ).filePath( QStringLiteral( "child-ready" ) );
+        const auto releasePath = QDir( rootPath ).filePath( QStringLiteral( "child-release" ) );
+        bool initialExitObserved = true;
+        const auto ready = child.startAndWaitUntilReady( [ & ]( QProcess& process ) {
+            REQUIRE_FALSE( waitForPublishedContent( readyPath ).isEmpty() );
+            // Observe while the real child still waits for its release file.
+            observeChildExit( process, 0 );
+            initialExitObserved = terminalObserved;
+            REQUIRE_FALSE( initialExitObserved );
+            REQUIRE( QFile::remove( readyPath ) );
+            REQUIRE( createSignalFile( releasePath ) );
+        } );
+        REQUIRE( terminalObserved );
+        REQUIRE_FALSE( ready );
+        const auto diagnostic = child.startupDiagnostic();
+        REQUIRE( diagnostic.contains( QStringLiteral( "phase=ready-content" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "exit_observed=yes" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "exit_status=0 exit_code=0" ) ) );
+    }
+    SECTION( "parent marker root deliberately differs from child snapshot" )
+    {
+        const auto otherRoot = makeTestDir( "capturestore_child_other_coordination" );
+        const ScopedEnvironmentVariable overrideGuard{ "KLOGG_CAPTURE_COORDINATION_ROOT",
+                                                       otherRoot.toUtf8() };
+        REQUIRE_FALSE( child.startAndWaitUntilReady() );
+        REQUIRE_FALSE( child.captureIdentity().isEmpty() );
+        const auto diagnostic = child.startupDiagnostic();
+        REQUIRE( diagnostic.contains( QStringLiteral( "phase=marker-coherence" ) ) );
+        REQUIRE( diagnostic.contains( QStringLiteral( "marker_path=" ) ) );
+        REQUIRE( diagnostic.size() <= 16384 );
+    }
+}
 
 TEST_CASE( "Capture coordination root honors the test isolation override",
            "[capturestore][coordination-root]" )
@@ -2076,7 +2646,9 @@ TEST_CASE( "CaptureStore cleanupUnusedCapturesAsync removes orphan captures off 
     const auto elapsedMs = timer.elapsed();
 
     INFO( "cleanup scheduling elapsed ms: " << elapsedMs );
-    KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );
+    // Local-only: CI checks the async contract through the orphan-directory
+    // wait below, not through this scheduling latency.
+    KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );  // lint-allow: perf-budget -- Local scheduling speed; CI checks orphan removal.
     REQUIRE( QDir{ retainedPath }.exists() );
 
     QElapsedTimer deadline;
@@ -2247,21 +2819,29 @@ TEST_CASE( "CaptureStore releases retired leases after dropping the path mutex" 
             }
         } );
 
+    const auto previousTimeout
+        = CaptureStoreTestAccess::setCapturePathGateTimeout( 20 );
+
     QElapsedTimer clearTimer;
     clearTimer.start();
+    CaptureStoreTestAccess::clearCapturePathGateWaits();
     owner.clear();
     const auto clearElapsed = clearTimer.elapsed();
     if ( siblingThread.joinable() ) {
         siblingThread.join();
     }
+    const auto clearGateWaits = CaptureStoreTestAccess::capturePathGateWaits();
+    CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
 
     REQUIRE( siblingHoldsGate.load( std::memory_order_acquire ) );
     REQUIRE( siblingCompleted );
-    // A clear() that wrongly blocked on the contended gate would cost the
-    // full default 5000ms gate timeout (plus QLockFile contention sleeps).
-    // Keep the bound comfortably below that regression floor while allowing
-    // sanitizer-instrumented runs several seconds of legitimate headroom.
-    KLOGG_CHECK_PERF_BUDGET( clearElapsed < 4000 );
+    // A clear() that wrongly waited the full default 5000ms gate timeout
+    // (plus QLockFile contention sleeps) instead of the configured 20ms must
+    // fail in CI. Assert it on the timeout that reached the gate: the previous
+    // wall-clock bound was routed through KLOGG_CHECK_PERF_BUDGET, which CI
+    // never evaluates.
+    INFO( "clear elapsed ms: " << clearElapsed );
+    requireConfiguredGateTimeoutWasUsed( "clear()", clearGateWaits, 20 );
     sibling.reset();
     REQUIRE( waitForNoSegments( owner.capturePath() ) );
 }
@@ -2300,6 +2880,7 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
         std::this_thread::yield();
     }
 
+    CaptureStoreTestAccess::clearCapturePathGateWaits();
     QElapsedTimer deletionTimer;
     deletionTimer.start();
     std::thread deletion( [ & ] {
@@ -2324,6 +2905,7 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
     deletion.join();
     const auto deletionCompletedAfterRelease
         = waitForMissingFile( capturePath );
+    const auto deletionGateWaits = CaptureStoreTestAccess::capturePathGateWaits();
     CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
 
     REQUIRE( gateHeld.load( std::memory_order_acquire ) );
@@ -2331,10 +2913,11 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
     REQUIRE( deletionStartedBeforeDeadline );
     REQUIRE( deletionFinishedBeforeRelease );
     // The 15000ms watchdog alone would still pass a regression that wrongly
-    // waited the full default 5000ms gate timeout. Keep an elapsed bound
-    // below that regression floor while allowing sanitizer-instrumented runs
-    // several seconds of legitimate headroom.
-    KLOGG_CHECK_PERF_BUDGET( deletionElapsed < 4000 );
+    // waited the full default 5000ms gate timeout, so assert the timeout that
+    // actually reached the gate: a perf-budget wall-clock bound could not carry
+    // this check into CI, because KLOGG_PERF_GATES is unset there.
+    INFO( "deletion elapsed ms: " << deletionElapsed );
+    requireConfiguredGateTimeoutWasUsed( "deleteCaptureFiles()", deletionGateWaits, 20 );
     REQUIRE( deletionFinished.load( std::memory_order_acquire ) );
     REQUIRE( deletionCompletedAfterRelease );
 }
@@ -2374,6 +2957,7 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
         std::this_thread::yield();
     }
 
+    CaptureStoreTestAccess::clearCapturePathGateWaits();
     QElapsedTimer destructionTimer;
     destructionTimer.start();
     std::thread destruction( [ & ] {
@@ -2395,16 +2979,18 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
     holder.join();
     destruction.join();
     survivingStore.deleteCaptureFiles();
+    const auto destructionGateWaits = CaptureStoreTestAccess::capturePathGateWaits();
     CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
 
     REQUIRE( gateHeld.load( std::memory_order_acquire ) );
     REQUIRE( holderCompleted );
     REQUIRE( destructionStartedBeforeDeadline );
     REQUIRE( destructionFinishedBeforeRelease );
-    // Same regression floor as the deletion case: a destruction that wrongly
-    // waited the full default 5000ms gate timeout must not slip past the
-    // generous watchdog.
-    KLOGG_CHECK_PERF_BUDGET( destructionElapsed < 4000 );
+    // Same contract as the deletion case: a destruction that wrongly waited the
+    // full default 5000ms gate timeout must be caught by CI, which the previous
+    // perf-budget bound was not.
+    INFO( "destruction elapsed ms: " << destructionElapsed );
+    requireConfiguredGateTimeoutWasUsed( "~CaptureStore", destructionGateWaits, 20 );
     REQUIRE( destructionFinished.load( std::memory_order_acquire ) );
     // The directory removal is deferred to a background retry thread, so an
     // immediate existence check races it (it flaked under the ubsan-only leg).
@@ -2520,6 +3106,8 @@ TEST_CASE( "CaptureStore cleanup preserves a live foreign process marker" )
 
 TEST_CASE( "CaptureStore child holds active process marker" )
 {
+    using klogg::testing::CaptureChildPhase;
+    using klogg::testing::recordCaptureChildPhase;
     const auto rootPath = qEnvironmentVariable( "KLOGG_CAPTURESTORE_CHILD_ROOT" );
     if ( rootPath.isEmpty() ) {
         SUCCEED();
@@ -2529,22 +3117,31 @@ TEST_CASE( "CaptureStore child holds active process marker" )
     const auto captureId = qEnvironmentVariable( "KLOGG_CAPTURESTORE_CHILD_ID" );
     const auto readyPath = qEnvironmentVariable( "KLOGG_CAPTURESTORE_CHILD_READY" );
     const auto releasePath = qEnvironmentVariable( "KLOGG_CAPTURESTORE_CHILD_RELEASE" );
+    recordCaptureChildPhase( CaptureChildPhase::BeforeStore );
     CaptureStore store( captureId, rootPath );
+    recordCaptureChildPhase( CaptureChildPhase::StoreReady );
     const auto spillsSegment
         = qEnvironmentVariableIsSet( "KLOGG_CAPTURESTORE_CHILD_SPILL" );
     if ( spillsSegment ) {
+        recordCaptureChildPhase( CaptureChildPhase::AppendBegin );
         store.appendUtf8( QByteArrayLiteral( "external-a\nexternal-b\n" ) );
+        recordCaptureChildPhase( CaptureChildPhase::SpillBegin );
         REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
+        recordCaptureChildPhase( CaptureChildPhase::SpillComplete );
     } else if ( qEnvironmentVariableIsSet( "KLOGG_CAPTURESTORE_CHILD_WRITE" ) ) {
+        recordCaptureChildPhase( CaptureChildPhase::AppendBegin );
         store.appendUtf8( QByteArrayLiteral( "replacement\n" ) );
     }
+    recordCaptureChildPhase( CaptureChildPhase::ReadyPublishBegin );
     QSaveFile readyFile( readyPath );
     readyFile.setDirectWriteFallback( false );
     REQUIRE( readyFile.open( QIODevice::WriteOnly ) );
     const auto captureIdentity
         = CaptureStoreTestAccess::capturePathIdentity( store ).toUtf8();
     REQUIRE( readyFile.write( captureIdentity ) == captureIdentity.size() );
+    recordCaptureChildPhase( CaptureChildPhase::ReadyCommitBegin );
     REQUIRE( readyFile.commit() );
+    recordCaptureChildPhase( CaptureChildPhase::ReadyCommitted );
     REQUIRE( waitForFile( releasePath ) );
     if ( spillsSegment ) {
         REQUIRE( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ),
@@ -3942,7 +4539,9 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget
     // Instrumented and unoptimized builds validate correctness above without
     // turning hosted-runner speed into a performance regression signal.
 #if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
-    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < 2000 );
+    // Multi-sample speed budget, local-only by design: CI must not gate on
+    // hosted-runner speed, and every correctness assertion above still runs.
+    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < 2000 );  // lint-allow: perf-budget -- Local append speed; CI checks line counts and contents.
 #endif
 }
 
@@ -3987,7 +4586,8 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
     // optimized implementation itself is being measured.
 #if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
     constexpr int MetadataOverheadBudgetMs = 200;
-    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < MetadataOverheadBudgetMs );
+    // Multi-sample speed budget, local-only by design (see the sibling case).
+    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < MetadataOverheadBudgetMs );  // lint-allow: perf-budget -- Local metadata speed; CI checks contents and memory accounting.
 #endif
 }
 
@@ -4255,23 +4855,63 @@ TEST_CASE( "CaptureStore publishes spilled segments only after a complete write"
         store.appendUtf8( QByteArrayLiteral( "aaa\nbbb\n" ) );
         REQUIRE( waitForNoSegments( capturePath ) );
 
+        struct Handoff {
+            std::atomic<bool> paused{ false };
+            std::atomic<bool> release{ false };
+        };
+        const auto handoff = std::make_shared<Handoff>();
+        struct ReleaseHandoff {
+            std::shared_ptr<Handoff> state;
+            ~ReleaseHandoff() { state->release.store( true, std::memory_order_release ); }
+        };
+        const ReleaseHandoff releaseOnExit{ handoff };
+        const auto memoryBefore = store.stats().memoryBytes;
+        const auto pendingBefore = store.persistenceState().pendingBytes;
+        const auto retryBefore = CaptureStoreTestAccess::maintenanceRetry( store );
+        CaptureStoreTestAccess::setBeforeRetryHandoffCallback( store, [ handoff ] {
+            handoff->paused.store( true, std::memory_order_release );
+            while ( !handoff->release.load( std::memory_order_acquire ) ) {
+                std::this_thread::yield();
+            }
+        } );
         CaptureStoreTestAccess::failNextRetiredFileRemoval( store );
         CaptureStoreTestAccess::failNextSegmentWrite( store );
-        REQUIRE_FALSE( CaptureStoreTestAccess::spillFirstSegment( store ) );
-        REQUIRE( waitForNoSegments( capturePath ) );
-        const auto abandonedTemporaryFiles = QDir( capturePath ).entryList(
+        const auto spilled = CaptureStoreTestAccess::spillFirstSegment( store );
+        const auto reachedHandoff = waitForFlag( handoff->paused );
+        const auto retryAtHandoff = CaptureStoreTestAccess::maintenanceRetry( store );
+        const auto incompleteFiles = QDir( capturePath ).entryList(
             QStringList{ QStringLiteral( ".klogg-segment-*.tmp" ) },
             QDir::Files | QDir::Hidden, QDir::NoSort );
-        REQUIRE( abandonedTemporaryFiles.size() == 1 );
-        REQUIRE( waitForMissingFile( QDir( capturePath ).filePath(
-            abandonedTemporaryFiles.front() ) ) );
-        // File disappearance is not the maintenance transaction boundary: the
-        // retry worker may still own the cross-process gate on Windows. Wait for
-        // its published lifecycle state before starting another spill.
+        const auto unpublishedSegments = segmentFiles( capturePath );
+        const auto memoryAfterFailure = store.stats().memoryBytes;
+        const auto pendingAfterFailure = store.persistenceState().pendingBytes;
+        handoff->release.store( true, std::memory_order_release );
+        // Release before assertions; shared state and the scope guard also make
+        // early failures safe for the background callback.
+        REQUIRE( reachedHandoff );
+        REQUIRE_FALSE( spilled );
+        REQUIRE( retryAtHandoff.requested > retryBefore.requested );
+        REQUIRE( retryAtHandoff.requested == retryAtHandoff.completed );
+        REQUIRE( retryAtHandoff.scheduled );
+        REQUIRE( incompleteFiles.isEmpty() );
+        REQUIRE( unpublishedSegments.isEmpty() );
+        REQUIRE( memoryAfterFailure == memoryBefore );
+        REQUIRE( pendingAfterFailure == pendingBefore );
+        // Name disappearance is not the maintenance transaction boundary. Wait
+        // for the published idle state before starting another spill.
         REQUIRE( waitForMaintenanceRetryIdle( store ) );
+        REQUIRE( store.lineCount() == 2_lcount );
+        REQUIRE( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ),
+                              QRegularExpression{} ) == QStringLiteral( "aaa" ) );
+        REQUIRE( store.lineAt( 1_lnum, QTextCodec::codecForName( "UTF-8" ),
+                              QRegularExpression{} ) == QStringLiteral( "bbb" ) );
 
         REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
-        REQUIRE( segmentFiles( capturePath ).size() == 1 );
+        const auto publishedSegments = segmentFiles( capturePath );
+        REQUIRE( publishedSegments.size() == 1 );
+        QFile published( QDir( capturePath ).filePath( publishedSegments.front() ) );
+        REQUIRE( published.open( QIODevice::ReadOnly ) );
+        REQUIRE( published.readAll() == QByteArrayLiteral( "aaa\nbbb\n" ) );
     }
 
     CaptureStore restored( captureId, rootPath, limits );

@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import hashlib
 import io
 import json
+import os
 import pathlib
+import re
 import shutil
+import stat
 import tarfile
+import tempfile
 
 from source_publication_identity import (
     normalize_base_url,
@@ -24,6 +29,7 @@ class LegalAssetError(RuntimeError):
 
 
 SOURCE_SET_RECEIPT = "ios-native-source-set-receipt.json"
+OVERLAY_RECEIPT = "ios-native-overlay-receipt.json"
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -180,45 +186,12 @@ def validated_build_receipt(
     return receipt, validated
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--lock", required=True, type=pathlib.Path)
-    parser.add_argument("--archive-root", required=True, type=pathlib.Path)
-    parser.add_argument("--repository-root", required=True, type=pathlib.Path)
-    parser.add_argument("--stack-root", required=True, type=pathlib.Path)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--base-url", required=True)
-    parser.add_argument("--output", required=True, type=pathlib.Path)
-    args = parser.parse_args()
-
-    version = validate_version(args.version)
-    base_url = normalize_base_url(args.base_url)
-    lock = json.loads(args.lock.read_text(encoding="utf-8"))
-    args.output.mkdir(parents=True, exist_ok=True)
-    sources = lock["sources"]
-    expected_ids = {
-        "openssl",
-        "curl",
-        "libplist",
-        "libimobiledevice-glue",
-        "libusbmuxd",
-        "libtatsu",
-        "libimobiledevice",
-    }
-    if {source["id"] for source in sources} != expected_ids:
-        raise LegalAssetError("legal source closure does not match the locked native stack")
-
-    build_receipt, dylibs = validated_build_receipt(args.lock, lock, args.stack_root)
-
-    source_archive = args.output / "ios-native-corresponding-source.tar.gz"
-    write_deterministic_source_archive(
-        source_archive, args.lock, lock, args.archive_root, args.repository_root
-    )
-    source_archive_hash = sha256(source_archive)
+def write_overlay(output: pathlib.Path, source: dict, version: str, base_url: str) -> None:
+    source_archive_hash = source["archive"]["sha256"]
     published_archive = published_source_name(version, "ios-native", source_archive_hash)
     versioned_releases_page = f"{base_url}/releases"
     continuous_release_page = f"{base_url}/releases/tag/continuous"
-    (args.output / "ios-native-source-offer.txt").write_text(
+    (output / "ios-native-source-offer.txt").write_text(
         "Klogg iOS Native Stack Corresponding Source Offer\n"
         "================================================\n\n"
         "The corresponding-source archive is not included in the installer; it is a separate\n"
@@ -243,7 +216,7 @@ def main() -> int:
         "rebuild, replacement, and ad-hoc re-signing instructions.\n",
         encoding="utf-8",
     )
-    replacement_guide = args.output / "ios-native-lgpl-replacement.txt"
+    replacement_guide = output / "ios-native-lgpl-replacement.txt"
     replacement_guide.write_text(
         "Klogg iOS Native LGPL Replacement Guide\n"
         "========================================\n\n"
@@ -265,6 +238,44 @@ def main() -> int:
         "engineering these LGPL libraries for the purpose of installing modified versions.\n",
         encoding="utf-8",
     )
+    write_json(output / OVERLAY_RECEIPT, {
+        "schema_version": 1,
+        "receipt_kind": "component-source-overlay",
+        "component": "ios-native",
+        "version": version,
+        "base_url": base_url,
+        "source_set_receipt_sha256": sha256(output / SOURCE_SET_RECEIPT),
+        "assets": [
+            {"kind": "source-offer", "file_name": "ios-native-source-offer.txt",
+             "sha256": sha256(output / "ios-native-source-offer.txt")},
+            {"kind": "replacement-guide", "file_name": replacement_guide.name,
+             "sha256": sha256(replacement_guide)},
+        ],
+        "distribution": {"package_required": True, "release_required": True},
+    })
+
+
+def generate_assets(args, lock: dict, version: str | None, base_url: str | None) -> None:
+    sources = lock["sources"]
+    expected_ids = {
+        "openssl",
+        "curl",
+        "libplist",
+        "libimobiledevice-glue",
+        "libusbmuxd",
+        "libtatsu",
+        "libimobiledevice",
+    }
+    if {source["id"] for source in sources} != expected_ids:
+        raise LegalAssetError("legal source closure does not match the locked native stack")
+
+    build_receipt, dylibs = validated_build_receipt(args.lock, lock, args.stack_root)
+
+    source_archive = args.output / "ios-native-corresponding-source.tar.gz"
+    write_deterministic_source_archive(
+        source_archive, args.lock, lock, args.archive_root, args.repository_root
+    )
+    source_archive_hash = sha256(source_archive)
 
     licenses = args.output / "licenses"
     if licenses.exists():
@@ -368,16 +379,6 @@ def main() -> int:
         },
         "patch_chain_sha256": canonical_sha256(patch_identity),
         "package_support_assets": [
-            {
-                "kind": "source-offer",
-                "file_name": "ios-native-source-offer.txt",
-                "sha256": sha256(args.output / "ios-native-source-offer.txt"),
-            },
-            {
-                "kind": "replacement-guide",
-                "file_name": replacement_guide.name,
-                "sha256": sha256(replacement_guide),
-            },
             {"kind": "notices", "file_name": notice.name, "sha256": sha256(notice)},
             *[
                 {
@@ -397,25 +398,400 @@ def main() -> int:
     # Preserve the historical thin-artifact filename while consumers migrate to
     # the architecture-independent component source-set receipt.
     write_json(args.output / "ios-native-source-receipt.json", source_set_receipt)
-    build_receipt["source_set_receipt_sha256"] = sha256(source_set_path)
-    write_json(args.stack_root / lock["receipts"]["build"], build_receipt)
-
     legal_receipt = {
         "schema_version": 1,
         "receipt_kind": "legal",
         "lock_sha256": sha256(args.lock),
         "architecture": build_receipt["architecture"],
         "deployment_target": build_receipt["deployment_target"],
+        "build_receipt_sha256": sha256(args.stack_root / lock["receipts"]["build"]),
+        "source_set_receipt_sha256": sha256(source_set_path),
         "license_files": legal_files,
         "notice": {"path": notice.name, "sha256": sha256(notice)},
-        "replacement_guide": {
-            "path": replacement_guide.name,
-            "sha256": sha256(replacement_guide),
-        },
         "sbom": {"path": sbom_path.name, "sha256": sha256(sbom_path)},
         "package": "app-bundled dynamic dylib closure",
     }
-    write_json(args.output / lock["receipts"]["legal"], legal_receipt)
+    legal_path = args.output / lock["receipts"]["legal"]
+    write_json(legal_path, legal_receipt)
+    if version is not None:
+        write_overlay(args.output, source_set_receipt, version, base_url)
+
+
+def checked_input(root: pathlib.Path, relative: str) -> pathlib.Path:
+    relative = validated_relative_path(relative, "immutable core asset")
+    path = root / relative
+    for parent in path.parents:
+        if parent == root:
+            break
+        if parent.is_symlink() or not parent.is_dir():
+            raise LegalAssetError("immutable core asset has an unsafe parent")
+    if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
+        raise LegalAssetError(f"missing regular immutable core asset: {relative}")
+    return path
+
+
+def check_output(output: pathlib.Path, inputs: tuple[pathlib.Path, ...]) -> None:
+    for root in inputs:
+        if root.is_symlink() or not root.is_dir():
+            raise LegalAssetError("immutable input must be a real directory")
+        resolved, destination = root.resolve(), output.resolve()
+        if resolved == destination or resolved in destination.parents or destination in resolved.parents:
+            raise LegalAssetError("legal output must be separate from immutable inputs")
+    if output.is_symlink() or (output.exists() and (not output.is_dir() or any(output.iterdir()))):
+        raise LegalAssetError("legal output must be a fresh empty directory")
+    if not output.parent.is_dir():
+        raise LegalAssetError("legal output parent must already exist")
+
+
+def strict_build_receipt(lock_path: pathlib.Path, lock: dict, stack: pathlib.Path) -> tuple[dict, list[dict]]:
+    from verify_ios_native_stack import validate_build_receipt
+
+    checked_input(stack, lock["receipts"]["build"])
+    receipt, dylibs = validated_build_receipt(lock_path, lock, stack)
+    validate_build_receipt(lock, lock_path, receipt, receipt["architecture"])
+    for item in dylibs:
+        checked_input(stack, "lib/" + item["name"])
+    return receipt, dylibs
+
+
+def validate_materialization_core(args, lock: dict, core: pathlib.Path) -> dict[str, str]:
+    """Check caller-pinned bytes and local bindings, not signature authenticity."""
+    from verify_ios_native_stack import (
+        read_json, validate_build_source_set_binding, verify_legal_core,
+    )
+
+    for name, expected in ((SOURCE_SET_RECEIPT, args.source_set_sha256),
+                           (lock["receipts"]["legal"], args.legal_receipt_sha256)):
+        path = checked_input(core, name)
+        if sha256(path) != expected:
+            raise LegalAssetError(f"external immutable receipt digest mismatch: {name}")
+    build_path = checked_input(args.stack_root, lock["receipts"]["build"])
+    if sha256(build_path) != args.build_receipt_sha256:
+        raise LegalAssetError("external immutable build receipt digest mismatch")
+    build, dylibs = strict_build_receipt(args.lock, lock, args.stack_root)
+    validate_build_source_set_binding(build, args.source_set_sha256)
+    source = read_json(core / SOURCE_SET_RECEIPT, "iOS native source set")
+    legal = read_json(core / lock["receipts"]["legal"], "iOS native legal core")
+    sbom = read_json(core / lock["receipts"]["sbom"], "iOS native SBOM")
+    if any(item.get("kind") in ("source-offer", "replacement-guide")
+           for item in source.get("package_support_assets", [])):
+        raise LegalAssetError("overlay materialization requires an unversioned source core")
+    verify_legal_core(args.lock, build["architecture"], core / SOURCE_SET_RECEIPT,
+                      core / lock["receipts"]["legal"], core / lock["receipts"]["sbom"],
+                      asset_scope="release", source_assets_root=core, build_receipt_path=build_path)
+    expected_files = [{"fileName": "lib/" + item["name"],
+                       "checksums": [{"algorithm": "SHA256", "checksumValue": item["sha256"]}]}
+                      for item in dylibs]
+    actual_files = [{"fileName": item.get("fileName"), "checksums": item.get("checksums")}
+                    for item in sbom.get("files", []) if isinstance(item, dict)]
+    if actual_files != expected_files:
+        raise LegalAssetError("immutable SBOM does not bind the original dylib bytes")
+    names = {SOURCE_SET_RECEIPT, lock["receipts"]["legal"], lock["receipts"]["sbom"],
+             source["archive"]["file_name"], legal["notice"]["path"]}
+    names.update(item["file_name"] for item in source["package_support_assets"])
+    names.update(item["path"] for item in legal["license_files"])
+    alias = "ios-native-source-receipt.json"
+    if (core / alias).exists() or (core / alias).is_symlink():
+        if checked_input(core, alias).read_bytes() != (core / SOURCE_SET_RECEIPT).read_bytes():
+            raise LegalAssetError("historical source receipt differs from immutable source set")
+        names.add(alias)
+    return {name: sha256(checked_input(core, name)) for name in sorted(names)}
+
+
+def copy_checked_files(source: pathlib.Path, output: pathlib.Path, files: dict[str, str],
+                       created: list[pathlib.Path] | None = None, *,
+                       modes: dict[str, int] | None = None,
+                       directory_handles: dict[str, int] | None = None) -> None:
+    """Stream bounded immutable copies, rejecting changed inputs or copied bytes."""
+    total = 0
+    for name, expected in files.items():
+        path = checked_input(source, name)
+        destination = output / name
+        digest = hashlib.sha256()
+        copied_digest = None
+        with path.open("rb") as original:
+            if directory_handles is None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                stream = destination.open("xb")
+            else:
+                parent, _, leaf = name.rpartition("/")
+                handle = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o666, dir_fd=directory_handles[parent])
+                try:
+                    stream = os.fdopen(handle, "w+b")
+                except BaseException:
+                    os.close(handle)
+                    raise
+            with stream as copied:
+                if created is not None:
+                    created.append(destination)
+                for chunk in iter(lambda: original.read(1024 * 1024), b""):
+                    total += len(chunk)
+                    if total > 2 * 1024**3:
+                        raise LegalAssetError("immutable legal core exceeds copy budget")
+                    digest.update(chunk)
+                    copied.write(chunk)
+                if modes is not None:
+                    # Apply metadata to the exclusively created file, not a path
+                    # another writer could have replaced after copying.
+                    os.fchmod(copied.fileno(), modes[name])
+                if directory_handles is not None:
+                    copied.seek(0)
+                    observed = hashlib.sha256()
+                    for chunk in iter(lambda: copied.read(1024 * 1024), b""):
+                        observed.update(chunk)
+                    copied_digest = observed.hexdigest()
+        if digest.hexdigest() != expected or (
+            copied_digest if directory_handles is not None else sha256(destination)
+        ) != expected:
+            raise LegalAssetError(f"immutable legal core changed while copying: {name}")
+
+
+def materialize(args, lock: dict, version: str | None, base_url: str | None) -> None:
+    inputs = (args.stack_root, args.core_root) if args.overlay_only else (args.stack_root,)
+    check_output(args.output, inputs)
+    if args.overlay_only:
+        files = validate_materialization_core(args, lock, args.core_root)
+    else:
+        strict_build_receipt(args.lock, lock, args.stack_root)
+    with tempfile.TemporaryDirectory(prefix=".ios-legal-", dir=args.output.parent) as directory:
+        stage = pathlib.Path(directory)
+        if args.overlay_only:
+            copy_checked_files(args.core_root, stage, files)
+            # Check the copied snapshot against the same external pins before
+            # generating its new overlay, without rebuilding any source bytes.
+            if validate_materialization_core(args, lock, stage) != files:
+                raise LegalAssetError("copied immutable legal core differs from its input")
+            source = json.loads((stage / SOURCE_SET_RECEIPT).read_text(encoding="utf-8"))
+            write_overlay(stage, source, version, base_url)
+        else:
+            staged_args = argparse.Namespace(**{**vars(args), "output": stage})
+            generate_assets(staged_args, lock, None, None)
+        files = {path.relative_to(stage).as_posix(): sha256(path)
+                 for path in stage.rglob("*") if path.is_file()}
+        check_output(args.output, inputs)
+        existed = args.output.exists()
+        created = []
+        try:
+            args.output.mkdir(exist_ok=True)
+            copy_checked_files(stage, args.output, files, created)
+            if any(sha256(args.output / name) != expected for name, expected in files.items()):
+                raise LegalAssetError("materialized legal core changed before completion")
+        except BaseException:
+            for path in reversed(created):
+                path.unlink(missing_ok=True)
+            for path in sorted(args.output.rglob("*"), reverse=True):
+                if path.is_dir():
+                    try:
+                        path.rmdir()
+                    except OSError:
+                        pass
+            if not existed:
+                args.output.rmdir()
+            raise
+
+
+def native_stack_inventory(root: pathlib.Path, build_receipt: str, *,
+                           legal_files: dict[str, str] | None = None,
+                           receipt_alias: str | None = None) -> tuple[dict, dict, dict]:
+    """Describe native entries, allowing only an explicitly bound full legal view."""
+    files, aliases = {}, {}
+    native_receipts = {build_receipt}
+    if receipt_alias is not None:
+        if receipt_alias not in ("ios-native-arm64-build-receipt.json",
+                                 "ios-native-x86_64-build-receipt.json"):
+            raise LegalAssetError("unsupported original native receipt alias")
+        if sha256(checked_input(root, receipt_alias)) != sha256(checked_input(root, build_receipt)):
+            raise LegalAssetError("original native receipt alias differs from build receipt")
+        native_receipts.add(receipt_alias)
+    legal_files = legal_files or {}
+    legal_directories = set()
+    for name in legal_files:
+        validated_relative_path(name, "full legal entry")
+        if name in native_receipts or name.split("/")[0] in ("lib", "include"):
+            raise LegalAssetError("full legal entry collides with original native ownership")
+        legal_directories.update(parent.as_posix() for parent in pathlib.PurePosixPath(name).parents
+                                 if parent.as_posix() != ".")
+    root_mode = root.stat().st_mode
+    special_permissions = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
+    if root_mode & special_permissions:
+        raise LegalAssetError("original native stack has unsupported special permissions")
+    directories = {"": stat.S_IMODE(root_mode)}
+    for name in ("lib", "include"):
+        if (root / name).is_symlink() or not (root / name).is_dir():
+            raise LegalAssetError(f"original native stack requires a real {name} directory")
+    for path in sorted(root.rglob("*")):
+        name = validated_relative_path(path.relative_to(root).as_posix(), "original native entry")
+        info = path.lstat()
+        if info.st_mode & special_permissions:
+            raise LegalAssetError("original native stack has unsupported special permissions")
+        if name in legal_files:
+            if not stat.S_ISREG(info.st_mode) or sha256(checked_input(root, name)) != legal_files[name]:
+                raise LegalAssetError(f"full legal entry changed: {name}")
+            continue
+        if name in legal_directories:
+            if not stat.S_ISDIR(info.st_mode):
+                raise LegalAssetError(f"full legal directory changed: {name}")
+            continue
+        if name not in native_receipts and name.split("/")[0] not in ("lib", "include"):
+            raise LegalAssetError(f"unexpected original native stack entry: {name}")
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(path)
+            if path.parent != root / "lib" or not path.name.endswith(".dylib"):
+                raise LegalAssetError("only original flat dylib aliases are supported")
+            validated_relative_path(target, "original dylib alias")
+            if "/" in target:
+                raise LegalAssetError("original dylib alias must stay in its lib directory")
+            try:
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise LegalAssetError("original dylib alias has no regular target") from error
+            if resolved.parent != (root / "lib").resolve() or not resolved.is_file():
+                raise LegalAssetError("original dylib alias escapes its native closure")
+            aliases[name] = target
+        elif stat.S_ISDIR(info.st_mode):
+            directories[name] = stat.S_IMODE(info.st_mode)
+        elif stat.S_ISREG(info.st_mode):
+            files[name] = (sha256(checked_input(root, name)), stat.S_IMODE(info.st_mode))
+        else:
+            raise LegalAssetError(f"unsupported original native stack entry: {name}")
+    return files, aliases, directories
+
+
+def assemble_original_stack(args, lock: dict, version: str, base_url: str, *,
+                            full_release: bool = False) -> None:
+    """Assemble pinned original bytes; full-release authenticity belongs to the caller."""
+    if os.name != "posix":
+        raise LegalAssetError("native stack assembly requires POSIX file modes and aliases")
+    check_output(args.output, (args.stack_root, args.core_root))
+    if args.output.exists():
+        raise LegalAssetError("assembled native stack output must not already exist")
+    build, dylibs = strict_build_receipt(args.lock, lock, args.stack_root)
+    full_release_files, receipt_alias = None, None
+    if full_release:
+        receipt_alias = f"ios-native-{build['architecture']}-build-receipt.json"
+        if args.stack_root.resolve() != args.core_root.resolve():
+            raise LegalAssetError("full release requires one original native and legal root")
+        full_release_files = validate_materialization_core(args, lock, args.core_root)
+        for name in (OVERLAY_RECEIPT, "ios-native-source-offer.txt",
+                     "ios-native-lgpl-replacement.txt", "SHA256SUMS"):
+            full_release_files[name] = sha256(checked_input(args.stack_root, name))
+    original = native_stack_inventory(args.stack_root, lock["receipts"]["build"],
+                                      legal_files=full_release_files, receipt_alias=receipt_alias)
+    files, aliases, directories = original
+    if {name for name in files if name.startswith("lib/")} != {
+        "lib/" + item["name"] for item in dylibs
+    }:
+        raise LegalAssetError("native library inventory differs from original build receipt")
+    with tempfile.TemporaryDirectory(prefix=".ios-stack-", dir=args.output.parent) as directory:
+        legal_output = pathlib.Path(directory) / "legal"
+        legal_args = argparse.Namespace(**{**vars(args), "output": legal_output,
+                                           "overlay_only": True})
+        materialize(legal_args, lock, version, base_url)
+        legal_files = {path.relative_to(legal_output).as_posix(): sha256(path)
+                       for path in legal_output.rglob("*") if path.is_file()}
+        legal_directories = {path.relative_to(legal_output).as_posix(): stat.S_IMODE(path.stat().st_mode)
+                             for path in legal_output.rglob("*") if path.is_dir()}
+        directory_modes = {**legal_directories, **directories}
+        expected_directories = set(directory_modes) - {""}
+        if any(name.split("/")[0] in ("lib", "include", lock["receipts"]["build"])
+               for name in set(legal_files) | set(legal_directories)):
+            raise LegalAssetError("legal projection collides with original native stack ownership")
+        # Reserve a fresh private output. Failure deliberately retains partial
+        # output rather than deleting entries another writer may have installed.
+        # The ordinary producer must publish only after this command succeeds.
+        with contextlib.ExitStack() as handles:
+            args.output.mkdir(mode=0o700)
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            handle = os.open(args.output, flags)
+            handles.callback(os.close, handle)
+            directory_handles = {"": handle}
+            for name in sorted(expected_directories, key=lambda value: (value.count("/"), value)):
+                parent, _, leaf = name.rpartition("/")
+                parent_handle = directory_handles[parent]
+                os.mkdir(leaf, mode=0o700, dir_fd=parent_handle)
+                handle = os.open(leaf, flags, dir_fd=parent_handle)
+                handles.callback(os.close, handle)
+                directory_handles[name] = handle
+            copy_checked_files(args.stack_root, args.output,
+                               {name: value[0] for name, value in files.items()},
+                               modes={name: value[1] for name, value in files.items()},
+                               directory_handles=directory_handles)
+            copy_checked_files(legal_output, args.output, legal_files,
+                               directory_handles=directory_handles)
+            for name, target in aliases.items():
+                os.symlink(target, name.split("/")[-1], dir_fd=directory_handles["lib"])
+            expected = {**{name: value[0] for name, value in files.items()}, **legal_files}
+            actual_entries = {path.relative_to(args.output).as_posix()
+                              for path in args.output.rglob("*")}
+            if actual_entries != set(expected) | set(aliases) | expected_directories or any(
+                (args.output / name).is_symlink() or not (args.output / name).is_dir()
+                for name in expected_directories
+            ):
+                raise LegalAssetError("assembled native stack inventory changed before completion")
+            if any(sha256(checked_input(args.output, name)) != digest
+                   for name, digest in expected.items()):
+                raise LegalAssetError("assembled native stack changed before completion")
+            if any(stat.S_IMODE((args.output / name).stat().st_mode) != value[1]
+                   for name, value in files.items()):
+                raise LegalAssetError("assembled native file mode changed before completion")
+            if any(os.readlink(args.output / name) != target for name, target in aliases.items()):
+                raise LegalAssetError("assembled native aliases changed before completion")
+            if native_stack_inventory(args.stack_root, lock["receipts"]["build"],
+                                      legal_files=full_release_files, receipt_alias=receipt_alias) != original:
+                raise LegalAssetError("original native stack changed during assembly")
+            for name in sorted(directory_modes, key=len, reverse=True):
+                handle = directory_handles[name]
+                owned, current = os.fstat(handle), (args.output / name).lstat()
+                if (owned.st_dev, owned.st_ino) != (current.st_dev, current.st_ino):
+                    raise LegalAssetError("assembled native directory identity changed")
+                os.fchmod(handle, directory_modes[name])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lock", required=True, type=pathlib.Path)
+    parser.add_argument("--archive-root", type=pathlib.Path)
+    parser.add_argument("--repository-root", type=pathlib.Path)
+    parser.add_argument("--stack-root", required=True, type=pathlib.Path)
+    parser.add_argument("--version")
+    parser.add_argument("--base-url")
+    parser.add_argument("--output", required=True, type=pathlib.Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--core-only", action="store_true")
+    mode.add_argument("--overlay-only", action="store_true")
+    mode.add_argument("--assemble-stack", action="store_true")
+    parser.add_argument("--core-root", type=pathlib.Path)
+    parser.add_argument("--source-set-sha256")
+    parser.add_argument("--legal-receipt-sha256")
+    parser.add_argument("--build-receipt-sha256")
+    args = parser.parse_args()
+    pins = (args.source_set_sha256, args.legal_receipt_sha256, args.build_receipt_sha256)
+    if args.overlay_only or args.assemble_stack:
+        selected_mode = "assemble-stack" if args.assemble_stack else "overlay-only"
+        if not args.core_root or args.archive_root or args.repository_root:
+            parser.error(f"{selected_mode} requires core-root and forbids source acquisition inputs")
+        if any(not isinstance(pin, str) or re.fullmatch(r"[0-9a-f]{64}", pin) is None
+               or pin == "0" * 64 for pin in pins):
+            parser.error(f"{selected_mode} requires three external immutable receipt SHA-256 pins")
+    elif not args.archive_root or not args.repository_root or args.core_root or any(pins):
+        parser.error("core generation requires archive-root and repository-root, not reused-core inputs")
+    if args.core_only:
+        if args.version or args.base_url:
+            parser.error("core-only forbids version and publication URL")
+        version, base_url = None, None
+    else:
+        if not args.version or not args.base_url:
+            parser.error("version and base-url are required when generating an overlay")
+        version, base_url = validate_version(args.version), normalize_base_url(args.base_url)
+    lock = json.loads(args.lock.read_text(encoding="utf-8"))
+    if args.assemble_stack:
+        assemble_original_stack(args, lock, version, base_url)
+    elif args.core_only or args.overlay_only:
+        materialize(args, lock, version, base_url)
+    else:
+        args.output.mkdir(parents=True, exist_ok=True)
+        generate_assets(args, lock, version, base_url)
     return 0
 
 

@@ -1,5 +1,10 @@
 # Klogg Technical Documentation
 
+This overview describes the current source architecture. Start at the
+[documentation hub](README.md) for user guides, focused architecture notes,
+and historical/proposed documents. Dependency versions and packaged helpers
+are tracked in [DEPENDENCIES.md](DEPENDENCIES.md).
+
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
@@ -19,7 +24,7 @@
 
 ## Project Overview
 
-Klogg is a high-performance, cross-platform log file viewer built on Qt5/Qt6. It is designed to handle very large log files (10+ GB) efficiently without loading entire files into memory. The project started as a fork of glogg and has evolved into a separate project with significant performance improvements and new features.
+Klogg is a cross-platform log explorer built with C++17 and Qt 5/Qt 6. It reads file content on demand, using 64-bit offsets and line addressing rather than an editor-style whole-file text buffer. Indexes, caches, and results still require memory. Single-file exploration, snapshot folder search, and live device capture have distinct source lifecycles behind shared viewing and search controls. The project originated as a fork of glogg; this repository continues the ZEACENT fork of [upstream klogg](https://github.com/variar/klogg).
 
 ### Key Features
 - **Multi-platform**: Windows, Linux, macOS
@@ -35,7 +40,7 @@ Klogg is a high-performance, cross-platform log file viewer built on Qt5/Qt6. It
 - **Build System**: CMake
 - **Threading**: TBB (Threading Building Blocks)
 - **Regex Engine**: Vectorscan (optional), Qt Regex (fallback)
-- **Memory Allocator**: mimalloc (optional)
+- **Container Allocator**: pinned static mimalloc for allocator-aware containers; no global malloc override
 - **Data Structures**: Roaring Bitmaps for match storage
 
 ---
@@ -43,6 +48,10 @@ Klogg is a high-performance, cross-platform log file viewer built on Qt5/Qt6. It
 ## Architecture Overview
 
 ### High-Level Architecture
+
+The following view hierarchy illustrates a file/live tab. Folder tabs use
+`FolderCrawlerWidget` and their own result model rather than being another
+`LogData` file.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -83,7 +92,11 @@ Klogg is a high-performance, cross-platform log file viewer built on Qt5/Qt6. It
 2. **Data Layer** (`src/logdata/`)
    - LogData: File indexing and line access
    - LogFilteredData: Search results management
+   - StreamingLogData / CaptureStore: Searchable live records and segment storage
    - FileHolder: Platform-specific file I/O
+
+   Live source protocol adapters and managed infrastructure live in
+   `src/livecapture/`; UI composition and export orchestration live in `src/ui/`.
 
 3. **Search Layer** (`src/regex/`)
    - RegularExpression: Regex pattern matching
@@ -96,6 +109,24 @@ Klogg is a high-performance, cross-platform log file viewer built on Qt5/Qt6. It
    - CrashHandler: Crash reporting
 
 ### Detailed Runtime Architecture
+
+Fresh Android capture uses managed ADB infrastructure and a packaged,
+source-built helper with smart-socket streaming. Fresh iOS capture is macOS-only
+and uses native libimobiledevice, without Python. `AdbLogcatSource` is the
+historically named shared source controller. Legacy process-backed sessions
+restore read-only; process compatibility classes are not a generic arbitrary
+process capture product.
+
+Adapters feed `StreamingLogData` and its `CaptureStore`; views and search read
+that capture independently of optional saved output. The default store has a
+1 MiB segment target and 256 MiB resident payload budget. Bound output flushes
+at 1 MiB or 1,000 lines, plus a 1-second timer, not once per line.
+`LiveLogExportService` asynchronously stages a capture snapshot and concurrent
+tail, then publishes and binds future output. Rolling output and stopped
+session restore are supported; restoring an existing output binding appends
+rather than truncating or replaying the snapshot. See
+[ADB Logcat Live Source Architecture](ADB_LOGCAT_ARCHITECTURE.md) for lifecycle,
+failure, and save semantics.
 
 ```mermaid
 flowchart TB
@@ -117,7 +148,7 @@ flowchart TB
     subgraph Sources[Input sources]
         FilePath[Local file path]
         AdbDialog[ADB/iOS dialogs]
-        LiveTransport[ProcessLiveSourceTransport<br/>QProcess stdout]
+        LiveTransport[Live source adapters<br/>ADB smart socket / native iOS]
         AdbSource[AdbLogcatSource<br/>owns live transport]
         FileWatcher[FileWatcher<br/>external file changes]
     end
@@ -467,6 +498,8 @@ paintEvent() → drawTextArea() → QPainter → viewport()
    - Reduces ~90% of calculations
 
 3. **Bottom Alignment Detection**
+   - Uses scrollbar max comparison
+   - Avoids unnecessary wrapped line calculations
 
 4. **Incremental Presentation Cadence**
    - `StreamingLogData` coalesces live append `loadingFinished` notifications on a fixed 33 ms window (about 30 FPS).
@@ -479,8 +512,6 @@ paintEvent() → drawTextArea() → QPainter → viewport()
    - `StreamingLogData` caches recent ANSI-rendered display lines as stripped text plus color spans.
    - Avoids parsing the same visible live lines twice during `AbstractLogView::drawTextArea()` (`getLines()` for text and `getLineAnsiColors()` for colors).
    - The cache is cleared when ANSI mode, prefilter, or capture contents are reset.
-   - Uses scrollbar max comparison
-   - Avoids expensive wrapped line calculations
 
 ### View Hierarchy
 
@@ -528,10 +559,11 @@ LogFilteredData → LogFilteredDataWorker → SearchOperation → PatternMatcher
    - Creates `LogFilteredDataWorker::SearchOperation`
    - Starts async search
 
-2. **Parallel Search** (`SearchOperation::doSearch()`)
-   - Uses TBB flow graph
-   - Multiple matcher threads
-   - Block-based processing
+2. **Search Execution** (`SearchOperation::doSearch()`)
+   - Uses a pooled single-thread path for small/incremental ranges
+   - Uses a TBB flow graph and multiple matcher threads for larger ranges
+   - Eligible raw UTF-8 chunks use the shared Vectorscan buffer-scan path;
+     transformed, boolean/inverse, or unsupported patterns retain per-line matching
 
 3. **Pattern Matching** (`PatternMatcher`)
    - Vectorscan (if available)
@@ -583,8 +615,8 @@ Supports:
 - Prefetching: 3 blocks ahead
 - Index-based line access: O(1) line lookup
 
-**Optimization Opportunities**:
-- Memory-mapped files (Phase 3)
+**Potential experiments, not a committed roadmap**:
+- Memory-mapped files
 - Larger read buffers for large files
 - Read-ahead optimization
 
@@ -610,17 +642,17 @@ Supports:
 - Partial redraws (`deltaY` optimization)
 - Column width caching
 
-**Optimization Opportunities**:
-- Wrapped line caching (Phase 1)
-- Incremental rendering (Phase 1)
-- Highlighter result caching (Phase 2)
-- Paint event throttling (Phase 2)
+Incremental result/live presentation is already implemented at 33 ms cadence,
+with independent progress/status publication and activity-aware catch-up as
+described above. The historical wrap analysis is not a current optimization
+roadmap.
 
 ### Memory Management
 
 **Allocators**:
-- mimalloc (optional, default on)
-- Standard malloc (fallback)
+- Pinned static mimalloc backs allocator-aware containers such as `klogg::vector`
+- `MI_OVERRIDE=OFF`: ordinary allocations are not globally redirected
+- No public CMake switch selects a different allocator
 
 **Data Structures**:
 - Roaring Bitmaps: Efficient match storage
@@ -693,8 +725,10 @@ Supports:
 
 2. **Worker Threads**
    - `LogDataWorker`: File indexing
-   - `LogFilteredDataWorker`: Search operations
-   - `QThreadPool`: Parallel search tasks
+   - `LogFilteredDataWorker`: Dispatch thread plus serialized operation thread;
+     live targets coalesce without a UI-thread join for normal update requests
+   - `LiveLogExportService`: Staged snapshot/tail export worker with synchronized
+     owner-thread cutover
 
 3. **TBB Threads**
    - Parallel pattern matching
@@ -733,9 +767,9 @@ Supports:
    - RAII for resource management
 
 2. **Memory Allocators**
-   - mimalloc (default, optional)
-   - Standard malloc (fallback)
-   - Custom allocators for Roaring Bitmaps
+   - Pinned static mimalloc for allocator-aware containers
+   - System allocation remains available; global override is disabled
+   - See [DEPENDENCIES.md](DEPENDENCIES.md) for dependency configuration
 
 3. **Cache Management**
    - Search cache: LRU eviction
@@ -802,7 +836,6 @@ Supports:
 
 **Key Options**:
 - `KLOGG_USE_VECTORSCAN`: Enable Vectorscan
-- `KLOGG_USE_MIMALLOC`: Enable mimalloc
 - `KLOGG_USE_SENTRY`: Enable crash reporting
 - `KLOGG_BUILD_TESTS`: Build test suite
 
@@ -812,17 +845,20 @@ Supports:
 - Qt5/Qt6 (Core, Widgets, Network)
 - CMake 3.14+
 
-**Optional**:
+**Optional backends/integrations**:
 - Vectorscan
-- mimalloc
 - Sentry
+
+The build also provisions pinned dependencies such as mimalloc; see the
+[dependency inventory](DEPENDENCIES.md), rather than assuming every dependency
+has a public enable/disable option.
 
 ### Platform Builds
 
-**Windows**:
-```bash
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+**Windows** (Visual Studio developer command prompt):
+```bat
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
 ```
 
 **Linux**:
@@ -938,32 +974,26 @@ stored in the repository.
 
 ---
 
-## Future Improvements
+## Proposed Work and Historical Analysis
 
-### Phase 1 (Quick Wins)
-1. Wrapped line caching
-2. Incremental rendering for scrolling
-
-### Phase 2 (Core Optimizations)
-1. Highlighter result caching
-2. Paint event throttling
-
-### Phase 3 (Advanced)
-1. Memory-mapped file access
-2. Incremental search optimization
+[BACKLOG.md](BACKLOG.md) records proposals separately from completed work.
+The Chart Panel and persistent Filters Panel are proposed features, not
+shipped UI. [WRAP_TEXT_ANALYSIS.md](WRAP_TEXT_ANALYSIS.md) preserves historical
+investigation, not the current rendering contract. Current search dispatch,
+coalescing, and matcher paths are described in
+[INCREMENTAL_SEARCH_ARCHITECTURE.md](INCREMENTAL_SEARCH_ARCHITECTURE.md).
 
 ---
 
 ## References
 
-- [Wrap Text Analysis](./WRAP_TEXT_ANALYSIS.md)
-- [Performance Optimization](./PERFORMANCE_OPTIMIZATION.md)
-- [Code Review Report](./CODE_REVIEW_REPORT.md)
-- [Build Instructions](../BUILD.md)
+- [Documentation Hub](README.md)
+- [Dependency Inventory](DEPENDENCIES.md)
+- [Build Instructions](BUILD.md)
 - [User Documentation](../DOCUMENTATION.md)
+- [Live Source Architecture](ADB_LOGCAT_ARCHITECTURE.md)
+- [Incremental / Streaming Search Architecture](INCREMENTAL_SEARCH_ARCHITECTURE.md)
+- [Regex Search Benchmarks](REGEX_BENCHMARKS.md)
+- [Historical Wrap Text Analysis](WRAP_TEXT_ANALYSIS.md)
 
----
-
-**Document Version**: 1.0  
-**Last Updated**: 2025-12-06  
-**Maintainer**: Klogg Development Team
+Document history is tracked in Git rather than a manually maintained date.

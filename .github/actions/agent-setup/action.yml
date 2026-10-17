@@ -42,19 +42,16 @@ runs:
         modules: ${{ inputs.qt-modules }}
         archives: ${{ inputs.qt-archives || 'qtbase icu' }}
 
-    - name: Set boost env vars
-      shell: sh
-      run: |
-        echo "BOOST_ROOT=${{github.workspace}}/3rdparty/boost" >> $GITHUB_ENV
-        echo "BOOST_URL=https://sourceforge.net/projects/boost/files/boost/1.86.0/boost_1_86_0.tar.bz2/download" >> $GITHUB_ENV
+    - name: Set Boost root
+      shell: bash
+      run: echo "BOOST_ROOT=$GITHUB_WORKSPACE/3rdparty/boost" >> "$GITHUB_ENV"
 
-    - name: Restore Boost cache
+    - name: Restore Boost source archive
       if: ${{ env.KLOGG_REQUIRE_PREFETCHED_BOOST != 'ON' }}
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      id: cache-boost
       with:
-        path: ${{env.BOOST_ROOT}}
-        key: ${{env.BOOST_URL}}
+        path: ${{ github.workspace }}/prefetch_artifacts/boost_1_86_0.tar.bz2
+        key: boost-source-${{ hashFiles('ci/environments/materials.json') }}
 
     - name: Restore CPM cache
       if: ${{ env.KLOGG_REQUIRE_PREFETCHED_CPM != 'ON' }}
@@ -72,23 +69,11 @@ runs:
     - name: Install Boost
       shell: bash
       run: |
-        if [ -f "$BOOST_ROOT/boost/version.hpp" ]
-        then
-          echo "Using boost from preloaded path"
-        elif [ "${KLOGG_REQUIRE_PREFETCHED_BOOST:-OFF}" = "ON" ]
-        then
-          echo "Prefetched Boost artifact is required but not available at $BOOST_ROOT" >&2
-          exit 1
-        else
-          echo "Downloading boost"
-          if [ "$OS" == "Windows_NT" ]; then
-            # fix up paths to be forward slashes consistently
-            BOOST_ROOT=$(echo $BOOST_ROOT | sed 's/\\/\//g')
-          fi
-          mkdir -p $BOOST_ROOT
-          curl --progress-bar --location --output $BOOST_ROOT/download.tar.bz2 $BOOST_URL
-          7z -o$BOOST_ROOT x $BOOST_ROOT/download.tar.bz2 -y -bd
-          7z -o$BOOST_ROOT x $BOOST_ROOT/download.tar -y -bd
-          cd $BOOST_ROOT && cp -r boost_*/* .
-          rm -rf boost_*/* download.tar.bz2 download.tar
+        set -euo pipefail
+        args=()
+        if [ "${KLOGG_REQUIRE_PREFETCHED_BOOST:-OFF}" = "ON" ]; then
+          args+=(--require-prefetched)
         fi
+        python3 scripts/materialize_boost.py \
+          --archive "$GITHUB_WORKSPACE/prefetch_artifacts/boost_1_86_0.tar.bz2" \
+          --destination "$BOOST_ROOT" "${args[@]}"

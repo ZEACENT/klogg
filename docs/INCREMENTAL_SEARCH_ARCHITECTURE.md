@@ -2,409 +2,258 @@
 
 ## Overview
 
-This document describes the unified search architecture that klogg uses for
-both static files and live streams (e.g. ADB logcat).  The same pipeline
-handles the initial full search triggered by the user and every incremental
-update that follows when new data arrives -- whether that data comes from a
-growing file on disk or from a live `CaptureStore` stream.
+Static files and live captures share `SearchableLogData`, `LogFilteredData`,
+and `LogFilteredDataWorker`. The same pipeline handles an initial full search
+and incremental updates as a file grows or a live capture receives data.
+`StreamingLogData` implements the searchable interface over `CaptureStore`;
+CaptureStore itself is storage, not a `SearchableLogData` implementation.
 
-The design achieves three goals simultaneously:
+See the [documentation hub](README.md),
+[technical overview](TECHNICAL_DOCUMENTATION.md), and
+[live-source architecture](ADB_LOGCAT_ARCHITECTURE.md) for related components.
 
-1. **Non-blocking UI** -- the search runs on a dedicated `std::thread`; the
-   main thread never waits for it.
-2. **Eventual consistency** -- every line that has been committed to the data
-   source will eventually be searched, even under continuous high-throughput
-   streaming.
-3. **Correctness** -- results are never lost and line ordering is preserved.
+The important contracts are:
 
----
+1. **Asynchronous operation dispatch.** Normal search/update requests do not
+   join the running search on the UI thread. This is not a blanket claim that
+   every search-related call is wait-free: request preparation and explicit
+   stop/wait during teardown have different responsibilities.
+2. **Catch-up.** A live update tracks an advancing target and resumes from
+   processed data. Once input stabilizes, a non-cancelled search can finish
+   the requested range; sustained input above processing capacity can lag.
+3. **Result identity.** Logical search generations reject superseded results;
+   operation IDs distinguish dispatches within a generation.
 
-## Architecture Diagram
+## Runtime Responsibilities
 
-```text
-  Data sources
-  ============
-  File on disk            CaptureStore (live stream)
-       |                         |
-       v                         v
-  +-----------------------------------------+
-  |          SearchableLogData               |  (abstract interface)
-  |  getNbLine(), getLinesRaw(), getFileSize()|
-  +-----------------------------------------+
-       |                         |
-       |   fileChanged /         |
-       |   loadingFinished       |
-       v                         v
-  +------------------------------------------+
-  |           CrawlerWidget                   |
-  |  loadingFinishedHandler():                |
-  |    if truncated -> replaceCurrentSearch()  |
-  |    else         -> updateSearch()          |
-  +------------------------------------------+
-                     |
-         runSearch() | updateSearch()
-                     v
-  +------------------------------------------+
-  |          LogFilteredData                  |
-  |  nbLinesProcessed_  (watermark)          |
-  |  matching_lines_    (Roaring64Map)       |
-  |  currentRegExp_                          |
-  +------------------------------------------+
-         |                        |
-   search()               updateSearch()
-         v                        v
-  +------------------------------------------+
-  |       LogFilteredDataWorker               |
-  |  operationsMutex_                        |
-  |  interruptRequested_  (AtomicFlag)       |
-  |  operationGeneration_ (atomic<uint64>)   |
-  |  searchData_          (SearchData)       |
-  |  opThread_            (std::thread)      |
-  +------------------------------------------+
-              |
-              v
-  +------------------------------------------+
-  |         SearchOperation                   |
-  |  FullSearchOperation::run()              |
-  |    -> searchData_.clear()                |
-  |    -> doSearch(0)                        |
-  |  UpdateSearchOperation::run()            |
-  |    -> doSearch(lastProcessedLine)        |
-  +------------------------------------------+
-              |
-              v
-  +---------------------------------------------------+
-  |  doSearch()  --  single-thread or TBB pipeline     |
-  |                                                    |
-  |  [single-thread path]                              |
-  |    loop: getLinesRaw() -> filterLines() -> addAll() |
-  |                                                    |
-  |  [TBB flow-graph path]                             |
-  |    limiter -> buffer -> N x matcherNode -> buffer  |
-  |                              |                     |
-  |                              v                     |
-  |                       matchProcessor -> addAll()   |
-  +---------------------------------------------------+
-              |
-              v
-  +------------------------------------------+
-  |     PatternMatcher  (per thread)          |
-  |  HsSingleMatcher | HsMultiMatcher        |
-  |  | HsPrefilterMatcher                    |
-  |  | DefaultRegularExpressionMatcher        |
-  +------------------------------------------+
-```text
-
----
+- `LogData` indexes files; `StreamingLogData` exposes retained live records.
+- `CrawlerWidget` routes file/load changes, truncation, and live auto-refresh
+  requests. Presentable live tabs coalesce auto-refresh requests on a 250 ms
+  window; this is separate from the presentation cadence below.
+- `LogFilteredData` owns the current pattern, result bitmaps, UI-side watermark,
+  marks, and independent result/status publication timers.
+- `LogFilteredDataWorker` accepts requests into a mutex/condition-variable
+  dispatch queue. Its dispatch thread joins the previous operation and starts
+  the next operation thread, rather than doing that join in `updateSearch()`.
+- `FullSearchOperation` clears previous search data; `UpdateSearchOperation`
+  resumes existing data. `doSearch()` chooses a single-thread path or a TBB
+  chunk pipeline with per-matcher state and serial result combination.
 
 ## Unified Search Model
 
-The same two operation classes serve every scenario:
+| Scenario | Operation | Behavior |
+|----------|-----------|----------|
+| New pattern / criteria | `FullSearchOperation` | Clear previous results and scan the requested range |
+| File appended | `UpdateSearchOperation` | Resume from the processed watermark |
+| Live data appended | `UpdateSearchOperation` | Coalesce/extend the live target and catch up |
+| File truncated | `FullSearchOperation` | Drop invalid cached results and replace the current search |
 
-| Scenario                | Operation           | What happens                                                      |
-|-------------------------|---------------------|-------------------------------------------------------------------|
-| New pattern entered     | `FullSearchOperation`  | `searchData_.clear()`, scan from line 0                          |
-| File appended           | `UpdateSearchOperation`| Resume from `nbLinesProcessed_` watermark                        |
-| Live stream data        | `UpdateSearchOperation`| Identical to file append -- CaptureStore is a SearchableLogData  |
-| File truncated          | `FullSearchOperation`  | `clearSearch(dropCache=true)`, then full `replaceCurrentSearch()` |
-
-`CrawlerWidget::loadingFinishedHandler()` decides which path to take:
-
-- `searchState_.isFileTruncated()` --> `replaceCurrentSearch()` (FullSearch)
-- otherwise --> `logFilteredData_->updateSearch(startLine, endLine)`
-
-`LogFilteredData::updateSearch()` passes `LineNumber(nbLinesProcessed_.get())`
-as the resume position to the worker.
-
----
+`CrawlerWidget::loadingFinishedHandler()` routes truncation through
+`replaceCurrentSearch()`; an append can extend the existing search through
+`LogFilteredData::updateSearch()`. The latter supplies its processed-line
+watermark to the worker. Full searches may have a nonzero requested start;
+"full" does not necessarily mean line zero of the whole source.
 
 ## Watermark Mechanism
 
-The watermark is `nbLinesProcessed_` stored in two places:
+The watermark is `nbLinesProcessed_` in two places:
 
-1. **`SearchData::nbLinesProcessed_`** -- the worker-side watermark, updated
-   atomically inside `addAll()` after each chunk is processed.  It records the
-   highest line number that has been fully scanned.
+1. **`SearchData::nbLinesProcessed_`** is worker-side state protected by its
+   data mutex. `addAll()` updates it as processed chunks are combined.
+2. **`LogFilteredData::nbLinesProcessed_`** is the owner-thread copy, updated
+   when partial search results are consumed.
 
-2. **`LogFilteredData::nbLinesProcessed_`** -- the UI-side copy, updated in
-   `handleSearchProgressed()` when partial results are consumed.
+It is a `LinesCount`, not a byte offset. Within an append-only search,
+`addAll()` retains the maximum processed value with `qMax()`. Replacing a
+search resets the state; truncation is not treated as ordinary append.
 
-Key properties:
-
-- **Line number, not file offset.**  The value is a `LinesCount` representing
-  how many lines from the source have been searched.
-- **Monotonically increasing.**  `addAll()` uses `qMax()`:
-  `nbLinesProcessed_ = qMax(nbLinesProcessed_, processedLines)`.
-- **Append-only assumption.**  UpdateSearch assumes new data only appears after
-  the current end of the file.  If this assumption is violated (truncation),
-  the UI layer detects it via `MonitoredFileStatus::Truncated` and triggers a
-  FullSearch instead.
-
-When `UpdateSearchOperation::run()` starts, it computes:
+`UpdateSearchOperation::run()` begins with this boundary adjustment:
 
 ```text
 initialLine = max(searchData.getLastProcessedLine(), initialPosition_)
 if initialLine >= 1:
-    initialLine--                     // re-check last line (may not have been LF-terminated)
-    searchData.deleteMatch(initialLine)  // avoid double-counting
+    initialLine--                       // last line may have grown
+    searchData.deleteMatch(initialLine) // remove its old match
 doSearch(searchData, initialLine)
-```text
+```
 
-The one-line backup handles the edge case where the previously-last line was
-incomplete (no trailing newline) and has since had more bytes appended to it.
+The one-line backup handles a previously unterminated last line whose bytes
+have changed. It also prevents the old match for that boundary line from
+being counted twice. Match sets are keyed/sorted by source line number;
+parallel matcher completion order is not display order.
 
----
+## Dispatch, Coalescing, and Backpressure
 
-## Backpressure Handling
+### File Updates
 
-When the data source produces lines faster than the search worker can consume
-them, the system uses an **interrupt-and-resume** pattern rather than
-buffering.
+A non-live `updateSearch()` sets the interrupt flag so a current operation
+can stop at a chunk boundary, then queues an update. The pending request slot
+selects the latest work. The dispatch thread performs the old operation's join
+and launches the replacement from the watermark. The caller does not perform
+that join or acquire `operationsMutex_` for the duration of the search.
 
-### Timeline
+### Live Updates
 
-```text
-  Time ---->
+A live update first stores the newest `liveTargetEndLine_`. If a live update
+is already running, it records the coalesced request and returns: ordinary
+new data does **not** interrupt and restart the operation for every batch.
+The running operation can extend its range as it catches up.
 
-  Data source:  [lines 0..999]  [lines 1000..1999]  [lines 2000..2999]
-                     |                  |                   |
-  loadingFinished    |                  |                   |
-                     v                  v                   v
-  Search worker: |--UpdateSearch----|  |--UpdateSearch--| |--UpdateSearch--|
-                  watermark=0->1000    watermark->2000    watermark->3000
+Small pending ranges can be deferred for a bounded coalescing interval;
+larger ranges dispatch directly. Deferred requests merge the target end and
+resume position. `finishLiveUpdateAndRestartIfNeeded()` handles data arriving
+around completion so a newer target is not stranded. Compiled expressions
+and pooled matchers are reused across incremental work.
 
-  If search is still running when new data arrives:
+A new full search advances the logical generation and cancels pending or
+coalesced live work for the old criteria. Explicit cancellation and teardown
+remain interrupt-and-wait operations; they should not be confused with normal
+live append scheduling.
 
-  Data source:       [0..999]        [1000..1999]
-                        |                 |
-                        v                 v
-  Search worker: |---UpdateSearch---X    |--UpdateSearch--|
-                  watermark=0->700       watermark=700->2000
-                  (interrupted at 700)   (resumes from 700)
-```text
+### Search During Data Arrival
 
-### The Interrupt Mechanism
+- **Update in progress:** another live request extends its target. For a file
+  source, an update can interrupt and queue a replacement from the watermark.
+- **Full search in progress:** live update work is dispatched without the
+  ordinary live-data request interrupting the full search. The dispatcher
+  serializes the update after the previous operation. File updates can use
+  the interrupt/resume path. Changing the pattern is a new full search, not
+  just an append update.
 
-`LogFilteredDataWorker::updateSearch()` begins by calling
-`interruptRequested_.set()` *before* acquiring `operationsMutex_`.  The
-currently running `doSearch()` loop checks `interruptRequested_` at every chunk
-boundary and exits early.  The mutex is then released, the old thread is joined,
-and a new `UpdateSearchOperation` is launched from the watermark.
+## Result Publication and 30 FPS Presentation
 
-### Guarantees
+Authoritative data and expensive visual publication have different schedules:
 
-- **Ordering** -- Lines are scanned in monotonically increasing order.  The
-  Roaring64Map result set preserves insertion order implicitly (it is sorted
-  by line number).
-- **Eventual consistency** -- As long as data eventually stops arriving, the
-  search will run to completion and cover every line.
-- **Non-blocking UI** -- The main thread never calls a blocking function on
-  the worker.  `interruptRequested_` is an atomic flag; setting it is
-  wait-free.
-- **Correctness** -- Partial results accumulated before an interruption are
-  preserved in `SearchData`.  The next UpdateSearch resumes from the
-  watermark, so no lines are skipped and no lines are double-counted (the
-  one-line backup + `deleteMatch` handles the boundary).
+- Live append notification and filtered-result publication use a
+  fixed-first-deadline **33 ms window (about 30 FPS)**. Repeated arrivals do not
+  keep postponing the same deadline.
+- Search progress/status has an independent **100 ms** window.
+- Terminal completion publishes the final results first, then terminal
+  status immediately, with no delayed timer residue.
+- Hidden, background-tab, and minimized views suspend expensive presentation,
+  while ingestion and model updates continue. Activation consumes accumulated
+  dirtiness in one latest-state catch-up. A visible but unfocused window is
+  still presentable.
 
----
+These are coalescing policies, not hard real-time latency guarantees. Performance
+work must preserve the active refresh cadence rather than trading away 30 FPS.
 
-## Search During Data Arrival
+## Thread Safety and Lifetime
 
-Two scenarios arise depending on which operation is in flight when new data
-arrives.
+### Synchronization Responsibilities
 
-### Scenario 1: UpdateSearch Running When New Data Arrives
+`requestMutex_` and `requestCv_` coordinate dispatch; `operationsMutex_`
+serializes operation execution; `opThreadMutex_` protects operation-thread
+ownership. `SearchData` protects its matches and watermark separately.
+CaptureStore protects segment metadata and reads with its recursive mutex.
+Queued owner-thread delivery and result publication are additional boundaries,
+not a single nested lock chain spanning all these components.
 
-This is the common case during live streaming.
+An owner of both Qt-child views and their source data must stop and wait for
+view searches before destroying the source data. Asynchronous normal dispatch
+does not remove this teardown requirement.
 
-1. `loadingFinishedHandler()` calls `logFilteredData_->updateSearch()`.
-2. `LogFilteredDataWorker::updateSearch()` sets `interruptRequested_`.
-3. The running `doSearch()` exits at the next chunk boundary.
-4. The old thread is joined; `interruptRequested_` is cleared.
-5. A new `UpdateSearchOperation` starts from
-   `max(searchData.getLastProcessedLine(), position)`.
-6. All matches found before the interrupt are already in `searchData_` and
-   `matching_lines_`; nothing is lost.
+### Logical Generations and Operation IDs
 
-### Scenario 2: FullSearch Running When New Data Arrives
+A new full search or explicit `bumpGeneration()` advances
+`operationGeneration_`; incremental `updateSearch()` retains it. Advancing the
+generation for every append would incorrectly reject valid completion signals
+from the same logical search. `operationId_` separately identifies individual
+requests; dispatch rejects work superseded by a newer request.
 
-This can happen if the user changes the search pattern while data is still
-being indexed.
+Owner-thread signal marshalling rejects stale work, and view consumers also
+check source identity and logical generation. In particular, already queued
+Qt signals are not cancelled merely by disconnecting a signal connection.
+See the completed generation-ID work in [BACKLOG.md](BACKLOG.md#task-001-search-generation-id-refactoring).
 
-1. `FullSearchOperation::run()` called `searchData_.clear()` at the start,
-   then began scanning from line 0.
-2. While scanning, new data arrives and `loadingFinishedHandler()` fires.
-3. `updateSearch()` sets `interruptRequested_`.
-4. The FullSearch exits early.  At this point `searchData_` contains partial
-   results for lines 0 through `watermark`.
-5. The new `UpdateSearchOperation` resumes from the watermark.
-6. Results are correct because FullSearch already cleared `searchData_` and
-   accumulated all matches for lines below the watermark.  UpdateSearch
-   continues from there and adds the rest.
+### CaptureStore Reads and Snapshots
 
----
-
-## Thread Safety
-
-### Lock Hierarchy
-
-Locks must always be acquired in the order shown below (outermost first).
-Acquiring them in a different order risks deadlock.
-
-```text
-  operationsMutex_          (LogFilteredDataWorker -- Mutex)
-      |
-      v
-  CaptureStore::mutex_      (std::recursive_mutex -- protects segments_)
-      |
-      v
-  SearchData::dataMutex_    (SharedMutex -- protects matches_, nbLinesProcessed_)
-      |
-      v
-  searchProgressMutex_      (LogFilteredData -- Mutex -- protects searchProgress_ tuple)
-```text
-
-### operationGeneration_ Atomic Counter
-
-Each call to `search()` or `updateSearch()` increments
-`operationGeneration_`.  The generation is captured by the task lambda and
-passed through signal marshalling.  When a queued signal arrives on the
-owner thread, the handler compares the captured generation against the
-current value:
-
-```cpp
-if (generation != operationGeneration_.load()) return;  // stale, discard
-```text
-
-This filters out progress/finished signals from a search that has already been
-superseded, avoiding races where a delayed signal from search N arrives after
-search N+1 has started.
-
-### CaptureStore Snapshot-Based Reading
-
-`CaptureStore` protects its `segments_` vector with a `std::recursive_mutex`.
-Readers call `buildRawLines()` or `lineAt()`, which lock the mutex, locate the
-relevant segment(s), and read data.  If a segment's `memoryData` is a
-`std::shared_ptr<QByteArray>`, the shared_ptr keeps the underlying buffer alive
-even if the writer thread rotates or spills the segment concurrently --
-preventing use-after-free.
+CaptureStore uses segment metadata to locate requested lines. Shared resident
+payload and spilled-file leases preserve the lifetime of data needed by reads
+or snapshots while segments rotate or spill. Export snapshots have their own
+fixed record sequence and cursor; they are not mutable live search results.
 
 ### TBB Parallel Matchers
 
-When `matchingThreadsCount > 1`, the TBB flow-graph path is used.  Each
-`RegexMatcherNode` holds its own `PatternMatcher` instance (via the
-`matcherData` vector, indexed by node).  These matchers have **no shared
-mutable state** -- the Vectorscan `hs_scratch_t` is cloned per matcher, and
-the `HsMatcherContext` is local.  The only shared write target is `SearchData`,
-which is protected by `dataMutex_` and only accessed by the single serial
-`matchProcessor` node.
+For sufficiently large ranges with parallel matching enabled, a TBB flow graph
+prefetches chunks, distributes matching across nodes, and combines results in
+a serial processor. Each matcher owns its mutable matching context, including
+Vectorscan scratch. Small ranges, especially incremental live work, use a
+pooled single-thread path to avoid graph/setup overhead. A configured thread
+count greater than one therefore does not imply every update uses the graph.
 
----
+## Vectorscan Block Scan and Per-Line Fallback
 
-## Vectorscan Block Scan
+### Eligible Chunk Scan
 
-### Per-Line Approach (Current Implementation)
+`filterLines()` can use `PatternMatcher::scanBuffer()` over a whole raw chunk,
+sharing the block-scan primitive with folder search. Match byte offsets map
+back to line indices through the chunk's end-of-line offsets.
 
-The current search path operates per-line.  `doSearch()` reads a chunk of raw
-lines via `getLinesRaw()`, then calls `filterLines()` which iterates line by
-line:
+Eligibility requires the default-on `perf.useBlockScan` setting, a matcher
+that supports buffer scanning, UTF-8-compatible raw bytes, plain ANSI mode,
+and no prefilter transformation. Boolean/inverse patterns, unsupported matcher
+capabilities, re-encoded data, and transformed chunks retain the per-line path.
+The block scan is an optimization; it does not change the line-based result
+contract.
 
-```cpp
-for (auto offset = 0u; offset < lines.size(); ++offset) {
-    const auto& line = lines[offset];
-    if (matcher.hasMatch(line)) {
-        results.matchingLines.add(lineNumber.get());
-    }
-}
-```text
+### Per-Line Matching
 
-Each `hasMatch()` call invokes `hs_scan()` on the individual line buffer.
+The fallback builds UTF-8 line views, calls `matcher.hasMatch(line)` for each
+line, and adds matching source line numbers to the result bitmap. For a
+Vectorscan matcher, that invokes `hs_scan()` on an individual line buffer.
 
 ### Database Compilation
 
-`HsRegularExpression` compiles two database variants using `hs_compile_multi`:
+For per-line Vectorscan matching, `HsRegularExpression` first tries an exact
+database. When supported by the pattern, a prefilter database can fall back to
+candidate matching followed by `QRegularExpression` verification.
 
-| Variant          | Flags                                        | Purpose                        |
-|------------------|----------------------------------------------|--------------------------------|
-| Primary          | `HS_FLAG_UTF8 \| HS_FLAG_UCP \| HS_FLAG_SINGLEMATCH` | Exact matching, terminates on first match |
-| Prefilter        | Same + `HS_FLAG_PREFILTER`                   | Fallback when primary compilation fails (unsupported syntax) |
+| Variant | Flags | Purpose |
+|---------|-------|---------|
+| Primary | `HS_FLAG_UTF8 \| HS_FLAG_UCP \| HS_FLAG_SINGLEMATCH` | Exact per-line matching |
+| Prefilter | Same + `HS_FLAG_PREFILTER` | Candidates verified by Qt regex |
 
-The primary database is tried first.  If `hs_compile_multi` fails (e.g. the
-pattern uses unsupported features), the prefilter database is compiled instead.
-Prefilter matches are then verified with `QRegularExpression` to eliminate
-false positives.
+This table describes the per-line variants, not the separate buffer-scan
+compilation contract.
 
-### Callbacks and Match Dispatch
+### Callbacks and Boolean Combination
 
-Two callbacks are used:
+- `matchSingleCallback` marks a single pattern and stops that scan.
+- `matchMultiCallback` marks a pattern ID and continues, allowing boolean
+  expressions to evaluate all relevant operands for the line.
 
-- **`matchSingleCallback`** -- sets `context->matchingPatterns[0] = true` and
-  returns 1 (halts scanning).  Used by `HsSingleMatcher` for single-pattern
-  searches.
-- **`matchMultiCallback`** -- sets `context->matchingPatterns[id] = true` and
-  returns 0 (continues scanning all patterns).  Used by `HsMultiMatcher` for
-  multi-pattern / boolean searches.
+`parseBooleanExpressions()` extracts quoted operands (with C-style escaping)
+and substitutes identifiers such as `p_0`. A multi-pattern matcher produces
+the per-line pattern bitmap, and `BooleanExpressionEvaluator` evaluates the
+expression against it. Operand producers and this parser must preserve the
+same escaping contract.
 
-### Boolean Combination Handling
+When Vectorscan is disabled or unavailable for the selected platform/CPU,
+`DefaultRegularExpressionMatcher` supplies the Qt fallback. `MatcherVariant`
+encapsulates the selected strategy; callers use the common matcher interface.
 
-When the user enters a boolean expression (e.g. `"error" AND "timeout"`):
+## CaptureStore Segments Versus Search Chunks
 
-1. `parseBooleanExpressions()` extracts quoted sub-patterns and replaces them
-   with unique IDs (`p_0`, `p_1`, ...) in the expression string.
-2. All sub-patterns are compiled into a single `HsMultiMatcher` database.
-3. Per line, `hs_scan()` produces a pattern bitmap (`MatchedPatterns` --
-   a `std::string` where each byte is 0 or 1).
-4. `BooleanExpressionEvaluator::evaluate()` evaluates the boolean expression
-   against the bitmap.
-
-### QRegularExpression Fallback
-
-If the CPU lacks SSE2/SSSE3, or if Vectorscan is not compiled in
-(`!KLOGG_HAS_VECTORSCAN`), all matching falls back to
-`DefaultRegularExpressionMatcher`, which wraps `QRegularExpression`.  The
-matcher interface (`MatcherVariant`) is a `std::variant`, so the switch is
-resolved at construction time with zero per-line dispatch overhead.
-
----
-
-## CaptureStore Segment-Level Parallelism
-
-`CaptureStore` organizes data into fixed-size segments
-(`segmentTargetBytes`, default 1 MiB).  Each segment tracks its own line
-offsets and byte boundaries.  This structure enables future segment-level
-parallel search:
-
-- Segments that have already been spilled to disk (or are in memory) can be
-  scanned independently by separate TBB tasks.
-- The `cumulativeEndLine` field on each segment maps global line numbers to
-  segment-local offsets, allowing results to be expressed in global line
-  numbers and merged into the shared `SearchData`.
-- The `shared_ptr<QByteArray> memoryData` ensures that a segment's buffer
-  remains valid for the duration of any reader, even if the writer thread
-  rotates or spills the segment concurrently.
-
-Currently, the TBB parallelism in `doSearch()` operates at the **chunk** level
-(chunks of `searchReadBufferSizeLines` lines from `getLinesRaw`), not at the
-segment level.  Segment-level parallelism would be an optimization for
-CaptureStore-backed sources specifically.
-
----
+CaptureStore's default segment target is 1 MiB, with line offsets and
+`cumulativeEndLine` metadata mapping global lines into each segment. This is a
+storage boundary, not the parallel search unit. `doSearch()` works on chunks
+of `searchReadBufferSizeLines` obtained through `getLinesRaw()`. Independent
+segment-level search remains a possible optimization, not a shipped separate
+live-search engine.
 
 ## Key Files Reference
 
 | File | Role |
 |------|------|
-| `src/logdata/include/searchablelogdata.h` | Abstract interface for all searchable data sources (`getLinesRaw`, `getNbLine`) |
-| `src/logdata/include/logfiltereddata.h` | Owns search results, watermark (`nbLinesProcessed_`), marks, and visibility |
-| `src/logdata/src/logfiltereddata.cpp` | Orchestrates search lifecycle: `runSearch`, `updateSearch`, `handleSearchProgressed` |
-| `src/logdata/include/logfiltereddataworker.h` | Defines `SearchData`, `SearchOperation`, `FullSearchOperation`, `UpdateSearchOperation`, `LogFilteredDataWorker` |
-| `src/logdata/src/logfiltereddataworker.cpp` | Implements the search loop (`doSearch`), TBB flow graph, interrupt/resume, generation filtering |
-| `src/logdata/include/capturestore.h` | Segment-based append-only store for live streams |
-| `src/logdata/src/capturestore.cpp` | Segment rotation, memory budget enforcement, spill-to-disk |
-| `src/ui/include/crawlerwidget.h` | UI controller: connects file-change signals to search operations |
-| `src/ui/src/crawlerwidget.cpp` | `loadingFinishedHandler`, `fileChangedHandler`: decides FullSearch vs UpdateSearch |
-| `src/regex/include/regularexpression.h` | `RegularExpression`, `PatternMatcher`: compile-time dispatch for match strategy |
-| `src/regex/src/regularexpression.cpp` | Boolean expression parsing, matcher construction, inverse match |
-| `src/regex/include/hsregularexpression.h` | Vectorscan database compilation, `HsSingleMatcher`, `HsMultiMatcher`, `HsPrefilterMatcher` |
-| `src/regex/src/hsregularexpression.cpp` | `hs_scan` callbacks, scratch cloning, prefilter fallback |
-| `src/utils/include/atomicflag.h` | `AtomicFlag`: lock-free interrupt signalling between UI and worker threads |
+| `src/logdata/include/searchablelogdata.h` | Searchable source interface |
+| `src/logdata/include/logfiltereddata.h` | Results, owner-side watermark, marks and visibility |
+| `src/logdata/src/logfiltereddata.cpp` | Search lifecycle and result/status publication |
+| `src/logdata/include/logfiltereddataworker.h` | SearchData, operations, dispatch and coalescing state |
+| `src/logdata/src/logfiltereddataworker.cpp` | Dispatch loop, watermarks, chunk search, matcher reuse |
+| `src/logdata/include/capturestore.h`, `src/logdata/src/capturestore.cpp` | Live segments, snapshot and storage lifecycle |
+| `src/logdata/src/streaminglogdata.cpp` | Searchable live source and append publication |
+| `src/ui/src/crawlerwidget.cpp` | Search request scheduling and presentation activity |
+| `src/regex/include/regularexpression.h`, `src/regex/src/regularexpression.cpp` | Matcher abstraction and boolean parsing |
+| `src/regex/include/hsregularexpression.h`, `src/regex/src/hsregularexpression.cpp` | Vectorscan compilation, block scan, callbacks, scratch |
+| `src/utils/include/atomicflag.h` | Interrupt signalling |

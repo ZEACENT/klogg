@@ -36,11 +36,15 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <QtGlobal>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <exception>
+#include <iostream>
+#include <locale>
+#include <mutex>
 #include <qsemaphore.h>
+#include <sstream>
 #include <utility>
 
 #include <robin_hood.h>
@@ -63,6 +67,46 @@
 namespace {
 constexpr auto LiveUpdateMaxCoalesceDelay = std::chrono::milliseconds( 25 );
 constexpr LinesCount::UnderlyingType LiveUpdateSingleThreadChunkMultiplier = 4;
+
+bool traceSearchTerminals()
+{
+    static const bool enabled = qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_TERMINALS" );
+    return enabled;
+}
+
+void traceSearchStart( const char* phase, quint64 generation, quint64 operationId, int type = -1 )
+{
+    static const bool enabled = qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" );
+    if ( !enabled ) {
+        return;
+    }
+
+    try {
+        std::ostringstream record;
+        record.imbue( std::locale::classic() );
+        record.exceptions( std::ios::badbit | std::ios::failbit );
+        record << "Search start " << phase << " generation " << generation << " operation "
+               << operationId << " type " << type << '\n';
+        const auto text = record.str();
+        const auto size = static_cast<std::streamsize>( text.size() );
+
+        static std::mutex traceMutex;
+        std::lock_guard<std::mutex> lock( traceMutex );
+        auto* buffer = std::cerr.rdbuf();
+        if ( !buffer ) {
+            return;
+        }
+        if ( buffer->sputn( text.data(), size ) != size ) {
+            return;
+        }
+        if ( buffer->pubsync() != 0 ) {
+            return;
+        }
+    } catch ( ... ) {
+        // Optional diagnostics must not interrupt the primary search request.
+        return;
+    }
+}
 
 struct PartialSearchResults {
     PartialSearchResults() = default;
@@ -271,6 +315,7 @@ void LogFilteredDataWorker::connectSignalsAndRun( SearchOperation* operationRequ
              },
              Qt::DirectConnection );
 
+    traceSearchStart( "operation.run", generation, operationId );
     operationRequested->run( searchData_ );
 }
 
@@ -280,7 +325,9 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
     const auto generation = operationGeneration_.fetch_add( 1 ) + 1;
     const auto operationId = operationId_.fetch_add( 1 ) + 1;
     LOG_INFO << "Search requested (async dispatch, gen " << generation << ")";
+    traceSearchStart( "compile.begin", generation, operationId );
     compiledExpression_ = std::make_shared<RegularExpression>( regExp );
+    traceSearchStart( "compile.end", generation, operationId );
 
     // A new full search implicitly cancels any pending or coalesced live
     // update.  Without this reset, liveUpdateRunning_ would stay true and
@@ -291,6 +338,7 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
         deferredLiveRequest_.reset();
     }
 
+    traceSearchStart( "enqueue.request", generation, operationId );
     enqueueRequest( SearchRequest{ SearchRequest::Type::Full, regExp, startLine, endLine, {},
                                    generation, operationId, compiledExpression_ } );
 }
@@ -433,6 +481,8 @@ void LogFilteredDataWorker::dispatchLoop()
             }
         }
 
+        traceSearchStart( "dispatch.selected", request.generation, request.operationId,
+                          static_cast<int>( request.type ) );
         // Check if this request has been superseded by a newer one before
         // doing any work. Serialization with the previous operation is
         // provided by joining opThread_ below; the worker itself acquires
@@ -451,6 +501,8 @@ void LogFilteredDataWorker::dispatchLoop()
             opThread_ = std::thread(
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
+                    traceSearchStart( "worker.entry", request.generation, request.operationId,
+                                      static_cast<int>( request.type ) );
                     ScopedLock operationLock( operationsMutex_ );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {
@@ -469,6 +521,8 @@ void LogFilteredDataWorker::dispatchLoop()
             opThread_ = std::thread(
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
+                    traceSearchStart( "worker.entry", request.generation, request.operationId,
+                                      static_cast<int>( request.type ) );
                     ScopedLock operationLock( operationsMutex_ );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {
@@ -488,6 +542,8 @@ void LogFilteredDataWorker::dispatchLoop()
             opThread_ = std::thread(
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
+                    traceSearchStart( "worker.entry", request.generation, request.operationId,
+                                      static_cast<int>( request.type ) );
                     ScopedLock operationLock( operationsMutex_ );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {
@@ -612,10 +668,17 @@ void LogFilteredDataWorker::emitSearchProgressedOnOwnerThread( LinesCount nbMatc
     // Use a named queued slot rather than a cross-thread functor. Qt owns and
     // copies these registered value arguments in its event queue; no short-lived
     // QCallableObject is concurrently destroyed while the owner thread invokes it.
-    QMetaObject::invokeMethod( this, "deliverSearchProgressed", Qt::QueuedConnection,
-                               Q_ARG( LinesCount, nbMatches ), Q_ARG( int, percent ),
-                               Q_ARG( LineNumber, initialLine ),
-                               Q_ARG( quint64, generation ), Q_ARG( quint64, operationId ) );
+    const auto queued = QMetaObject::invokeMethod( this, "deliverSearchProgressed",
+                                                    Qt::QueuedConnection,
+                                                    Q_ARG( LinesCount, nbMatches ),
+                                                    Q_ARG( int, percent ),
+                                                    Q_ARG( LineNumber, initialLine ),
+                                                    Q_ARG( quint64, generation ),
+                                                    Q_ARG( quint64, operationId ) );
+    if ( percent == 100 && traceSearchTerminals() ) {
+        LOG_WARNING << "Search terminal enqueue generation " << generation << " operation "
+                 << operationId << " accepted " << queued;
+    }
 }
 
 void LogFilteredDataWorker::emitSearchFinishedOnOwnerThread( OperationGeneration generation,
@@ -630,6 +693,11 @@ void LogFilteredDataWorker::deliverSearchProgressed( LinesCount nbMatches, int p
                                                      quint64 operationId )
 {
     if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
+        if ( percent == 100 && traceSearchTerminals() ) {
+            LOG_WARNING << "Search terminal rejected generation " << generation << " operation "
+                     << operationId << " current generation " << operationGeneration_.load()
+                     << " current operation " << operationId_.load();
+        }
         return;
     }
 
@@ -637,6 +705,10 @@ void LogFilteredDataWorker::deliverSearchProgressed( LinesCount nbMatches, int p
     // queued. Terminal progress means results are visible, not that opThread_
     // has already returned; teardown uses shutdownAndWait() for that contract.
     Q_EMIT searchProgressed( nbMatches, percent, initialLine, generation );
+    if ( percent == 100 && traceSearchTerminals() ) {
+        LOG_WARNING << "Search terminal emitted by owner generation " << generation << " operation "
+                 << operationId;
+    }
 }
 
 void LogFilteredDataWorker::deliverSearchFinished( quint64 generation, quint64 operationId )
@@ -848,6 +920,9 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         LOG_INFO << "Searching io perf " << mebibytesPerSecond << " MiB/s";
 
         Q_EMIT searchProgressed( nbMatches, 100, initialLine );
+        if ( traceSearchTerminals() ) {
+            LOG_WARNING << "Search operation terminal emitted";
+        }
         Q_EMIT searchFinished();
 
         // Return the single-threaded matcher to the pool for reuse.
@@ -1090,6 +1165,9 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
              << " MiB/s";
 
     Q_EMIT searchProgressed( nbMatches, 100, initialLine );
+    if ( traceSearchTerminals() ) {
+        LOG_WARNING << "Search operation terminal emitted";
+    }
     Q_EMIT searchFinished();
 }
 

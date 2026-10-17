@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import pathlib
 import re
@@ -45,7 +46,12 @@ jobs:
       CODEQL_ACTION_OVERLAY_ANALYSIS_CODE_SCANNING_CPP: "false"
     timeout-minutes: 30
     steps:
-      - uses: ./.github/actions/agent-setup
+      - name: Restore CPM cache
+        uses: actions/cache@{CACHE_PINNED}
+      - uses: ./.github/actions/prefetch-cpm-cache
+      - name: Fetch the pinned official CodeQL bundle
+        id: codeql-bundle
+        run: python3 scripts/fetch_codeql_bundle.py --repo-root "$GITHUB_WORKSPACE" --output-dir "$RUNNER_TEMP/klogg-codeql" --github-output "$GITHUB_OUTPUT"
       - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - run: cmake --build build -t klogg_codeql_thirdparty
       - run: cmake --build build -t klogg -- -n > /tmp/codeql-traced-plan.txt && ! grep -E 'cpm_cache|_deps|3rdparty/CMakeFiles' /tmp/codeql-traced-plan.txt
@@ -53,9 +59,362 @@ jobs:
         with:
           languages: c-cpp
           build-mode: manual
+          tools: ${{{{ steps.codeql-bundle.outputs.bundle }}}}
       - run: cmake --build build -t klogg
       - uses: github/codeql-action/analyze@{CODEQL_PINNED} # v4.37.9
 """
+
+
+# This is the escaped producer, including its unchecked cache-hit/upload path.
+LEGACY_OPENSSL_JOB = '''  PrefetchOpenSsl:
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Windows Qt 5 OpenSSL"
+    runs-on: ubuntu-22.04
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
+    steps:
+      - name: Restore OpenSSL prefetch cache
+        id: cache-openssl-prefetch
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-prefetch-1-1-1w
+
+      - name: Prefetch OpenSSL artifact
+        if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
+        shell: sh
+        run: |
+          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
+          OPENSSL_ARCHIVE="$PREFETCH_ROOT/openssl.zip"
+
+          mkdir -p "$PREFETCH_ROOT"
+
+          attempt=1
+          max_attempts=3
+          while [ $attempt -le $max_attempts ]; do
+            if curl --progress-bar --location --output "$OPENSSL_ARCHIVE" "$OPENSSL_URL"; then
+              exit 0
+            fi
+
+            rm -f "$OPENSSL_ARCHIVE"
+
+            if [ $attempt -eq $max_attempts ]; then
+              exit 1
+            fi
+
+            echo "OpenSSL prefetch attempt $attempt failed, retrying after backoff..."
+            attempt=$((attempt + 1))
+            sleep $((attempt * 10))
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openssl-archive
+          path: prefetch_artifacts/openssl.zip
+          if-no-files-found: error
+
+'''
+LEGACY_OPENSSL_CONSUMER = '''      - name: Unpack prefetched openssl
+        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
+        shell: pwsh
+        run: |
+          if ( !(Test-Path openssl.zip) ) {
+            Write-Error "Prefetched OpenSSL artifact is required but openssl.zip is missing"
+            exit 1
+          }
+          7z x openssl.zip
+
+'''
+
+
+VERIFIED_OPENSSL_JOB = '''  PrefetchOpenSsl:
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Windows Qt 5 OpenSSL"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore OpenSSL prefetch cache
+        id: cache-openssl-prefetch
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}
+
+      - name: Validate restored OpenSSL archive or genuine absence
+        id: verify-openssl-cache
+        shell: bash
+        env:
+          KLOGG_OPENSSL_CACHE_HIT: ${{ steps.cache-openssl-prefetch.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          archive="$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip"
+          case "$KLOGG_OPENSSL_CACHE_HIT" in
+            true|false|"") ;;
+            *) echo "::error::Unexpected OpenSSL cache-hit value"; exit 1 ;;
+          esac
+          if [[ "$KLOGG_OPENSSL_CACHE_HIT" == "true" || -e "$archive" || -L "$archive" ]]; then
+            python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$archive" --verify-only
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Acquire locked OpenSSL archive on genuine miss
+        if: ${{ steps.verify-openssl-cache.outputs.missing == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/prefetch_artifacts"
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --acquire
+
+      - name: Verify complete OpenSSL archive before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --verify-only
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openssl-archive
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          if-no-files-found: error
+
+      - name: Save verified OpenSSL prefetch cache
+        if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}
+
+'''
+VERIFIED_OPENSSL_CONSUMER = '''      - name: Verify and materialize locked Qt 5 OpenSSL
+        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/openssl.zip" --materialize --architecture "${{ env.KLOGG_CONFIG_ARCH }}" --destination "$GITHUB_WORKSPACE/openssl-1.1"
+
+'''
+
+
+def verified_openssl_workflow():
+    return legacy_openssl_workflow().replace(LEGACY_OPENSSL_JOB.rstrip("\n"), VERIFIED_OPENSSL_JOB.rstrip("\n"), 1).replace(
+        LEGACY_OPENSSL_CONSUMER.rstrip("\n"), VERIFIED_OPENSSL_CONSUMER.rstrip("\n"), 1)
+
+
+def legacy_openssl_workflow():
+    workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+    block = "\n".join(MODULE.workflow_job_blocks(workflow)["PrefetchOpenSsl"])
+    workflow = workflow.replace(block, LEGACY_OPENSSL_JOB.rstrip("\n"), 1)
+    for step in MODULE.workflow_job_steps(workflow)["WindowsPackages"]:
+        fields, _ = MODULE.workflow_step_fields(step)
+        if fields.get("name") in ("Unpack prefetched openssl", "Verify and materialize locked Qt 5 OpenSSL"):
+            workflow = workflow.replace("\n".join(step), LEGACY_OPENSSL_CONSUMER.rstrip("\n"), 1)
+            break
+    return workflow
+
+
+class OpenSslPolicyTest(unittest.TestCase):
+    def test_exact_escaped_workflow_is_rejected_by_existing_public_route(self):
+        workflow = legacy_openssl_workflow()
+        self.assertIn('if curl --progress-bar --location', workflow)
+        self.assertIn('7z x openssl.zip', workflow)
+        issues = MODULE.ci_build_workflow_issues(workflow)
+        self.assertTrue(any("OpenSSL" in issue for issue in issues), issues)
+
+    def test_new_rule_rejects_unchecked_cache_upload_and_consumer(self):
+        self.assertTrue(MODULE.ci_build_openssl_issues(legacy_openssl_workflow()))
+
+    def test_verified_neighbor_and_real_workflow_are_accepted(self):
+        self.assertEqual(MODULE.ci_build_openssl_issues(verified_openssl_workflow()), [])
+        self.assertEqual(MODULE.ci_build_openssl_issues(
+            (ROOT / ".github/workflows/ci-build.yml").read_text()), [])
+
+    def test_acquisition_requires_existing_archive_parent_before_helper(self):
+        workflow = verified_openssl_workflow()
+        command = '          mkdir -p "$GITHUB_WORKSPACE/prefetch_artifacts"\n'
+        self.assertIn(command, workflow)
+        for changed in (
+            workflow.replace(command, "", 1),
+            workflow.replace(command, command.replace("mkdir", "# mkdir"), 1),
+            workflow.replace(command, command.replace("prefetch_artifacts", "wrong-parent"), 1),
+            workflow.replace(command, command.rstrip("\n") + " || true\n", 1),
+        ):
+            with self.subTest(changed=changed[:70]):
+                self.assertTrue(MODULE.ci_build_openssl_issues(changed))
+
+    def test_producer_mutations_fail_closed(self):
+        workflow = verified_openssl_workflow()
+        producer = "\n".join(MODULE.workflow_job_blocks(workflow)["PrefetchOpenSsl"])
+        mutations = {
+            "old key": ("openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}", "openssl-prefetch-1-1-1w"),
+            "prefix restore": ("          key: openssl-qt5", "          restore-keys: openssl-\n          key: openssl-qt5"),
+            "mutable action": ("actions/cache/restore@" + CACHE_PINNED, "actions/cache/restore@v6"),
+            "unchecked auto-save": ("actions/cache/restore@", "actions/cache@"),
+            "skip hit validation": ('"true" || -e "$archive" || -L "$archive"', '"false" || -e "$archive" || -L "$archive"'),
+            "missing hit fetch": ('"true" || -e "$archive" || -L "$archive"', '"true" && -e "$archive"'),
+            "dangling symlink": (' || -L "$archive"', ''),
+            "unknown hit accepted": ('exit 1 ;;', 'true ;;'),
+            "ignore verification exit": ('--archive "$archive" --verify-only', '--archive "$archive" --verify-only || true'),
+            "comment spoof": ('            python3 scripts/materialize_openssl.py', '            # python3 scripts/materialize_openssl.py'),
+            "string spoof": ('            python3 scripts/materialize_openssl.py', '            printf "%s\\n" "python3 scripts/materialize_openssl.py'),
+            "fetch on ordinary miss not absence": ("steps.verify-openssl-cache.outputs.missing == 'true'", "steps.cache-openssl-prefetch.outputs.cache-hit != 'true'"),
+            "wrong missing output": ('echo "missing=false"', 'echo "missing=true"'),
+            "wrong lock": ('--lock ci/tools/openssl-qt5.json', '--lock ci/tools/msys2-tools.json'),
+            "wrong archive": ('--archive "$archive"', '--archive "$RUNNER_TEMP/openssl.zip"'),
+            "wrong mode": ('--verify-only', '--acquire'),
+            "no fatal shell": ('set -euo pipefail', 'set -uo pipefail'),
+            "wrong token": ('GH_TOKEN: ${{ github.token }}', "GH_TOKEN: ${{ secrets.PAT }}"),
+            "write permission": ('actions: read', 'actions: write'),
+            "credentials persisted": ('persist-credentials: false', 'persist-credentials: true'),
+            "no timeout": ('timeout-minutes: 20', 'timeout-minutes: 120'),
+            "disable validator": ('id: verify-openssl-cache', "id: verify-openssl-cache\n        if: ${{ false }}"),
+            "continue validation error": ('id: verify-openssl-cache', 'id: verify-openssl-cache\n        continue-on-error: true'),
+            "continue job error": ('timeout-minutes: 20', 'timeout-minutes: 20\n    continue-on-error: true'),
+            "duplicate direct key": ('id: verify-openssl-cache', 'id: verify-openssl-cache\n        id: bypass'),
+            "token at job scope": ('    steps:', '    env:\n      GH_TOKEN: ${{ github.token }}\n    steps:'),
+            "token at offline step": ('id: verify-openssl-cache', 'id: verify-openssl-cache\n        env:\n          GH_TOKEN: ${{ github.token }}'),
+            "save before validation": ('      - name: Save verified OpenSSL prefetch cache', '      - name: Save verified OpenSSL prefetch cache\n        continue-on-error: true'),
+        }
+        for label, (before, after) in mutations.items():
+            with self.subTest(label=label):
+                self.assertIn(before, producer)
+                changed = workflow.replace(producer, producer.replace(before, after, 1), 1)
+                self.assertTrue(MODULE.ci_build_openssl_issues(changed), label)
+
+    def test_upload_and_save_cannot_precede_unconditional_verification(self):
+        workflow = verified_openssl_workflow()
+        steps = MODULE.workflow_job_steps(workflow)["PrefetchOpenSsl"]
+        verify = "\n".join(steps[4])
+        for index in (5, 6):
+            with self.subTest(index=index):
+                publish = "\n".join(steps[index])
+                # Swap by placeholders so replacement never swaps itself back.
+                changed = workflow.replace(verify, "OPENSSL_SWAP", 1).replace(publish, verify, 1).replace("OPENSSL_SWAP", publish, 1)
+                self.assertTrue(MODULE.ci_build_openssl_issues(changed))
+        for addition in ("        if: ${{ always() }}\n", "        if: ${{ false }}\n", "        continue-on-error: true\n"):
+            changed = workflow.replace('      - name: Verify complete OpenSSL archive before publication\n',
+                                       '      - name: Verify complete OpenSSL archive before publication\n' + addition)
+            self.assertTrue(MODULE.ci_build_openssl_issues(changed))
+
+    def test_consumer_aliases_and_qt5_only_materialization_are_enforced(self):
+        workflow = verified_openssl_workflow()
+        consumer = VERIFIED_OPENSSL_CONSUMER.rstrip("\n")
+        mutations = {
+            "unchecked 7z": LEGACY_OPENSSL_CONSUMER.rstrip("\n"),
+            "Qt6": consumer.replace("'5'", "'6'"),
+            "all Qt versions": consumer.replace("        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}\n", ""),
+            "wrong architecture": consumer.replace('${{ env.KLOGG_CONFIG_ARCH }}', 'x64'),
+            "wrong destination": consumer.replace('openssl-1.1', 'openssl-runtime'),
+            "network mode": consumer.replace('--materialize', '--acquire'),
+            "ignored failure": consumer.replace('--destination "$GITHUB_WORKSPACE/openssl-1.1"', '--destination "$GITHUB_WORKSPACE/openssl-1.1" || true'),
+            "comment spoof": consumer.replace('          python3 ', '          # python3 '),
+            "continued failure": consumer.replace('        shell: bash', '        continue-on-error: true\n        shell: bash'),
+        }
+        for label, changed in mutations.items():
+            with self.subTest(label=label):
+                self.assertTrue(MODULE.ci_build_openssl_issues(workflow.replace(consumer, changed, 1)), label)
+        self.assertTrue(MODULE.ci_build_openssl_issues(workflow.replace('steps: *windows_steps', 'steps: *unknown_windows', 1)))
+        self.assertTrue(MODULE.ci_build_openssl_issues(workflow.replace("if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}", "if: ${{ startsWith(env.KLOGG_QT_VERSION, '6') }}", 1)))
+
+    def test_duplicate_job_mapping_and_inherited_token_fail_closed(self):
+        workflow = verified_openssl_workflow()
+        for changed in (
+            workflow.replace("jobs:\n", "jobs:\n  PrefetchOpenSsl: {}\n", 1),
+            workflow + "\njobs:\n  HiddenProducer: {}\n",
+            workflow.replace("jobs:\n", "env:\n  GH_TOKEN: ${{ github.token }}\njobs:\n", 1),
+        ):
+            with self.subTest(changed=changed[-70:]):
+                self.assertTrue(MODULE.ci_build_openssl_issues(changed))
+
+    def test_rule_fails_closed_on_missing_or_malformed_structure(self):
+        for workflow in ("", "jobs:\n  PrefetchOpenSsl: {}\n", "jobs:\n  WindowsX86:\n    steps: *unknown\n"):
+            with self.subTest(workflow=workflow):
+                self.assertTrue(MODULE.ci_build_openssl_issues(workflow))
+
+
+class AdbSourceTransportPolicyTest(unittest.TestCase):
+    def test_transport_lint_rejects_unsafe_real_workflow_mutations(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        self.assertEqual(MODULE.ci_build_adb_source_transport_issues(workflow), [])
+        producer = "\n".join(MODULE.workflow_job_blocks(workflow)["PrefetchAdbHelperSources"])
+        mutations = {
+            "missing invocation": ("python3 scripts/ci_adb_source_transport.py",
+                                   "python3 scripts/prefetch_adb_source_closure.py"),
+            "comment spoof": ("if python3 scripts/ci_adb_source_transport.py",
+                              "if false; then # python3 scripts/ci_adb_source_transport.py"),
+            "ignore fatal transport status": ('            else\n              exit "$transport_status"\n            fi\n          fi',
+                                              '            else\n              true\n            fi\n          fi'),
+            "dispatch import": ('"$KLOGG_ADB_SOURCE_EVENT" == "push"',
+                                '"$KLOGG_ADB_SOURCE_EVENT" == "workflow_dispatch"'),
+            "invalid exact hit bypass": ('exit 1\n              fi\n              echo "::warning::The restored v1',
+                                         'true\n              fi\n              echo "::warning::The restored v1'),
+            "shallow ancestry": ("          persist-credentials: false\n          fetch-depth: 0\n\n      - name: Compute exact ADB source cache key",
+                                 "          persist-credentials: false\n          fetch-depth: 1\n\n      - name: Compute exact ADB source cache key"),
+            "write permissions": ("      actions: read\n    env:\n      KLOGG_ADB_SOURCE_CACHE_MAX_BYTES",
+                                  "      actions: write\n    env:\n      KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"),
+            "missing token": ("          GH_TOKEN: ${{ github.token }}", "          GH_TOKEN: ''"),
+            "missing reset": ('            rm -rf "$adb_source_cache_root"\n', ''),
+            "skip post-import verification": (
+                '            elif [[ "$transport_status" -eq 0 ]]; then\n'
+                '              python3 scripts/prefetch_adb_helper_sources.py \\\n',
+                '            elif [[ "$transport_status" -eq 0 ]]; then\n'
+                '              true # python3 scripts/prefetch_adb_helper_sources.py \\\n'),
+        }
+        for label, (before, after) in mutations.items():
+            with self.subTest(label=label):
+                self.assertIn(before, producer, label)
+                self.assertTrue(MODULE.ci_build_adb_source_transport_issues(
+                    workflow.replace(producer, producer.replace(before, after, 1), 1)), label)
+
+    def test_transport_lint_requires_post_import_validation(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        script = next(fields["run"] for step in MODULE.workflow_job_steps(workflow)["PrefetchAdbHelperSources"]
+                      if (fields := MODULE.workflow_step_fields(step)[0]).get("name")
+                      == "Prefetch and hash immutable ADB sources")
+        self.assertIn('elif [[ "$transport_status" -eq 0 ]]; then\n'
+                      'python3 scripts/prefetch_adb_helper_sources.py',
+                      MODULE.active_script_content(script))
+
+    def test_transport_lint_fails_closed_on_missing_or_malformed_job(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        for source in ("", "jobs:\n  PrefetchAdbHelperSources: {}\n",
+                       workflow.replace("  PrefetchAdbHelperSources:\n",
+                                        "  RenamedAdbHelperSources:\n", 1)):
+            with self.subTest(source=source[:42]):
+                self.assertTrue(MODULE.ci_build_adb_source_transport_issues(source))
+
+
+class NativeMacosIdentityPolicyTest(unittest.TestCase):
+    def test_workflow_selection_requires_matching_reviewed_native_locks(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        catalog = json.loads((ROOT / "ci/dependencies/catalog.json").read_text())
+        adb_lock = json.loads((ROOT / "packaging/adb/adb-helper.lock.json").read_text())
+        ios_script = (ROOT / "scripts/ci_dependency_toolchain.py").read_text()
+        self.assertEqual(MODULE.native_macos_identity_issues(
+            workflow, catalog, adb_lock, ios_script), [])
+        adb = adb_lock["toolchains"]["macos-arm64"]
+        original_sdk = adb["sdk_version"]
+        adb["sdk_version"] = "26.4"
+        self.assertTrue(MODULE.native_macos_identity_issues(
+            workflow, catalog, adb_lock, ios_script))
+        adb["sdk_version"] = original_sdk
+        catalog["targets"]["ios-x86_64"]["runner"] = "macos-latest"
+        self.assertTrue(MODULE.native_macos_identity_issues(
+            workflow, catalog, adb_lock, ios_script))
+        self.assertTrue(MODULE.native_macos_identity_issues(
+            workflow, json.loads((ROOT / "ci/dependencies/catalog.json").read_text()),
+            adb_lock, ios_script.replace("Xcode_26.6.app", "Xcode.app")))
 
 
 class WorkflowTimerAndCliPolicyTest(unittest.TestCase):
@@ -115,7 +474,10 @@ jobs:
             with self.subTest(workflow=path.name):
                 self.assertEqual(MODULE.workflow_schedule_issues(text), [])
                 expected = {"workflow_dispatch"}
-                if path.name not in ("ci-release.yml", "ci-continuous.yml"):
+                if path.name in ("ci-environments.yml", "ci-dependencies.yml",
+                                 "ci-ios-host-evidence.yml"):
+                    expected = {"workflow_call"}
+                elif path.name not in ("ci-release.yml", "ci-continuous.yml"):
                     expected |= {"push", "pull_request"}
                 self.assertEqual(set(MODULE.workflow_trigger_mapping(text)), expected)
 
@@ -232,7 +594,7 @@ jobs:
 
     def test_static_analysis_event_modes_remain_strict_except_manual_full_report(self):
         workflow = (ROOT / ".github/workflows/static-analysis.yml").read_text()
-        section = workflow.split("      - name: Resolve authoritative analysis base", 1)[1].split("      - name: Install gcc-13", 1)[0]
+        section = workflow.split("      - name: Resolve authoritative analysis base", 1)[1].split("      - name: Locate clang-tidy-diff", 1)[0]
         script = textwrap.dedent(section.split("        run: |\n", 1)[1])
         for event, manual, expected in (
             ("pull_request", "full-report", "changed-strict"),
@@ -260,7 +622,7 @@ class WorkflowShapeOptimizationPolicyTest(unittest.TestCase):
     STATIC_SINGLETON_MESSAGE = "static matrix must fan out to at least two jobs"
     COMPOSITE_MATRIX_MESSAGE = "local composite actions must not reference matrix.*"
     EXPLICIT_NAME_MESSAGE = "CI Build jobs must define explicit name values"
-    GATE_NAME_MESSAGE = 'CI Build job ci-gate must set name: "ci-gate"'
+    GATE_NAME_MESSAGE = 'CI Build job ci-gate must preserve its ordinary name and isolate producer-mode skips'
 
     def manifest_issues(self, text: str, path: str = ".github/workflows/ci-build.yml"):
         return MODULE.check_checkout_blocks(pathlib.Path(path), text)
@@ -685,7 +1047,7 @@ jobs:
         self.assertEqual(missing_names, [])
         self.assertEqual(
             MODULE.workflow_job_direct_value(blocks["ci-gate"], "name"),
-            "ci-gate",
+            MODULE.CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate",
         )
 
     def test_real_ci_build_static_matrices_are_reserved_for_true_fanout(self):
@@ -736,29 +1098,35 @@ jobs:
         self.assertEqual(missing_names, [])
         self.assertEqual(
             MODULE.workflow_job_direct_value(blocks["ci-gate"], "name"),
-            "ci-gate",
+            MODULE.CI_BUILD_PRODUCER_NAME_PREFIX + "ci-gate",
         )
 
         expected_needs = {
+            "DependencyModePreflight": set(),
+            "IosHostEvidence": {"DependencyModePreflight"},
+            "EnvironmentModePreflight": set(),
+            "EnvironmentProducer": {"EnvironmentModePreflight"},
+            "DependencyGate": {"DependencyModePreflight", "BuildAdbHelperLegalAssets", "BuildAdbLinuxX64",
+                               "BuildAdbLinuxArm64", "BuildAdbWindowsX64", "BuildAdbMacX64",
+                               "BuildAdbMacArm64", "BuildIosNativeX64", "BuildIosNativeArm64"},
             "ReleaseQualificationPreflight": set(),
-            "SaveVersion": set(),
+            "SaveVersion": {"DependencyModePreflight"},
             "PrefetchCpmCache": set(),
             "PrefetchBoost": set(),
             "PrefetchOpenSsl": set(),
             "PrefetchLinuxDeployQt": set(),
-            "PrefetchCmakeInstaller": set(),
             "PrefetchWindowsTools": set(),
-            "PrefetchAdbHelperSources": set(),
+            "PrefetchAdbHelperSources": {"DependencyModePreflight"},
             "BuildAdbHelperLegalAssets": {"SaveVersion", "PrefetchAdbHelperSources"},
             "BuildAdbLinuxX64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbLinuxArm64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbWindowsX64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbMacX64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbMacArm64": {"BuildAdbHelperLegalAssets"},
-            "LinuxPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchLinuxDeployQt", "PrefetchCmakeInstaller", "BuildAdbLinuxX64", "ReleaseQualificationPreflight"},
-            "LinuxSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchCmakeInstaller", "ReleaseQualificationPreflight"},
+            "LinuxPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchLinuxDeployQt", "BuildAdbLinuxX64", "ReleaseQualificationPreflight"},
+            "LinuxSanitizers": {"SaveVersion", "PrefetchCpmCache", "ReleaseQualificationPreflight"},
             "LinuxTsan": {"SaveVersion", "PrefetchCpmCache", "ReleaseQualificationPreflight"},
-            "PrefetchIosNativeSources": set(),
+            "PrefetchIosNativeSources": {"DependencyModePreflight"},
             "BuildIosNativeX64": {"SaveVersion", "PrefetchIosNativeSources"},
             "BuildIosNativeArm64": {"SaveVersion", "PrefetchIosNativeSources"},
             "MacPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacX64", "BuildIosNativeX64", "ReleaseQualificationPreflight"},
@@ -855,25 +1223,20 @@ jobs:
 class PlatformFragilePreflightPolicyTest(unittest.TestCase):
     CI_PREFLIGHT_JOB = "ReleaseQualificationPreflight"
     EXPENSIVE_PREFLIGHT_JOB = "PlatformFragilePreflight"
+    RESOLVER_JOB = "ResolveLinuxEnvironment"
     CI_PREFLIGHT_MESSAGE = (
         "CI Build platform-fragile preflight must run in parallel with "
         "version/prefetch roots and precede every first-party application job"
     )
     EXPENSIVE_PREFLIGHT_MESSAGE = (
         "CodeQL, Coverage, and Static analysis expensive jobs must depend on "
-        "an exact scoped platform-fragile preflight"
+        "an exact scoped platform-fragile preflight and the locked environment resolver"
     )
-    CI_PARALLEL_ROOTS = {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchBoost",
-        "PrefetchOpenSsl",
-        "PrefetchLinuxDeployQt",
-        "PrefetchCmakeInstaller",
-        "PrefetchWindowsTools",
-        "PrefetchAdbHelperSources",
-        "PrefetchIosNativeSources",
-    }
+    LOCKED_ENVIRONMENT_MESSAGE = (
+        "CodeQL, Coverage, and Static analysis expensive jobs must run inside the "
+        "verified locked analysis environment image"
+    )
+    CI_PARALLEL_ROOTS = MODULE.CI_BUILD_ROOT_JOBS
     CI_APPLICATION_JOBS = {
         "LinuxPackages",
         "LinuxSanitizers",
@@ -900,12 +1263,18 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
             for name in ("ci-build.yml", *cls.WORKFLOW_JOBS)
         }
 
-    def repository_issues(self, workflows: dict[str, str]) -> list[str]:
+    def repository_issues(
+        self, workflows: dict[str, str], actions: dict[str, str] | None = None
+    ) -> list[str]:
         original_read = pathlib.Path.read_text
         replacements = {
             ROOT / ".github" / "workflows" / name: text
             for name, text in workflows.items()
         }
+        replacements.update({
+            ROOT / ".github" / "actions" / name / "action.yml": text
+            for name, text in (actions or {}).items()
+        })
 
         def read(path, *args, **kwargs):
             if path in replacements:
@@ -939,7 +1308,13 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                 protected_jobs = set(needs) - {preflight}
                 if name == "ci-build.yml":
                     expected_roots.update(self.CI_PARALLEL_ROOTS)
+                    expected_roots.update({"EnvironmentModePreflight", "DependencyModePreflight"})
                     protected_jobs = self.CI_APPLICATION_JOBS
+                else:
+                    # The resolver is a root: it verifies the locked image
+                    # before the expensive job starts, not after the lint.
+                    expected_roots.add(self.RESOLVER_JOB)
+                    protected_jobs.discard(self.RESOLVER_JOB)
                 self.assertEqual(
                     {job for job, dependencies in needs.items() if not dependencies},
                     expected_roots,
@@ -991,9 +1366,9 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
             "    needs: [BuildAdbHelperLegalAssets, ReleaseQualificationPreflight]\n",
             1,
         ).replace(
-            "PrefetchCmakeInstaller, BuildAdbLinuxX64, "
+            "PrefetchLinuxDeployQt, BuildAdbLinuxX64, "
             "ReleaseQualificationPreflight]",
-            "PrefetchCmakeInstaller, BuildAdbLinuxX64]",
+            "PrefetchLinuxDeployQt, BuildAdbLinuxX64]",
             1,
         )
         self.assertNotEqual(transitive, ci_build)
@@ -1018,12 +1393,12 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                 1,
             ),
             "application job bypass": ci_build.replace(
-                "PrefetchCmakeInstaller, ReleaseQualificationPreflight]",
-                "PrefetchCmakeInstaller]",
+                "PrefetchCpmCache, ReleaseQualificationPreflight]",
+                "PrefetchCpmCache]",
                 1,
             ),
             "conditional event bypass": ci_build.replace(
-                "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n",
+                f"    if: {MODULE.CI_BUILD_ORDINARY_IF}\n",
                 "    if: ${{ github.event_name == 'pull_request' }}\n",
                 1,
             ),
@@ -1078,7 +1453,7 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
             "application job runs after failed preflight": ci_build.replace(
                 "  LinuxTsan:\n"
                 "    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]\n"
-                "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n",
+                f"    if: {MODULE.CI_BUILD_ORDINARY_IF}\n",
                 "  LinuxTsan:\n"
                 "    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]\n"
                 "    if: ${{ always() }}\n",
@@ -1126,10 +1501,12 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
 
         for name, expensive_job in self.WORKFLOW_JOBS.items():
             workflow = workflows[name]
+            needs_line = (
+                f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}, {self.RESOLVER_JOB}]\n"
+            )
             mutations = {
                 "missing dependency": workflow.replace(
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    f"  {expensive_job}:\n" + needs_line,
                     f"  {expensive_job}:\n",
                     1,
                 ),
@@ -1140,9 +1517,8 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     1,
                 ),
                 "duplicate dependency key": workflow.replace(
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
-                    "    needs: []\n",
+                    needs_line,
+                    needs_line + "    needs: []\n",
                     1,
                 ),
                 "full quality runner instead of scoped lint": workflow.replace(
@@ -1173,19 +1549,15 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     1,
                 ),
                 "escaped failed-needs condition key": workflow.replace(
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
-                    "    \"\\u0069f\": ${{ always() }}\n",
+                    f"  {expensive_job}:\n" + needs_line,
+                    f"  {expensive_job}:\n" + needs_line
+                    + "    \"\\u0069f\": ${{ always() }}\n",
                     1,
                 ),
                 "expensive job runs after failed preflight": workflow.replace(
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
-                    f"  {expensive_job}:\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
-                    "    if: ${{ always() }}\n",
+                    f"  {expensive_job}:\n" + needs_line,
+                    f"  {expensive_job}:\n" + needs_line
+                    + "    if: ${{ always() }}\n",
                     1,
                 ),
                 "broadened to full platform-fragile lint": workflow.replace(
@@ -1217,9 +1589,8 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                     1,
                 ),
                 "duplicate needs key": workflow.replace(
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
-                    "    needs: [MissingSpoof]\n"
-                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    needs_line,
+                    "    needs: [MissingSpoof]\n" + needs_line,
                     1,
                 ),
                 "duplicate command key": workflow.replace(
@@ -1238,6 +1609,319 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
                         self.EXPENSIVE_PREFLIGHT_MESSAGE,
                         self.repository_issues(candidate),
                     )
+
+    def test_repository_rejects_missing_init_in_actual_build_launch(self):
+        path = ROOT / ".github" / "actions" / "docker-build" / "action.yml"
+        action = path.read_text()
+        # Freeze an owned fixture independently of concurrent launcher edits.
+        action = action.replace("docker run --pull=never --init", "docker run --pull=never")
+        self.assertIn("docker run --pull=never", action)
+        issues = self.repository_issues({}, {"docker-build": action})
+        self.assert_policy_issue(
+            "configure: Docker launch must have exactly one enabled --init before the image",
+            issues,
+        )
+
+    def test_repository_rejects_missing_analysis_container_init(self):
+        for name in self.WORKFLOW_JOBS:
+            workflow = self.repository_workflows()[name]
+            workflow = workflow.replace("      options: --init\n", "")
+            with self.subTest(workflow=name):
+                self.assert_policy_issue(
+                    self.LOCKED_ENVIRONMENT_MESSAGE,
+                    self.repository_issues({name: workflow}),
+                )
+
+    DOCKER_INIT_MESSAGE = "Docker launch must have exactly one enabled --init before the image"
+    DOCKER_INIT_ROUTES = {
+        "docker-build": ("configure", "build"),
+        "docker-run-tests": ("test",),
+    }
+    DOCKER_IMAGE = "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }}"
+
+    @classmethod
+    def init_action_fixture(cls, action: str) -> str:
+        text = (ROOT / ".github" / "actions" / action / "action.yml").read_text()
+        return re.sub(
+            r"docker run --pull=never(?: --init)?",
+            "docker run --pull=never --init",
+            text,
+        )
+
+    @staticmethod
+    def replace_action_step(text: str, name: str, script: str) -> str:
+        runs = MODULE.workflow_mapping_block(text.splitlines(), "runs", 0)
+        assert runs is not None
+        step = next(
+            step for step in MODULE.workflow_step_blocks(["runs:"] + runs["steps"][1])
+            if MODULE.workflow_step_fields(step)[0].get("name") == name
+        )
+        replacement = (
+            f"    - name: {name}\n      shell: sh\n      run: |\n"
+            + "\n".join("        " + line for line in script.splitlines())
+        )
+        return text.replace("\n".join(step), replacement, 1)
+
+    def test_repository_requires_all_scoped_steps_and_actual_launches(self):
+        for action, names in self.DOCKER_INIT_ROUTES.items():
+            valid = self.init_action_fixture(action)
+            self.assert_policy_clean(
+                self.DOCKER_INIT_MESSAGE, self.repository_issues({}, {action: valid})
+            )
+            for name in names:
+                for script in (
+                    f"docker run --pull=never {self.DOCKER_IMAGE} /bin/true --init",
+                    f"# docker run --init {self.DOCKER_IMAGE} /bin/true\ntrue",
+                    f"echo 'docker run --init {self.DOCKER_IMAGE} /bin/true'",
+                    f"printf '%s' 'docker run --init {self.DOCKER_IMAGE} /bin/true'",
+                    f"env docker run --init {self.DOCKER_IMAGE} /bin/true",
+                    "true",
+                ):
+                    with self.subTest(action=action, step=name, script=script):
+                        candidate = self.replace_action_step(valid, name, script)
+                        self.assert_policy_issue(
+                            f"{name}: {self.DOCKER_INIT_MESSAGE}",
+                            self.repository_issues({}, {action: candidate}),
+                        )
+                with self.subTest(action=action, step=name, mutation="deleted step"):
+                    renamed = valid.replace(f"- name: {name}\n", "- name: unrelated\n", 1)
+                    self.assertNotEqual(renamed, valid)
+                    self.assert_policy_issue(
+                        f"{name}: {self.DOCKER_INIT_MESSAGE}",
+                        self.repository_issues({}, {action: renamed}),
+                    )
+
+    def test_scoped_docker_init_option_boundaries(self):
+        image = self.DOCKER_IMAGE
+        good = (
+            f"docker run --pull=never --init {image} /bin/true",
+            f"docker run --pull never --env NOTE=--init --env ASAN_OPTIONS --init=true -v '$PWD:/work' {image} /bin/true --init=false",
+            f"docker run --env=NOTE=--init --init --mount type=bind,src=/tmp,dst=/work --network=none --user 1000:1000 '{image}' /bin/true",
+            f"if docker run --init --pull=never --env NOTE=\"$NOTE\" {image} /bin/true; then exit 0; fi",
+            f"docker run --pull=never \\\n  --init \\\n  {image} /bin/true # --init=false",
+            f"docker run --init -- {image} /bin/true",
+            f"# docker run --init=false {image}\necho --init=false\ndocker run --init {image} /bin/true",
+        )
+        bad = (
+            f"docker run --pull=never {image} /bin/true # --init",
+            f"docker run --init=false {image} /bin/true",
+            f"docker run --init --init {image} /bin/true",
+            f"docker run --init=true --init=false {image} /bin/true",
+            f"docker run --init=$INIT {image} /bin/true",
+            f"docker run --init= {image} /bin/true",
+            f"docker run --init=enabled {image} /bin/true",
+            f"docker run --env '--init' {image} /bin/true",
+            f"docker run --env NOTE=--init {image} /bin/true",
+            f"docker run --env=NOTE=--init {image} /bin/true",
+            f"docker run --label '--init' {image} /bin/true",
+            f"docker run --init --env {image}",
+            "docker run --init --env",
+            "docker run --init",
+            f"docker run --init --unknown value {image} /bin/true",
+            f"docker run $DOCKER_FLAGS --init {image} /bin/true",
+            f"docker run --init $DOCKER_FLAGS {image} /bin/true",
+            f"docker run --init {image} /bin/true\ndocker run {image} /bin/true",
+            f"docker run --init '{image} /bin/true",
+            f"eval 'docker run --init {image} /bin/true'",
+            f"sh -c 'docker run --init {image} /bin/true'",
+            f"cat <<'EOF'\ndocker run --init {image} /bin/true\nEOF",
+            f"docker() {{ true; }}\ndocker run --init {image} /bin/true",
+        )
+        valid = self.init_action_fixture("docker-build")
+        for expected_clean, commands in ((True, good), (False, bad)):
+            for command in commands:
+                with self.subTest(clean=expected_clean, command=command):
+                    candidate = self.replace_action_step(valid, "configure", command)
+                    issues = MODULE.docker_init_action_issues(candidate, ("configure", "build"))
+                    assertion = self.assert_policy_clean if expected_clean else self.assert_policy_issue
+                    assertion(f"configure: {self.DOCKER_INIT_MESSAGE}", issues)
+
+    def test_scoped_docker_init_accepts_only_literal_host_identity_queries(self):
+        valid = self.init_action_fixture("docker-build")
+        # The actual action captures both selectors before its literal launch.
+        self.assertEqual(MODULE.docker_init_action_issues(valid, ("configure", "build")), [])
+        for query in ("id -u", "id -g"):
+            script = (f"identity=$({query}) || exit 1\n"
+                      f'docker run --pull=never --init --user "$identity:$identity" {self.DOCKER_IMAGE} /bin/true')
+            candidate = self.replace_action_step(valid, "configure", script)
+            with self.subTest(query=query):
+                self.assertEqual(MODULE.docker_init_action_issues(candidate, ("configure",)), [])
+
+    def test_scoped_identity_query_compatibility_keeps_unknown_bindings_and_init_spoofs_closed(self):
+        valid = self.init_action_fixture("docker-build")
+        image = self.DOCKER_IMAGE
+        launch = f"docker run --pull=never --init {image} /bin/true"
+        bad = (
+            "identity=$(id)\n" + launch,
+            "identity=$(id -un)\n" + launch,
+            "identity=$(id -u root)\n" + launch,
+            "identity=$(id --user)\n" + launch,
+            "identity=$(env id -u)\n" + launch,
+            f"identity=$(id -u; docker run {image} /bin/true)\n" + launch,
+            "id() { printf '123\\n'; }\nidentity=$(id -u)\n" + launch,
+            f"identity=$(id -u)\n# {launch}\ntrue",
+            f"identity=$(id -u)\necho '{launch}'",
+            f"identity=$(id -u)\ndocker run --pull=never {image} /bin/true # --init",
+        )
+        for script in bad:
+            with self.subTest(script=script):
+                candidate = self.replace_action_step(valid, "configure", script)
+                self.assert_policy_issue(
+                    f"configure: {self.DOCKER_INIT_MESSAGE}",
+                    MODULE.docker_init_action_issues(candidate, ("configure",)),
+                )
+
+    def test_scoped_launch_rejects_hidden_additional_launch_bindings(self):
+        image = self.DOCKER_IMAGE
+        actual = f"docker run --init {image} /bin/true"
+        scripts = (
+            f"env docker run {image} /bin/true\n{actual}",
+            f"command docker run {image} /bin/true\n{actual}",
+            f"exec docker run {image} /bin/true\n{actual}",
+            f"eval 'docker run {image} /bin/true'\n{actual}",
+            f"sh -c 'docker run {image} /bin/true'\n{actual}",
+            f"$LAUNCH_DOCKER run {image} /bin/true\n{actual}",
+            f"launch() {{ {actual}; }}\nlaunch",
+            f"timeout 5 docker run {image} /bin/true\n{actual}",
+            f"python3 hidden-launch.py\n{actual}",
+            f"/usr/bin/docker run {image} /bin/true\n{actual}",
+            f"docker run --init true {image} /bin/true",
+            f"docker run --init false {image} /bin/true",
+        )
+        valid = self.init_action_fixture("docker-build")
+        for script in scripts:
+            with self.subTest(script=script):
+                candidate = self.replace_action_step(valid, "configure", script)
+                self.assert_policy_issue(
+                    f"configure: {self.DOCKER_INIT_MESSAGE}",
+                    MODULE.docker_init_action_issues(candidate, ("configure", "build")),
+                )
+
+    def test_scoped_docker_steps_reject_ambiguous_workflow_fields(self):
+        valid = self.init_action_fixture("docker-build")
+        nested_run = self.replace_action_step(
+            valid, "configure", f"docker run --init {self.DOCKER_IMAGE} /bin/true"
+        ).replace("      run: |\n", "      env:\n        run: |\n", 1).replace(
+            "        docker run --init", "          docker run --init", 1
+        )
+        mutations = {
+            "nested run in environment": nested_run,
+            "duplicate run": valid.replace("      run: |\n", "      run: true\n      run: |\n", 1),
+            "duplicate step": valid.replace("    - name: configure\n", "    - name: configure\n      run: true\n    - name: configure\n", 1),
+            "no-op shell": valid.replace("    - name: configure\n      shell: sh", "    - name: configure\n      shell: 'true {0}'", 1),
+            "duplicate steps": valid.replace("  steps:\n", "  steps: []\n  steps:\n", 1),
+            "duplicate runs": valid.replace("runs:\n", "runs:\n  using: composite\n  steps: []\nruns:\n", 1),
+            "quoted duplicate runs": valid + '\n"runs":\n  using: composite\n  steps: []\n',
+            "quoted duplicate run": valid.replace("      run: |\n", '      "run": true\n      run: |\n', 1),
+            "quoted duplicate name": valid.replace("    - name: configure\n", '    - name: configure\n      "name": unrelated\n', 1),
+            "commented step": valid.replace("    - name: configure\n", "    # - name: configure\n", 1),
+        }
+        for label, candidate in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(candidate, valid)
+                self.assert_policy_issue(
+                    self.DOCKER_INIT_MESSAGE,
+                    self.repository_issues({}, {"docker-build": candidate}),
+                )
+
+    def test_expensive_jobs_run_inside_the_locked_analysis_environment(self):
+        workflows = self.repository_workflows()
+        analysis = {
+            name: workflows[name] for name in self.WORKFLOW_JOBS
+        }
+        self.assert_policy_clean(
+            self.LOCKED_ENVIRONMENT_MESSAGE,
+            self.repository_issues(dict(workflows)),
+        )
+        for name, expensive_job in self.WORKFLOW_JOBS.items():
+            workflow = analysis[name]
+            resolver_start = workflow.index(f"  {self.RESOLVER_JOB}:\n")
+            resolver_end = workflow.index(f"  {expensive_job}:\n")
+            image_line = "      image: ${{ needs.ResolveLinuxEnvironment.outputs.image }}\n"
+            container = "    container:\n" + image_line + "      options: --init\n"
+            self.assertIn(container, workflow)
+            mutations = {
+                "missing init options": workflow.replace("      options: --init\n", "", 1),
+                "commented init options": workflow.replace("      options: --init\n", "      # options: --init\n", 1),
+                "disabled init": workflow.replace("      options: --init\n", "      options: --init=false\n", 1),
+                "duplicate init flags": workflow.replace("      options: --init\n", "      options: --init --init\n", 1),
+                "dynamic init": workflow.replace("      options: --init\n", "      options: ${{ env.INIT_OPTIONS }}\n", 1),
+                "duplicate options": workflow.replace("      options: --init\n", "      options: --init\n      options: --init=false\n", 1),
+                "duplicate container": workflow.replace(container, container + container, 1),
+                "quoted duplicate container": workflow.replace(container, container + '    "container":\n' + image_line + "      options: --init=false\n", 1),
+                "duplicate image": workflow.replace(image_line, image_line + image_line, 1),
+                "wrong scope options": workflow.replace("      options: --init\n", "    options: --init\n", 1),
+                "nested options": workflow.replace("      options: --init\n", "      env:\n        options: --init\n", 1),
+                "commented container": workflow.replace(container, "".join("    # " + line.lstrip() for line in container.splitlines(keepends=True)), 1),
+                "missing container": workflow.replace(container, "", 1),
+                "wrong scope container": workflow.replace(container, "".join("  " + line for line in container.splitlines(keepends=True)), 1),
+                "block options": workflow.replace("      options: --init\n", "      options: |\n        --init\n", 1),
+                "nested image": workflow.replace(image_line, "      env:\n  " + image_line, 1),
+                "floating container tag": workflow.replace(
+                    "image: ${{ needs.ResolveLinuxEnvironment.outputs.image }}",
+                    "image: ghcr.io/zeacent/klogg-ci-env:latest",
+                    1,
+                ),
+                "resolver pulls instead of only resolving": workflow.replace(
+                    'pull: "false"',
+                    'pull: "true"',
+                    1,
+                ),
+                "host provisioning returns": workflow.replace(
+                    "      - name: Restore CPM cache\n",
+                    "      - run: sudo apt-get update && sudo apt-get install -y clang-tidy\n"
+                    "      - name: Restore CPM cache\n",
+                    1,
+                ),
+                "host tool installation returns": workflow.replace(
+                    "      - name: Restore CPM cache\n",
+                    "      - uses: ./.github/actions/agent-setup\n"
+                    "      - name: Restore CPM cache\n",
+                    1,
+                ),
+                "missing resolver job": workflow[:resolver_start]
+                + workflow[resolver_end:],
+                "missing CPM restore": workflow.replace(
+                    "      - name: Restore CPM cache\n", "", 1
+                ),
+                "missing container Git trust": workflow.replace(
+                    'git config --global --add safe.directory "$GITHUB_WORKSPACE"',
+                    "git --version",
+                    1,
+                ),
+                "run step without explicit bash shell": workflow.replace(
+                    "      - name: Trust the workspace for Git inside the container\n"
+                    "        shell: bash\n",
+                    "      - name: Trust the workspace for Git inside the container\n",
+                    1,
+                ),
+            }
+            for label, mutated in mutations.items():
+                with self.subTest(workflow=name, mutation=label):
+                    self.assertNotEqual(mutated, workflow)
+                    candidate = dict(workflows)
+                    candidate[name] = mutated
+                    self.assert_policy_issue(
+                        self.LOCKED_ENVIRONMENT_MESSAGE,
+                        self.repository_issues(candidate),
+                    )
+
+            with self.subTest(workflow=name, mutation="resolver missing from needs"):
+                needs_line = (
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}, {self.RESOLVER_JOB}]\n"
+                )
+                mutated = workflow.replace(
+                    needs_line,
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    1,
+                )
+                self.assertNotEqual(mutated, workflow)
+                candidate = dict(workflows)
+                candidate[name] = mutated
+                self.assert_policy_issue(
+                    self.EXPENSIVE_PREFLIGHT_MESSAGE,
+                    self.repository_issues(candidate),
+                )
 
     def test_expensive_preflight_cannot_be_limited_to_one_event_projection(self):
         workflows = self.repository_workflows()
@@ -1262,7 +1946,7 @@ class PlatformFragilePreflightPolicyTest(unittest.TestCase):
     def test_lint_workflow_keeps_the_complete_quality_runner(self):
         workflow = (ROOT / ".github" / "workflows" / "lint.yml").read_text()
         blocks = MODULE.workflow_job_blocks(workflow)
-        self.assertEqual(set(blocks), {"platform-fragile"})
+        self.assertEqual(set(blocks), {"platform-fragile", "source-metadata-probe"})
         steps = [
             MODULE.workflow_step_fields(step)[0]
             for step in MODULE.workflow_step_blocks(blocks["platform-fragile"])
@@ -1519,6 +2203,180 @@ jobs:
             MODULE.ci_build_workflow_issues(flow_mutated),
         )
 
+    def test_environment_prior_source_input_contract_fails_closed_on_real_tree_mutations(self):
+        parent = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        child = (ROOT / ".github/workflows/ci-environments.yml").read_text()
+        parent_changes = (
+            ("      prior-source-run-id:\n", "      # prior-source-run-id:\n"),
+            ("      prior-source-artifact-id: ${{ inputs.prior-source-artifact-id }}",
+             "      prior-source-artifact-id: ${{ github.run_id }}"),
+            ("        default: \"\"\n        type: string\n      prior-source-artifact-id:",
+             "        default: 123\n        type: string\n      prior-source-artifact-id:"),
+            ("if not producer and any(os.environ[name] for name in prior):",
+             "print('if not producer and any(os.environ[name] for name in prior):')"),
+            ("if any(values) and not all(values):", "# if any(values) and not all(values):"),
+            ("if any(values) and not all(values):", "print('if any(values) and not all(values):')"),
+            ("          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior-source-run-attempt }}",
+             "          KLOGG_PRIOR_SOURCE_RUN_ATTEMPT: ${{ github.run_attempt }}"),
+        )
+        for old, new in parent_changes:
+            with self.subTest(parent=old):
+                mutated = parent.replace(old, new, 1)
+                self.assertNotEqual(mutated, parent)
+                issues = MODULE.ci_build_environment_mode_issues(mutated)
+                self.assertTrue(any("prior source" in issue.lower() or "source pins" in issue.lower() or
+                                    "dispatch requires exact" in issue.lower() or "environment caller" in issue.lower()
+                                    for issue in issues), issues)
+        child_changes = (
+            ("      prior-source-sha:\n", "      # prior-source-sha:\n"),
+            ("      prior-source-run-attempt:\n        description: Explicit prior source-cache attempt\n        required: false",
+             "      prior-source-run-attempt:\n        description: Explicit prior source-cache attempt\n        required: true"),
+        )
+        for old, new in child_changes:
+            with self.subTest(child=old):
+                mutated = child.replace(old, new, 1)
+                self.assertNotEqual(mutated, child)
+                self.assertTrue(MODULE.ci_environment_workflow_issues(mutated))
+
+    def test_dependency_dispatch_isolated_from_ordinary_ci_on_all_events(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        blocks = MODULE.workflow_job_blocks(workflow)
+        # Native dispatch retains only its prerequisite and builder jobs, not the ordinary gate.
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
+        self.assertIn("DependencyModePreflight", blocks)
+        self.assertEqual(MODULE.workflow_job_needs(workflow)["DependencyModePreflight"], set())
+        for event, environment, dependency, qualification, expected in (
+            ("pull_request", "off", "off", "validation", MODULE.CI_BUILD_REQUIRED_JOBS - {"DispatchContinuous"}),
+            ("push", "off", "off", "validation", MODULE.CI_BUILD_REQUIRED_JOBS),
+            ("workflow_dispatch", "off", "off", "validation", MODULE.CI_BUILD_REQUIRED_JOBS - {"DispatchContinuous"}),
+            ("workflow_dispatch", "off", "off", "release", MODULE.CI_BUILD_REQUIRED_JOBS - {"DispatchContinuous"}),
+            ("workflow_dispatch", "qualify", "off", "validation", set()),
+            ("workflow_dispatch", "off", "qualify", "validation", MODULE.CI_BUILD_NATIVE_JOBS),
+            ("workflow_dispatch", "off", "publish", "validation", MODULE.CI_BUILD_NATIVE_JOBS),
+            ("workflow_dispatch", "off", "observe-ios-host", "validation", set()),
+        ):
+            with self.subTest(event=event, environment=environment, dependency=dependency):
+                available = set()
+                for job in MODULE.CI_BUILD_REQUIRED_JOBS - {"DispatchContinuous"}:
+                    condition = MODULE.workflow_job_direct_value(blocks[job], "if")
+                    if condition is None:
+                        continue
+                    self.assertTrue(condition.startswith("${{ ") and condition.endswith(" }}"))
+                    expression = condition[4:-3]
+                    expression = expression.replace("github.event_name", repr(event))
+                    expression = expression.replace("inputs.environment-mode", repr(environment))
+                    expression = expression.replace("inputs.dependency-mode", repr(dependency))
+                    expression = expression.replace("github.event.head_commit.message", repr("ordinary commit"))
+                    preflight = "success"  # Inactive native preflight is an explicit no-op, not a skipped ancestor.
+                    expression = expression.replace("needs.DependencyModePreflight.result", repr(preflight))
+                    expression = expression.replace("always()", "True").replace("!cancelled()", "True")
+                    expression = expression.replace("!contains('ordinary commit', '[skip ci]')", "True")
+                    expression = expression.replace("&&", " and ").replace("||", " or ")
+                    self.assertRegex(expression, r"^[\s\w'()=!\-]+$")
+                    if eval(expression, {"__builtins__": {}}, {}):
+                        available.add(job)
+                if event == "push" and environment == dependency == "off":
+                    available.add("DispatchContinuous")
+                self.assertEqual(available, expected)
+                if dependency == "observe-ios-host":
+                    self.assertEqual(available, set())
+                    self.assertIn("IosHostEvidence", blocks)
+                    self.assertEqual(MODULE.workflow_job_needs(workflow)["IosHostEvidence"],
+                                     {"DependencyModePreflight"})
+
+    def test_dependency_child_requires_read_only_gate_and_disabled_publisher(self):
+        child = (ROOT / ".github/workflows/ci-dependencies.yml").read_text()
+        self.assertEqual(MODULE.ci_dependency_workflow_issues(child), [])
+        mutations = (
+            ("schedule", "  workflow_call:\n", "  workflow_call:\n  schedule:\n    - cron: '7 9 * * *'\n"),
+            ("token write", "      attestations: read\n", "      attestations: write\n"),
+            ("skipped verification", "          python3 scripts/ci_dependency_gate.py \\\n", "          true # python3 scripts/ci_dependency_gate.py \\\n"),
+            ("unfiltered needs", "          del needs['DependencyModePreflight']\n", "          pass # del needs['DependencyModePreflight']\n"),
+            ("publish succeeds", "          exit 1\n", "          exit 0\n"),
+            ("publish ignored failure", "      - name: Refuse publication until protected publisher is reviewed\n",
+             "      - name: Refuse publication until protected publisher is reviewed\n        continue-on-error: true\n"),
+            ("publish skipped", "      - name: Refuse publication until protected publisher is reviewed\n",
+             "      - name: Refuse publication until protected publisher is reviewed\n        if: ${{ false }}\n"),
+            ("gate upload skipped", "        id: upload_gate\n", "        id: upload_gate\n        if: ${{ false }}\n"),
+        )
+        for label, old, new in mutations:
+            with self.subTest(label=label):
+                modified = child.replace(old, new, 1)
+                self.assertNotEqual(modified, child)
+                self.assertTrue(MODULE.ci_dependency_workflow_issues(modified))
+
+    def test_dependency_mode_contract_rejects_mutations_and_spoofs(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        changed = (
+            ("missing mode", workflow.replace("      dependency-mode:\n", "      # dependency-mode:\n", 1), "dispatch requires exact mode"),
+            ("wrong default", workflow.replace("      dependency-mode:\n", "      dependency-mode:\n        default: qualify\n", 1), "dependency mode"),
+            ("unguarded app", workflow.replace("  LinuxPackages:\n", "  LinuxPackages:\n    # dependency-mode is off\n    if: ${{ always() }}\n", 1), "job must isolate ordinary and native"),
+            ("missing preflight", workflow.replace("  DependencyModePreflight:\n", "  # DependencyModePreflight:\n", 1), "dependency"),
+            ("skipped ancestor", workflow.replace(
+                '  DependencyModePreflight:\n',
+                "  DependencyModePreflight:\n    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}\n", 1), "dependency"),
+            ("no inactive success step", workflow.replace(
+                "      - name: Inactive native dependency preflight\n",
+                "      - name: Skipped native dependency preflight\n", 1), "dependency"),
+            ("unguarded checkout", workflow.replace(
+                "        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}\n        with:\n          ref: ${{ github.sha }}",
+                "        with:\n          ref: ${{ github.sha }}", 1), "dependency"),
+            ("unguarded validation", workflow.replace(
+                "      - name: Validate isolated dependency mode and exact source\n        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dependency-mode != 'off' }}\n",
+                "      - name: Validate isolated dependency mode and exact source\n", 1), "dependency"),
+            ("mutual exclusion", workflow.replace("dependency-mode cannot combine with environment-mode", "dependency-mode can combine with environment-mode", 1), "dependency"),
+            ("source pin", workflow.replace("dispatched source does not match expected-source-sha", "source checked later", 1), "dependency"),
+            ("checkout source", workflow.replace("          ref: ${{ github.sha }}", "          ref: master", 1), "dependency"),
+            ("comment spoof", workflow.replace("          if source != os.environ['GITHUB_SHA']:\n", "          # if source != os.environ['GITHUB_SHA']:\n", 1), "dependency"),
+            ("string spoof", workflow.replace("          if source != os.environ['GITHUB_SHA']:\n", "          print(\"if source != os.environ['GITHUB_SHA']:\")\n", 1), "dependency"),
+            ("canonical branch", workflow.replace("dependency production requires a canonical repository branch", "repository branch", 1), "dependency"),
+            ("disable qualification", workflow.replace('test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"', 'test "$(git rev-parse HEAD)" = "$KLOGG_EXPECTED_SOURCE_SHA"\n          exit 1', 1), "dependency"),
+        )
+        for name, mutated, marker in changed:
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, workflow)
+                self.assertIn(marker, "\n".join(MODULE.ci_build_workflow_issues(mutated)))
+
+    def test_dependency_preflight_accepts_isolated_modes_and_rejects_unsafe_sources(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        steps = MODULE.workflow_step_blocks(MODULE.workflow_job_blocks(workflow)["DependencyModePreflight"])
+        scripts = [textwrap.dedent("\n".join(step[next(index for index, line in enumerate(step) if line.strip() == "run: |") + 1:]))
+                   for step in steps if MODULE.workflow_step_fields(step)[0].get("name") == "Validate isolated dependency mode and exact source"]
+        self.assertEqual(len(scripts), 1)
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        defaults = {"KLOGG_ENVIRONMENT_MODE": "off", "KLOGG_QUALIFICATION_MODE": "validation",
+                    "KLOGG_EXPECTED_SOURCE_SHA": sha, "GITHUB_REPOSITORY": "ZEACENT/klogg",
+                    "GITHUB_REF": "refs/heads/master", "GITHUB_SHA": sha}
+        for mode in ("qualify", "publish"):
+            with self.subTest(mode=mode):
+                env = {**os.environ, **defaults, "KLOGG_DEPENDENCY_MODE": mode}
+                result = subprocess.run(["bash", "-c", scripts[0]], cwd=ROOT, env=env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        observed = {**os.environ, **defaults, "GITHUB_REF": "refs/heads/worktree-master-ci-fail",
+                    "KLOGG_DEPENDENCY_MODE": "observe-ios-host"}
+        result = subprocess.run(["bash", "-c", scripts[0]], cwd=ROOT, env=observed,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for mode, overrides, expected in (
+            ("observe-ios-host", {}, "non-default branch"),
+            ("observe-ios-host", {"GITHUB_REF": "refs/heads/feature", "KLOGG_ENVIRONMENT_MODE": "qualify"}, "cannot combine with environment-mode"),
+            ("observe-ios-host", {"GITHUB_REF": "refs/heads/feature", "KLOGG_QUALIFICATION_MODE": "release"}, "cannot combine with release qualification"),
+            ("qualify", {"KLOGG_ENVIRONMENT_MODE": "publish"}, "cannot combine with environment-mode"),
+            ("publish", {"KLOGG_QUALIFICATION_MODE": "release"}, "cannot combine with release qualification"),
+            ("qualify", {"GITHUB_REPOSITORY": "fork/klogg"}, "canonical repository branch"),
+            ("qualify", {"GITHUB_REF": "refs/tags/v1"}, "canonical repository branch"),
+            ("qualify", {"KLOGG_EXPECTED_SOURCE_SHA": ""}, "explicit nonzero full commit SHA"),
+            ("publish", {"KLOGG_EXPECTED_SOURCE_SHA": "0" * 40}, "explicit nonzero full commit SHA"),
+            ("publish", {"KLOGG_EXPECTED_SOURCE_SHA": "a" * 40}, "does not match expected-source-sha"),
+        ):
+            with self.subTest(mode=mode, overrides=overrides):
+                env = {**os.environ, **defaults, **overrides, "KLOGG_DEPENDENCY_MODE": mode}
+                result = subprocess.run(["bash", "-c", scripts[0]], cwd=ROOT, env=env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stdout + result.stderr)
+
     def test_ci_build_uses_the_optimized_prefetch_and_native_build_dag(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
@@ -1542,7 +2400,6 @@ jobs:
             "LinuxSanitizers": {
                 "SaveVersion",
                 "PrefetchCpmCache",
-                "PrefetchCmakeInstaller",
                 "ReleaseQualificationPreflight",
             },
             "LinuxTsan": {
@@ -1593,7 +2450,6 @@ jobs:
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchLinuxDeployQt",
-                "PrefetchCmakeInstaller",
                 "BuildAdbLinuxX64",
                 "ReleaseQualificationPreflight",
             },
@@ -1717,6 +2573,18 @@ jobs:
             "steps.run-tests.outcome == 'failure' }}"
         )
         mutations = {
+            "missing explicit test dump directory": (
+                '          "KLOGG_TEST_MINIDUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8\n',
+                '          # "KLOGG_TEST_MINIDUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8\n',
+            ),
+            "missing startup trace opt-in": (
+                '          "KLOGG_TEST_TRACE_SEARCH_STARTS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8\n',
+                '          # "KLOGG_TEST_TRACE_SEARCH_STARTS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8\n',
+            ),
+            "missing unit executable evidence": (
+                '@("klogg_itests.exe", "klogg_itests.pdb", "klogg_tests.exe", "klogg_tests.pdb")',
+                '@("klogg_itests.exe", "klogg_itests.pdb", "missing.exe", "klogg_tests.pdb")',
+            ),
             "conditional test continuation": (
                 "        continue-on-error: true\n\n"
                 "      - name: Collect Windows diagnostics on test failure\n",
@@ -1885,11 +2753,10 @@ jobs:
                     1,
                 )
                 self.assertNotEqual(mutated, workflow)
-                self.assertIn(
-                    f"CI early fan-out job {job} must remain a root parallel to "
-                    "ReleaseQualificationPreflight",
-                    MODULE.ci_build_workflow_issues(mutated),
-                )
+                expected = (f"CI native prerequisites must directly require dispatch preflight: {job}"
+                            if job in MODULE.CI_BUILD_NATIVE_ROOT_JOBS else
+                            f"CI early fan-out job {job} must remain a root parallel to ReleaseQualificationPreflight")
+                self.assertIn(expected, MODULE.ci_build_workflow_issues(mutated))
 
     def test_ci_build_output_references_require_direct_needs(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
@@ -1907,8 +2774,8 @@ jobs:
     def test_ci_build_rejects_missing_dynamic_native_artifact_ancestry(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
-            "PrefetchCmakeInstaller, BuildAdbLinuxX64",
-            "PrefetchCmakeInstaller, BuildAdbHelperLegalAssets",
+            "PrefetchLinuxDeployQt, BuildAdbLinuxX64",
+            "PrefetchLinuxDeployQt, BuildAdbHelperLegalAssets",
             1,
         )
         self.assertNotEqual(mutated, workflow)
@@ -1921,10 +2788,10 @@ jobs:
     def test_ci_build_rejects_full_adb_release_closure_consumers(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
-            "          name: adb-helper-package-support\n"
-            "          path: ${{ runner.temp }}/adb-helper-package-support\n",
+            "          name: adb-helper-package-core\n"
+            "          path: ${{ runner.temp }}/adb-helper-package-core\n",
             "          name: adb-helper-legal-assets\n"
-            "          path: ${{ runner.temp }}/adb-helper-package-support\n",
+            "          path: ${{ runner.temp }}/adb-helper-package-core\n",
             1,
         )
         self.assertNotEqual(mutated, workflow)
@@ -1934,28 +2801,105 @@ jobs:
             issues,
         )
         self.assertIn(
-            "CI job BuildAdbLinuxX64 must download artifact adb-helper-package-support",
+            "CI job BuildAdbLinuxX64 must download artifact adb-helper-package-core",
             issues,
         )
+
+    def test_ci_build_accepts_unversioned_adb_core_and_preserves_application_support(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
+        self.assertEqual(MODULE.CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS["adb-helper-package-core"], {
+            "BuildAdbLinuxX64", "BuildAdbLinuxArm64", "BuildAdbWindowsX64",
+            "BuildAdbMacX64", "BuildAdbMacArm64",
+        })
+        self.assertEqual(MODULE.CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS["adb-helper-package-support"], {
+            "LinuxPackages", "MacPackages", "MacArmPackages", "WindowsPackages",
+        })
+
+    def test_ci_build_rejects_versioned_support_as_a_raw_adb_core_fallback(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "          name: adb-helper-package-core\n"
+            "          path: ${{ runner.temp }}/adb-helper-package-core\n",
+            "          name: adb-helper-package-support\n"
+            "          path: ${{ runner.temp }}/adb-helper-package-core\n", 1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        issues = MODULE.ci_build_workflow_issues(mutated)
+        self.assertIn("CI job BuildAdbLinuxX64 must download artifact adb-helper-package-core", issues)
+        self.assertIn("CI job BuildAdbLinuxX64 must not download artifact adb-helper-package-support", issues)
+
+    def test_ci_build_rejects_package_core_in_application_packages(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        block = "\n".join(MODULE.workflow_job_blocks(workflow)["LinuxPackages"])
+        replacement = block.replace("name: adb-helper-package-support", "name: adb-helper-package-core", 1)
+        self.assertNotEqual(replacement, block)
+        mutated = workflow.replace(block, replacement, 1)
+        issues = MODULE.ci_build_workflow_issues(mutated)
+        self.assertIn("CI job LinuxPackages must download artifact adb-helper-package-support", issues)
+        self.assertIn("CI job LinuxPackages must not download artifact adb-helper-package-core", issues)
+
+    def test_ci_build_core_upload_requires_the_legal_producer_not_a_comment_spoof(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        upload = (
+            "      - name: Upload immutable ADB package core\n"
+            "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+            "        with:\n"
+            "          name: adb-helper-package-core\n"
+            "          path: prefetch_artifacts/adb-helper-package-core/*\n"
+            "          if-no-files-found: error\n"
+            "          compression-level: 0\n"
+        )
+        self.assertIn(upload, workflow)
+        commented = "\n".join("# " + line for line in upload.splitlines()) + "\n"
+        near_miss = upload.replace("name: adb-helper-package-core\n", "name: adb-helper-package-core-extra\n")
+        for label, replacement in (("missing", ""), ("comment", commented), ("near-miss", near_miss)):
+            with self.subTest(variant=label):
+                mutated = workflow.replace(upload, replacement, 1)
+                self.assertIn(
+                    "CI artifact adb-helper-package-core must be uploaded only by BuildAdbHelperLegalAssets, got []",
+                    MODULE.ci_build_workflow_issues(mutated),
+                )
+
+    def test_ci_build_core_upload_is_secret_neutral_on_all_ordinary_events(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        header = "      - name: Upload immutable ADB package core\n"
+        conditions = [(event, "${{ github.event_name == '" + event + "' }}")
+                      for event in ("pull_request", "push", "workflow_dispatch")]
+        conditions.append(("malformed", "not-a-supported-event-expression"))
+        for event, condition in conditions:
+            with self.subTest(event=event):
+                mutated = workflow.replace(header, header + f"        if: {condition}\n", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertIn(
+                    "CI artifact step BuildAdbHelperLegalAssets uploads adb-helper-package-core must use condition None",
+                    "\n".join(MODULE.ci_build_workflow_issues(mutated)),
+                )
 
     def test_ci_build_rejects_broad_adb_release_closure_upload_conditions(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         trusted = (
             "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
-            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
-            "inputs.qualification-mode == 'release') }}"
+            "(github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') || (github.repository == 'ZEACENT/klogg' && "
+            "github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && "
+            "inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || "
+            "inputs.dependency-mode == 'publish')))) }}"
         )
-        mutated = workflow.replace(
-            f"        if: {trusted}\n",
-            "        if: ${{ github.event_name != 'pull_request' }}\n",
-            1,
-        )
-        self.assertNotEqual(mutated, workflow)
-        self.assertIn(
-            "CI artifact step BuildAdbHelperLegalAssets uploads adb-helper-legal-assets "
-            "must use condition",
-            "\n".join(MODULE.ci_build_workflow_issues(mutated)),
-        )
+        for replacement in (
+            "${{ github.event_name != 'pull_request' }}",
+            trusted.replace("github.repository == 'ZEACENT/klogg' && ", ""),
+            trusted.replace("github.ref_type == 'branch' && ", ""),
+            trusted.replace("inputs.environment-mode == 'off' && ", ""),
+        ):
+            with self.subTest(replacement=replacement):
+                mutated = workflow.replace(f"        if: {trusted}\n", f"        if: {replacement}\n", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertIn(
+                    "CI artifact step BuildAdbHelperLegalAssets uploads adb-helper-legal-assets "
+                    "must use condition",
+                    "\n".join(MODULE.ci_build_workflow_issues(mutated)),
+                )
 
     def test_ci_build_rejects_a_missing_direct_artifact_dependency(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
@@ -2028,10 +2972,10 @@ jobs:
 
     def test_ci_build_gate_must_run_after_failures(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
-        mutated = workflow.replace("    if: always()\n", "    if: success()\n", 1)
+        mutated = workflow.replace(f"    if: {MODULE.CI_BUILD_ORDINARY_GATE_IF}\n", "    if: success()\n", 1)
         self.assertNotEqual(mutated, workflow)
         self.assertIn(
-            "CI gate must run with if: always()",
+            "CI gate must run with if: always() for ordinary events only",
             MODULE.ci_build_workflow_issues(mutated),
         )
 
@@ -2551,8 +3495,8 @@ jobs:
         self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
         post_gate_message = "CI post-gate job DispatchContinuous must directly need only ci-gate"
         wrong_need = workflow.replace(
-            "  DispatchContinuous:\n    name: \"Dispatch Continuous publisher\"\n    needs: [ci-gate]",
-            "  DispatchContinuous:\n    name: \"Dispatch Continuous publisher\"\n    needs: [LinuxPackages]",
+            '  DispatchContinuous:\n    name: "Dispatch Continuous publisher"\n    needs: [ci-gate]',
+            '  DispatchContinuous:\n    name: "Dispatch Continuous publisher"\n    needs: [LinuxPackages]',
             1,
         )
         self.assertIn(post_gate_message, MODULE.ci_build_workflow_issues(wrong_need))
@@ -2678,16 +3622,12 @@ jobs:
         )
         self.assertIn(message, MODULE.ci_build_workflow_issues(comment_spoof))
 
-    def test_ci_build_requires_at_least_one_buildkit_cache_exporter(self):
+    def test_ci_build_has_no_buildkit_cache_exports_after_locked_environment_consumption(self):
+        # Ordinary CI consumes locked GHCR environments; the per-leg BuildKit
+        # layer caches and their push-only export guard are gone for good.
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
-        mutated = "\n".join(
-            line for line in workflow.splitlines() if "cache-to:" not in line
-        )
-        self.assertNotEqual(mutated, workflow)
-        self.assertIn(
-            "BuildKit cache exports must run only on default-branch pushes",
-            MODULE.ci_build_workflow_issues(mutated),
-        )
+        self.assertNotIn("cache-to:", workflow)
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
 
     def test_buildkit_cache_export_condition_cannot_admit_pull_requests(self):
         message = "BuildKit cache exports must run only on default-branch pushes"
@@ -3076,7 +4016,7 @@ jobs:
         good = secure_codeql_workflow()
         mutations = (
             (
-                "      - uses: ./.github/actions/agent-setup\n",
+                "      - uses: ./.github/actions/prefetch-cpm-cache\n",
                 "CodeQL manual build must restore the shared dependency closure",
             ),
             (
@@ -3486,9 +4426,21 @@ steps:
         )
 
     def test_static_analysis_installs_optional_dependency_build_tools(self):
+        # The locked noble-qt693-analysis environment carries the optional
+        # dependency build tools; the consumer workflow must not reinstall
+        # them from floating host package sources.
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
-        self.assertIn("libcurl4-openssl-dev", workflow)
-        self.assertIn("ragel", workflow)
+        self.assertNotIn("apt-get", workflow)
+        inputs = json.loads(
+            (ROOT / "ci" / "environments" / "inputs" / "noble-qt693-analysis.json").read_text()
+        )
+        packages = {
+            package["package"]
+            for bundle in inputs["apt_bundles"]
+            for package in bundle["manifest"]["packages"]
+        }
+        self.assertIn("libcurl4-openssl-dev", packages)
+        self.assertIn("ragel", packages)
 
     def test_static_analysis_full_audit_and_changed_events_do_not_cancel_each_other(self):
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
@@ -3930,7 +4882,7 @@ class ReleaseDownloadPublicationLintTest(unittest.TestCase):
         "release body must be rendered from the verified publication manifest"
     )
     INVENTORY_MESSAGE = (
-        "release publication must upload exactly 23 consolidated assets"
+        "release publication must upload exactly 25 consolidated assets"
     )
     CANDIDATE_MESSAGE = "public promoted release name must not contain Candidate"
     CRITICAL_MESSAGE = (
@@ -3981,7 +4933,7 @@ ${{ env.CHANGELOG }}
                 f"{indent}    set -euo pipefail\n"
                 f"{indent}    python3 scripts/verify_source_publication_manifest.py --manifest packages-publication/klogg-source-publication-manifest.json --assets-root packages-publication\n"
                 f"{indent}    asset_count=\"$(find packages-publication -maxdepth 1 -type f | wc -l)\"\n"
-                f"{indent}    test \"$asset_count\" -eq 23\n"
+                f"{indent}    test \"$asset_count\" -eq 25\n"
                 f"{indent}    python3 scripts/render_release_downloads.py --manifest packages-publication/klogg-source-publication-manifest.json --assets-root packages-publication --changelog-file release-changelog.txt --output release-body.md\n\n"
             )
             workflow = workflow[:create] + render + workflow[create:]
@@ -4260,8 +5212,8 @@ jobs:
                     self.BODY_MESSAGE, self.issues(channel, without_renderer)
                 )
                 without_exact_count = projected.replace(
-                    '    test "$asset_count" -eq 23',
-                    '    test "$asset_count" -ge 23',
+                    '    test "$asset_count" -eq 25',
+                    '    test "$asset_count" -ge 25',
                     1,
                 )
                 self.assertIn(

@@ -126,8 +126,8 @@ memory allocator on MacOS. Klogg crashes with segmentation fault right at the st
 on MacOS the default system memory allocator is used.
 
 Tweaking encoding conversion algorithm is a big change, so several next CI releases might be less
-stable than usual. Please report any bugs and crashes either on [GitHub](https://github.com/ZEACENT/klogg/issues)
-or in [Discord](https://discord.gg/DruNyQftzB).
+stable than usual. Please report bugs and crashes on [GitHub](https://github.com/ZEACENT/klogg/issues),
+this project's only communication channel.
 
 
 

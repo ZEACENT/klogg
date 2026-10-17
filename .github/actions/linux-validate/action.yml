@@ -1,0 +1,162 @@
+name: "Validate a prepared Linux environment"
+description: "Run a build profile using an already identity-verified local image and prepared artifacts."
+inputs:
+  family:
+    description: Locked environment family with an existing fixed local tag
+    required: true
+  profile:
+    description: Build qualification profile declared for the family
+    required: true
+runs:
+  using: "composite"
+  steps:
+    # The caller supplies a verified local image, CPM cache, helper/tool artifacts,
+    # and KLOGG_VERSION. Acquisition and artifact provenance stay with the caller.
+    - name: Configure Linux qualification profile
+      shell: bash
+      env:
+        KLOGG_INPUT_FAMILY: ${{ inputs.family }}
+        KLOGG_INPUT_PROFILE: ${{ inputs.profile }}
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import json
+        import os
+        import pathlib
+        import subprocess
+        import sys
+
+        sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+        from ci_environment_profiles import format_environment
+        from consume_ci_environment import LOCAL_TAGS
+        from validate_ci_container_suffix import validate_container_suffix
+
+        family = os.environ["KLOGG_INPUT_FAMILY"]
+        profile = os.environ["KLOGG_INPUT_PROFILE"]
+        if family not in LOCAL_TAGS:
+            raise SystemExit("family has no prepared local build image; analysis roles are not supported")
+        result = subprocess.run(
+            [sys.executable, "scripts/ci_environment_profiles.py", "profile-env",
+             "--family", family, "--profile", profile, "--workspace", "/usr/local", "--format", "json"],
+            check=True, capture_output=True, text=True,
+        )
+        environment = json.loads(result.stdout)
+        if environment["KLOGG_ENVIRONMENT_ROLE"] != "build":
+            raise SystemExit("linux-validate accepts build profiles only")
+        for key in ("ASAN_OPTIONS", "LSAN_OPTIONS", "UBSAN_OPTIONS", "TSAN_OPTIONS"):
+            environment.setdefault(key, "")
+        prefix = "zeacent/klogg"
+        image = LOCAL_TAGS[family]
+        if not image.startswith(prefix):
+            raise SystemExit("unexpected local build image prefix")
+        environment["KLOGG_CI_IMAGE_PREFIX"] = prefix
+        environment["KLOGG_CONTAINER_SUFFIX"] = validate_container_suffix(image[len(prefix):])
+        # Profile paths are in-container paths. Docker composites need the HOST
+        # checkout as their bind source; never mount the host's /usr/local here.
+        workspace = os.environ["GITHUB_WORKSPACE"]
+        if not pathlib.Path(workspace).is_absolute() or not pathlib.Path(workspace).is_dir():
+            raise SystemExit("GITHUB_WORKSPACE must be an existing absolute host checkout")
+        environment["KLOGG_WORKSPACE"] = workspace
+        rendered = format_environment(environment, "github-env")
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
+            stream.write(rendered)
+        PY
+
+    - name: Require prepared local image
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker image inspect "$KLOGG_CI_IMAGE_PREFIX$KLOGG_CONTAINER_SUFFIX" >/dev/null
+
+    - name: Verify TSan image prerequisites
+      if: ${{ env.KLOGG_SANITIZER == 'thread' }}
+      shell: bash
+      run: |
+        docker run --pull=never --rm "$KLOGG_CI_IMAGE_PREFIX$KLOGG_CONTAINER_SUFFIX" /bin/bash -c '
+          set -euo pipefail
+          test -x /usr/bin/llvm-symbolizer-14
+          test -f /opt/qt5-tsan/plugins/platforms/libqoffscreen.so
+          llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep "__tsan_acquire" >/dev/null
+          llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep "__tsan_release" >/dev/null
+        '
+
+    - name: Verify durable TSan Qt corresponding sources
+      if: ${{ env.KLOGG_SANITIZER == 'thread' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker run --pull=never --network=none --rm \
+          -v "$KLOGG_WORKSPACE:/usr/local:ro" \
+          "$KLOGG_CI_IMAGE_PREFIX$KLOGG_CONTAINER_SUFFIX" \
+          python3 /usr/local/scripts/verify_tsan_qt_sources.py \
+          --sources /usr/share/klogg-ci/qt-sources --repo-root /usr/local --require-locked
+
+    - uses: ./.github/actions/docker-build
+      with:
+        container-suffix: ${{ env.KLOGG_CONTAINER_SUFFIX }}
+
+    - name: Verify ASan-instrumented test binaries
+      if: ${{ env.KLOGG_SANITIZER == 'address' }}
+      shell: bash
+      run: |
+        docker run --pull=never --rm \
+          --env KLOGG_BUILD_ROOT \
+          -v "$KLOGG_WORKSPACE:/usr/local" \
+          "$KLOGG_CI_IMAGE_PREFIX$KLOGG_CONTAINER_SUFFIX" \
+          /bin/bash -c '
+            set -euo pipefail
+            for bin in klogg_tests klogg_itests; do
+              f="/usr/local/$KLOGG_BUILD_ROOT/output/$bin"
+              test -x "$f" || { echo "test binary missing: $bin"; exit 1; }
+              # Drain nm fully: grep -q can cause a false SIGPIPE with pipefail.
+              nm "$f" 2>/dev/null | grep "asan_init" >/dev/null || {
+                echo "ERROR: $bin missing ASan instrumentation (no asan_init symbol)"; exit 1; }
+            done
+          '
+
+    - name: Verify UBSan-instrumented test binaries
+      if: ${{ env.KLOGG_SANITIZER == 'undefined' }}
+      shell: bash
+      run: |
+        docker run --pull=never --rm \
+          --env KLOGG_BUILD_ROOT \
+          -v "$KLOGG_WORKSPACE:/usr/local" \
+          "$KLOGG_CI_IMAGE_PREFIX$KLOGG_CONTAINER_SUFFIX" \
+          /bin/bash -c '
+            set -euo pipefail
+            for bin in klogg_tests klogg_itests; do
+              f="/usr/local/$KLOGG_BUILD_ROOT/output/$bin"
+              test -x "$f" || { echo "test binary missing: $bin"; exit 1; }
+              # Drain nm fully: grep -q can cause a false SIGPIPE with pipefail.
+              nm "$f" 2>/dev/null | grep "ubsan_handle" >/dev/null || {
+                echo "ERROR: $bin missing UBSan instrumentation (no ubsan_handle symbol)"; exit 1; }
+            done
+          '
+
+    - name: Verify TSan Qt runtime provenance
+      if: ${{ env.KLOGG_SANITIZER == 'thread' }}
+      shell: bash
+      run: |
+        docker run --pull=never --rm \
+          --env TSAN_OPTIONS \
+          -v "$KLOGG_WORKSPACE:/usr/local" \
+          "$KLOGG_CI_IMAGE_PREFIX$KLOGG_CONTAINER_SUFFIX" \
+          /usr/local/scripts/verify_tsan_qt_runtime.sh \
+          "/usr/local/$KLOGG_BUILD_ROOT/output/klogg_itests" \
+          /opt/qt5-tsan
+
+    - uses: ./.github/actions/docker-run-tests
+      with:
+        container-suffix: ${{ env.KLOGG_CONTAINER_SUFFIX }}
+
+    - uses: ./.github/actions/docker-package
+      if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+      with:
+        os: ${{ env.KLOGG_CONFIG_OS }}
+        container-suffix: ${{ env.KLOGG_CONTAINER_SUFFIX }}
+        cpack-generator: ${{ env.KLOGG_CPACK_GEN }}
+        package-suffix: ${{ env.KLOGG_PACKAGE_SUFFIX }}
+        artifact-id: ${{ env.KLOGG_ARTIFACTS_ID }}
+        collect-symbols: "true"
+        check-container: ${{ env.KLOGG_CHECK_CONTAINER }}
+        check-command: ${{ env.KLOGG_CHECK_COMMAND }}

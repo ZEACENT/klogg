@@ -6,12 +6,40 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      source_metadata_probe:
+        description: 'Run one read-only source metadata diagnostic, never acquire payloads'
+        required: false
+        type: boolean
+        default: false
+      expected_source_sha:
+        description: 'Exact dispatch source SHA required by the diagnostic'
+        required: false
+        type: string
+        default: ''
+      prior_source_sha:
+        description: 'Original ancestor source of the raw source artifact'
+        required: false
+        type: string
+        default: ''
+      prior_source_run_id:
+        description: 'Original raw source artifact workflow run'
+        required: false
+        type: string
+        default: ''
+      prior_source_run_attempt:
+        description: 'Original raw source artifact workflow attempt'
+        required: false
+        type: string
+        default: ''
+      prior_source_artifact_id:
+        description: 'Exact raw source artifact ID; metadata only, no ZIP download'
+        required: false
+        type: string
+        default: ''
 
-# Cheap, sub-minute lint job that gates obvious cross-platform pitfalls
-# before the heavyweight Windows / macOS / Linux build matrix runs.  Targets
-# the specific failure patterns that have actually slipped past macOS / Linux
-# CI in the past (see scripts/lint_platform_fragile.py for the rationale and
-# docs/PORTABILITY.md for the broader guidance).
+# Preserve the complete secret-neutral quality gate for PR, push and manual events.
+# The optional read-only metadata diagnostic stays outside every build/publish DAG.
 jobs:
   platform-fragile:
     name: platform-fragile patterns
@@ -25,3 +53,42 @@ jobs:
           python-version: '3.8'
       - name: Run complete fast CI quality gate
         run: python3 scripts/run_ci_quality.py
+
+  source-metadata-probe:
+    name: Source artifact metadata only
+    needs: [platform-fragile]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'ZEACENT/klogg' &&
+      inputs.source_metadata_probe &&
+      inputs.expected_source_sha == github.sha &&
+      github.run_attempt == '1' &&
+      startsWith(github.ref, 'refs/heads/') &&
+      github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Authenticate original source metadata only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLOGG_PROBE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          PRIOR_SOURCE_SHA: ${{ inputs.prior_source_sha }}
+          PRIOR_SOURCE_RUN_ID: ${{ inputs.prior_source_run_id }}
+          PRIOR_SOURCE_RUN_ATTEMPT: ${{ inputs.prior_source_run_attempt }}
+          PRIOR_SOURCE_ARTIFACT_ID: ${{ inputs.prior_source_artifact_id }}
+        run: |
+          python3 scripts/probe_ci_environment_source.py \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --prior-sha "$PRIOR_SOURCE_SHA" \
+            --run-id "$PRIOR_SOURCE_RUN_ID" \
+            --run-attempt "$PRIOR_SOURCE_RUN_ATTEMPT" \
+            --artifact-id "$PRIOR_SOURCE_ARTIFACT_ID"

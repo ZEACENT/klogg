@@ -44,6 +44,7 @@
 
 #include <QCoreApplication>
 #include <QString>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <cassert>
@@ -61,6 +62,12 @@
 
 namespace {
 constexpr int kSearchStatusPresentationIntervalMs = 100;
+
+bool traceSearchTerminals()
+{
+    static const bool enabled = qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_TERMINALS" );
+    return enabled;
+}
 }
 
 namespace {
@@ -693,15 +700,26 @@ void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress
                                               quint64 generation )
 {
     if ( shuttingDown_ ) {
+        if ( progress == 100 && traceSearchTerminals() ) {
+            LOG_WARNING << "Search terminal discarded during filtered-data shutdown generation "
+                     << generation;
+        }
         return;
     }
 
     assert( nbMatches >= 0_lcount );
 
     if ( generation != currentSearchGeneration() ) {
+        if ( progress == 100 && traceSearchTerminals() ) {
+            LOG_WARNING << "Search terminal discarded by filtered-data generation " << generation
+                     << " current generation " << currentSearchGeneration();
+        }
         return;
     }
 
+    if ( progress == 100 && traceSearchTerminals() ) {
+        LOG_WARNING << "Search terminal entered filtered data generation " << generation;
+    }
     const auto searchResults = workerThread_.getSearchResults();
     const bool resultsChanged = !searchResults.newMatches.isEmpty();
 
@@ -785,11 +803,19 @@ void LogFilteredData::publishTerminal( LinesCount nbMatches, LineNumber initialL
 {
     cancelPendingPublications();
     if ( shuttingDown_ || generation != currentSearchGeneration() ) {
+        if ( traceSearchTerminals() ) {
+            LOG_WARNING << "Search terminal publication rejected generation " << generation
+                     << " current generation " << currentSearchGeneration()
+                     << " shutting down " << shuttingDown_;
+        }
         return;
     }
 
     Q_EMIT searchResultsChanged( nbMatches, initialLine, true, generation );
     Q_EMIT searchProgressed( nbMatches, 100, initialLine, generation );
+    if ( traceSearchTerminals() ) {
+        LOG_WARNING << "Search terminal published generation " << generation;
+    }
 }
 
 LineNumber LogFilteredData::findLogDataLine( LineNumber index ) const

@@ -11,7 +11,7 @@ import re
 import sys
 import tarfile
 
-from source_publication_identity import normalize_base_url, source_asset_url
+from source_publication_identity import normalize_base_url, published_source_name, source_asset_url
 
 
 class PublicationError(RuntimeError):
@@ -613,6 +613,22 @@ EVIDENCE_KINDS = {
     "signing",
     "notarization",
 }
+OVERLAY_ASSETS = {
+    "adb-helper": {"source-offer": "ADB-HELPER-SOURCE-OFFER.txt"},
+    "ios-native": {
+        "source-offer": "ios-native-source-offer.txt",
+        "replacement-guide": "ios-native-lgpl-replacement.txt",
+    },
+}
+OVERLAY_DISPLAY_NAMES = {
+    "adb-helper": "ADB helper overlay receipt",
+    "ios-native": "iOS native overlay receipt",
+}
+
+
+def overlay_receipt_name(component: str) -> str:
+    return f"{component}-overlay-receipt.json"
+
 SUPPORT_DISPLAY_NAMES = {
     "adb-helper-licenses.tar.gz": "ADB helper licenses",
     "adb-helper-notices.tar.gz": "ADB helper notices",
@@ -983,17 +999,93 @@ def verify_sha256sums(
             raise PublicationError(f"checksum hash mismatch: {name}")
 
 
+def verify_component_overlay(
+    component: str,
+    overlay: object,
+    source_set_hash: str,
+    version: str,
+    base_url: str,
+    archive_hash: str,
+    assets_root: pathlib.Path,
+) -> list[dict]:
+    label = f"{component} overlay"
+    receipt = require_fields(
+        overlay,
+        {
+            "schema_version", "receipt_kind", "component", "version", "base_url",
+            "source_set_receipt_sha256", "assets", "distribution",
+        },
+        f"{label} receipt",
+    )
+    require_schema_version(receipt["schema_version"], 1, f"{label} receipt")
+    if receipt["receipt_kind"] != "component-source-overlay" or receipt["component"] != component:
+        raise PublicationError(f"invalid {label} receipt identity")
+    if receipt["version"] != version or receipt["base_url"] != base_url:
+        raise PublicationError(f"{label} version/repository mismatch")
+    if receipt["source_set_receipt_sha256"] != source_set_hash:
+        raise PublicationError(f"{label} source-set receipt binding mismatch")
+    distribution = require_fields(
+        receipt["distribution"], {"package_required", "release_required"},
+        f"{label} distribution",
+    )
+    for field in ("package_required", "release_required"):
+        require_boolean(distribution[field], True, f"{label} {field}")
+    expected_assets = OVERLAY_ASSETS[component]
+    assets = receipt["assets"]
+    if not isinstance(assets, list) or len(assets) != len(expected_assets):
+        raise PublicationError(f"{label} asset coverage mismatch")
+    records: dict[str, dict] = {}
+    for offset, asset in enumerate(assets):
+        item = require_fields(
+            asset, {"kind", "file_name", "sha256"}, f"{label} asset {offset}"
+        )
+        kind = item["kind"]
+        if not isinstance(kind, str) or kind in records or expected_assets.get(kind) != item["file_name"]:
+            raise PublicationError(f"invalid {label} asset identity")
+        path = regular_asset(assets_root, item["file_name"], f"{label} {kind}")
+        require_hash(path, item["sha256"], f"{label} {kind}")
+        records[kind] = item
+    if set(records) != set(expected_assets):
+        raise PublicationError(f"{label} asset coverage mismatch")
+
+    published = published_source_name(version, component, archive_hash)
+    offer_path = assets_root / records["source-offer"]["file_name"]
+    expected_lines = {
+        "Published archive": published,
+        "SHA-256": archive_hash,
+        "Versioned releases page": f"{base_url}/releases",
+        "Rolling continuous release page": f"{base_url}/releases/tag/continuous",
+    }
+    try:
+        lines = offer_path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise PublicationError(f"invalid {label} source offer encoding") from error
+    for field, value in expected_lines.items():
+        if [line for line in lines if line.startswith(f"{field}: ")] != [f"{field}: {value}"]:
+            raise PublicationError(f"{label} source offer {field} mismatch")
+    if component == "ios-native":
+        guide_path = assets_root / records["replacement-guide"]["file_name"]
+        try:
+            guide = guide_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise PublicationError("invalid iOS overlay replacement guide encoding") from error
+        if f"from {published} and replace" not in guide:
+            raise PublicationError("iOS overlay replacement guide source archive mismatch")
+    return [records[kind] for kind in expected_assets]
+
+
 def verify_component_v2(
     component: str,
     record: object,
     assets_root: pathlib.Path,
     tag: str,
+    version: str,
     base_url: str,
     support_records: dict[str, dict],
 ) -> tuple[str, set[str]]:
     component_record = require_fields(
         record,
-        {"display_name", "source_set_receipt", "source_archive"},
+        {"display_name", "source_set_receipt", "source_archive", "overlay_receipt"},
         f"source component {component}",
     )
     expected_source_display, expected_receipt_display = COMPONENT_DISPLAY_NAMES[component]
@@ -1063,6 +1155,8 @@ def verify_component_v2(
             raise PublicationError(f"unsafe source support path {component}:{offset}")
         if len(relative.parts) != 1:
             continue
+        if relative.name in OVERLAY_ASSETS[component].values():
+            raise PublicationError(f"{component} overlay asset cannot be owned by core source set")
         support_record = support_records.get(relative.name)
         if support_record is None:
             raise PublicationError(f"missing manifest source support asset: {relative.name}")
@@ -1071,7 +1165,30 @@ def verify_component_v2(
         if support_record["sha256"] != digest:
             raise PublicationError(f"support manifest hash mismatch: {relative.name}")
         referenced_support.add(relative.name)
-    return receipt_hash, {receipt_path.name, archive_path.name, *referenced_support}
+    referenced_assets = {receipt_path.name, archive_path.name, *referenced_support}
+    label = f"{component} overlay receipt"
+    overlay_binding = require_fields(
+        component_record["overlay_receipt"],
+        {"display_name", "file_name", "sha256"}, f"{label} binding",
+    )
+    if (
+        overlay_binding["display_name"] != OVERLAY_DISPLAY_NAMES[component]
+        or overlay_binding["file_name"] != overlay_receipt_name(component)
+    ):
+        raise PublicationError(f"invalid {label} publication identity")
+    overlay_path = regular_asset(assets_root, overlay_binding["file_name"], label)
+    require_hash(overlay_path, overlay_binding["sha256"], label)
+    overlay_assets = verify_component_overlay(
+        component, read_json(overlay_path, label), receipt_hash, version,
+        base_url, archive_hash, assets_root,
+    )
+    for item in overlay_assets:
+        support_record = support_records.get(item["file_name"])
+        if support_record is None or support_record["sha256"] != item["sha256"]:
+            raise PublicationError(f"{component} overlay support manifest hash mismatch")
+        referenced_assets.add(item["file_name"])
+    referenced_assets.add(overlay_path.name)
+    return receipt_hash, referenced_assets
 
 
 def verify_promotion_lineage(
@@ -1216,7 +1333,7 @@ def verify_manifest_v2(
         raise PublicationError("publication source component coverage mismatch")
     component_results = {
         component: verify_component_v2(
-            component, record, assets_root, expected_tag, base_url, support_records
+            component, record, assets_root, expected_tag, expected_version, base_url, support_records
         )
         for component, record in components.items()
     }

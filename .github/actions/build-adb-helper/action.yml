@@ -7,8 +7,14 @@ inputs:
   source-root:
     description: Extracted and verified source closure
     required: true
+  package-core-root:
+    description: Version-independent package-required legal core without a source archive or overlay
+    required: true
   package-support-root:
-    description: Verified package-required legal, SBOM, manifest, receipt, and source-offer assets
+    description: Fresh output for package legal assets and the current source-offer overlay
+    required: true
+  version:
+    description: Current application release version from the original legal producer
     required: true
   artifact-root:
     description: Output directory for the helper closure and receipt
@@ -67,7 +73,7 @@ runs:
               --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
               --target "${{ inputs.target }}" \
               --artifact-root "${{ inputs.artifact-root }}" \
-              --package-support-root "${{ inputs.package-support-root }}"
+              --package-support-root "${{ inputs.package-core-root }}"
           '
 
     - name: Build native macOS helper from prefetched sources
@@ -85,7 +91,7 @@ runs:
           --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
           --target "${{ inputs.target }}" \
           --artifact-root "${{ inputs.artifact-root }}" \
-          --package-support-root "${{ inputs.package-support-root }}"
+          --package-support-root "${{ inputs.package-core-root }}"
 
     - name: Build native Windows helper from prefetched sources
       if: ${{ inputs.target == 'windows-x86_64' }}
@@ -103,7 +109,27 @@ runs:
           --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
           --target "${{ inputs.target }}" \
           --artifact-root "${{ inputs.artifact-root }}" \
-          --package-support-root "${{ inputs.package-support-root }}"
+          --package-support-root "${{ inputs.package-core-root }}"
+
+    - name: Assemble current ADB package overlay from pinned core
+      shell: bash
+      run: |
+        set -euo pipefail
+        core_root="${{ inputs.package-core-root }}"
+        receipt="${{ inputs.artifact-root }}/receipt.json"
+        receipt_sha256() {
+          python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$1"
+        }
+        python3 scripts/build_adb_helper_legal_assets.py \
+          --package-overlay-only \
+          --lock packaging/adb/adb-helper.lock.json \
+          --core-root "$core_root" \
+          --build-receipt "$receipt" \
+          --source-set-sha256 "$(receipt_sha256 "$core_root/adb-helper-source-set-receipt.json")" \
+          --build-receipt-sha256 "$(receipt_sha256 "$receipt")" \
+          --version "${{ inputs.version }}" \
+          --base-url "https://github.com/${GITHUB_REPOSITORY}" \
+          --output "${{ inputs.package-support-root }}"
 
     - name: Smoke and verify source-built ADB artifact
       shell: bash

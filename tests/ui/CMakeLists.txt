@@ -15,7 +15,7 @@ add_executable(klogg_itests ${UI_TEST_SOURCES})
 
 target_link_libraries(klogg_itests klogg_ui klogg_utils Catch2 Qt${QT_VERSION_MAJOR}::Test test_utils test_crash_trace)
 set_target_properties(klogg_itests PROPERTIES AUTOMOC ON)
-klogg_configure_test_target(klogg_itests)
+klogg_configure_test_target(klogg_itests KEEP_DEBUG_SYMBOLS)
 
 klogg_add_runtime_test(klogg_itests klogg_itests)
 if(UNIX)

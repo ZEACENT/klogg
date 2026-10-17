@@ -83,6 +83,11 @@ def package_support_receipt_assets(lock: dict, root: pathlib.Path) -> list[dict]
         ):
             raise RuntimeError(f"invalid ADB package-support distribution: {kind}")
         seen_kinds.add(kind)
+        # Overlay assets embed the application version and are bound by the
+        # packaged overlay receipt instead; embedding them here would make the
+        # binary build contract change on every version bump.
+        if asset.get("ownership") == "overlay":
+            continue
         if distribution["package_required"] is not True:
             continue
 

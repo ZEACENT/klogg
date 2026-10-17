@@ -245,6 +245,17 @@ waitForOverviewSearch( SafeQSignalSpy& searchProgressSpy,
 
         const auto remaining = timeoutMs - static_cast<int>( timer.elapsed() );
         if ( remaining <= 0 ) {
+            WARN( "Overview terminal search timed out: expected generation "
+                  << expectedGeneration << ", spy valid " << searchProgressSpy.isValid()
+                  << ", signals " << searchProgressSpy.count() );
+            const auto first = searchProgressSpy.count() > 8 ? searchProgressSpy.count() - 8 : 0;
+            for ( auto index = first; index < searchProgressSpy.count(); ++index ) {
+                const auto args = searchProgressSpy.at( index );
+                if ( args.size() >= 4 ) {
+                    WARN( "Observed search progress " << args.at( 1 ).toInt()
+                          << " generation " << args.at( 3 ).toULongLong() );
+                }
+            }
             return std::nullopt;
         }
         searchProgressSpy.wait( qMin( 100, remaining ) );
@@ -311,6 +322,8 @@ class OverviewFilteredDataFixture {
             REQUIRE( file_.open() );
             REQUIRE( file_.write( contents ) == contents.size() );
             REQUIRE( file_.flush() );
+            file_.close();
+            REQUIRE_FALSE( file_.isOpen() );
 
             auto source = std::make_unique<LogData>();
             SafeQSignalSpy readySpy{ source.get(), &LogData::loadingFinished };

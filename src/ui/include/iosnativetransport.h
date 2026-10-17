@@ -26,10 +26,9 @@ class IosNativeTransport final : public LiveSourceTransport {
     Q_OBJECT
 
 public:
-    using QueuedTask = std::function<void()>;
-    // Dispatchers must enqueue and return; inline execution can deadlock the
-    // callback gate. The bool reports whether ownership of the task was accepted.
-    using QueuedDispatcher = std::function<bool( QObject&, QueuedTask )>;
+    // Dispatchers enqueue the named no-argument wakeup and return; inline
+    // execution can deadlock the gate. Callback payloads stay in its mailbox.
+    using QueuedDispatcher = std::function<bool( QObject&, const char* )>;
 
     IosNativeTransport( const IosNativeStreamWorkerFactory& workerFactory,
                         IosNativeStreamConfig config, QObject* parent = nullptr );
@@ -50,6 +49,9 @@ public:
 
     std::optional<LiveSourceError> lastStructuredError() const override;
     void serviceShutdown();
+
+private Q_SLOTS:
+    void deliverPostedCallback();
 
 private:
     struct CallbackGate;

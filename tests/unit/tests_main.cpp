@@ -26,6 +26,7 @@
 #include <logger.h>
 
 #include "capturestore.h"
+#include "capture_child_observation.h"
 #include "configuration.h"
 #include "crash_trace.h"
 #include <persistentinfo.h>
@@ -57,8 +58,15 @@ void configureTestTempDir()
 
 int main( int argc, char* argv[] )
 {
+    using klogg::testing::CaptureChildPhase;
+    using klogg::testing::recordCaptureChildPhase;
+    recordCaptureChildPhase( CaptureChildPhase::MainEnter );
     QApplication a( argc, argv );
+    recordCaptureChildPhase( CaptureChildPhase::ApplicationReady );
 
+#ifdef _WIN32
+    qputenv( "KLOGG_TEST_TRACE_SEARCH_TERMINALS", "1" );
+#endif
     klogg::testing::installFirstChanceCrashTrace();
     logging::enableLogging( true, logging::LogLevel::Warning );
     configureTestTempDir();
@@ -67,6 +75,7 @@ int main( int argc, char* argv[] )
     Q_UNUSED( config );
     configureProductLikeRegexpEngine( config );
 
+    recordCaptureChildPhase( CaptureChildPhase::CatchDispatch );
     const auto result = Catch::Session().run( argc, argv );
     CaptureStore::shutdownBackgroundWorkers();
     return result;

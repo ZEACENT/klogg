@@ -1,110 +1,103 @@
-# Introduction
+# Contributing to klogg
 
-Thank you for considering contributing to Klogg.
-It's people like you that make Klogg such a great tool.
+Thank you for helping make logs easier to understand. Useful contributions
+include bug reports, documentation, accessibility and usability improvements,
+translations, reproducible performance investigations, and code.
 
-Following these guidelines helps to communicate that you respect 
-the time of the developers managing and developing this open source project.
-In return, they should reciprocate that respect in addressing your issue,
-assessing changes, and helping you finalize your pull requests.
+[Documentation hub](docs/README.md) · [Build guide](docs/BUILD.md) ·
+[Code of Conduct](CODE_OF_CONDUCT.md)
 
-There are many ways to contribute, from writing tutorials or blog posts,
-improving the documentation, submitting bug reports and feature requests
-to writing code which can be incorporated into Klogg itself.
+## Before you start
 
-# Ground Rules
+This is the [ZEACENT fork](https://github.com/ZEACENT/klogg), built on
+[variar/klogg](https://github.com/variar/klogg). **GitHub is this project's only
+communication channel.** Check that your report or change belongs to the version
+you are using.
 
- * Keep pull requests and issues as small as possible, preferably one new feature or bug description per request.
- * Ensure cross-platform compatibility for every code change: Windows, Mac, Ubuntu Linux.
- * Create issues for any major changes and enhancements that you wish to make. Discuss things transparently and get community feedback.
- * Be welcoming to newcomers and encourage diverse new contributors from all backgrounds.
-  See the [Code of Conduct](CODE_OF_CONDUCT.md).
+- Keep each issue or pull request focused on one problem or coherent change.
+- Discuss significant new features or architectural changes in an issue before
+  investing in a large implementation.
+- Consider Windows, Linux, and macOS, as well as the relevant file, folder-search,
+  and live-device scenarios. Their shared UI does not make every behavior identical.
+- Be constructive and welcoming. Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-# How to suggest a feature or enhancement
+## Report a bug
 
-Klogg is intended to be a log *viewing* tool with additional features that help
-navigate through text files, extract information and reconstruct chain of events.
+Use [GitHub Issues](https://github.com/ZEACENT/klogg/issues) for ordinary bug
+reports. Include:
 
-If you find yourself wishing for a feature that doesn't exist in Klogg,
-you are probably not alone. There are bound to be others out there with similar needs.
-Many of the features that Klogg has today have been added because our users saw the need.
-Open an issue on GitHub which describes the feature you would like to see,
-why you need it, and how it should work.
+1. The klogg version and package source, from the About dialog or release page.
+2. Operating system, processor architecture, and relevant display or device details.
+3. The source type: single file, folder search, Android capture, or macOS iOS capture.
+4. Steps to reproduce, expected behavior, and actual behavior.
+5. A small synthetic or sanitized example, and screenshots or diagnostics when useful.
 
-# How to report a bug
+Do not upload private log content, credentials, personal device identifiers, or
+customer data. Large-file problems are easier to investigate with a reproducible
+data generator and exact search pattern than with an unexplained timing number.
 
-If you find a security vulnerability, do **NOT** open an issue. 
+**Security concerns are different:** read [SECURITY.md](SECURITY.md). Do not post
+sensitive vulnerability details in a public issue or assume an upstream contact
+maintains this fork.
 
-In order to determine whether you are dealing with a security issue, ask yourself these two questions:
- * Can I access something that's not mine, or something I shouldn't have access to?
- * Can I disable something for other people?
+## Suggest an improvement
 
- If the answer to either of those two questions are "yes", then you're probably dealing with a security issue.
- Note that even if you answer "no" to both questions, you may still be dealing with a security issue,
- so if you're unsure, just email us at klogg@filimonov.dev.
+Describe the workflow and the outcome you need, not only a proposed control.
+Explain which source types it affects and what you do today as a workaround.
+The [backlog](docs/BACKLOG.md) and
+[panel specification](docs/SPEC_CHART_AND_FILTERS_PANEL.md) are planning records,
+not commitments or lists of already shipped features.
 
-When filing an issue, make sure to answer these five questions:
+## Improve the documentation
 
-1. What version of Klogg are you using (version is listed in window title and about dialog)?
-1. What operating system are you using?
-1. What did you do?
-1. What did you expect to see?
-1. What did you see instead?
+The [documentation hub](docs/README.md) describes each document's role:
 
-General questions do not need to follow this checklist. 
-Feel free to ask anything about using, developing or distributing Klogg. Such questions often
-help to improve project documentation.
+- `README.md` introduces the product and points readers to downloads and guides.
+- `DOCUMENTATION.md` is the canonical user guide and is also embedded in Help.
+  Keep essential instructions self-contained and compatible with the maddy HTML renderer.
+- `docs/BUILD.md` owns build and test instructions.
+- `docs/DEPENDENCIES.md` summarizes pins; CMake and lockfiles remain authoritative.
+- Architecture documents explain current behavior; proposals and historical
+  investigations must be clearly labeled as such.
 
-# Documentation
+Use English for repository prose. Application translations belong in
+`src/app/i18n/`. Verify menu labels, shortcuts, platform limitations, links, and
+heading anchors. Use real screenshots with non-sensitive content, and identify
+older images instead of presenting them as current builds. Preserve benchmark
+data and its provenance; do not turn one controlled result into a universal claim.
 
-Klogg has become a quite complex tool with many features. Any time spent fixing
-typos or clarifying sections in the documentation is greatly appreciated.
-Features that need better documentation can be found in this 
-[list](https://github.com/ZEACENT/klogg/issues?q=is%3Aissue+label%3A%22status%3A+need+documentation%22+). 
-Both open and closed issues marked with label `status: need documentation`
-require some work with documentation.
+## Contribute code
 
-# How to contribute code
+1. Fork the repository and create a branch for your change.
+2. Follow the [build guide](docs/BUILD.md) and existing `.clang-format` style.
+3. Add or update tests that demonstrate the intended behavior. See
+   [portability guidance](docs/PORTABILITY.md) for cross-platform and asynchronous
+   contracts. Prefer observable completion over timing-dependent sleeps.
+4. Run the relevant tests and the fast quality gate:
 
-Unsure where to begin contributing to Klogg? 
-You can start by looking through these issues:
-- [Good first issues](https://github.com/ZEACENT/klogg/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22+sort%3Acomments-desc) -
- issues which should only require a few lines of code.
-- [Help wanted issues](https://github.com/ZEACENT/klogg/issues?q=is%3Aissue+is%3Aopen+sort%3Acomments-desc+label%3A%22help+wanted%22) -
- issues which should be a bit more involved, required some discussion.
+   ```sh
+   python3 scripts/run_ci_quality.py
+   git diff --check
+   ```
 
-Both issue lists are sorted by total number of comments. While not perfect, number of comments is a reasonable proxy for impact a given change will have.
+5. Follow the build guide for sanitizer checks relevant to the change. Performance
+   budgets are opt-in local checks, not a replacement for CI correctness tests.
+6. Update affected user or developer documentation and open a pull request.
 
-Working on your first Pull Request? You can learn how from the [GitHub docs on contributing to open source](https://docs.github.com/en/get-started/exploring-projects-on-github/contributing-to-a-project).
+State the problem, how to reproduce it, the approach, and what you verified.
+Name checks that were not run and any remaining platform limitations. Keep
+unrelated formatting, generated output, and dependency upgrades out of the change.
 
-At this point, you're ready to make your changes! Feel free to ask for help; everyone is a beginner at first :smile_cat:
+## Commit messages
 
-For something that is bigger than a ten line fix:
+Use a short, descriptive English subject. A prefix such as `fix:`, `feat:`,
+`docs:`, `test:`, `build:`, `ci:`, `perf:`, or `refactor:` is welcome when it helps
+explain the change. For nontrivial changes, explain the motivation and relevant
+verification in the body rather than repeating the diff.
 
-1. Create an issue to discuss you idea. It's generally best if you get confirmation
- of your bug fix or approval for your feature
- request this way before starting to code.
-1. Create your own fork of the code
-1. Do the changes in your fork
-1. If you like the change and think the project could use it:
-    * Be sure you have followed the code style for the project (.clang-format file is provided)
-    * Note the [Code of Conduct](CODE_OF_CONDUCT.md).
-    * Create a pull request
+## Recognition and license
 
-## Commit message format
-If possible commit message should be like `prefix: message`, where prefix is one of
-```
-  feat = 'Features',
-  fix = 'Bug Fixes',
-  docs = 'Documentation',
-  style = 'Styles',
-  refactor = 'Code Refactoring',
-  perf = 'Performance Improvements',
-  test = 'Tests',
-  build = 'Builds',
-  ci = 'Continuous Integration',
-  chore = 'Chores',
-  revert = 'Reverts',
-  tr = 'Translations'
-```
-    
+Contributors build on the work of Nicolas Bonnefon, Anton Filimonov, and the
+wider glogg/klogg community. See the
+[contributors](https://github.com/ZEACENT/klogg/graphs/contributors),
+[GPL license](COPYING), and [third-party notices](NOTICE).

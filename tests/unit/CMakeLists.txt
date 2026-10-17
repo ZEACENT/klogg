@@ -17,6 +17,56 @@ add_test(NAME klogg_ios_protocol_tests COMMAND klogg_ios_protocol_tests)
 set_tests_properties(klogg_ios_protocol_tests PROPERTIES TIMEOUT 120)
 klogg_set_test_isolation(klogg_ios_protocol_tests)
 
+# The private crash collector shares protocol and reap ordering with these
+# deterministic fakes; this target runs without Windows or intentional faults.
+add_executable(
+  klogg_crash_collector_protocol_tests
+  crash_collector_protocol_test.cpp
+  pure_catch_main.cpp
+)
+target_link_libraries(
+  klogg_crash_collector_protocol_tests PRIVATE test_utils Catch2 project_options project_warnings
+)
+klogg_configure_test_target(klogg_crash_collector_protocol_tests)
+add_test(NAME klogg_crash_collector_protocol_tests COMMAND klogg_crash_collector_protocol_tests)
+set_tests_properties(klogg_crash_collector_protocol_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_crash_collector_protocol_tests)
+
+# The Win32 backend shares this operation-lifetime coordinator with the
+# deterministic native-I/O fake, so cancellation needs no kernel or timing.
+get_target_property(_klogg_efsw_source_dir efsw SOURCE_DIR)
+# efsw declares C++11. The runnable test uses project_options (C++17), so
+# compile the same coverage separately at the dependency's language boundary.
+add_library(
+  klogg_directory_io_lifetime_cxx11 OBJECT win32_directory_io_lifetime_test.cpp
+)
+set_target_properties(
+  klogg_directory_io_lifetime_cxx11
+  PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO
+)
+target_include_directories(
+  klogg_directory_io_lifetime_cxx11 PRIVATE "${_klogg_efsw_source_dir}/src"
+)
+target_link_libraries(
+  klogg_directory_io_lifetime_cxx11 PRIVATE Catch2 project_warnings
+)
+add_executable(
+  klogg_directory_io_lifetime_tests
+  win32_directory_io_lifetime_test.cpp
+  pure_catch_main.cpp
+)
+add_dependencies(klogg_directory_io_lifetime_tests klogg_directory_io_lifetime_cxx11)
+target_include_directories(
+  klogg_directory_io_lifetime_tests PRIVATE "${_klogg_efsw_source_dir}/src"
+)
+target_link_libraries(
+  klogg_directory_io_lifetime_tests PRIVATE Catch2 project_options project_warnings
+)
+klogg_configure_test_target(klogg_directory_io_lifetime_tests)
+add_test(NAME klogg_directory_io_lifetime_tests COMMAND klogg_directory_io_lifetime_tests)
+set_tests_properties(klogg_directory_io_lifetime_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_directory_io_lifetime_tests)
+
 # Configuration loads before KloggApp in production, so migrations must not
 # require a QGuiApplication or a platform plugin.
 add_executable(
@@ -233,12 +283,52 @@ add_executable(klogg_tests
 
 target_link_libraries(klogg_tests klogg_ui klogg_utils klogg_logging klogg_versioncheck klogg_livecapture klogg_adb_smartsocket Catch2 Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Test test_utils test_crash_trace)
 add_dependencies(klogg_tests adb_server_test_helper)
+add_dependencies(klogg_tests search_start_empty_env_launcher)
 target_compile_definitions(
   klogg_tests PRIVATE KLOGG_ADB_SERVER_TEST_HELPER_PATH="$<TARGET_FILE:adb_server_test_helper>"
 )
 target_include_directories(klogg_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/app")
 target_include_directories(klogg_tests PRIVATE "${CMAKE_BINARY_DIR}/src/ui/klogg_ui_autogen/include")
 set_target_properties(klogg_tests PROPERTIES AUTOMOC ON)
-klogg_configure_test_target(klogg_tests)
+klogg_configure_test_target(klogg_tests KEEP_DEBUG_SYMBOLS)
 
 klogg_add_runtime_test(klogg_tests klogg_tests)
+
+# The opt-in is cached on first use, so absence, an empty value, and "0" each
+# need a fresh process. Hidden tags keep these out of the main run.
+foreach(_klogg_trace_mode enabled empty absent)
+  set(_klogg_trace_tag "[.search-start-enabled]")
+  if(_klogg_trace_mode STREQUAL "absent")
+    set(_klogg_trace_env "--unset=KLOGG_TEST_TRACE_SEARCH_STARTS")
+    set(_klogg_trace_tag "[.search-start-absent]")
+  elseif(_klogg_trace_mode STREQUAL "empty")
+    set(_klogg_trace_tag "[.search-start-enabled],[.search-start-empty]")
+  else()
+    set(_klogg_trace_env "KLOGG_TEST_TRACE_SEARCH_STARTS=0")
+  endif()
+  set(_klogg_trace_runtime_env)
+  if(WIN32)
+    set(_klogg_trace_runtime_path
+      "PATH=$<TARGET_FILE_DIR:klogg_tests>$<SEMICOLON>$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>$<SEMICOLON>$ENV{PATH}"
+    )
+    string(REPLACE ";" "\\;" _klogg_trace_runtime_path "${_klogg_trace_runtime_path}")
+    list(APPEND _klogg_trace_runtime_env "${_klogg_trace_runtime_path}")
+  endif()
+  set(_klogg_trace_test "klogg_search_start_trace_${_klogg_trace_mode}")
+  if(_klogg_trace_mode STREQUAL "empty")
+    add_test(
+      NAME ${_klogg_trace_test}
+      COMMAND ${CMAKE_COMMAND} -E env ${_klogg_trace_runtime_env}
+              $<TARGET_FILE:search_start_empty_env_launcher>
+              $<TARGET_FILE:klogg_tests> "${_klogg_trace_tag}"
+    )
+  else()
+    add_test(
+      NAME ${_klogg_trace_test}
+      COMMAND ${CMAKE_COMMAND} -E env ${_klogg_trace_runtime_env} "${_klogg_trace_env}"
+              $<TARGET_FILE:klogg_tests> -platform offscreen "${_klogg_trace_tag}"
+    )
+  endif()
+  set_tests_properties(${_klogg_trace_test} PROPERTIES TIMEOUT 120)
+  klogg_set_test_isolation(${_klogg_trace_test})
+endforeach()

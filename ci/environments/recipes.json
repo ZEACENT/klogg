@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "registry": "ghcr.io/zeacent/klogg-ci-env",
+  "families": {
+    "focal-qt5-gcc13": {
+      "platform": "linux/amd64",
+      "dockerfile": "docker/ubuntu20.04/Dockerfile",
+      "context": "docker/ubuntu20.04",
+      "recipe_files": ["docker/ubuntu20.04/Dockerfile", "scripts/ci_install_locked_apt.sh"],
+      "build_args": {"KLOGG_APT_STAGE": "locked"},
+      "profiles": ["appimage"]
+    },
+    "jammy-qt5": {
+      "platform": "linux/amd64",
+      "dockerfile": "docker/ubuntu22.04/Dockerfile",
+      "context": "docker/ubuntu22.04",
+      "recipe_files": ["docker/ubuntu22.04/Dockerfile", "scripts/ci_install_locked_apt.sh"],
+      "build_args": {"KLOGG_APT_STAGE": "locked"},
+      "profiles": ["deb", "asan-lsan", "ubsan"]
+    },
+    "noble-qt6": {
+      "platform": "linux/amd64",
+      "dockerfile": "docker/ubuntu24.04/Dockerfile",
+      "context": "docker/ubuntu24.04",
+      "recipe_files": ["docker/ubuntu24.04/Dockerfile", "scripts/ci_install_locked_apt.sh"],
+      "build_args": {"KLOGG_APT_STAGE": "locked"},
+      "profiles": ["deb"]
+    },
+    "resolute-qt6": {
+      "platform": "linux/amd64",
+      "dockerfile": "docker/ubuntu26.04/Dockerfile",
+      "context": "docker/ubuntu26.04",
+      "recipe_files": ["docker/ubuntu26.04/Dockerfile", "scripts/ci_install_locked_apt.sh"],
+      "build_args": {"KLOGG_APT_STAGE": "locked"},
+      "profiles": ["deb"]
+    },
+    "jammy-qt5-tsan": {
+      "platform": "linux/amd64",
+      "dockerfile": "docker/ubuntu22.04-tsan/Dockerfile",
+      "context": "docker/ubuntu22.04-tsan",
+      "recipe_files": [
+        "docker/ubuntu22.04-tsan/Dockerfile",
+        "docker/ubuntu22.04-tsan/README.md",
+        "docker/ubuntu22.04-tsan/apt_snapshot_retry.sh",
+        "docker/ubuntu22.04-tsan/verify_elf_runtime_closure.sh",
+        "docker/ubuntu22.04-tsan/patches/fix_qt5_qobject_tsan_publication.patch",
+        "scripts/ci_install_locked_apt.sh"
+      ],
+      "build_args": {"KLOGG_APT_STAGE": "locked"},
+      "profiles": ["tsan"]
+    },
+    "noble-qt693-analysis": {
+      "platform": "linux/amd64",
+      "dockerfile": "docker/ubuntu24.04-analysis/Dockerfile",
+      "context": "docker/ubuntu24.04-analysis",
+      "recipe_files": [
+        "docker/ubuntu24.04-analysis/Dockerfile",
+        "scripts/ci_install_locked_apt.sh",
+        "scripts/extract_verified_tar.py",
+        "scripts/prefetch_adb_helper_sources.py"
+      ],
+      "profiles": ["static", "coverage", "codeql"]
+    }
+  }
+}

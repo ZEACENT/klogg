@@ -23,7 +23,24 @@ add_dependencies(klogg_itests file_write_helper)
 # klogg_configure_test_target(), keeping CI and coverage build scope aligned.
 add_dependencies(ci_build klogg_test_build)
 
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
+find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+
+add_test(
+  NAME prepare_efsw_git_contract
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/scripts/test_prepare_efsw_git.py"
+)
+set_tests_properties(prepare_efsw_git_contract PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(prepare_efsw_git_contract)
+
+if(WIN32)
+  add_test(
+    NAME windows_crash_trace_smoke
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/windows_crash_trace_smoke.py
+            --helper $<TARGET_FILE:crash_trace_test_helper>
+  )
+  set_tests_properties(windows_crash_trace_smoke PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+  klogg_set_test_isolation(windows_crash_trace_smoke)
+endif()
 
 add_test(
   NAME adb_helper_release_contract
@@ -40,6 +57,22 @@ add_test(
 add_test(
   NAME adb_helper_cycle8_release_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_adb_helper_cycle8_release_contract.py
+)
+add_test(
+  NAME adb_manifest_fallback_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_prefetch_adb_manifest_fallback.py
+)
+add_test(
+  NAME adb_source_context_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_prefetch_adb_source_context.py
+)
+add_test(
+  NAME adb_libusb_fallback_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_prefetch_adb_libusb_fallback.py
+)
+add_test(
+  NAME adb_source_closure_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_prefetch_adb_source_closure.py
 )
 add_test(
   NAME libimobiledevice_ostrace_patch_contract
@@ -90,6 +123,10 @@ set_tests_properties(
   adb_helper_verifier_contract
   adb_helper_hardening_contract
   adb_helper_cycle8_release_contract
+  adb_manifest_fallback_contract
+  adb_source_context_contract
+  adb_libusb_fallback_contract
+  adb_source_closure_contract
   libimobiledevice_ostrace_patch_contract
   ios_native_release_contract
   external_source_asset_package_contract
@@ -101,6 +138,7 @@ set_tests_properties(
   ios_compiler_portability_contract
   PROPERTIES TIMEOUT 60
 )
+set_tests_properties(external_source_asset_package_contract PROPERTIES RUN_SERIAL TRUE)
 # The identity test walks the whole repository (git ls-files with an os.walk
 # fallback); give it its own outer bound with real headroom on slow
 # filesystems instead of raising the shared 60s block for everyone.

@@ -1,5 +1,8 @@
+import os
 import pathlib
 import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -78,6 +81,53 @@ class EfswPatchContractTest(unittest.TestCase):
         )
         self.assertIn("if ( -1 != mKqueue )", descriptor_cleanup)
 
+    def test_windows_completion_patch_is_applied_only_to_build_private_source(self):
+        text = THIRD_PARTY.read_text()
+        patch_call = text.split("klogg_apply_pinned_patch_series(\n  efsw\n", 1)[1].split("\n)", 1)[0]
+        self.assertIn("fix_efsw_win32_iocp_retirement.patch", patch_call)
+        self.assertNotIn("${efsw_SOURCE_DIR}", patch_call)
+        self.assertIn("${KLOGG_EFSW_PREPARED_SOURCE_DIR}", patch_call)
+        self.assertLess(patch_call.index("fix_efsw_inotify_watcher_uaf.patch"),
+                        patch_call.index("fix_efsw_kqueue_watcher_races.patch"))
+        self.assertLess(patch_call.index("fix_efsw_kqueue_watcher_races.patch"),
+                        patch_call.index("fix_efsw_win32_iocp_retirement.patch"))
+        self.assertIn("add_subdirectory(${KLOGG_EFSW_PREPARED_SOURCE_DIR}", text)
+        self.assertIn('get_filename_component(_efsw_expected_source_dir "${KLOGG_EFSW_PREPARED_SOURCE_DIR}" REALPATH)', text)
+
+    def test_efsw_patch_bytes_survive_git_clean_filters(self):
+        # Win32 hunks include literal upstream CRLF context. Git staging must
+        # preserve those bytes, not just a patch that works before committing.
+        patches = (PATCH, KQUEUE_PATCH, ROOT / "3rdparty/patches/fix_efsw_win32_iocp_retirement.patch")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = pathlib.Path(temporary)
+            environment = os.environ.copy()
+            environment.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+            subprocess.run(["git", "init", "-q", str(fixture)], check=True, env=environment)
+            (fixture / ".gitattributes").write_bytes((ROOT / ".gitattributes").read_bytes())
+            for patch in patches:
+                with self.subTest(patch=patch.name):
+                    original = patch.read_bytes()
+                    relative = patch.relative_to(ROOT).as_posix()
+                    blob = subprocess.check_output(
+                        ["git", "-c", "core.autocrlf=true", "hash-object", "-w", f"--path={relative}", "--stdin"],
+                        input=original, cwd=fixture, env=environment,
+                    ).decode("ascii").strip()
+                    restored = subprocess.check_output(
+                        ["git", "cat-file", "blob", blob], cwd=fixture, env=environment,
+                    )
+                    self.assertEqual(restored, original, "Git clean filters changed pinned patch bytes")
+
+    def test_private_source_identity_changes_with_the_complete_patch_series(self):
+        text = THIRD_PARTY.read_text()
+        identity = re.search(r'set\(KLOGG_EFSW_PATCHED_TREE_SHA256 ([0-9a-f]{64})\)', text)
+        self.assertIsNotNone(identity, "private source needs the verified final tree identity")
+        self.assertIn(
+            '${CMAKE_CURRENT_BINARY_DIR}/klogg-prepared/efsw-${KLOGG_EFSW_PATCHED_TREE_SHA256}',
+            text,
+        )
+        patch_call = text.split("klogg_apply_pinned_patch_series(\n  efsw\n", 1)[1].split("\n)", 1)[0]
+        self.assertIn("${KLOGG_EFSW_PATCHED_TREE_SHA256}", patch_call)
+
     def test_dependency_is_immutable_and_rejects_target_substitution(self):
         text = THIRD_PARTY.read_text()
         pinned_revision = "62f785c56b7a34f035193d4cb831921347b586b8"
@@ -85,10 +135,10 @@ class EfswPatchContractTest(unittest.TestCase):
         self.assertIn(
             "klogg_apply_pinned_patch_series(\n"
             "  efsw\n"
-            "  ${efsw_SOURCE_DIR}\n"
+            "  ${KLOGG_EFSW_PREPARED_SOURCE_DIR}\n"
             f"  {pinned_revision}\n"
             "  c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677\n"
-            "  dd0fac8dd03bee124f4b780ad131019590dd49e7ae7ce75f812e280e50c039f3\n",
+            "  ${KLOGG_EFSW_PATCHED_TREE_SHA256}\n",
             text,
         )
         self.assertIn(pinned_revision, text)

@@ -28,7 +28,18 @@ STATIC_ANALYSIS_WORKFLOW = ROOT / ".github" / "workflows" / "static-analysis.yml
 
 
 def function_body(source, signature):
-    start = source.index(signature)
+    # The signature must be followed by its parameter list, so a prefix match
+    # cannot select a longer name: "void CaptureStore::clear" must not extract
+    # "void CaptureStore::clearCapturePathGateWaitsForTesting()", which would
+    # silently move every assertion in the caller onto the wrong function.
+    # Signatures that already spell out the parameter list are matched as is.
+    pattern = re.escape(signature)
+    if "(" not in signature:
+        pattern += r"\s*\("
+    match = re.search(pattern, source)
+    if match is None:
+        raise AssertionError(f"Function not found: {signature}")
+    start = match.start()
     # The body opens at the first "{" that is either alone on its line
     # (Allman style) or directly follows the parameter list (K&R). Brace
     # pairs inside the declaration (for example "= {}" default arguments)
@@ -55,6 +66,29 @@ def function_body(source, signature):
 
 
 class StaticAnalysisRegressionTest(unittest.TestCase):
+    def test_function_body_requires_the_parameter_list(self):
+        # Every contract below extracts a function by a signature prefix; a
+        # longer name sharing that prefix must not be selected instead (see
+        # the capturestore gate-wait helpers, which sit before clear()).
+        source = (
+            "void clearCapturePathGateWaitsForTesting()\n"
+            "{\n"
+            "    wrong();\n"
+            "}\n"
+            "\n"
+            "void clear()\n"
+            "{\n"
+            "    right();\n"
+            "}\n"
+        )
+        body = function_body(source, "void clear")
+        self.assertIn("right()", body)
+        self.assertNotIn("wrong()", body)
+
+    def test_function_body_reports_a_missing_signature(self):
+        with self.assertRaises(AssertionError):
+            function_body("void other()\n{\n}\n", "void clear")
+
     def test_static_analysis_alone_detaches_ui_autogen_from_link_dependencies(self):
         cmake = UI_CMAKE.read_text()
         workflow = STATIC_ANALYSIS_WORKFLOW.read_text()
@@ -426,6 +460,122 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("captureBackgroundThreadsStopping()", scheduler)
         self.assertIn("rootPath, 0, shouldStop", scheduler)
         self.assertIn("preserveModifiedAfter, {}, 0,", scheduler)
+
+    def test_capture_child_observations_cover_pre_application_startup(self):
+        main = function_body(UNIT_TEST_MAIN.read_text(), "int main(")
+        ordered = (
+            "recordCaptureChildPhase( CaptureChildPhase::MainEnter );",
+            "QApplication a( argc, argv );",
+            "recordCaptureChildPhase( CaptureChildPhase::ApplicationReady );",
+            "configureTestTempDir();",
+            "recordCaptureChildPhase( CaptureChildPhase::CatchDispatch );",
+            "Catch::Session().run",
+        )
+        for statement in ordered:
+            self.assertIn(statement, main)
+        self.assertEqual([main.index(statement) for statement in ordered],
+                         sorted(main.index(statement) for statement in ordered))
+
+    def test_capture_child_observations_do_not_gate_the_handshake(self):
+        source = (ROOT / "tests/unit/capturestore_test.cpp").read_text()
+        child = function_body(source, 'TEST_CASE( "CaptureStore child holds active process marker" )')
+        ordered = (
+            "recordCaptureChildPhase( CaptureChildPhase::BeforeStore );",
+            "CaptureStore store( captureId, rootPath );",
+            "recordCaptureChildPhase( CaptureChildPhase::StoreReady );",
+            "recordCaptureChildPhase( CaptureChildPhase::ReadyPublishBegin );",
+            "QSaveFile readyFile( readyPath );",
+            "recordCaptureChildPhase( CaptureChildPhase::ReadyCommitBegin );",
+            "REQUIRE( readyFile.commit() );",
+            "recordCaptureChildPhase( CaptureChildPhase::ReadyCommitted );",
+            "REQUIRE( waitForFile( releasePath ) );",
+        )
+        for statement in ordered:
+            self.assertIn(statement, child)
+        self.assertEqual([child.index(statement) for statement in ordered],
+                         sorted(child.index(statement) for statement in ordered))
+        startup = function_body(source, "bool startAndWaitUntilReady(")
+        self.assertIn("waitForStarted( 5000 )", startup)
+        self.assertIn("readyContents_ = waitForPublishedContent( readyPath_ );", startup)
+        self.assertIn('waitUntilMarkerRecordCoherent() || failStartup( "marker-coherence" )', startup)
+        release = function_body(source, "bool releaseAndWait(")
+        for body in (startup, release):
+            self.assertNotIn("captureChildPhaseSnapshot", body)
+            self.assertNotIn("KLOGG_CAPTURESTORE_CHILD_PHASES", body)
+        failure = function_body(source, "bool failStartup(")
+        self.assertIn("captureChildPhaseSnapshot", failure)
+        self.assertIn("bounded( startupDiagnostic_, 16384 )", failure)
+        self.assertIn("catch ( ... )", failure)
+        self.assertTrue(failure.rstrip().endswith("return false;\n    }"))
+
+    def test_capture_child_process_observers_precede_start_and_preserve_primary(self):
+        source = (ROOT / "tests/unit/capturestore_test.cpp").read_text()
+        constructor = function_body(source, "ActiveCaptureChild(")
+        for signal in ("stateChanged", "errorOccurred", "started", "finished"):
+            self.assertIn("&QProcess::" + signal, constructor)
+        self.assertIn("qOverload<int, QProcess::ExitStatus>", constructor)
+        self.assertIn("&observationContext_", constructor)
+        self.assertIn("noexcept", constructor)
+        self.assertIn("catch ( ... )", constructor)
+        failure = function_body(source, "bool failStartup(")
+        self.assertLess(
+            failure.index("klogg::testing::ProcessSnapshot::take( process_ )"),
+            failure.index("waitForReadyRead( 0 )"),
+        )
+        self.assertIn("processObservation_.finishedObserved()", failure)
+        self.assertNotIn("started_ &&", failure)
+        fields = source[source.index("QProcess process_;", source.index("class ActiveCaptureChild")):]
+        self.assertLess(fields.index("CaptureChildProcessObservation processObservation_;"),
+                        fields.index("QObject observationContext_;"))
+
+    def test_capture_child_cleanup_reports_original_operation_results(self):
+        source = (ROOT / "tests/unit/capturestore_test.cpp").read_text()
+        cleanup = function_body(source, "~ActiveCaptureChild(")
+        ordered = (
+            "cleanup.releasePublished = createSignalFile( releasePath_ );",
+            "cleanup.initialState = process_.state();",
+            "cleanup.releaseWait = process_.waitForFinished( 5000 );",
+            "cleanup.killAttempted = true;",
+            "process_.kill();",
+            "cleanup.killWait = process_.waitForFinished( 5000 );",
+            "cleanup.finalState = process_.state();",
+            "cleanup.finalReportedPid = process_.processId();",
+            "cleanup.diagnostic()",
+        )
+        for statement in ordered:
+            self.assertIn(statement, cleanup)
+        self.assertEqual([cleanup.index(statement) for statement in ordered],
+                         sorted(cleanup.index(statement) for statement in ordered))
+        self.assertEqual(cleanup.count("waitForFinished( 5000 )"), 2)
+        self.assertEqual(cleanup.count("process_.kill();"), 1)
+        self.assertIn("if ( cleanup.initialState != QProcess::NotRunning )", cleanup)
+        self.assertIn("if ( !*cleanup.releaseWait )", cleanup)
+        self.assertIn("catch ( ... )", cleanup)
+        release = function_body(source, "bool releaseAndWait(")
+        self.assertIn("createSignalFile( releasePath_ ) && process_.waitForFinished( 5000 )",
+                      release)
+
+    def test_failed_clear_wait_reports_facts_without_changing_its_budget(self):
+        source = (ROOT / "tests/unit/live_source_transport_contract_test.cpp").read_text()
+        for name in (
+            "ProcessLiveSourceTransport clear returns before its process result",
+            "Asynchronous clear failures remain request-local",
+        ):
+            case = function_body(source, 'TEST_CASE( "' + name + '"')
+            self.assertIn("waitForClearCompletion( clearSpy, transport,", case)
+            self.assertNotIn("clearSpy.safeWait(", case)
+        wait = function_body(source, "bool waitForClearCompletion(")
+        self.assertEqual(wait.count("spy.safeWait( 3000 )"), 1)
+        self.assertLess(wait.index("spy.safeWait( 3000 )"),
+                        wait.index("clearWaitDiagnostic("))
+        self.assertIn("if ( !completed )", wait)
+        self.assertIn("catch ( ... )", wait)
+        self.assertTrue(wait.rstrip().endswith("return completed;\n}"))
+        snapshot = function_body(source, "QString clearWaitDiagnostic(")
+        self.assertIn("Qt::FindDirectChildrenOnly", snapshot)
+        self.assertIn("klogg::testing::ProcessSnapshot::take( *process )", snapshot)
+        for probe in ("waitForStarted", "waitForReadyRead", "waitForFinished", "kill(", "start("):
+            self.assertNotIn(probe, snapshot)
 
     def test_capture_background_workers_stop_before_qt_teardown(self):
         header = CAPTURESTORE_HEADER.read_text()

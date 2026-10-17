@@ -299,7 +299,7 @@ jobs:
             --expected-commit "$KLOGG_SOURCE_COMMIT" \
             --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
           asset_count="$(find packages-publication -maxdepth 1 -type f | wc -l)"
-          test "$asset_count" -eq 23
+          test "$asset_count" -eq 25
           test -f packages-publication/klogg-release-evidence.tar
           test -f packages-publication/SHA256SUMS
           python3 scripts/render_release_downloads.py \

@@ -13,7 +13,7 @@ CI_QUALITY_RUNNER = ROOT / "scripts" / "run_ci_quality.py"
 PYTHON_BASELINE = "3.8"
 PEP585_BUILTINS = {"dict", "list", "set", "tuple"}
 UNSUPPORTED_STRING_METHODS = {"removeprefix", "removesuffix"}
-UNSUPPORTED_PATH_METHODS = {"readlink"}
+UNSUPPORTED_PATH_METHODS = {"is_relative_to", "readlink"}
 
 
 def python_sources():

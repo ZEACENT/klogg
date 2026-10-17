@@ -1,0 +1,142 @@
+name: CI Native Dependency Qualification
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Qualify, or qualify before a deliberately blocked publication
+        required: true
+        type: string
+      expected-source-sha:
+        description: Exact source revision validated by the parent dispatch preflight
+        required: true
+        type: string
+      needs-json:
+        description: GitHub-controlled toJSON(needs) from the nine required parent jobs
+        required: true
+        type: string
+    outputs:
+      gate-tar-sha256:
+        description: SHA-256 of the exact Gate archive bytes
+        value: ${{ jobs.Gate.outputs.gate-tar-sha256 }}
+      gate-tar-size:
+        description: Byte length of the exact Gate archive
+        value: ${{ jobs.Gate.outputs.gate-tar-size }}
+      gate-artifact-id:
+        description: Immutable same-run Gate archive artifact ID
+        value: ${{ jobs.Gate.outputs.gate-artifact-id }}
+
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+
+jobs:
+  Gate:
+    name: Authenticate native dependency qualification evidence
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    outputs:
+      gate-tar-sha256: ${{ steps.archive.outputs.sha256 }}
+      gate-tar-size: ${{ steps.archive.outputs.size }}
+      gate-artifact-id: ${{ steps.upload_gate.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected-source-sha }}
+          persist-credentials: false
+
+      - name: Validate and filter parent needs
+        shell: bash
+        env:
+          KLOGG_DEPENDENCY_MODE: ${{ inputs.mode }}
+          KLOGG_EXPECTED_SOURCE_SHA: ${{ inputs.expected-source-sha }}
+          KLOGG_PARENT_NEEDS_JSON: ${{ inputs.needs-json }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$KLOGG_EXPECTED_SOURCE_SHA" = "$GITHUB_SHA"
+          case "$KLOGG_DEPENDENCY_MODE" in qualify|publish) ;; *) exit 1 ;; esac
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          expected = {
+              'DependencyModePreflight', 'BuildAdbHelperLegalAssets',
+              'BuildAdbLinuxX64', 'BuildAdbLinuxArm64', 'BuildAdbWindowsX64',
+              'BuildAdbMacX64', 'BuildAdbMacArm64', 'BuildIosNativeX64',
+              'BuildIosNativeArm64',
+          }
+          def unique_pairs(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError('duplicate parent job ID')
+                  result[key] = value
+              return result
+          needs = json.loads(os.environ['KLOGG_PARENT_NEEDS_JSON'], object_pairs_hook=unique_pairs)
+          if not isinstance(needs, dict) or set(needs) != expected:
+              raise SystemExit('expected exactly nine independent parent jobs')
+          for name, job in needs.items():
+              if not isinstance(job, dict) or job.get('result') != 'success' or not isinstance(job.get('outputs'), dict):
+                  raise SystemExit('parent job missing successful result or outputs: ' + name)
+          del needs['DependencyModePreflight']
+          destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-gate-needs.json'
+          destination.write_text(json.dumps(needs, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
+          PY
+
+      - name: Verify independent full builds and qualify exact candidate bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLOGG_DEPENDENCY_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_dependency_gate.py \
+            --mode "$KLOGG_DEPENDENCY_MODE" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --needs-json "$RUNNER_TEMP/native-gate-needs.json" \
+            --output-dir "$RUNNER_TEMP/native-gate-output"
+
+      - name: Archive exact eight Gate publisher inputs
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=scripts python3 - <<'PY'
+          import os
+          import pathlib
+          from ci_dependency_gate import write_gate_archive
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          identity = write_gate_archive(temp / 'native-gate-output', temp / 'native-gate.tar.gz')
+          with pathlib.Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
+              output.write('sha256=' + identity['sha256'] + '\n')
+              output.write('size=' + str(identity['size']) + '\n')
+          PY
+
+      - name: Upload immutable same-run Gate evidence
+        id: upload_gate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-gate.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  Publish:
+    name: Native dependency publication deliberately disabled
+    needs: [Gate]
+    if: ${{ inputs.mode == 'publish' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse publication until protected publisher is reviewed
+        shell: bash
+        run: |
+          echo '::error::Native dependency publication is not implemented; no registry or release writes are permitted'
+          exit 1

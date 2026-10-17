@@ -2,5 +2,12 @@
 **/patches/*.patch text eol=lf -whitespace
 **/patches/**/*.patch text eol=lf -whitespace
 **/patches/**/*.def text eol=lf -whitespace
+# This pinned Win32 source has CRLF context; its patch must retain exact bytes.
+3rdparty/patches/fix_efsw_win32_iocp_retirement.patch -text -eol -whitespace
 packaging/adb/adb-helper.lock.json text eol=lf
 packaging/windows/*.nsi -text whitespace=cr-at-eol
+# Signed receipts and bundles are verified as exact bytes, including on Windows.
+ci/environments/evidence/** -text
+ci/dependencies/evidence/** -text
+# Public key armor is upstream data; preserve its hash, including header spacing.
+ci/environments/keys/*.asc -text -whitespace

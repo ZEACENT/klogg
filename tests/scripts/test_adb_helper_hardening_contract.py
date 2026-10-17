@@ -1,16 +1,29 @@
+import sys
+
+if __name__ == "__main__":
+    try:
+        print("adb-hardening-contract: importing", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+import argparse
 import gzip
+import shutil
 import hashlib
 import importlib.util
 import io
 import json
 import pathlib
-import subprocess
-import sys
 import tarfile
 import tempfile
 import time
 import unittest
 from unittest import mock
+
+from contract_cli_observation import ContractCliObserver
+
+
+run_contract_cli = ContractCliObserver(enabled=__name__ == "__main__", label="adb-hardening-cli")
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -46,6 +59,14 @@ def load_prefetch_module():
     return module
 
 
+def load_legal_module():
+    with mock.patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]):
+        spec = importlib.util.spec_from_file_location("build_adb_helper_legal_assets", LEGAL_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    return module
+
+
 def archive_sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -74,7 +95,7 @@ def canonical_tar_gz_bytes(name: str, content: bytes, mode: int = 0o644) -> byte
 class AdbHelperSourceHardeningContractTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.root = pathlib.Path(self.tempdir.name)
+        self.root = pathlib.Path(self.tempdir.name).resolve()
 
     def tearDown(self):
         self.tempdir.cleanup()
@@ -93,8 +114,9 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         executable.chmod(0o755)
         (artifact_root / "SHA256SUMS").write_text("receipt\n", encoding="utf-8")
         archive = self.root / "artifact.tar.gz"
-        subprocess.run(
+        run_contract_cli(
             ["tar", "-czf", str(archive), "-C", str(artifact_root), "."],
+            role="fixture-tar",
             check=True,
         )
 
@@ -152,7 +174,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         ]
         if extract_root is not None:
             command.extend(("--extract-root", str(extract_root)))
-        return subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+        return run_contract_cli(command, capture_output=True, text=True, timeout=10, check=False)
 
     def test_gitiles_archives_use_canonical_content_identity_in_the_real_lock(self):
         lock = json.loads(LOCK.read_text(encoding="utf-8"))
@@ -428,9 +450,10 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("excluded build symlink", (result.stdout + result.stderr).lower())
 
-    def make_legal_fixture(self):
-        repository = self.root / "repository"
-        archive_root = self.root / "archives"
+    def make_legal_fixture(self, root=None):
+        root = root or self.root
+        repository = root / "repository"
+        archive_root = root / "archives"
         archive_root.mkdir()
         for relative, content in {
             "COPYING": "Klogg license\n",
@@ -438,6 +461,11 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "packaging/adb/README.md": "Build instructions\n",
             "packaging/adb/superbuild/CMakeLists.txt": "project(adb)\n",
             "scripts/prefetch_adb_helper_sources.py": "# prefetch\n",
+            "scripts/prefetch_adb_manifest_fallback.py": "# manifest fallback\n",
+            "scripts/prefetch_adb_source_context.py": "# source context\n",
+            "scripts/prefetch_adb_libusb_fallback.py": "# libusb fallback\n",
+            "scripts/prefetch_adb_source_closure.py": "# source closure\n",
+            "scripts/ci_adb_source_transport.py": "# ordinary source transport\n",
             "scripts/build_adb_helper.py": "# build\n",
             "scripts/build_adb_helper_legal_assets.py": "# legal\n",
             "scripts/source_publication_identity.py": "# identity\n",
@@ -464,6 +492,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             ("source-offer", "ADB-HELPER-SOURCE-OFFER.txt"),
             ("source-manifest", "adb-helper-source-manifest.json"),
             ("source-set-receipt", "adb-helper-source-set-receipt.json"),
+            ("overlay-receipt", "adb-helper-overlay-receipt.json"),
         ]
         lock = {
             "schema_version": 1,
@@ -493,6 +522,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
                 {
                     "kind": kind,
                     "required": True,
+                    "ownership": "overlay" if kind in ("source-offer", "overlay-receipt") else "core",
                     "distribution": {
                         "package_required": kind != "source-archive",
                         "release_required": True,
@@ -509,7 +539,8 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         return repository, archive_root, lock_path, lock
 
     def build_legal_assets(
-        self, repository, archive_root, lock, output, package_support_output=None
+        self, repository, archive_root, lock, output, package_support_output=None,
+        version="26.08.27", package_core_output=None,
     ):
         command = [
             sys.executable,
@@ -521,7 +552,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "--repository-root",
             str(repository),
             "--version",
-            "26.08.27",
+            version,
             "--base-url",
             "https://github.com/ZEACENT/klogg",
             "--output",
@@ -529,7 +560,9 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         ]
         if package_support_output is not None:
             command.extend(("--package-support-output", str(package_support_output)))
-        return subprocess.run(
+        if package_core_output is not None:
+            command.extend(("--package-core-output", str(package_core_output)))
+        return run_contract_cli(
             command,
             capture_output=True,
             text=True,
@@ -572,6 +605,11 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "packaging/adb/README.md",
             "packaging/adb/superbuild/CMakeLists.txt",
             "scripts/prefetch_adb_helper_sources.py",
+            "scripts/prefetch_adb_manifest_fallback.py",
+            "scripts/prefetch_adb_source_context.py",
+            "scripts/prefetch_adb_libusb_fallback.py",
+            "scripts/prefetch_adb_source_closure.py",
+            "scripts/ci_adb_source_transport.py",
             "scripts/build_adb_helper.py",
             "scripts/build_adb_helper_legal_assets.py",
             "scripts/source_publication_identity.py",
@@ -582,6 +620,878 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/smoke_adb_helper.py",
         }
         self.assertEqual(required_build_material - members, set())
+
+    def test_acquisition_contracts_are_registered_with_ctest(self):
+        cmake = (ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        for name, script in (
+            ("adb_libusb_fallback_contract", "test_prefetch_adb_libusb_fallback.py"),
+            ("adb_source_closure_contract", "test_prefetch_adb_source_closure.py"),
+        ):
+            with self.subTest(name=name):
+                self.assertIn(
+                    f"add_test(\n  NAME {name}\n"
+                    f"  COMMAND ${{Python3_EXECUTABLE}} ${{CMAKE_SOURCE_DIR}}/tests/scripts/{script}\n)",
+                    cmake,
+                )
+                timeout_tests = cmake.split("set_tests_properties(\n", 1)[1].split(
+                    "PROPERTIES TIMEOUT 60", 1
+                )[0]
+                self.assertIn(f"  {name}\n", timeout_tests)
+
+    def test_core_legal_assets_are_version_independent(self):
+        # Immutable-core reuse requires the binary build contract to survive an
+        # application version bump: only the versioned source offer (the
+        # overlay) may change; the source-set receipt anchors the core identity
+        # and must not embed overlay bytes.
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        first = self.root / "release-version-one"
+        second = self.root / "release-version-two"
+        for output, version in ((first, "26.08.27"), (second, "99.01.01")):
+            result = self.build_legal_assets(
+                repository, archive_root, lock_path, output, version=version
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        versioned = set()
+        for asset in lock["release_assets"]:
+            name = asset["file_name"]
+            if archive_sha256(first / name) != archive_sha256(second / name):
+                versioned.add(asset["kind"])
+        self.assertEqual(versioned, {"source-offer", "overlay-receipt"})
+
+        receipt = json.loads(
+            (first / "adb-helper-source-set-receipt.json").read_text(encoding="utf-8")
+        )
+        embedded = {asset["kind"] for asset in receipt["package_support_assets"]}
+        self.assertNotIn("source-offer", embedded)
+
+        # The binary builder also records only core support hashes; the
+        # source-set receipt is identical across these application versions.
+        build = load_build_module()
+        first_support = build.package_support_receipt_assets(lock, first)
+        second_support = build.package_support_receipt_assets(lock, second)
+        self.assertEqual(first_support, second_support)
+        self.assertTrue(first_support)
+        self.assertTrue(all(asset["kind"] not in ("source-offer", "overlay-receipt")
+                            for asset in first_support))
+
+    def test_version_overlay_materializes_from_verified_core_without_sources(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        core = self.root / "immutable-core"
+        core_build = run_contract_cli(
+            [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
+             "--archive-root", str(archive_root), "--repository-root", str(repository),
+             "--output", str(core)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(core_build.returncode, 0, core_build.stdout + core_build.stderr)
+        self.assertFalse((core / "ADB-HELPER-SOURCE-OFFER.txt").exists())
+        self.assertFalse((core / "adb-helper-overlay-receipt.json").exists())
+        self.assertTrue((core / "adb-helper-source-set-receipt.json").is_file())
+
+        # The native helper core is already built. An application release
+        # regenerates ONLY its versioned overlay, without access to the source
+        # archives or the original generator checkout.
+        pins = self.overlay_pin_arguments(core, lock_path, lock)
+        archive_root.rename(self.root / "unavailable-archives")
+        output = self.root / "versioned-assembly"
+        support = self.root / "versioned-package-support"
+        overlay_build = run_contract_cli(
+            [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(lock_path),
+             "--core-root", str(core), "--version", "99.01.01",
+             "--base-url", "https://github.com/ZEACENT/klogg",
+             "--output", str(output), "--package-support-output", str(support), *pins],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(overlay_build.returncode, 0, overlay_build.stdout + overlay_build.stderr)
+        self.assertEqual(
+            (core / "adb-helper-source-set-receipt.json").read_bytes(),
+            (output / "adb-helper-source-set-receipt.json").read_bytes(),
+        )
+        self.assertIn("klogg-v99.01.01-adb-helper-source-",
+                      (output / "ADB-HELPER-SOURCE-OFFER.txt").read_text())
+        self.assertTrue((support / "adb-helper-overlay-receipt.json").is_file())
+        self.assertFalse((support / "adb-helper-source-archive.tar.gz").exists())
+
+        # Both paths must assemble identical package and release bytes; no
+        # receipt may silently change its identity during the cutover.
+        (self.root / "unavailable-archives").rename(archive_root)
+        direct = self.root / "direct-full-build"
+        result = self.build_legal_assets(
+            repository, archive_root, lock_path, direct, version="99.01.01"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            {path.name: archive_sha256(path) for path in direct.iterdir()},
+            {path.name: archive_sha256(path) for path in output.iterdir()},
+        )
+
+    def test_package_core_projection_is_version_independent_without_source_archive(self):
+        repository, archives, lock_path, lock = self.make_legal_fixture()
+        projections = []
+        for version in ("26.08.27", "99.01.01"):
+            with self.subTest(version=version):
+                release = self.root / f"release-{version}"
+                support = self.root / f"support-{version}"
+                core = self.root / f"package-core-{version}"
+                result = self.build_legal_assets(
+                    repository, archives, lock_path, release, support,
+                    version=version, package_core_output=core,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                expected = {
+                    asset[field]: archive_sha256(release / asset[field])
+                    for asset in lock["release_assets"]
+                    if asset["ownership"] == "core"
+                    and asset["distribution"]["package_required"]
+                    for field in ("file_name", "sha256_file")
+                }
+                actual = {path.name: archive_sha256(path) for path in core.iterdir()}
+                self.assertEqual(actual, expected)
+                self.assertFalse((core / "adb-helper-source-archive.tar.gz").exists())
+                self.assertFalse((core / "ADB-HELPER-SOURCE-OFFER.txt").exists())
+                self.assertFalse((core / "adb-helper-overlay-receipt.json").exists())
+                self.assertTrue((support / "ADB-HELPER-SOURCE-OFFER.txt").is_file())
+                if projections:
+                    self.assertEqual(projections[0], actual)
+                projections.append(actual)
+
+    def test_package_overlay_matches_direct_support_without_source_archive_or_acquisition(self):
+        repository, archives, lock_path, lock = self.make_legal_fixture()
+        expected = {}
+        core = self.root / "package-core"
+        core.mkdir()
+        for version in ("26.08.27", "99.01.01"):
+            release = self.root / f"direct-release-{version}"
+            support = self.root / f"direct-support-{version}"
+            result = self.build_legal_assets(
+                repository, archives, lock_path, release, support, version=version,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            expected[version] = {path.name: archive_sha256(path) for path in support.iterdir()}
+            if not any(core.iterdir()):
+                for asset in lock["release_assets"]:
+                    if asset["ownership"] == "core" and asset["distribution"]["package_required"]:
+                        for field in ("file_name", "sha256_file"):
+                            shutil.copyfile(release / asset[field], core / asset[field])
+        overlay_lock = self.root / "overlay-lock.json"
+        shutil.copyfile(lock_path, overlay_lock)
+        pins = self.overlay_pin_arguments(core, overlay_lock, lock)
+        before = {path.name: archive_sha256(path) for path in core.iterdir()}
+        repository.rename(self.root / "unavailable-repository")
+        archives.rename(self.root / "unavailable-archives")
+        for version in expected:
+            with self.subTest(version=version):
+                output = self.root / f"assembled-package-{version}"
+                result = run_contract_cli(
+                    [sys.executable, str(LEGAL_SCRIPT), "--package-overlay-only",
+                     "--lock", str(overlay_lock), "--core-root", str(core),
+                     "--version", version, "--base-url", "https://github.com/ZEACENT/klogg",
+                     "--output", str(output), *pins],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(
+                    {path.name: archive_sha256(path) for path in output.iterdir()},
+                    expected[version],
+                )
+                self.assertFalse((output / "adb-helper-source-archive.tar.gz").exists())
+                self.assertFalse((output / "adb-helper-release-assets.json").exists())
+        self.assertEqual({path.name: archive_sha256(path) for path in core.iterdir()}, before)
+
+    def write_original_build_receipt(self, core, lock_path, lock, changes=None):
+        build_path = core.parent / "original-build.json"
+        source_set = core / "adb-helper-source-set-receipt.json"
+        receipt = {
+            "schema_version": 1, "receipt_kind": "binary-build",
+            "lock_sha256": archive_sha256(lock_path),
+            "source_set_receipt_sha256": archive_sha256(source_set),
+            "release_assets": load_build_module().package_support_receipt_assets(lock, core),
+            "qualification": {"fixture": "not-native-qualified"},
+        }
+        receipt.update(changes or {})
+        build_path.write_text(json.dumps(receipt), encoding="utf-8")
+        return build_path, archive_sha256(source_set), archive_sha256(build_path)
+
+    def overlay_pin_arguments(self, core, lock_path, lock):
+        build, source_pin, build_pin = self.write_original_build_receipt(core, lock_path, lock)
+        return ["--build-receipt", str(build), "--source-set-sha256", source_pin,
+                "--build-receipt-sha256", build_pin]
+
+    def make_overlay_fixture(self, build_changes=None, *, name=None):
+        root = self.root / name if name else self.root
+        root.mkdir(exist_ok=True)
+        repository, archives, lock_path, lock = self.make_legal_fixture(root)
+        core = root / "immutable-core"
+        result = run_contract_cli(
+            [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
+             "--archive-root", str(archives), "--repository-root", str(repository),
+             "--output", str(core)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        build_path, source_pin, build_pin = self.write_original_build_receipt(
+            core, lock_path, lock, build_changes)
+        args = argparse.Namespace(
+            lock=lock_path, archive_root=None, repository_root=None,
+            core_only=False, overlay_only=True, package_overlay_only=False,
+            package_core_output=None, core_root=core,
+            build_receipt=build_path, source_set_sha256=source_pin,
+            build_receipt_sha256=build_pin,
+            output=root / "assembly", package_support_output=root / "support",
+            version="99.01.01", base_url="https://github.com/ZEACENT/klogg",
+        )
+        return args, lock
+
+    def make_package_overlay_fixture(self, *, name=None):
+        args, lock = self.make_overlay_fixture(name=name)
+        for asset in lock["release_assets"]:
+            if asset["ownership"] == "core" and not asset["distribution"]["package_required"]:
+                for field in ("file_name", "sha256_file"):
+                    (args.core_root / asset[field]).unlink()
+        (args.core_root / "adb-helper-release-assets.json").unlink()
+        args.overlay_only = False
+        args.package_overlay_only = True
+        args.package_support_output = None
+        return args, lock
+
+    def test_package_overlay_rejects_bad_receipt_pins_before_output(self):
+        for field, value in (("source_set_sha256", "1" * 64),
+                             ("build_receipt_sha256", "1" * 64),
+                             ("build_receipt", None)):
+            with self.subTest(field=field):
+                args, _ = self.make_package_overlay_fixture(name=field)
+                setattr(args, field, value)
+                with mock.patch.object(sys, "stderr", io.StringIO()):
+                    with self.assertRaises((RuntimeError, SystemExit)):
+                        self.materialize_fixture_overlay(args)
+                self.assertFalse(args.output.exists())
+
+    def test_package_overlay_rejects_full_source_core_and_full_overlay_requires_source(self):
+        args, _ = self.make_overlay_fixture(name="full-input")
+        args.overlay_only = False
+        args.package_overlay_only = True
+        args.package_support_output = None
+        with self.assertRaisesRegex(RuntimeError, "must not contain"):
+            self.materialize_fixture_overlay(args)
+        self.assertFalse(args.output.exists())
+        args, _ = self.make_package_overlay_fixture(name="missing-full-source")
+        args.overlay_only = True
+        args.package_overlay_only = False
+        with self.assertRaisesRegex(RuntimeError, "corresponding source archive"):
+            self.materialize_fixture_overlay(args)
+        self.assertFalse(args.output.exists())
+
+    def test_package_overlay_forbids_acquisition_and_additional_projections(self):
+        for field in ("archive_root", "repository_root", "package_support_output", "package_core_output"):
+            with self.subTest(field=field):
+                args, _ = self.make_package_overlay_fixture(name=field)
+                setattr(args, field, self.root / f"forbidden-{field}")
+                with mock.patch.object(sys, "stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.materialize_fixture_overlay(args)
+                self.assertFalse(args.output.exists())
+                self.assertFalse(getattr(args, field).exists())
+
+    def test_package_overlay_rejects_zero_archive_identity_even_with_matching_pins(self):
+        args, lock = self.make_package_overlay_fixture()
+        module = load_legal_module()
+        source_set = args.core_root / "adb-helper-source-set-receipt.json"
+        receipt = json.loads(source_set.read_text(encoding="utf-8"))
+        receipt["archive"]["sha256"] = "0" * 64
+        source_set.write_text(json.dumps(receipt), encoding="utf-8")
+        module.write_hash(source_set)
+        args.build_receipt, args.source_set_sha256, args.build_receipt_sha256 = (
+            self.write_original_build_receipt(args.core_root, args.lock, lock)
+        )
+        with self.assertRaisesRegex(RuntimeError, "nonzero"):
+            self.materialize_fixture_overlay(args, module)
+        self.assertFalse(args.output.exists())
+
+    @unittest.skipIf(sys.platform == "win32", "requires POSIX symlink creation")
+    def test_package_core_rejects_foreign_output_alias_even_with_identical_bytes(self):
+        args, lock = self.make_overlay_fixture()
+        module = load_legal_module()
+        asset = next(asset for asset in lock["release_assets"]
+                     if asset["ownership"] == "core" and asset["distribution"]["package_required"])
+        name = asset["file_name"]
+        witness = self.root / "foreign-witness"
+        witness.write_bytes((args.core_root / name).read_bytes())
+        before = witness.read_bytes()
+        original_copy = module.copy_checked_asset
+
+        def substitute(source, destination, digest, created, **kwargs):
+            original_copy(source, destination, digest, created, **kwargs)
+            if destination.name == name:
+                destination.unlink()
+                destination.symlink_to(witness)
+
+        with mock.patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]), \
+                mock.patch.object(module, "copy_checked_asset", side_effect=substitute):
+            with self.assertRaisesRegex(RuntimeError, "regular|projection"):
+                module.materialize_package_core(args.core_root, args.output, lock["release_assets"])
+        self.assertEqual(witness.read_bytes(), before)
+        self.assertTrue((args.output / name).is_symlink())
+
+    def test_package_core_rejects_source_changes_after_copy(self):
+        args, lock = self.make_overlay_fixture()
+        module = load_legal_module()
+        asset = next(asset for asset in lock["release_assets"]
+                     if asset["ownership"] == "core" and asset["distribution"]["package_required"])
+        original_copy = module.copy_checked_asset
+
+        def mutate(source, destination, digest, created, **kwargs):
+            original_copy(source, destination, digest, created, **kwargs)
+            if destination.name == asset["file_name"]:
+                source.write_bytes(b"changed after the package core copy")
+
+        with mock.patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]), \
+                mock.patch.object(module, "copy_checked_asset", side_effect=mutate):
+            with self.assertRaisesRegex(RuntimeError, "projection"):
+                module.materialize_package_core(args.core_root, args.output, lock["release_assets"])
+        self.assertEqual((args.core_root / asset["file_name"]).read_bytes(),
+                         b"changed after the package core copy")
+
+    def materialize_fixture_overlay(self, args, module=None):
+        module = module or load_legal_module()
+        # Supply the parsed caller inputs directly to isolate materialization
+        # from parser plumbing in mutation and failure-injection tests.
+        with mock.patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]), \
+                mock.patch.object(module.argparse.ArgumentParser, "parse_args", return_value=args):
+            return module.main()
+
+    def test_overlay_requires_external_pins_before_creating_output(self):
+        args, _ = self.make_overlay_fixture()
+        result = run_contract_cli(
+            [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(args.lock),
+             "--core-root", str(args.core_root), "--version", args.version,
+             "--base-url", args.base_url, "--output", str(args.output)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("external", result.stderr)
+        self.assertFalse(args.output.exists())
+
+    def test_overlay_rejects_wrong_external_pins_before_any_output(self):
+        args, _ = self.make_overlay_fixture()
+        for field in ("source_set_sha256", "build_receipt_sha256"):
+            with self.subTest(pin=field):
+                invalid = argparse.Namespace(**{**vars(args), field: "a" * 64,
+                                               "output": self.root / f"assembly-{field}",
+                                               "package_support_output": self.root / f"support-{field}"})
+                with self.assertRaisesRegex(RuntimeError, "external.*digest"):
+                    self.materialize_fixture_overlay(invalid)
+                self.assertFalse(invalid.output.exists())
+                self.assertFalse(invalid.package_support_output.exists())
+
+    def test_overlay_rejects_coherent_support_and_source_set_rewrite(self):
+        args, _ = self.make_overlay_fixture()
+        asset = args.core_root / "adb-helper-licenses.tar.gz"
+        asset.write_bytes(b"coherently forged legal bytes\n")
+        asset.with_name(asset.name + ".sha256").write_text(
+            f"{archive_sha256(asset)}  {asset.name}\n", encoding="utf-8")
+        source_set_path = args.core_root / "adb-helper-source-set-receipt.json"
+        source_set = json.loads(source_set_path.read_text())
+        next(item for item in source_set["package_support_assets"]
+             if item["kind"] == "licenses")["sha256"] = archive_sha256(asset)
+        source_set_path.write_text(json.dumps(source_set), encoding="utf-8")
+        load_legal_module().write_hash(source_set_path)
+        with self.assertRaisesRegex(RuntimeError, "external.*digest"):
+            self.materialize_fixture_overlay(args)
+        self.assertFalse(args.output.exists())
+
+    def test_overlay_uses_original_build_source_set_binding(self):
+        args, _ = self.make_overlay_fixture({"source_set_receipt_sha256": "a" * 64})
+        with self.assertRaisesRegex(RuntimeError, "binary-build receipt source-set"):
+            self.materialize_fixture_overlay(args)
+        self.assertFalse(args.output.exists())
+
+    def test_overlay_rejects_support_overlap_before_destructive_projection(self):
+        args, _ = self.make_overlay_fixture()
+        before = {p.name: p.read_bytes() for p in args.core_root.iterdir()}
+        args.package_support_output = args.core_root
+        with self.assertRaisesRegex(RuntimeError, "separate|disjoint"):
+            self.materialize_fixture_overlay(args)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in args.core_root.iterdir()})
+        self.assertFalse(args.output.exists())
+
+    def test_overlay_detects_core_mutation_after_copy_and_cleans_owned_outputs(self):
+        args, _ = self.make_overlay_fixture()
+        module = load_legal_module()
+        real_copy = module.copy_checked_asset
+        changed = args.core_root / "adb-helper-licenses.tar.gz"
+        original_build = args.build_receipt.read_bytes()
+
+        def mutate_after_copy(source, destination, expected, created, **kwargs):
+            real_copy(source, destination, expected, created, **kwargs)
+            if source == changed:
+                changed.write_bytes(b"mutated after its checked copy\n")
+
+        with mock.patch.object(module, "copy_checked_asset", side_effect=mutate_after_copy):
+            with self.assertRaisesRegex(RuntimeError, "sha256"):
+                self.materialize_fixture_overlay(args, module)
+        self.assertEqual(changed.read_bytes(), b"mutated after its checked copy\n")
+        self.assertEqual(args.build_receipt.read_bytes(), original_build)
+        self.assertFalse(args.output.exists())
+        self.assertFalse(args.package_support_output.exists())
+
+    def test_overlay_cleanup_preserves_unowned_files_in_empty_caller_output(self):
+        args, _ = self.make_overlay_fixture()
+        args.output.mkdir()
+        stranger = args.output / "peer-owned.txt"
+        before = {path.name: path.read_bytes() for path in args.core_root.iterdir()}
+        module = load_legal_module()
+        real_copy = module.copy_checked_asset
+
+        def fail_after_copy(source, destination, expected, created, **kwargs):
+            real_copy(source, destination, expected, created, **kwargs)
+            if destination.parent == args.output:
+                stranger.write_bytes(b"peer data\n")
+                raise OSError("injected copy failure")
+
+        with mock.patch.object(module, "copy_checked_asset", side_effect=fail_after_copy):
+            with self.assertRaisesRegex(OSError, "injected copy failure"):
+                self.materialize_fixture_overlay(args, module)
+        self.assertTrue(stranger.is_file(), "cleanup must remove only owned files")
+        self.assertEqual(stranger.read_bytes(), b"peer data\n")
+        self.assertEqual(list(args.output.iterdir()), [stranger])
+        self.assertFalse(args.package_support_output.exists())
+        self.assertEqual(before, {path.name: path.read_bytes() for path in args.core_root.iterdir()})
+
+    def test_overlay_revalidates_generated_overlay_sidecars(self):
+        args, _ = self.make_overlay_fixture()
+        module = load_legal_module()
+        real_hashes = module.write_release_hashes
+
+        def corrupt_overlay_sidecar(output, assets, **kwargs):
+            real_hashes(output, assets, **kwargs)
+            (output / "ADB-HELPER-SOURCE-OFFER.txt.sha256").write_text("forged sidecar\n")
+
+        with mock.patch.object(module, "write_release_hashes", side_effect=corrupt_overlay_sidecar):
+            with self.assertRaisesRegex(RuntimeError, "sidecar"):
+                self.materialize_fixture_overlay(args, module)
+        self.assertFalse(args.output.exists())
+        self.assertFalse(args.package_support_output.exists())
+
+    def test_overlay_rejects_unplanned_files_and_forged_release_index(self):
+        args, _ = self.make_overlay_fixture()
+        module = load_legal_module()
+        real_hashes = module.write_release_hashes
+        for scenario in ("extra-file", "release-index"):
+            with self.subTest(scenario=scenario):
+                args.output = self.root / f"assembly-{scenario}"
+                args.package_support_output = None
+
+                def corrupt_release(output, assets, **kwargs):
+                    real_hashes(output, assets, **kwargs)
+                    if scenario == "extra-file":
+                        (output / "unplanned.txt").write_bytes(b"not in the locked closure\n")
+                    else:
+                        (output / "adb-helper-release-assets.json").write_text("[]\n")
+
+                with mock.patch.object(module, "write_release_hashes", side_effect=corrupt_release):
+                    with self.assertRaisesRegex(RuntimeError, "coverage|release.*index"):
+                        self.materialize_fixture_overlay(args, module)
+
+    def test_overlay_preserves_verified_core_sidecar_bytes(self):
+        args, _ = self.make_overlay_fixture()
+        # The existing verifier accepts whitespace-separated checksum fields.
+        # A checked projection must retain those verified bytes, not normalize
+        # a core asset that was never owned by the new overlay.
+        sidecar = args.core_root / "adb-helper-licenses.tar.gz.sha256"
+        fields = sidecar.read_text().split()
+        sidecar.write_text(f"{fields[0]}    {fields[1]}\n")
+        before = {path.name: path.read_bytes() for path in args.core_root.iterdir()}
+        self.materialize_fixture_overlay(args)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in args.core_root.iterdir()})
+        for name, content in before.items():
+            if name != "adb-helper-release-assets.json":
+                self.assertEqual((args.output / name).read_bytes(), content, name)
+
+    def test_overlay_rejects_pinned_non_build_evidence(self):
+        for index, changes in enumerate(({"schema_version": True}, {"receipt_kind": "package-verification"})):
+            with self.subTest(changes=changes):
+                args, _ = self.make_overlay_fixture(changes, name=f"invalid-receipt-{index}")
+                with self.assertRaisesRegex(RuntimeError, "binary-build.*schema|not binary-build"):
+                    self.materialize_fixture_overlay(args)
+                self.assertFalse(args.output.exists())
+
+    def test_overlay_preserves_original_receipt_support_and_external_binary_without_acquisition(self):
+        args, _ = self.make_overlay_fixture()
+        external_binary = self.root / "external-helper"
+        external_binary.write_bytes(b"synthetic external binary fixture; never executed\n")
+        frozen_binary = external_binary.read_bytes()
+        frozen_build = args.build_receipt.read_bytes()
+        frozen_core = {path.name: path.read_bytes() for path in args.core_root.iterdir()}
+        current_lock = self.root / "available-lock.json"
+        args.lock.rename(current_lock)
+        args.lock = current_lock
+        shutil.rmtree(self.root / "repository")
+        shutil.rmtree(self.root / "archives")
+        offers = []
+        for version, url in (("99.01.01", "https://github.com/ZEACENT/klogg/"),
+                             ("99.01.02", "https://example.invalid/project")):
+            args.version, args.base_url = version, url
+            args.output = self.root / f"assembly-{version}"
+            args.package_support_output = self.root / f"support-{version}"
+            self.materialize_fixture_overlay(args)
+            self.assertEqual(args.build_receipt.read_bytes(), frozen_build)
+            self.assertEqual(external_binary.read_bytes(), frozen_binary)
+            self.assertEqual(frozen_core, {path.name: path.read_bytes() for path in args.core_root.iterdir()})
+            for name, content in frozen_core.items():
+                if name != "adb-helper-release-assets.json":
+                    self.assertEqual((args.output / name).read_bytes(), content, name)
+            offer = (args.output / "ADB-HELPER-SOURCE-OFFER.txt").read_text()
+            self.assertIn(f"klogg-v{version}-adb-helper-source-", offer)
+            self.assertIn(f"{url.rstrip('/')}/releases", offer)
+            offers.append(offer)
+        self.assertNotEqual(*offers)
+
+    def test_overlay_rejects_all_output_input_overlaps_before_writing(self):
+        args, _ = self.make_overlay_fixture()
+        frozen = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                  for path in self.root.rglob("*") if path.is_file()}
+        cases = (
+            (args.core_root, self.root / "support"),
+            (args.core_root / "child", self.root / "support"),
+            (self.root, self.root / "support"),
+            (self.root / "assembly", args.core_root / "child"),
+            (self.root / "assembly", args.lock.parent),
+            (self.root / "assembly", args.build_receipt),
+            (self.root / "assembly", self.root / "assembly"),
+            (self.root / "assembly", self.root / "assembly" / "child"),
+            (self.root / "assembly" / "child", self.root / "assembly"),
+        )
+        for output, support in cases:
+            with self.subTest(output=output, support=support):
+                args.output, args.package_support_output = output, support
+                with self.assertRaisesRegex(RuntimeError, "separate|disjoint|parent"):
+                    self.materialize_fixture_overlay(args)
+                self.assertEqual(frozen, {path.relative_to(self.root).as_posix(): path.read_bytes()
+                                          for path in self.root.rglob("*") if path.is_file()})
+        self.assertFalse((self.root / "assembly").exists())
+        self.assertFalse((self.root / "support").exists())
+
+    def test_overlay_refuses_nonempty_symlink_and_missing_parent_outputs(self):
+        args, _ = self.make_overlay_fixture()
+        sentinel_root = self.root / "occupied"
+        sentinel_root.mkdir()
+        sentinel = sentinel_root / "sentinel.txt"
+        sentinel.write_bytes(b"preserve caller data\n")
+        alias = self.root / "alias"
+        alias.symlink_to(sentinel_root, target_is_directory=True)
+        cases = ((sentinel_root, "empty"), (alias, "symlink"),
+                 (alias / "child", "symlink"), (self.root / "missing" / "child", "parent"),
+                 (sentinel, "empty"))
+        for bad_path, message in cases:
+            for field in ("output", "package_support_output"):
+                with self.subTest(path=bad_path, field=field):
+                    args.output = self.root / "assembly"
+                    args.package_support_output = self.root / "support"
+                    setattr(args, field, bad_path)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        self.materialize_fixture_overlay(args)
+                    self.assertEqual(sentinel.read_bytes(), b"preserve caller data\n")
+                    self.assertFalse((self.root / "assembly").exists())
+                    self.assertFalse((self.root / "support").exists())
+
+    def test_overlay_rejects_changed_build_bytes_and_missing_original_support_binding(self):
+        args, _ = self.make_overlay_fixture()
+        original = args.build_receipt.read_bytes()
+        args.build_receipt.write_bytes(original + b" \n")
+        with self.assertRaisesRegex(RuntimeError, "external.*digest"):
+            self.materialize_fixture_overlay(args)
+        args.build_receipt.write_bytes(original)
+        self.assertFalse(args.output.exists())
+        args, _ = self.make_overlay_fixture({"release_assets": []}, name="missing-build-support")
+        with self.assertRaisesRegex(RuntimeError, "coverage"):
+            self.materialize_fixture_overlay(args)
+        self.assertFalse(args.output.exists())
+
+    def test_overlay_rejects_symlinked_release_index_without_deleting_its_target(self):
+        args, _ = self.make_overlay_fixture()
+        module = load_legal_module()
+        real_hashes = module.write_release_hashes
+        target = self.root / "foreign-index.json"
+
+        def replace_index(output, assets, **kwargs):
+            real_hashes(output, assets, **kwargs)
+            index = output / "adb-helper-release-assets.json"
+            target.write_bytes(index.read_bytes())
+            index.unlink()
+            index.symlink_to(target)
+
+        with mock.patch.object(module, "write_release_hashes", side_effect=replace_index):
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                self.materialize_fixture_overlay(args, module)
+        self.assertTrue(target.is_file())
+        self.assertFalse(args.output.exists())
+        self.assertFalse(args.package_support_output.exists())
+
+    def test_checked_copy_streams_and_rejects_mid_read_mutation(self):
+        module = load_legal_module()
+        source = self.root / "large-synthetic-input"
+        destination = self.root / "checked-copy"
+        chunk_size = 1024 * 1024
+        source.write_bytes(b"a" * (chunk_size + 128))
+        expected = archive_sha256(source)
+        real_open = pathlib.Path.open
+        reads = []
+
+        class MutatingReader:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.stream.close()
+
+            def read(self, size):
+                reads.append(size)
+                chunk = self.stream.read(size)
+                if len(reads) == 1:
+                    with real_open(source, "r+b") as changed:
+                        changed.seek(chunk_size)
+                        changed.write(b"b" * 128)
+                return chunk
+
+        def open_stream(path, mode="r", *args, **kwargs):
+            stream = real_open(path, mode, *args, **kwargs)
+            return MutatingReader(stream) if path == source and mode == "rb" else stream
+
+        with mock.patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]), \
+                mock.patch.object(pathlib.Path, "open", new=open_stream):
+            with self.assertRaisesRegex(RuntimeError, "changed while copying"):
+                module.copy_checked_asset(source, destination, expected, {})
+        self.assertTrue(reads)
+        self.assertTrue(all(size == chunk_size for size in reads))
+        self.assertEqual(source.read_bytes()[-128:], b"b" * 128)
+
+    def test_overlay_rejects_late_input_alias_and_late_output_index_symlink(self):
+        for scenario in ("input-alias", "output-index"):
+            with self.subTest(scenario=scenario):
+                args, _ = self.make_overlay_fixture(name=scenario)
+                module = load_legal_module()
+                real_copy = module.copy_checked_asset
+                original_build = args.build_receipt.read_bytes()
+                foreign_target = args.output.parent / "foreign-target"
+                changed = False
+
+                def replace_after_final_copy(source, destination, expected, created, **kwargs):
+                    nonlocal changed
+                    real_copy(source, destination, expected, created, **kwargs)
+                    if destination.parent != args.output or changed:
+                        return
+                    if scenario == "input-alias":
+                        args.core_root.rename(foreign_target)
+                        args.core_root.symlink_to(foreign_target, target_is_directory=True)
+                        changed = True
+                    elif destination.name == "adb-helper-release-assets.json":
+                        foreign_target.write_bytes(destination.read_bytes())
+                        destination.unlink()
+                        destination.symlink_to(foreign_target)
+                        changed = True
+
+                with mock.patch.object(module, "copy_checked_asset", side_effect=replace_after_final_copy):
+                    with self.assertRaisesRegex(RuntimeError, "symlink"):
+                        self.materialize_fixture_overlay(args, module)
+                self.assertTrue(changed)
+                self.assertTrue(foreign_target.exists())
+                self.assertEqual(args.build_receipt.read_bytes(), original_build)
+
+    def test_overlay_cli_rejects_missing_and_malformed_external_inputs(self):
+        args, _ = self.make_overlay_fixture()
+        base = [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(args.lock),
+                "--core-root", str(args.core_root), "--version", args.version,
+                "--base-url", args.base_url, "--output", str(args.output)]
+        original = {"--build-receipt": str(args.build_receipt),
+                    "--source-set-sha256": args.source_set_sha256,
+                    "--build-receipt-sha256": args.build_receipt_sha256}
+        cases = [{key: value for key, value in original.items() if key != omitted}
+                 for omitted in original]
+        cases.extend({**original, flag: malformed}
+                     for flag in ("--source-set-sha256", "--build-receipt-sha256")
+                     for malformed in ("a" * 63, "A" * 64, "0" * 64))
+        for index, inputs in enumerate(cases):
+            with self.subTest(case=index):
+                result = run_contract_cli(
+                    base + [item for pair in inputs.items() for item in pair],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("external", result.stderr)
+                self.assertFalse(args.output.exists())
+                self.assertFalse(args.package_support_output.exists())
+
+    def test_overlay_partial_projection_failure_cleans_only_owned_output(self):
+        args, _ = self.make_overlay_fixture()
+        args.output.mkdir()
+        args.package_support_output.mkdir()
+        before = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                  for path in self.root.rglob("*") if path.is_file()}
+        module = load_legal_module()
+        real_copy = module.copy_checked_asset
+        real_open = pathlib.Path.open
+
+        class FailingWriter:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.stream.close()
+
+            def fileno(self):
+                return self.stream.fileno()
+
+            def write(self, chunk):
+                self.stream.write(chunk[:8])
+                raise OSError("injected partial support write")
+
+        def fail_support_write(source, destination, expected, created, **kwargs):
+            def open_stream(path, mode="r", *arguments, **kwargs):
+                stream = real_open(path, mode, *arguments, **kwargs)
+                return FailingWriter(stream) if path == destination and mode == "xb" else stream
+
+            if destination.parent == args.package_support_output:
+                with mock.patch.object(pathlib.Path, "open", new=open_stream):
+                    return real_copy(source, destination, expected, created, **kwargs)
+            return real_copy(source, destination, expected, created, **kwargs)
+
+        with mock.patch.object(module, "copy_checked_asset", side_effect=fail_support_write):
+            with self.assertRaisesRegex(OSError, "partial support write"):
+                self.materialize_fixture_overlay(args, module)
+        self.assertTrue(args.output.is_dir())
+        self.assertTrue(args.package_support_output.is_dir())
+        self.assertEqual(list(args.output.iterdir()), [])
+        self.assertEqual(list(args.package_support_output.iterdir()), [])
+        self.assertEqual(before, {path.relative_to(self.root).as_posix(): path.read_bytes()
+                                 for path in self.root.rglob("*") if path.is_file()})
+        self.assertEqual(list(args.output.parent.glob(".adb-overlay-*")), [])
+
+    def test_overlay_refuses_support_alias_inserted_during_release_copy_without_foreign_writes(self):
+        for initially_empty in (False, True):
+            with self.subTest(initially_empty=initially_empty):
+                args, _ = self.make_overlay_fixture(name=f"support-alias-{initially_empty}")
+                if initially_empty:
+                    args.package_support_output.mkdir()
+                foreign = args.output.parent / "foreign-support"
+                foreign.mkdir()
+                (foreign / "unrelated.txt").write_bytes(b"preserve unrelated caller material\n")
+                frozen_foreign = {path.name: path.read_bytes() for path in foreign.iterdir()}
+                frozen_core = {path.name: path.read_bytes() for path in args.core_root.iterdir()}
+                frozen_build = args.build_receipt.read_bytes()
+                module = load_legal_module()
+                real_copy = module.copy_checked_asset
+                replaced = False
+
+                def replace_support_during_release_copy(source, destination, expected, created, **kwargs):
+                    nonlocal replaced
+                    real_copy(source, destination, expected, created, **kwargs)
+                    if destination.parent == args.output and not replaced:
+                        if initially_empty:
+                            args.package_support_output.rmdir()
+                        args.package_support_output.symlink_to(foreign, target_is_directory=True)
+                        replaced = True
+
+                with mock.patch.object(module, "copy_checked_asset", side_effect=replace_support_during_release_copy):
+                    with self.assertRaisesRegex(RuntimeError, "symlink"):
+                        self.materialize_fixture_overlay(args, module)
+                self.assertTrue(replaced, "the alias must be inserted after preflight and during release copy")
+                self.assertEqual(
+                    frozen_foreign, {path.name: path.read_bytes() for path in foreign.iterdir()},
+                    "rejecting a late support alias must not leave projection files in its foreign target",
+                )
+                self.assertEqual(frozen_core, {path.name: path.read_bytes() for path in args.core_root.iterdir()})
+                self.assertEqual(args.build_receipt.read_bytes(), frozen_build)
+                self.assertTrue(args.package_support_output.is_symlink())
+                self.assertFalse(args.output.exists())
+
+    def test_overlay_binds_later_copies_to_the_acquired_output_directory(self):
+        args, _ = self.make_overlay_fixture()
+        foreign = args.output.parent / "foreign-release"
+        foreign.mkdir()
+        (foreign / "unrelated.txt").write_bytes(b"foreign release material\n")
+        frozen_foreign = {path.name: path.read_bytes() for path in foreign.iterdir()}
+        moved_owned = args.output.parent / "moved-owned-release"
+        module = load_legal_module()
+        real_copy = module.copy_checked_asset
+        replaced = False
+
+        def replace_acquired_release(source, destination, expected, created, **kwargs):
+            nonlocal replaced
+            real_copy(source, destination, expected, created, **kwargs)
+            if destination.parent == args.output and not replaced:
+                args.output.rename(moved_owned)
+                foreign.rename(args.output)
+                replaced = True
+
+        with mock.patch.object(module, "copy_checked_asset", side_effect=replace_acquired_release):
+            with self.assertRaises(RuntimeError):
+                self.materialize_fixture_overlay(args, module)
+        self.assertTrue(replaced)
+        self.assertEqual(frozen_foreign, {path.name: path.read_bytes() for path in args.output.iterdir()})
+        self.assertTrue(moved_owned.is_dir())
+        self.assertFalse(args.package_support_output.exists())
+
+    def test_core_only_refuses_stale_overlay_in_its_output(self):
+        repository, archive_root, lock_path, _ = self.make_legal_fixture()
+        output = self.root / "stale-core"
+        output.mkdir()
+        (output / "ADB-HELPER-SOURCE-OFFER.txt").write_text("old release offer\n")
+        result = run_contract_cli(
+            [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
+             "--archive-root", str(archive_root), "--repository-root", str(repository),
+             "--output", str(output)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("empty", (result.stdout + result.stderr).lower())
+
+    def test_overlay_only_rejects_core_bytes_even_with_forged_sidecar(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        core = self.root / "immutable-core"
+        build = run_contract_cli(
+            [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
+             "--archive-root", str(archive_root), "--repository-root", str(repository),
+             "--output", str(core)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+        pins = self.overlay_pin_arguments(core, lock_path, lock)
+        asset = core / "adb-helper-licenses.tar.gz"
+        asset.write_bytes(b"forged licenses\n")
+        asset.with_name(asset.name + ".sha256").write_text(
+            f"{archive_sha256(asset)}  {asset.name}\n", encoding="utf-8"
+        )
+        result = run_contract_cli(
+            [sys.executable, str(LEGAL_SCRIPT), "--overlay-only", "--lock", str(lock_path),
+             "--core-root", str(core), "--version", "99.01.01",
+             "--base-url", "https://github.com/ZEACENT/klogg",
+             "--output", str(self.root / "staged"), *pins],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sha256", (result.stdout + result.stderr).lower())
+
+    def test_legal_assets_reject_core_overlay_ownership_swaps(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        for kind in ("source-offer", "licenses"):
+            with self.subTest(kind=kind):
+                record = next(asset for asset in lock["release_assets"] if asset["kind"] == kind)
+                original = record["ownership"]
+                record["ownership"] = "core" if kind == "source-offer" else "overlay"
+                lock_path.write_text(json.dumps(lock), encoding="utf-8")
+                result = self.build_legal_assets(
+                    repository, archive_root, lock_path, self.root / f"invalid-{kind}"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ownership", (result.stdout + result.stderr).lower())
+                record["ownership"] = original
 
     def test_legal_assets_materialize_only_locked_package_support_projection(self):
         repository, archive_root, lock_path, lock = self.make_legal_fixture()
@@ -1154,4 +2064,4 @@ Dump of file adb.exe
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

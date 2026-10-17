@@ -51,6 +51,33 @@ def verify_hosted_image_family(expected: dict, image_os: str) -> None:
         )
 
 
+def verify_apple_toolchain(expected: dict, compiler_line: str) -> None:
+    developer_dir = expected.get("developer_dir")
+    xcode = expected.get("xcode")
+    sdk_version = expected.get("sdk_version")
+    sdk_path = expected.get("sdk_path")
+    clang_identity = expected.get("clang_identity")
+    if (not isinstance(developer_dir, str) or not developer_dir
+            or not isinstance(xcode, list) or len(xcode) != 2
+            or any(not isinstance(line, str) or not line for line in xcode)
+            or not isinstance(sdk_version, str) or not sdk_version
+            or not isinstance(sdk_path, str) or not sdk_path
+            or not isinstance(clang_identity, str) or not clang_identity):
+        raise RuntimeError("macOS ADB toolchain lacks reviewed Xcode, SDK or clang identity")
+    if os.environ.get("DEVELOPER_DIR") != developer_dir:
+        raise RuntimeError("macOS ADB build did not select its locked Xcode")
+    observed = {
+        "xcode": command_text(["xcodebuild", "-version"]).splitlines(),
+        "sdk_version": command_text(["xcrun", "--show-sdk-version"]),
+        "sdk_path": command_text(["xcrun", "--show-sdk-path"]),
+        "clang_identity": compiler_line,
+    }
+    reviewed = {"xcode": xcode, "sdk_version": sdk_version,
+                "sdk_path": sdk_path, "clang_identity": clang_identity}
+    if observed != reviewed:
+        raise RuntimeError(f"macOS ADB Xcode/SDK/clang identity mismatch: expected {reviewed}, got {observed}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", required=True, type=pathlib.Path)
@@ -128,6 +155,8 @@ def main() -> int:
         raise RuntimeError(
             f"compiler version mismatch for {args.target}: expected {expected['compiler_version']}, got {compiler_line}"
         )
+    if compiler == "appleclang":
+        verify_apple_toolchain(expected, compiler_line)
 
     host = f"{platform.system()} {platform.machine()}"
     print(f"verified ADB helper toolchain {expected['identifier']} on {host}; image={image_os}/{image_version}")

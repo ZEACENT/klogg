@@ -4,6 +4,7 @@ import json
 import pathlib
 import re
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -33,6 +34,10 @@ _CI_SPEC = importlib.util.spec_from_file_location(
 assert _CI_SPEC is not None and _CI_SPEC.loader is not None
 CI_MODULE = importlib.util.module_from_spec(_CI_SPEC)
 _CI_SPEC.loader.exec_module(CI_MODULE)
+_TOOLCHAIN_SPEC = importlib.util.spec_from_file_location("adb_toolchain", TOOLCHAIN_SCRIPT)
+assert _TOOLCHAIN_SPEC is not None and _TOOLCHAIN_SPEC.loader is not None
+ADB_TOOLCHAIN = importlib.util.module_from_spec(_TOOLCHAIN_SPEC)
+_TOOLCHAIN_SPEC.loader.exec_module(ADB_TOOLCHAIN)
 
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -89,6 +94,7 @@ REQUIRED_RELEASE_ASSET_KINDS = {
     "source-offer",
     "source-manifest",
     "source-set-receipt",
+    "overlay-receipt",
 }
 
 
@@ -203,6 +209,11 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     identity_fields.extend(("container_image", "container_digest"))
                 else:
                     identity_fields.extend(("hosted_image_family", "ninja_version"))
+                    if target.startswith("macos-"):
+                        identity_fields.extend(("developer_dir", "sdk_version", "sdk_path", "clang_identity"))
+                        self.assertEqual(toolchain.get("xcode"), ["Xcode 26.6", "Build version 17F113"])
+                        self.assertEqual(toolchain.get("runner_image"),
+                                         "macos-26-intel" if target == "macos-x86_64" else "macos-26")
                     self.assertNotIn(
                         "runner_image_revision",
                         toolchain,
@@ -230,8 +241,48 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIn("lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb", workflow)
         self.assertIn("cmakeVersion: 3.31.6", workflow)
         self.assertIn("ninjaVersion: 1.12.1", workflow)
-        for family in ("macos15", "win22"):
+        for family in ("macos26", "win22"):
             self.assertIn(f'"hosted_image_family": "{family}"', LOCK.read_text())
+
+    def test_macos_toolchain_requires_selected_xcode_sdk_and_exact_clang(self):
+        developer_dir = "/Applications/Xcode_26.6.app/Contents/Developer"
+        expected = {
+            "developer_dir": developer_dir,
+            "xcode": ["Xcode 26.6", "Build version 17F113"],
+            "sdk_version": "26.5",
+            "sdk_path": developer_dir + "/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+            "clang_identity": "Apple clang version 99.0.0 (synthetic test identity)",
+        }
+        outputs = {
+            ("xcodebuild", "-version"): "Xcode 26.6\nBuild version 17F113\n",
+            ("xcrun", "--show-sdk-version"): "26.5",
+            ("xcrun", "--show-sdk-path"): expected["sdk_path"],
+        }
+
+        def fake_command(command):
+            return outputs[tuple(command)]
+
+        with mock.patch.dict("os.environ", {"DEVELOPER_DIR": developer_dir}), \
+                mock.patch.object(ADB_TOOLCHAIN, "command_text", side_effect=fake_command):
+            ADB_TOOLCHAIN.verify_apple_toolchain(expected, expected["clang_identity"])
+            for field, value in (("xcode", ["Xcode 26.5", "Build version 17F113"]),
+                                 ("sdk_version", "26.4"),
+                                 ("sdk_path", "/tmp/unreviewed.sdk"),
+                                 ("clang_identity", "unreviewed clang"),
+                                 ("developer_dir", "/Applications/Xcode.app/Contents/Developer")):
+                with self.subTest(field=field), self.assertRaises(RuntimeError):
+                    ADB_TOOLCHAIN.verify_apple_toolchain({**expected, field: value},
+                                                         expected["clang_identity"])
+            for field in expected:
+                with self.subTest(missing=field), self.assertRaises(RuntimeError):
+                    ADB_TOOLCHAIN.verify_apple_toolchain(
+                        {key: value for key, value in expected.items() if key != field},
+                        expected["clang_identity"])
+            with self.assertRaises(RuntimeError):
+                ADB_TOOLCHAIN.verify_apple_toolchain(expected, "different Apple clang")
+            outputs[("xcodebuild", "-version")] = "Xcode 26.6\nBuild version 17F114\n"
+            with self.assertRaises(RuntimeError):
+                ADB_TOOLCHAIN.verify_apple_toolchain(expected, expected["clang_identity"])
 
     def test_windows_build_selects_the_msys2_gnu_patch_binary_explicitly(self):
         workflow = self.required_text(BUILD_ACTION)
@@ -403,6 +454,13 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         for kind, asset in by_kind.items():
             with self.subTest(kind=kind):
                 self.assertIs(asset.get("required"), True)
+                # The versioned source offer and its overlay receipt are the
+                # only assets allowed to change with the application version.
+                self.assertEqual(
+                    asset.get("ownership"),
+                    "overlay" if kind in ("source-offer", "overlay-receipt") else "core",
+                    f"unexpected ownership for {kind}",
+                )
                 distribution = asset.get("distribution")
                 self.assertIsInstance(
                     distribution, dict, f"{kind} must declare package/release distribution"
@@ -605,6 +663,31 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIn("source-built ADB helper leaked to portable archive root", package_action)
         self.assertIn("smoke_adb_helper.py", package_action)
 
+    def test_dependency_producer_keeps_legal_ids_and_propagates_current_version(self):
+        workflow = self.required_text(CI_BUILD)
+        legal = CI_MODULE.workflow_job_blocks(workflow)["BuildAdbHelperLegalAssets"]
+        outputs = CI_MODULE.workflow_mapping_block(legal, "outputs", 4)
+        self.assertIsNotNone(outputs)
+        self.assertEqual({key: value for key, (value, _) in outputs.items()}, {
+            "support_artifact_id": "${{ steps.upload_adb_support.outputs.artifact-id }}",
+            "full_release_artifact_id": "${{ steps.upload_adb_release.outputs.artifact-id }}",
+            "klogg_version": "${{ needs.SaveVersion.outputs.klogg_version }}",
+        })
+        steps = [CI_MODULE.workflow_step_fields(step) for step in
+                 CI_MODULE.workflow_job_steps(workflow)["BuildAdbHelperLegalAssets"]]
+        uploads = {fields.get("id"): (fields, children.get("with", {}))
+                   for fields, children in steps if fields.get("id", "").startswith("upload_adb_")}
+        self.assertEqual(set(uploads), {"upload_adb_support", "upload_adb_release"})
+        self.assertEqual(uploads["upload_adb_support"][1]["name"], "adb-helper-package-support")
+        self.assertEqual(uploads["upload_adb_release"][1]["name"], "adb-helper-legal-assets")
+        condition = uploads["upload_adb_release"][0].get("if", "")
+        for marker in ("inputs.dependency-mode == 'qualify'",
+                       "inputs.dependency-mode == 'publish'",
+                       "github.repository == 'ZEACENT/klogg'", "github.ref_type == 'branch'",
+                       "inputs.environment-mode == 'off'",
+                       "inputs.qualification-mode == 'validation'"):
+            self.assertIn(marker, condition)
+
     def test_adb_package_support_and_full_release_artifacts_have_distinct_ownership(self):
         workflow = self.required_text(CI_BUILD)
         records = CI_MODULE.workflow_artifact_records(workflow)
@@ -612,9 +695,12 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         full_release = "adb-helper-legal-assets"
         full_release_condition = (
             "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
-            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
-            "inputs.qualification-mode == 'release') }}"
-        )
+            "(github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') || (github.repository == 'ZEACENT/klogg' && "
+            "github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && "
+            "inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || "
+            "inputs.dependency-mode == 'publish')))) }}"
+        ).lower()
 
         legal_records = records.get("BuildAdbHelperLegalAssets", [])
         self.assertCountEqual(
@@ -631,9 +717,15 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
 
         blocks = CI_MODULE.workflow_job_blocks(workflow)
         legal_block = blocks["BuildAdbHelperLegalAssets"]
+        # Dependency dispatch needs the same legal support as ordinary jobs;
+        # environment production must continue to skip this independent lane.
         self.assertEqual(
             CI_MODULE.workflow_job_direct_value(legal_block, "if"),
-            "!contains(github.event.head_commit.message, '[skip ci]')",
+            "${{ ((github.event_name != 'workflow_dispatch' || "
+            "(inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || "
+            "(github.event_name == 'workflow_dispatch' && "
+            "(inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) "
+            "&& !contains(github.event.head_commit.message, '[skip ci]') }}",
             "the unconditional package-support upload is useless if its job is event-gated",
         )
         uploads = {}
@@ -680,7 +772,8 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     for kind, artifact, condition in records.get(job, [])
                     if kind == "downloads"
                 }
-                self.assertIn((package_support, None), downloads)
+                self.assertIn(("adb-helper-package-core", None), downloads)
+                self.assertNotIn(package_support, {artifact for artifact, _ in downloads})
                 self.assertNotIn(full_release, {artifact for artifact, _ in downloads})
 
         package_jobs = {
@@ -719,7 +812,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
 
         self.assertIn("package-support-root:", build_action)
         self.assertNotIn("release-assets-root:", build_action)
-        self.assertIn('--package-support-root "${{ inputs.package-support-root }}"', build_action)
+        self.assertIn('--package-support-root "${{ inputs.package-core-root }}"', build_action)
         self.assertIn("--asset-scope package", build_action)
         self.assertIn(
             '--source-assets-root "${{ inputs.package-support-root }}"', build_action
@@ -730,6 +823,76 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             "package-support-root: ${{ runner.temp }}/adb-helper-package-support",
             workflow,
         )
+
+    def test_ordinary_adb_builders_assemble_package_overlay_after_original_receipt(self):
+        workflow = self.required_text(CI_BUILD)
+        jobs = CI_MODULE.workflow_job_steps(workflow)
+        legal_steps = [CI_MODULE.workflow_step_fields(step) for step in jobs["BuildAdbHelperLegalAssets"]]
+        legal_build = next(fields["run"] for fields, _ in legal_steps
+                           if fields.get("name") == "Verify source closure and build legal assets")
+        self.assertIn("--package-core-output prefetch_artifacts/adb-helper-package-core", legal_build)
+        self.assertEqual(legal_build.count("python3 scripts/build_adb_helper_legal_assets.py"), 1)
+        core_uploads = [(fields, children["with"]) for fields, children in legal_steps
+                        if children.get("with", {}).get("name") == "adb-helper-package-core"]
+        self.assertEqual(len(core_uploads), 1)
+        fields, upload = core_uploads[0]
+        self.assertNotIn("if", fields)
+        self.assertEqual(upload["path"], "prefetch_artifacts/adb-helper-package-core/*")
+        self.assertEqual(upload["if-no-files-found"], "error")
+        self.assertEqual(upload["compression-level"], "0")
+
+        for job in ("BuildAdbLinuxX64", "BuildAdbLinuxArm64", "BuildAdbWindowsX64",
+                    "BuildAdbMacX64", "BuildAdbMacArm64"):
+            with self.subTest(job=job):
+                steps = [CI_MODULE.workflow_step_fields(step) for step in jobs[job]]
+                build_index, (_, children) = next(
+                    (index, entry) for index, entry in enumerate(steps)
+                    if entry[0].get("uses") == "./.github/actions/build-adb-helper"
+                )
+                options = children["with"]
+                self.assertEqual(options["package-core-root"], "${{ runner.temp }}/adb-helper-package-core")
+                self.assertEqual(options["package-support-root"], "${{ runner.temp }}/adb-helper-package-support")
+                self.assertEqual(options["version"], "${{ needs.BuildAdbHelperLegalAssets.outputs.klogg_version }}")
+                self.assertTrue(any(
+                    children.get("with", {}).get("name") == "adb-helper-package-core"
+                    and children["with"].get("path") == options["package-core-root"]
+                    for _, children in steps[:build_index]
+                ))
+
+        action = self.required_text(BUILD_ACTION)
+        body = action.split("  steps:\n", 1)[1]
+        projected = "jobs:\n  Build:\n    steps:\n" + "\n".join("  " + line for line in body.splitlines())
+        steps = [CI_MODULE.workflow_step_fields(step) for step in
+                 CI_MODULE.workflow_job_steps(projected)["Build"]]
+        overlays = [(index, fields) for index, (fields, _) in enumerate(steps)
+                    if "--package-overlay-only" in fields.get("run", "")]
+        self.assertEqual(len(overlays), 1)
+        overlay_index, overlay = overlays[0]
+        self.assertEqual(overlay["shell"], "bash")
+        self.assertNotIn("if", overlay)
+        self.assertNotIn("continue-on-error", overlay)
+        script = overlay["run"]
+        for marker in ('--core-root "$core_root"', '--build-receipt "$receipt"',
+                       '--source-set-sha256 "$(receipt_sha256 "$core_root/adb-helper-source-set-receipt.json")"',
+                       '--build-receipt-sha256 "$(receipt_sha256 "$receipt")"',
+                       '--version "${{ inputs.version }}"',
+                       '--output "${{ inputs.package-support-root }}"',
+                       'core_root="${{ inputs.package-core-root }}"',
+                       'receipt="${{ inputs.artifact-root }}/receipt.json"',
+                       "hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()"):
+            self.assertIn(marker, script)
+        self.assertNotIn("--archive-root", script)
+        self.assertNotIn("--repository-root", script)
+        raw_builds = [(index, fields) for index, (fields, _) in enumerate(steps)
+                      if "scripts/build_adb_helper.py" in fields.get("run", "")]
+        self.assertEqual(len(raw_builds), 3)
+        for index, fields in raw_builds:
+            self.assertLess(index, overlay_index)
+            self.assertIn('--package-support-root "${{ inputs.package-core-root }}"', fields["run"])
+        verify_index = next(index for index, (fields, _) in enumerate(steps)
+                            if fields.get("name") == "Smoke and verify source-built ADB artifact")
+        self.assertLess(overlay_index, verify_index)
+        self.assertIn('--source-assets-root "${{ inputs.package-support-root }}"', steps[verify_index][0]["run"])
 
     def test_adb_artifact_event_projection_keeps_package_validation_on_every_ci_event(self):
         workflow = self.required_text(CI_BUILD)
@@ -747,32 +910,37 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIsNone(producers[package_support])
         full_release_condition = (
             "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
-            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
-            "inputs.qualification-mode == 'release') }}"
-        )
+            "(github.event_name == 'workflow_dispatch' && ((github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') || (github.repository == 'ZEACENT/klogg' && "
+            "github.ref_type == 'branch' && inputs.qualification-mode == 'validation' && "
+            "inputs.environment-mode == 'off' && (inputs.dependency-mode == 'qualify' || "
+            "inputs.dependency-mode == 'publish')))) }}"
+        ).lower()
         self.assertEqual(producers.get(full_release), full_release_condition)
 
-        for event, ref, qualification_mode, full_release_expected in (
-            ("pull_request", "refs/pull/1/merge", "validation", False),
-            ("push", "refs/heads/master", "validation", True),
-            ("push", "refs/heads/topic", "validation", False),
-            ("workflow_dispatch", "refs/heads/master", "validation", False),
-            ("workflow_dispatch", "refs/heads/master", "release", True),
-            ("workflow_dispatch", "refs/heads/topic", "release", False),
+        for event, ref, qualification_mode, environment_mode, dependency_mode, repository, full_release_expected in (
+            ("pull_request", "refs/pull/1/merge", "validation", "off", "off", "ZEACENT/klogg", False),
+            ("push", "refs/heads/master", "validation", "off", "off", "ZEACENT/klogg", True),
+            ("push", "refs/heads/topic", "validation", "off", "off", "ZEACENT/klogg", False),
+            ("workflow_dispatch", "refs/heads/master", "validation", "off", "off", "ZEACENT/klogg", False),
+            ("workflow_dispatch", "refs/heads/master", "release", "off", "off", "ZEACENT/klogg", True),
+            ("workflow_dispatch", "refs/heads/topic", "release", "off", "off", "ZEACENT/klogg", False),
+            ("workflow_dispatch", "refs/heads/topic", "validation", "off", "qualify", "ZEACENT/klogg", True),
+            ("workflow_dispatch", "refs/heads/topic", "validation", "off", "publish", "ZEACENT/klogg", True),
+            ("workflow_dispatch", "refs/heads/topic", "validation", "qualify", "publish", "ZEACENT/klogg", False),
+            ("workflow_dispatch", "refs/heads/topic", "validation", "off", "publish", "fork/klogg", False),
+            ("workflow_dispatch", "refs/tags/v1", "validation", "off", "publish", "ZEACENT/klogg", False),
         ):
-            with self.subTest(
-                event=event, ref=ref, qualification_mode=qualification_mode
-            ):
-                self.assertTrue(
-                    producers.get(package_support) is None,
-                    "package-support assets must remain available to package validation",
-                )
+            with self.subTest(event=event, ref=ref, dependency_mode=dependency_mode):
+                self.assertIsNone(producers.get(package_support))
                 full_release_runs = (
                     event == "push" and ref == "refs/heads/master"
                 ) or (
                     event == "workflow_dispatch"
-                    and ref == "refs/heads/master"
-                    and qualification_mode == "release"
+                    and ((ref == "refs/heads/master" and qualification_mode == "release")
+                         or (repository == "ZEACENT/klogg" and ref.startswith("refs/heads/")
+                             and qualification_mode == "validation" and environment_mode == "off"
+                             and dependency_mode in {"qualify", "publish"}))
                 )
                 self.assertEqual(full_release_runs, full_release_expected)
 
@@ -849,6 +1017,11 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     or "Signed release qualification must run from master" in line
                 ):
                     line = line.replace("refs/heads/master", "trusted-master-ref")
+                    line = line.replace("refs/heads/main", "trusted-main-ref")
+                if "startswith('refs/heads/')" in line:
+                    # Producer preflight validates the dispatch ref shape; it is
+                    # not a floating source revision for helper materials.
+                    line = line.replace("refs/heads/", "trusted-branch-prefix/")
                 lines.append(line)
             normalized_sources.append("\n".join(lines))
         combined = "\n".join(normalized_sources)
