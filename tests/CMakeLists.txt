@@ -43,6 +43,13 @@ if(WIN32)
 endif()
 
 add_test(
+  NAME windows_runtime_verifier_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_verify_windows_runtime.py
+)
+set_tests_properties(windows_runtime_verifier_contract PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(windows_runtime_verifier_contract)
+
+add_test(
   NAME adb_helper_release_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_adb_helper_release_contract.py
 )

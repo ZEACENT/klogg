@@ -596,6 +596,49 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             ),
         )
 
+    def test_windows_runtime_component_is_required_and_describes_local_deployment(self):
+        installer = self.required_text(NSIS)
+        runtime_section = installer.split(
+            'Section "MSVC Runtime libraries" vcruntime', 1
+        )[1].split("SectionEnd", 1)[0]
+        self.assertRegex(runtime_section, r"(?m)^\s*SectionIn RO\s*$")
+        description = installer.split(
+            "!insertmacro MUI_DESCRIPTION_TEXT ${vcruntime}", 1
+        )[1].split("!insertmacro", 1)[0]
+        self.assertIn("application directory", description)
+        self.assertIn("required", description.lower())
+        self.assertNotIn("2017 Redistributable", description)
+
+    def test_windows_final_packages_verify_runtime_before_launch(self):
+        action = self.required_text(WIN_PACKAGE)
+        runs = ["runs:", *action.split("runs:\n", 1)[1].splitlines()]
+        fields = [CI_MODULE.workflow_step_fields(step)[0]
+                  for step in CI_MODULE.workflow_step_blocks(runs)]
+        steps = {step.get("name"): step for step in fields}
+        for step_name, root, smoke in (
+            ("Verify Windows portable archive layout", "$portableRoot", "$portableSmoke"),
+            ("Verify Windows installer layout", "$installRoot", "$installedSmoke"),
+        ):
+            with self.subTest(step=step_name):
+                step = steps[step_name]
+                self.assertEqual(step["shell"], "pwsh")
+                self.assertNotIn("if", step)
+                commands = "\n".join(
+                    line.strip() for line in step["run"].replace("`\n", "").splitlines()
+                    if not line.lstrip().startswith("#")
+                )
+                invocation = (
+                    r"(?m)^python -I scripts/verify_windows_runtime\.py\s+"
+                    + re.escape(f'--package-root "{root}"') + r"\s+"
+                    + re.escape('--staged-root "$env:KLOGG_WORKSPACE/release"')
+                    + r"\s+" + re.escape("--arch $env:KLOGG_ARCH") + r"\n"
+                    + re.escape("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }")
+                    + r"$"
+                )
+                self.assertRegex(commands, invocation)
+                self.assertLess(commands.index("verify_windows_runtime.py"),
+                                commands.index(smoke))
+
     def test_package_definitions_stage_exact_resolver_paths_and_verify_first(self):
         files = {
             "linux-cpack": self.required_text(ROOT_CMAKE),
