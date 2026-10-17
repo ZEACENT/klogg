@@ -501,6 +501,41 @@ checks; its filesystem contracts do not make it a signed production consumer.
 Existing ADB/iOS schema-1 build receipts bind the
 full source lock and cannot be reinterpreted as cross-version core receipts.
 
+## Workflow responsibilities and reuse completion gates
+
+The three reusable workflows are not three alternative ways to build the same
+inputs. Keep their authority boundaries separate:
+
+| Workflow | Role | When to run / retirement condition |
+| --- | --- | --- |
+| CI Environment Producer | Build, qualify and publish locked Linux environments | Only environment/toolchain inputs or qualification policy change; ordinary CI consumes immutable digests. |
+| CI Native Dependency Qualification | Authenticate all seven native targets and their source/legal companions | Core recipe, source, toolchain, architecture or policy changes; application-version overlays must not rebuild a qualified core. Production consumption is not activated yet. |
+| iOS Host Tool Evidence | Unreviewed diagnostic of the missing host-input boundary | Only while establishing the actual host closure. Fold its proven observation implementation into native qualification and retire the standalone diagnostic once both architectures pass. |
+
+All three already share the registered CI Build dispatcher. Merging their YAML
+now neither removes the ordinary native source builds nor proves reuse, and can
+invalidate workflow-bound signer identities and policy hashes. A successful
+local contract suite is not seven-target qualification evidence.
+
+The next native-core milestone must observe or enforce the **real**
+CMake/Ninja/ExternalProject/autogen/Perl/make execution chain, including nested
+processes, interpreter modules, macros, dylibs and the reviewed system/Xcode
+boundary. It requires genuine per-architecture tool bytes, recursive inputs and
+licenses, source/run/attempt binding, and negative undeclared-read/execute tests.
+A tool-tree snapshot or a trivial DTrace capability probe alone is insufficient.
+The catalog schema, core identity, builder receipt and Gate must then accept the
+same reviewed evidence together; deleting either existing refusal is not a fix.
+
+Only after both hosted macOS architectures pass may a fresh seven-target run
+support an independently authenticated protected publisher, detached signatures,
+anonymously verified immutable OCI assets, and a production-lock proposal. A
+signed companion must bind headers, original receipts and legal/source assets to
+the binary core before ordinary CI can use it without acquisition/rebuild. Keep
+application-version source offers in the current-version assembly layer and
+retain helper, application and installer smoke tests. Publication and production
+lock activation require separate approval; no diagnostic or performance-cache
+change grants that authority.
+
 ## Consuming locked environments
 
 Ordinary CI never builds an environment image. Two consumption shapes exist:
@@ -529,6 +564,41 @@ Ordinary CI never builds an environment image. Two consumption shapes exist:
   closed without it. Host provisioning (apt installs, agent-setup) must not
   reappear in these jobs; the image already carries the compilers, analysis
   tools, Qt, and Boost, and only the shared CPM source cache is restored on top.
+
+Ordinary static analysis and coverage use `scripts/run_ci_analysis.py`. This
+ordinary-only adapter imports the unchanged `scripts/qualify_ci_analysis.py`
+engine for canonical configuration, environment, command execution, first-party
+filtering, and cppcheck arguments. `scripts/run_linux_analysis.sh` and the engine
+retain their exact previously qualified bytes; the production lock, profiles and
+signed evidence are unchanged. The adapter does not issue evidence or claim to be
+a verifier approved by that lock.
+
+The signed engine exposes complete static and coverage roles, not independent
+phases. Ordinary CI must retain changed-only PR analysis, independent tool steps,
+and a coverage ratchet after report transport back to the original checkout.
+The adapter therefore owns ordinary phase sequencing and the tool invocations
+without an existing engine seam; it does not copy or rewrite the engine source,
+filter out qualification commands, or fabricate successful qualification work.
+Command-parity tests compare its composed phases with the unchanged engine's
+complete roles, and direct-call tests protect the reused primitives. This is
+partial implementation reuse, not a claim that complete execution is shared.
+
+Configure reads canonical CMake options from `ci/environments/profiles.json`.
+Ordinary coverage substitutes only the runtime CPM-cache argument so its private
+source clone consumes the original prefetched cache. Static analysis selects
+`changed-strict` or `full-report`; qualification still runs both. Coverage keeps
+all build targets, the complete CTest run, both gcovr passes, and the ratchet.
+The adapter sets gcovr's working directory to its source root as well as passing
+`--root`, preserving relative first-party filters for the private checkout.
+Workflows own event/base resolution, private namespaces, report transport, and
+artifact upload, not inline analyzer commands.
+
+Deeper phase sharing requires a separately reviewed engine change, genuine
+analysis requalification and matching signed lock evidence. Refactoring is not
+permission to rewrite an existing receipt, relabel approval, or bypass its policy
+digest. The offline reuse-compatibility regression checks every family's current
+recipe, inputs and verifier-policy identity against its recorded lock/receipt;
+it complements rather than replaces cryptographic consumer verification.
 
 Build-private efsw preparation has a distinct Git ownership boundary. It first
 verifies the approved shared-cache source digest, canonicalizes the cache path,

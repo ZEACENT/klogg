@@ -1,0 +1,147 @@
+{
+  "job_id": 117382283400,
+  "job_name": "Linux ubuntu-26.04-deb [vs-gen]",
+  "run_id": 39027449860,
+  "head_sha": "f4c3d005ca2204b23489855988175ecd6f994e48",
+  "source": "https://api.github.com/repos/ZEACENT/klogg/actions/jobs/117382283400/logs",
+  "log_sha256": "37513a16cf04004fdac91d15301b0747efcc94696caa2609bf07f6febdba9721",
+  "note": "Exact selected log lines with original 1-based line numbers; ccache -s totals are accumulated, NOT current-build deltas.",
+  "lines": [
+    {
+      "line": 535,
+      "text": "2026-10-17T11:14:30.8660312Z   path: /home/runner/work/klogg/klogg/.ccache"
+    },
+    {
+      "line": 536,
+      "text": "2026-10-17T11:14:30.8660676Z   key: ubuntu-26.04-deb-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 537,
+      "text": "2026-10-17T11:14:30.8661018Z   restore-keys: ubuntu-26.04-deb-ccache-v2-"
+    },
+    {
+      "line": 538,
+      "text": ""
+    },
+    {
+      "line": 539,
+      "text": "2026-10-17T11:14:30.8661354Z   enableCrossOsArchive: false"
+    },
+    {
+      "line": 540,
+      "text": "2026-10-17T11:14:30.8661645Z   fail-on-cache-miss: false"
+    },
+    {
+      "line": 541,
+      "text": "2026-10-17T11:14:30.8661920Z   lookup-only: false"
+    },
+    {
+      "line": 562,
+      "text": "2026-10-17T11:14:30.8670329Z ##[endgroup]"
+    },
+    {
+      "line": 563,
+      "text": "2026-10-17T11:14:31.2438656Z Cache hit for: ubuntu-26.04-deb-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 564,
+      "text": "2026-10-17T11:14:32.5315594Z Received 12582912 of 390463282 (3.2%), 12.0 MBs/sec"
+    },
+    {
+      "line": 565,
+      "text": "2026-10-17T11:14:33.5314569Z Received 125829120 of 390463282 (32.2%), 59.9 MBs/sec"
+    },
+    {
+      "line": 566,
+      "text": "2026-10-17T11:14:34.5358376Z Received 226492416 of 390463282 (58.0%), 71.9 MBs/sec"
+    },
+    {
+      "line": 567,
+      "text": "2026-10-17T11:14:35.5344603Z Received 335544320 of 390463282 (85.9%), 79.9 MBs/sec"
+    },
+    {
+      "line": 570,
+      "text": "2026-10-17T11:14:35.9349951Z [command]/usr/bin/tar -xf /home/runner/work/_temp/5397330a-5168-4cd2-a58b-2c4584556734/cache.tzst -P -C /home/runner/work/klogg/klogg --use-compress-program unzstd"
+    },
+    {
+      "line": 571,
+      "text": "2026-10-17T11:14:36.7645429Z Cache restored successfully"
+    },
+    {
+      "line": 572,
+      "text": "2026-10-17T11:14:36.8514320Z Cache restored from key: ubuntu-26.04-deb-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 573,
+      "text": "2026-10-17T11:14:36.8785656Z Prepare all required actions"
+    },
+    {
+      "line": 574,
+      "text": "2026-10-17T11:14:36.8861821Z ##[group]Run ./.github/actions/prepare-workspace-env"
+    },
+    {
+      "line": 575,
+      "text": "2026-10-17T11:14:36.8862165Z with:"
+    },
+    {
+      "line": 576,
+      "text": "2026-10-17T11:14:36.8862359Z   arch: x64"
+    },
+    {
+      "line": 68962,
+      "text": "2026-10-17T11:22:28.5115687Z ##[endgroup]"
+    },
+    {
+      "line": 68963,
+      "text": "2026-10-17T11:22:28.6791251Z Cacheable calls:   1906 / 1906 (100.0%)"
+    },
+    {
+      "line": 68964,
+      "text": "2026-10-17T11:22:28.6791875Z   Hits:             963 / 1906 (50.52%)"
+    },
+    {
+      "line": 68965,
+      "text": "2026-10-17T11:22:28.6792383Z     Direct:         950 /  963 (98.65%)"
+    },
+    {
+      "line": 68966,
+      "text": "2026-10-17T11:22:28.6792812Z     Preprocessed:    13 /  963 ( 1.35%)"
+    },
+    {
+      "line": 68967,
+      "text": "2026-10-17T11:22:28.6793337Z   Misses:           943 / 1906 (49.48%)"
+    },
+    {
+      "line": 68968,
+      "text": "2026-10-17T11:22:28.6794096Z Local storage:"
+    },
+    {
+      "line": 68969,
+      "text": "2026-10-17T11:22:28.6794686Z   Cache size (GB):  0.4 /  2.0 (20.01%)"
+    },
+    {
+      "line": 68970,
+      "text": "2026-10-17T11:22:28.6795190Z   Hits:             963 / 1906 (50.52%)"
+    },
+    {
+      "line": 68971,
+      "text": "2026-10-17T11:22:28.6795664Z   Misses:           943 / 1906 (49.48%)"
+    },
+    {
+      "line": 68972,
+      "text": "2026-10-17T11:22:28.7902097Z Prepare all required actions"
+    },
+    {
+      "line": 68973,
+      "text": "2026-10-17T11:22:28.7959840Z ##[group]Run ./.github/actions/docker-run-tests"
+    },
+    {
+      "line": 68974,
+      "text": "2026-10-17T11:22:28.7960181Z with:"
+    },
+    {
+      "line": 68975,
+      "text": "2026-10-17T11:22:28.7960418Z   container-suffix: _ubuntu26.04"
+    }
+  ]
+}
