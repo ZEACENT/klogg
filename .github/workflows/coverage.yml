@@ -109,25 +109,25 @@ jobs:
             "$private_parent" "$private_parent" >> "$GITHUB_ENV"
           printf 'KLOGG_CPM_SOURCE_CACHE=%s/cpm_cache\n' "$source_root" >> "$GITHUB_ENV"
 
-      # Qualification and consumers use the same profile and execution phases.
-      # Only the private checkout/cache layout and artifact transport differ.
+      # The ordinary adapter reuses the unchanged qualification primitives.
+      # Separate phases retain report transport and the original ratchet context.
       - name: Configure (Debug + coverage)
         shell: bash
         run: |
-          sh scripts/run_linux_analysis.sh configure --role coverage \
+          python3 scripts/run_ci_analysis.py configure --role coverage \
             --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" \
             --cpm-source-cache "$KLOGG_CPM_SOURCE_CACHE"
 
       - name: Build tests
         shell: bash
         run: |
-          sh scripts/run_linux_analysis.sh coverage-build --role coverage \
+          python3 scripts/run_ci_analysis.py coverage-build --role coverage \
             --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" --jobs "$(nproc)"
 
       - name: Run tests
         shell: bash
         run: |
-          sh scripts/run_linux_analysis.sh coverage-test --role coverage \
+          python3 scripts/run_ci_analysis.py coverage-test --role coverage \
             --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" --jobs "$(nproc)"
 
       - name: Generate coverage report
@@ -136,7 +136,7 @@ jobs:
           set -euo pipefail
           # The executor owns gcovr's CWD as well as --root so relative filters
           # select the private checkout. Copy the entire HTML companion tree.
-          sh scripts/run_linux_analysis.sh coverage-report --role coverage \
+          python3 scripts/run_ci_analysis.py coverage-report --role coverage \
             --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" \
             --report-dir "$KLOGG_WORKSPACE/coverage_report"
           cp -R "$KLOGG_WORKSPACE/coverage_report" "$GITHUB_WORKSPACE/"
@@ -168,7 +168,7 @@ jobs:
             exit 1
           fi
 
-          sh scripts/run_linux_analysis.sh coverage-ratchet --role coverage \
+          python3 scripts/run_ci_analysis.py coverage-ratchet --role coverage \
             --workspace "$GITHUB_WORKSPACE" --report-dir "$GITHUB_WORKSPACE/coverage_report" \
             --analysis-base-sha "$base_sha"
 

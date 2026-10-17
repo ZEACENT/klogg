@@ -137,11 +137,43 @@ class AnalysisRoleTest(unittest.TestCase):
                                      runner=self.runner, jobs=2)
 
     def run_phase(self, phase, role, build=None, *options):
-        arguments = ["inside", phase, "--role", role, "--workspace", str(self.workspace)]
+        import run_ci_analysis as ordinary
+        arguments = [phase, "--role", role, "--workspace", str(self.workspace)]
         if build is not None:
             arguments += ["--build-dir", str(build)]
-        with mock.patch.object(analysis.subprocess, "run", side_effect=self.runner):
-            return analysis.main(arguments + list(options))
+        with mock.patch.object(ordinary.subprocess, "run", side_effect=self.runner):
+            return ordinary.main(arguments + list(options))
+
+    def test_consumer_invokes_unchanged_engine_primitives_without_emitting_evidence(self):
+        build = self.root / "consumer-build"
+        with mock.patch.object(analysis, "configure", wraps=analysis.configure) as configure, \
+                mock.patch.object(analysis, "role_environment", wraps=analysis.role_environment) as environment, \
+                mock.patch.object(analysis, "_filtered_database", wraps=analysis._filtered_database) as filtered, \
+                mock.patch.object(analysis, "_cppcheck", wraps=analysis._cppcheck) as cppcheck, \
+                mock.patch.object(analysis, "execute", wraps=analysis.execute) as execute:
+            self.assertEqual(self.run_phase("configure", "static", build), 0)
+            self.assertEqual(self.run_phase("static-cppcheck", "static", build,
+                                           "--analysis-mode", "changed-strict", "--analysis-base-sha", BASE), 0)
+            configure.assert_called_once()
+            self.assertEqual(environment.call_count, 2)
+            filtered.assert_called_once()
+            cppcheck.assert_called_once()
+            self.assertTrue(cppcheck.call_args.args[-1])
+            self.assertEqual(execute.call_count, 3)
+        self.assertFalse(list(self.root.rglob("analysis-evidence.json")))
+
+    def test_consumer_cache_override_rejects_missing_or_duplicate_canonical_argument(self):
+        import run_ci_analysis as ordinary
+        canonical = "-DCPM_SOURCE_CACHE=@WORKSPACE@/cpm_cache"
+        for copies in (0, 2):
+            options = ["-DFETCHCONTENT_FULLY_DISCONNECTED=ON"] + [canonical] * copies
+            with self.subTest(copies=copies), mock.patch.object(
+                analysis.profiles, "profile_configuration", return_value={"cmake_options": options}
+            ), mock.patch.object(ordinary.subprocess, "run") as runner:
+                with self.assertRaisesRegex(analysis.AnalysisError, "canonical CPM cache option"):
+                    ordinary.configure("coverage", self.workspace, self.root / "build", runner, {}, {},
+                                       cpm_source_cache=self.root / "original-cache")
+                runner.assert_not_called()
 
     def test_consumer_static_phases_execute_the_qualification_commands(self):
         self.run_role("static")
@@ -154,7 +186,8 @@ class AnalysisRoleTest(unittest.TestCase):
             for phase in ("static-tidy", "static-cppcheck"):
                 self.assertEqual(self.run_phase(phase, "static", build, "--analysis-mode", mode,
                                                "--analysis-base-sha", BASE, "--jobs", "2"), 0)
-        normalized = [[value.replace(str(build), str(self.work / "build_root")) for value in command]
+        normalized = [[value.replace(str(build / "cppcheck-"), str(self.work / "cppcheck-"))
+                       .replace(str(build), str(self.work / "build_root")) for value in command]
                       for command in self.commands]
         self.assertEqual(normalized, qualified)
 
@@ -174,6 +207,45 @@ class AnalysisRoleTest(unittest.TestCase):
                        .replace(str(report), str(self.work / "coverage_report")) for value in command]
                       for command in self.commands]
         self.assertEqual(normalized, qualified)
+
+    def test_consumer_changed_cppcheck_preserves_header_sweep_and_empty_diff(self):
+        build = self.root / "consumer-build"
+        self.assertEqual(self.run_phase("configure", "static", build), 0)
+        for changed, expected_count in (("src/shared.h\0", 1), ("", 0), ("docs/example.md\0", 0)):
+            with self.subTest(changed=changed):
+                self.changed = changed
+                self.commands = []
+                self.assertEqual(self.run_phase("static-cppcheck", "static", build,
+                                               "--analysis-mode", "changed-strict", "--analysis-base-sha", BASE), 0)
+                cppcheck = [command for command in self.commands if command[0] == "cppcheck"]
+                self.assertEqual(len(cppcheck), expected_count)
+                if cppcheck:
+                    self.assertIn("--error-exitcode=1", cppcheck[0])
+                    records = json.loads((build / "cppcheck-changed.json").read_text())
+                    self.assertEqual([record["file"] for record in records],
+                                     [str(self.workspace / "src/app/main.cpp")])
+
+    def test_consumer_missing_compile_command_fails_without_running_cppcheck(self):
+        build = self.root / "consumer-build"
+        self.assertEqual(self.run_phase("configure", "static", build), 0)
+        self.changed = "src/platform/missing.cpp\0"
+        diagnostics = io.StringIO()
+        with contextlib.redirect_stderr(diagnostics):
+            self.assertEqual(self.run_phase("static-cppcheck", "static", build,
+                                           "--analysis-mode", "changed-strict", "--analysis-base-sha", BASE), 1)
+        self.assertIn("missing compile command", diagnostics.getvalue())
+        self.assertFalse(any(command[0] == "cppcheck" for command in self.commands))
+        self.assertFalse(list(self.root.rglob("analysis-evidence.json")))
+
+    def test_consumer_cannot_request_qualification_or_evidence_output(self):
+        import run_ci_analysis as ordinary
+        for arguments in (("qualify",), ("configure", "--output", str(self.output)),
+                          ("configure", "--role", "codeql")):
+            with self.subTest(arguments=arguments), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as error:
+                ordinary.main(["--role", "static", "--workspace", str(self.workspace), *arguments])
+            self.assertEqual(error.exception.code, 2)
+        self.assertFalse(self.output.exists())
 
     def test_consumer_static_mode_does_not_add_another_analysis_scope(self):
         build = self.root / "consumer-build"

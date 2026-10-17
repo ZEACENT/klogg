@@ -4389,14 +4389,14 @@ endforeach()
 
 
 class SharedAnalysisPhasePolicyTest(unittest.TestCase):
-    """The workflow owns event context; the shared runner owns execution policy."""
+    """The workflow owns event context; the ordinary adapter owns phase sequencing."""
 
     MESSAGE = "shared analysis phases must delegate with exact context and fail closed"
 
     @staticmethod
     def phase_runs(role):
         context = f'--role {role} --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT"'
-        runner = 'sh scripts/run_linux_analysis.sh '
+        runner = 'python3 scripts/run_ci_analysis.py '
         if role == "static":
             scope = ' --analysis-mode "$KLOGG_ANALYSIS_MODE" --analysis-base-sha "${KLOGG_ANALYSIS_BASE:-}"'
             return {
@@ -4427,7 +4427,7 @@ class SharedAnalysisPhasePolicyTest(unittest.TestCase):
                 suffix = ""
                 env = ""
                 if name == "Enforce coverage ratchet":
-                    prefix = fields["run"].split("sh scripts/run_linux_analysis.sh", 1)[0].rstrip() + "\n"
+                    prefix = fields["run"].split("python3 scripts/run_ci_analysis.py", 1)[0].rstrip() + "\n"
                     env = (
                         "        env:\n"
                         "          EVENT_NAME: ${{ github.event_name }}\n"
@@ -4446,6 +4446,17 @@ class SharedAnalysisPhasePolicyTest(unittest.TestCase):
     def issues(role, workflow):
         checker = MODULE.static_analysis_workflow_issues if role == "static" else MODULE.coverage_workflow_issues
         return checker(workflow)
+
+    def test_ordinary_adapter_is_required_instead_of_unsupported_signed_engine_phases(self):
+        for role in ("static", "coverage"):
+            workflow = self.delegated_workflow(role).replace(
+                "sh scripts/run_linux_analysis.sh", "python3 scripts/run_ci_analysis.py")
+            with self.subTest(role=role):
+                self.assertEqual(self.issues(role, workflow), [])
+                for command in ("sh scripts/run_linux_analysis.sh",
+                                "python3 scripts/qualify_ci_analysis.py inside"):
+                    mutated = workflow.replace("python3 scripts/run_ci_analysis.py", command)
+                    self.assertIn(self.MESSAGE, self.issues(role, mutated))
 
     def test_shared_analysis_accepts_complete_ordered_delegation(self):
         for role in ("static", "coverage"):

@@ -88,12 +88,12 @@ def model_tool(tool, arguments):
                 "acquired namespace parent was replaced")
         return build
 
-    # The wrapper and shared executor are real. Only external analysis tools
+    # The ordinary adapter and imported engine are real. Only external tools
     # are seams; shell functions would disappear across the Python boundary.
-    if tool == "python3" and pathlib.Path(arguments[0]).name == "qualify_ci_analysis.py":
-        require(path(arguments[0]) == workspace / "scripts/qualify_ci_analysis.py",
+    if tool == "python3" and pathlib.Path(arguments[0]).name == "run_ci_analysis.py":
+        require(path(arguments[0]) == workspace / "scripts/run_ci_analysis.py",
                 "ordinary analysis helper must execute from the original checkout")
-        phase = arguments[2]
+        phase = arguments[1]
         expected_source = (pathlib.Path(state["private"]) / "source"
                            if state["role"] == "coverage" and phase != "coverage-ratchet" else workspace)
         require(path(option("--workspace")) == expected_source, "shared phase changed its workspace")
@@ -336,7 +336,7 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
             path = self.workspace / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
-        for relative in ("scripts/run_linux_analysis.sh", "scripts/qualify_ci_analysis.py",
+        for relative in ("scripts/run_linux_analysis.sh", "scripts/qualify_ci_analysis.py", "scripts/run_ci_analysis.py",
                          "scripts/ci_build_metrics.py", "scripts/ci_environment.py", "scripts/ci_environment_profiles.py",
                          "scripts/first_party_compile_units.py", "scripts/filter_compile_database.py",
                          "scripts/prefetch_adb_helper_sources.py", "scripts/enforce_coverage_ratchet.py",
@@ -344,7 +344,7 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
             destination = self.workspace / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, destination)
-        self.helper = self.workspace / "scripts/qualify_ci_analysis.py"
+        self.helper = self.workspace / "scripts/run_ci_analysis.py"
         self.helper_source = self.helper.read_text()
         tools = self.root / "tools"
         tools.mkdir()
@@ -457,11 +457,11 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
                 self.assertIn(private, pathlib.Path(state["build"]).parents)
                 if role in ("static", "coverage"):
                     shared = [call for call in state["calls"] if call["tool"] == "python3"
-                              and pathlib.Path(call["args"][0]).name == "qualify_ci_analysis.py"]
+                              and pathlib.Path(call["args"][0]).name == "run_ci_analysis.py"]
                     expected = (["configure", "static-prepare", "static-tidy", "static-cppcheck"]
                                 if role == "static" else ["configure", "coverage-build", "coverage-test",
                                                           "coverage-report", "coverage-ratchet"])
-                    self.assertEqual([call["args"][2] for call in shared], expected)
+                    self.assertEqual([call["args"][1] for call in shared], expected)
                     for step in self.steps(role, self.workflow(role)):
                         fields, _ = self.quality.workflow_step_fields(step)
                         if fields.get("name", "").startswith("Configure ("):
@@ -541,10 +541,10 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
         # Mutate only the fixture copy of the real helper, not the workflow or
         # its invocation boundary. Relative gcovr filters must use private cwd.
         mutations = (
-            ('build], cwd=workspace, env=environment).stdout',
-             'build], cwd=pathlib.Path(environment["GITHUB_WORKSPACE"]), env=environment).stdout'),
-            ('report / "coverage.json", build], cwd=workspace, env=environment)',
-             'report / "coverage.json", build], cwd=pathlib.Path(environment["GITHUB_WORKSPACE"]), env=environment)'),
+            ('build]).stdout',
+             'build], cwd=pathlib.Path(os.environ["GITHUB_WORKSPACE"])).stdout'),
+            ('report / "coverage.json", build])',
+             'report / "coverage.json", build], cwd=pathlib.Path(os.environ["GITHUB_WORKSPACE"]))'),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation[0]):
@@ -582,7 +582,7 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
 
     def test_actual_ratchet_rejects_corrupted_synthetic_summaries(self):
         text = self.workflow("coverage")
-        consumer = 'sh scripts/run_linux_analysis.sh coverage-ratchet'
+        consumer = 'python3 scripts/run_ci_analysis.py coverage-ratchet'
         self.assertIn(consumer, text)
         corruptions = ((":", "missing a parseable 'lines'"),
                        ("printf '%s\\n' 'not a percentage'", "missing a parseable 'lines'"),
@@ -648,7 +648,7 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
                          ('--report-dir "$KLOGG_WORKSPACE/coverage_report"', '--report-dir "$KLOGG_BUILD_ROOT/coverage_report"'),
                          ('--workspace "$GITHUB_WORKSPACE"', '--workspace "$KLOGG_WORKSPACE"'),
                          ('--report-dir "$GITHUB_WORKSPACE/coverage_report"', '--report-dir "$KLOGG_BUILD_ROOT/coverage_report"'),
-                         ('sh scripts/run_linux_analysis.sh configure', 'sh "$KLOGG_WORKSPACE/scripts/run_linux_analysis.sh" configure'),
+                         ('python3 scripts/run_ci_analysis.py configure', 'python3 "$KLOGG_WORKSPACE/scripts/run_ci_analysis.py" configure'),
                          ('path: coverage_report/', 'path: build_root/')],
         }
         for role, changes in mutations.items():

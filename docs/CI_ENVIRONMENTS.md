@@ -565,29 +565,40 @@ Ordinary CI never builds an environment image. Two consumption shapes exist:
   reappear in these jobs; the image already carries the compilers, analysis
   tools, Qt, and Boost, and only the shared CPM source cache is restored on top.
 
-Static analysis and coverage use `scripts/run_linux_analysis.sh` for both ordinary
-CI and qualification. Its phases are implemented in `scripts/qualify_ci_analysis.py`,
-which is already bound by the analysis profiles' verification inputs. Configure
-reads the role's canonical CMake options from `ci/environments/profiles.json`;
-ordinary coverage supplies only an explicit CPM-cache path because its private
-source clone shares the original prefetched cache.
+Ordinary static analysis and coverage use `scripts/run_ci_analysis.py`. This
+ordinary-only adapter imports the unchanged `scripts/qualify_ci_analysis.py`
+engine for canonical configuration, environment, command execution, first-party
+filtering, and cppcheck arguments. `scripts/run_linux_analysis.sh` and the engine
+retain their exact previously qualified bytes; the production lock, profiles and
+signed evidence are unchanged. The adapter does not issue evidence or claim to be
+a verifier approved by that lock.
 
-The static phases own generated headers, configured first-party translation units,
-clang-tidy arguments, and cppcheck scope/suppressions. Ordinary CI selects either
-`changed-strict` or `full-report`; qualification composes both, including the full
-audit when no application files changed. Coverage phases own build targets, the
-complete CTest run, both gcovr passes, and the ratchet invocation. The executor
-sets gcovr's working directory to its source root as well as passing `--root`, so
-relative first-party filters work with the private checkout. Workflows retain
-GitHub event/base resolution, private namespace acquisition, report transport,
-and artifact upload; qualification retains candidate verification and evidence.
-There is no second inline tool-policy implementation in either workflow.
+The signed engine exposes complete static and coverage roles, not independent
+phases. Ordinary CI must retain changed-only PR analysis, independent tool steps,
+and a coverage ratchet after report transport back to the original checkout.
+The adapter therefore owns ordinary phase sequencing and the tool invocations
+without an existing engine seam; it does not copy or rewrite the engine source,
+filter out qualification commands, or fabricate successful qualification work.
+Command-parity tests compare its composed phases with the unchanged engine's
+complete roles, and direct-call tests protect the reused primitives. This is
+partial implementation reuse, not a claim that complete execution is shared.
 
-Changing these shared verifier bytes requires fresh analysis qualification and
-reviewed signed lock evidence before ordinary consumers can accept the new
-policy. Refactoring is not permission to rewrite an existing receipt or bypass
-its policy digest. The profile manifest need not change when using these already
-bound entry points; unrelated family policies remain unchanged.
+Configure reads canonical CMake options from `ci/environments/profiles.json`.
+Ordinary coverage substitutes only the runtime CPM-cache argument so its private
+source clone consumes the original prefetched cache. Static analysis selects
+`changed-strict` or `full-report`; qualification still runs both. Coverage keeps
+all build targets, the complete CTest run, both gcovr passes, and the ratchet.
+The adapter sets gcovr's working directory to its source root as well as passing
+`--root`, preserving relative first-party filters for the private checkout.
+Workflows own event/base resolution, private namespaces, report transport, and
+artifact upload, not inline analyzer commands.
+
+Deeper phase sharing requires a separately reviewed engine change, genuine
+analysis requalification and matching signed lock evidence. Refactoring is not
+permission to rewrite an existing receipt, relabel approval, or bypass its policy
+digest. The offline reuse-compatibility regression checks every family's current
+recipe, inputs and verifier-policy identity against its recorded lock/receipt;
+it complements rather than replaces cryptographic consumer verification.
 
 Build-private efsw preparation has a distinct Git ownership boundary. It first
 verifies the approved shared-cache source digest, canonicalizes the cache path,

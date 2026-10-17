@@ -184,24 +184,24 @@ jobs:
           private_parent=$(mktemp -d /tmp/klogg-analysis.XXXXXXXX)
           printf 'KLOGG_BUILD_ROOT=%s/build_root\n' "$private_parent" >> "$GITHUB_ENV"
 
-      # These phases are also composed by environment qualification. Keep tool
-      # policy in the shared executor; the workflow owns only event/context input.
+      # The ordinary adapter reuses the unchanged qualification primitives.
+      # Keep phase orchestration out of the workflow and signed verifier bytes.
       - name: Configure (generate compile_commands.json)
         shell: bash
         run: |
-          sh scripts/run_linux_analysis.sh configure --role static \
+          python3 scripts/run_ci_analysis.py configure --role static \
             --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT"
 
       - name: Generate Qt UI headers for analysis
         shell: bash
         run: |
-          sh scripts/run_linux_analysis.sh static-prepare --role static \
+          python3 scripts/run_ci_analysis.py static-prepare --role static \
             --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" --jobs "$(nproc)"
 
       - name: Run clang-tidy
         shell: bash
         run: |
-          sh scripts/run_linux_analysis.sh static-tidy --role static \
+          python3 scripts/run_ci_analysis.py static-tidy --role static \
             --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" \
             --analysis-mode "$KLOGG_ANALYSIS_MODE" --analysis-base-sha "${KLOGG_ANALYSIS_BASE:-}" \
             --clang-tidy-diff "$CLANG_TIDY_DIFF" --jobs "$(nproc)"
@@ -209,6 +209,6 @@ jobs:
       - name: Run cppcheck (warning+style over src/)
         shell: bash
         run: |
-          sh scripts/run_linux_analysis.sh static-cppcheck --role static \
+          python3 scripts/run_ci_analysis.py static-cppcheck --role static \
             --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" \
             --analysis-mode "$KLOGG_ANALYSIS_MODE" --analysis-base-sha "${KLOGG_ANALYSIS_BASE:-}"

@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import ci_environment as ci
 import ci_environment_profiles as profiles_api
 import qualify_ci_analysis as analysis
+import run_ci_analysis as ordinary_analysis
 
 RECIPES = ROOT / "ci/environments/recipes.json"
 PROFILES = ROOT / "ci/environments/profiles.json"
@@ -304,8 +305,9 @@ class EnvironmentProfilesTest(unittest.TestCase):
         environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
                            CONFIGURE_RECEIPT=str(receipt))
         kwargs = {} if cache is None else {"cpm_source_cache": cache}
-        analysis.configure(role, workspace, build, subprocess.run, environment,
-                           self.profiles if document is None else document, **kwargs)
+        configure = analysis.configure if role == "codeql" else ordinary_analysis.configure
+        configure(role, workspace, build, subprocess.run, environment,
+                  self.profiles if document is None else document, **kwargs)
         observed = json.loads(receipt.read_text())
         self.assertEqual(observed["cwd"], str(workspace.resolve()))
         self.assertEqual(observed["args"][:4], ["-S", str(workspace), "-B", str(build)])

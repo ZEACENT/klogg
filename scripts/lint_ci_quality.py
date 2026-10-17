@@ -3810,10 +3810,10 @@ fi
 
 
 def shared_analysis_phase_issues(text: str, role: str) -> list[str]:
-    """Validate actual run-step commands against the closed shared phase API.
+    """Validate actual run-step commands against the ordinary adapter's phase API.
 
     Standalone delegation keeps failure propagation and ordering structural;
-    analyzer options and execution policy belong to the shared runner's tests.
+    analyzer options and execution policy belong to the adapter's parity tests.
     Report publication and event-base resolution have exact fail-closed command
     sequences, so additional shell control flow cannot skip or mask a phase.
     """
@@ -3859,7 +3859,7 @@ def shared_analysis_phase_issues(text: str, role: str) -> list[str]:
             or workflow_job_direct_value(job_block, "continue-on-error") not in {None, "false"}):
         return failure
     seen = []
-    runner = ["sh", "scripts/run_linux_analysis.sh"]
+    runner = ["python3", "scripts/run_ci_analysis.py"]
     obsolete_tools = {"cmake", "ctest", "gcovr", "clang-tidy", "cppcheck"}
     obsolete_scripts = {"scripts/first_party_compile_units.py",
                         "scripts/filter_compile_database.py",
