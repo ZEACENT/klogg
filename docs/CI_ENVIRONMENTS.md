@@ -530,6 +530,30 @@ Ordinary CI never builds an environment image. Two consumption shapes exist:
   reappear in these jobs; the image already carries the compilers, analysis
   tools, Qt, and Boost, and only the shared CPM source cache is restored on top.
 
+Static analysis and coverage use `scripts/run_linux_analysis.sh` for both ordinary
+CI and qualification. Its phases are implemented in `scripts/qualify_ci_analysis.py`,
+which is already bound by the analysis profiles' verification inputs. Configure
+reads the role's canonical CMake options from `ci/environments/profiles.json`;
+ordinary coverage supplies only an explicit CPM-cache path because its private
+source clone shares the original prefetched cache.
+
+The static phases own generated headers, configured first-party translation units,
+clang-tidy arguments, and cppcheck scope/suppressions. Ordinary CI selects either
+`changed-strict` or `full-report`; qualification composes both, including the full
+audit when no application files changed. Coverage phases own build targets, the
+complete CTest run, both gcovr passes, and the ratchet invocation. The executor
+sets gcovr's working directory to its source root as well as passing `--root`, so
+relative first-party filters work with the private checkout. Workflows retain
+GitHub event/base resolution, private namespace acquisition, report transport,
+and artifact upload; qualification retains candidate verification and evidence.
+There is no second inline tool-policy implementation in either workflow.
+
+Changing these shared verifier bytes requires fresh analysis qualification and
+reviewed signed lock evidence before ordinary consumers can accept the new
+policy. Refactoring is not permission to rewrite an existing receipt or bypass
+its policy digest. The profile manifest need not change when using these already
+bound entry points; unrelated family policies remain unchanged.
+
 Build-private efsw preparation has a distinct Git ownership boundary. It first
 verifies the approved shared-cache source digest, canonicalizes the cache path,
 and requires ordinary, non-redirected Git metadata. The clone trusts only that

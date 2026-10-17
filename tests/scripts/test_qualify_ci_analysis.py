@@ -136,6 +136,111 @@ class AnalysisRoleTest(unittest.TestCase):
                                      expected_codeql_version="2.26.4" if role == "codeql" else None,
                                      runner=self.runner, jobs=2)
 
+    def run_phase(self, phase, role, build=None, *options):
+        arguments = ["inside", phase, "--role", role, "--workspace", str(self.workspace)]
+        if build is not None:
+            arguments += ["--build-dir", str(build)]
+        with mock.patch.object(analysis.subprocess, "run", side_effect=self.runner):
+            return analysis.main(arguments + list(options))
+
+    def test_consumer_static_phases_execute_the_qualification_commands(self):
+        self.run_role("static")
+        qualified = self.commands[1:]
+        self.commands = []
+        build = self.root / "consumer-build"
+        self.assertEqual(self.run_phase("configure", "static", build), 0)
+        self.assertEqual(self.run_phase("static-prepare", "static", build, "--jobs", "2"), 0)
+        for mode in ("full-report", "changed-strict"):
+            for phase in ("static-tidy", "static-cppcheck"):
+                self.assertEqual(self.run_phase(phase, "static", build, "--analysis-mode", mode,
+                                               "--analysis-base-sha", BASE, "--jobs", "2"), 0)
+        normalized = [[value.replace(str(build), str(self.work / "build_root")) for value in command]
+                      for command in self.commands]
+        self.assertEqual(normalized, qualified)
+
+    def test_consumer_coverage_phases_execute_the_qualification_commands(self):
+        self.run_role("coverage")
+        qualified = self.commands[1:]
+        self.commands = []
+        build = self.workspace / "consumer-build"
+        report = self.root / "consumer-report"
+        self.assertEqual(self.run_phase("configure", "coverage", build), 0)
+        for phase in ("coverage-build", "coverage-test"):
+            self.assertEqual(self.run_phase(phase, "coverage", build, "--jobs", "2"), 0)
+        self.assertEqual(self.run_phase("coverage-report", "coverage", build, "--report-dir", str(report)), 0)
+        self.assertEqual(self.run_phase("coverage-ratchet", "coverage", None, "--report-dir", str(report),
+                                       "--analysis-base-sha", BASE), 0)
+        normalized = [[value.replace(str(build), str(self.workspace / "build_root"))
+                       .replace(str(report), str(self.work / "coverage_report")) for value in command]
+                      for command in self.commands]
+        self.assertEqual(normalized, qualified)
+
+    def test_consumer_static_mode_does_not_add_another_analysis_scope(self):
+        build = self.root / "consumer-build"
+        self.assertEqual(self.run_phase("configure", "static", build), 0)
+        for mode in ("full-report", "changed-strict"):
+            self.commands = []
+            for phase in ("static-tidy", "static-cppcheck"):
+                self.assertEqual(self.run_phase(phase, "static", build, "--analysis-mode", mode,
+                                               "--analysis-base-sha", BASE), 0)
+            tidy = [command for command in self.commands if command[0] == "clang-tidy"]
+            changed = [command for command in self.commands if any("run_changed_clang_tidy.py" in value for value in command)]
+            cppcheck = [command for command in self.commands if command[0] == "cppcheck"]
+            self.assertEqual(bool(tidy), mode == "full-report")
+            self.assertEqual(bool(changed), mode == "changed-strict")
+            self.assertEqual(len(cppcheck), 1)
+            self.assertEqual("--error-exitcode=1" in cppcheck[0], mode == "changed-strict")
+
+    def test_consumer_invalid_phase_context_fails_before_running_tools(self):
+        build = self.root / "consumer-build"
+        build.mkdir()
+        cases = [
+            ("static-prepare", "coverage", []),
+            ("coverage-build", "static", []),
+            ("static-tidy", "static", []),
+            ("static-tidy", "static", ["--analysis-mode", "changed-strict", "--analysis-base-sha", "0" * 40]),
+            ("static-cppcheck", "static", ["--analysis-mode", "changed-strict"]),
+            ("coverage-report", "coverage", []),
+            ("coverage-ratchet", "coverage", ["--report-dir", str(self.root / "report")]),
+            ("coverage-test", "coverage", ["--jobs", "0"]),
+        ]
+        for phase, role, options in cases:
+            with self.subTest(phase=phase, role=role, options=options):
+                self.assertEqual(self.run_phase(phase, role, build, *options), 1)
+                self.assertEqual(self.commands, [])
+
+    def test_consumer_tidy_forwards_the_discovered_diff_tool(self):
+        build = self.root / "consumer-build"
+        self.assertEqual(self.run_phase("configure", "static", build), 0)
+        self.assertEqual(self.run_phase("static-tidy", "static", build, "--analysis-mode", "changed-strict",
+                                       "--analysis-base-sha", BASE, "--clang-tidy-diff", "/tools/tidy diff.py"), 0)
+        command = self.commands[-1]
+        self.assertEqual(self.option(command, "--clang-tidy-diff"), "/tools/tidy diff.py")
+
+    def test_consumer_phases_propagate_tool_failures(self):
+        build = self.root / "consumer-build"
+        self.assertEqual(self.run_phase("configure", "static", build), 0)
+        cases = [
+            ("static-prepare", "static", "generate_version", []),
+            ("static-tidy", "static", "clang-tidy", ["--analysis-mode", "full-report"]),
+            ("static-tidy", "static", "run_changed_clang_tidy.py", ["--analysis-mode", "changed-strict"]),
+            ("static-cppcheck", "static", "cppcheck", ["--analysis-mode", "full-report"]),
+            ("static-cppcheck", "static", "diff", ["--analysis-mode", "changed-strict"]),
+            ("coverage-build", "coverage", "cmake", []),
+            ("coverage-test", "coverage", "ctest", []),
+            ("coverage-report", "coverage", "--html-details", []),
+            ("coverage-report", "coverage", "--json", []),
+            ("coverage-ratchet", "coverage", "enforce_coverage_ratchet.py", []),
+        ]
+        for phase, role, token, options in cases:
+            with self.subTest(phase=phase, token=token):
+                self.fail_token = token
+                report = self.root / (phase + "-" + token)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(self.run_phase(phase, role, build, "--analysis-base-sha", BASE,
+                                                   "--report-dir", str(report), *options), 1)
+                self.assertFalse((self.output / "analysis-evidence.json").exists())
+
     def test_role_failure_cannot_emit_success_evidence(self):
         self.fail_token = "cmake"
         with self.assertRaises(ci.ContractError):
@@ -147,7 +252,21 @@ class AnalysisRoleTest(unittest.TestCase):
         self.assertEqual(result["role"], "static")
         self.assertEqual(result["result"], "passed")
         self.assertGreater(result["checks"]["full_first_party_units"], 0)
-        self.assertTrue(any(command[0] == "clang-tidy" for command in self.commands))
+        configure = next(command for command in self.commands if command[:2] == ["cmake", "-S"])
+        for name, value in (("KLOGG_USE_SENTRY", "ON"), ("KLOGG_USE_VECTORSCAN", "ON"),
+                            ("CMAKE_EXPORT_COMPILE_COMMANDS", "ON"), ("FETCHCONTENT_FULLY_DISCONNECTED", "ON"),
+                            ("KLOGG_UI_AUTOGEN_ORIGIN_DEPENDS", "OFF")):
+            assignments = [option.split("=", 1)[1] for option in configure
+                           if "=" in option and option.split("=", 1)[0].split(":", 1)[0] == "-D" + name]
+            self.assertEqual(assignments, [value], name)
+        # Detached UI autogen does not build version.h transitively; both
+        # producers must finish before clang-tidy sees klogg_version.cpp.
+        prep = next(command for command in self.commands if command[:2] == ["cmake", "--build"])
+        self.assertEqual(prep[prep.index("--target") + 1:], ["klogg_ui_autogen", "generate_version", "-j2"])
+        tidy = next(command for command in self.commands if command[0] == "clang-tidy")
+        self.assertFalse(any(option.startswith("--warnings-as-errors") for option in tidy))
+        self.assertIn("--extra-arg=-Wno-unknown-warning-option", tidy)
+        self.assertLess(self.commands.index(prep), self.commands.index(tidy))
         changed = next(command for command in self.commands if any(value.endswith("run_changed_clang_tidy.py") for value in command))
         self.assertIn(BASE, changed)
         self.assertNotIn("--fast", changed)
@@ -284,8 +403,14 @@ class AnalysisRoleTest(unittest.TestCase):
         reports = [command for command in self.commands if command[0] == "gcovr"]
         self.assertEqual(len(reports), 2)
         for command in reports:
-            self.assertIn("negative_hits.warn_once_per_file", command)
-            self.assertIn("^src/", command)
+            self.assertEqual(command.count("--gcov-ignore-parse-errors"), 1)
+            self.assertEqual(self.option(command, "--gcov-ignore-parse-errors"), "negative_hits.warn_once_per_file")
+            self.assertEqual(command.count("--filter"), 1)
+            self.assertEqual(self.option(command, "--filter"), "^src/")
+            self.assertEqual(self.option(command, "--root"), str(self.workspace))
+            self.assertFalse(any(option.startswith("--gcov-ignore-errors") for option in command))
+        self.assertTrue({"--html-details", "--html-self-contained", "--print-summary"} <= set(reports[0]))
+        self.assertTrue({"--json", "--json-pretty"} <= set(reports[1]))
         ratchet = next(command for command in self.commands if any(value.endswith("enforce_coverage_ratchet.py") for value in command))
         self.assertIn("--base-sha", ratchet)
         self.assertIn(BASE, ratchet)

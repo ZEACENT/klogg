@@ -109,70 +109,37 @@ jobs:
             "$private_parent" "$private_parent" >> "$GITHUB_ENV"
           printf 'KLOGG_CPM_SOURCE_CACHE=%s/cpm_cache\n' "$source_root" >> "$GITHUB_ENV"
 
+      # Qualification and consumers use the same profile and execution phases.
+      # Only the private checkout/cache layout and artifact transport differ.
       - name: Configure (Debug + coverage)
         shell: bash
         run: |
-          rm -rf "$KLOGG_BUILD_ROOT"
-          mkdir -p "$KLOGG_BUILD_ROOT"
-          cd "$KLOGG_BUILD_ROOT"
-          cmake -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DKLOGG_BUILD_TESTS=ON \
-            -DENABLE_COVERAGE=ON \
-            -DKLOGG_USE_VECTORSCAN=OFF \
-            -DKLOGG_USE_LTO=OFF \
-            -DKLOGG_OVERRIDE_MALLOC=OFF \
-            -DCPM_SOURCE_CACHE="$KLOGG_CPM_SOURCE_CACHE" \
-            -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            "$KLOGG_WORKSPACE"
+          sh scripts/run_linux_analysis.sh configure --role coverage \
+            --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" \
+            --cpm-source-cache "$KLOGG_CPM_SOURCE_CACHE"
 
       - name: Build tests
         shell: bash
         run: |
-          cmake --build "$KLOGG_BUILD_ROOT" -t klogg klogg_grep klogg_test_build -j"$(nproc)"
+          sh scripts/run_linux_analysis.sh coverage-build --role coverage \
+            --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" --jobs "$(nproc)"
 
       - name: Run tests
         shell: bash
         run: |
-          cd "$KLOGG_BUILD_ROOT"
-          ctest --output-on-failure --parallel "$(getconf _NPROCESSORS_ONLN)"
+          sh scripts/run_linux_analysis.sh coverage-test --role coverage \
+            --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" --jobs "$(nproc)"
 
       - name: Generate coverage report
         shell: bash
-        working-directory: ${{ env.KLOGG_WORKSPACE }}
         run: |
           set -euo pipefail
-          # Explicit relative filters use CWD, not --root. Select the private
-          # checkout's src/ while retaining the original upload/ratchet context.
-          mkdir -p coverage_report
-          # HTML report (primary, human-readable) + textual summary in one pass.
-          # --print-summary writes to stdout while -o directs the HTML output.
-          gcovr \
-            --root "$KLOGG_WORKSPACE" \
-            --filter '^src/' \
-            --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
-            --html-details \
-            --html-self-contained \
-            --html-title "Klogg line/branch coverage" \
-            -o coverage_report/index.html \
-            --print-summary "$KLOGG_BUILD_ROOT" \
-            | tee coverage_report/summary.txt
-
-          # Machine-readable companion to the authoritative summary. Keep this
-          # fail-closed too: malformed or missing first-party gcov data must not
-          # disappear from either report without failing the gate.
-          gcovr \
-            --root "$KLOGG_WORKSPACE" \
-            --filter '^src/' \
-            --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
-            --json --json-pretty \
-            -o coverage_report/coverage.json \
-            "$KLOGG_BUILD_ROOT"
-
-          echo "=== gcovr summary ==="
-          cat coverage_report/summary.txt
-          cp -R coverage_report "$GITHUB_WORKSPACE/"
+          # The executor owns gcovr's CWD as well as --root so relative filters
+          # select the private checkout. Copy the entire HTML companion tree.
+          sh scripts/run_linux_analysis.sh coverage-report --role coverage \
+            --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" \
+            --report-dir "$KLOGG_WORKSPACE/coverage_report"
+          cp -R "$KLOGG_WORKSPACE/coverage_report" "$GITHUB_WORKSPACE/"
 
       - name: Enforce coverage ratchet
         shell: bash
@@ -201,13 +168,9 @@ jobs:
             exit 1
           fi
 
-          args=(
-            --summary coverage_report/summary.txt
-            --line-floor .github/baselines/coverage-line.txt
-            --branch-floor .github/baselines/coverage-branch.txt
-          )
-          args+=(--base-sha "$base_sha")
-          python3 scripts/enforce_coverage_ratchet.py "${args[@]}"
+          sh scripts/run_linux_analysis.sh coverage-ratchet --role coverage \
+            --workspace "$GITHUB_WORKSPACE" --report-dir "$GITHUB_WORKSPACE/coverage_report" \
+            --analysis-base-sha "$base_sha"
 
       - name: Upload coverage report
         if: always()

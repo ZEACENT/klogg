@@ -4320,30 +4320,6 @@ endforeach()
                     with self.assertRaises(ValueError):
                         MODULE.coverage_floor(path)
 
-    def test_coverage_workflow_requires_root_sources_and_production_targets(self):
-        insecure = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg_tests klogg_itests
-      --filter '.*/src/.*'
-      --filter '.*/src/.*'
-"""
-        self.assertEqual(len(MODULE.coverage_workflow_issues(insecure)), 6)
-
-        secure = """\
-env:
-  EVENT_NAME: ${{ github.event_name }}
-steps:
-  - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_test_build
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
-      git fetch --no-tags origin "$base_sha"
-      git cat-file -e "$base_sha^{commit}"
-      echo "coverage ratchet base commit"
-"""
-        self.assertEqual(MODULE.coverage_workflow_issues(secure), [])
-
     def test_configured_test_targets_join_the_coverage_aggregate(self):
         options = (ROOT / "cmake" / "TestTargetOptions.cmake").read_text()
         self.assertIn("add_dependencies(klogg_test_build ${target})", options)
@@ -4365,142 +4341,6 @@ steps:
         self.assertIn(
             "coverage ratchet must fail closed on the event base commit",
             MODULE.coverage_workflow_issues(insecure),
-        )
-
-    def test_coverage_comments_cannot_spoof_scope_or_targets(self):
-        workflow = """\
-steps:
-  # cmake --build build_root -t klogg klogg_grep klogg_test_build
-  - run: |
-      # --filter '^src/'
-      # --filter '^src/'
-      cmake --build build_root -t klogg_tests klogg_itests
-"""
-        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 6)
-
-    def test_inline_shell_comments_cannot_spoof_coverage_policy(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg_tests klogg_itests : # klogg klogg_grep
-      true # --filter '^src/'
-      true # --filter '^src/'
-"""
-        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 6)
-
-    def test_coverage_noop_tokens_cannot_spoof_report_policy(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_test_build
-      echo "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file"
-      echo "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file"
-      gcovr --filter '^src/' --html
-      gcovr --filter '^src/' --json
-"""
-        issues = MODULE.coverage_workflow_issues(workflow)
-        self.assertIn(
-            "every coverage report must narrowly handle GCC's negative branch-hit bug",
-            issues,
-        )
-
-    def test_every_gcovr_command_requires_the_narrow_workaround(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_test_build
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file
-      gcovr --filter '^src/' --json
-"""
-        issues = MODULE.coverage_workflow_issues(workflow)
-        self.assertIn(
-            "every coverage report must narrowly handle GCC's negative branch-hit bug",
-            issues,
-        )
-
-    def test_coverage_reports_must_fail_closed(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_test_build
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html || echo ignored
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json || :
-"""
-        issues = MODULE.coverage_workflow_issues(workflow)
-        self.assertIn("coverage report generation must fail closed", issues)
-
-    def test_coverage_requires_one_html_and_one_json_report(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_test_build
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index-2.html
-"""
-        self.assertIn(
-            "coverage must produce the authoritative HTML summary and JSON report",
-            MODULE.coverage_workflow_issues(workflow),
-        )
-
-    def test_coverage_targets_cannot_be_spoofed_after_shell_operators(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg_tests klogg_itests && printf '%s' klogg klogg_grep
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
-"""
-        issues = MODULE.coverage_workflow_issues(workflow)
-        self.assertIn("coverage build must include target klogg", issues)
-        self.assertIn("coverage build must include target klogg_grep", issues)
-
-    def test_coverage_options_cannot_be_spoofed_inside_another_argument(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_test_build
-      gcovr --html-title "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file" --html-details --print-summary -o coverage_report/index.html
-      gcovr --html-title "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file" --json -o coverage_report/coverage.json
-"""
-        issues = MODULE.coverage_workflow_issues(workflow)
-        self.assertIn(
-            "gcovr must include root-relative src/ paths in every report pass",
-            issues,
-        )
-        self.assertIn(
-            "every coverage report must narrowly handle GCC's negative branch-hit bug",
-            issues,
-        )
-
-    def test_coverage_and_lists_cannot_mask_report_failure(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_test_build
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html && :
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
-"""
-        self.assertIn(
-            "coverage report generation must fail closed",
-            MODULE.coverage_workflow_issues(workflow),
-        )
-
-    def test_coverage_rejects_duplicate_scope_and_output_options(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_test_build
-      gcovr --filter '^src/' --filter '.*' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html -o /tmp/redirected.html
-      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
-"""
-        issues = MODULE.coverage_workflow_issues(workflow)
-        self.assertIn(
-            "gcovr must include root-relative src/ paths in every report pass",
-            issues,
-        )
-        self.assertIn(
-            "coverage must produce the authoritative HTML summary and JSON report",
-            issues,
         )
 
     def test_clang_tidy_diff_find_fallback_preserves_explicit_error(self):
@@ -4540,412 +4380,6 @@ steps:
         self.assertNotIn('workflow_dispatch) base_sha="$(git rev-parse HEAD^)"', workflow)
         self.assertIn('git fetch --no-tags origin "$base_sha"', workflow)
 
-    def test_static_analysis_uses_reusable_changed_line_runner(self):
-        workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
-        self.assertIn("python3 scripts/run_changed_clang_tidy.py", workflow)
-        self.assertIn('--base "$KLOGG_ANALYSIS_BASE"', workflow)
-        self.assertIn("PUSH_BASE_SHA: ${{ github.event.before }}", workflow)
-        self.assertIn('--build-dir "$KLOGG_BUILD_ROOT"', workflow)
-        self.assertIn('--clang-tidy-diff "$CLANG_TIDY_DIFF"', workflow)
-
-    def test_static_analysis_is_equally_strict_on_pull_requests_and_master_pushes(self):
-        message = "clang-tidy findings must fail both pull requests and master pushes"
-        good = """\
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
-env:
-  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-  PUSH_BASE_SHA: ${{ github.event.before }}
-  MANUAL_BASE_SHA: ${{ inputs.base-sha }}
-steps:
-  - name: Run clang-tidy
-    run: |
-      if [ "$KLOGG_ANALYSIS_MODE" = "full-report" ]; then
-        xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-      else
-        case "$EVENT_NAME" in
-          pull_request) base_sha="$PR_BASE_SHA" ;;
-          push) base_sha="$PUSH_BASE_SHA" ;;
-          workflow_dispatch) base_sha="$MANUAL_BASE_SHA" ;;
-        esac
-        git fetch --no-tags origin "$base_sha"
-        python3 scripts/run_changed_clang_tidy.py --base "$KLOGG_ANALYSIS_BASE" --build-dir "$KLOGG_BUILD_ROOT" --clang-tidy-diff "$CLANG_TIDY_DIFF"
-      fi
-"""
-        issues = MODULE.static_analysis_workflow_issues(good)
-        self.assertNotIn(message, issues)
-        consumer_message = (
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers"
-        )
-        self.assertNotIn(consumer_message, issues)
-
-        without_report_only_consumer = good.replace(
-            "        xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\"' _ < tidy_files.nul\n",
-            "        true\n",
-            1,
-        )
-        self.assertNotEqual(without_report_only_consumer, good)
-        self.assertIn(
-            consumer_message,
-            MODULE.static_analysis_workflow_issues(without_report_only_consumer),
-        )
-
-        bad = good.replace(
-            "  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}",
-            "  cancel-in-progress: true",
-            1,
-        )
-        self.assertNotEqual(bad, good)
-        self.assertIn(message, MODULE.static_analysis_workflow_issues(bad))
-
-    def test_static_analysis_rejects_masked_report_only_tool_failures(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "static-analysis.yml"
-        ).read_text()
-        mutated = workflow.replace(
-            "' _ < tidy_files.nul\n",
-            "' _ < tidy_files.nul || true\n",
-            1,
-        )
-        self.assertIn(
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
-            MODULE.static_analysis_workflow_issues(mutated),
-        )
-
-    def test_static_analysis_rejects_duplicate_runner_options(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "static-analysis.yml"
-        ).read_text()
-        mutated = workflow.replace(
-            "--jobs \"$(nproc)\"",
-            "--jobs \"$(nproc)\" --base HEAD",
-            1,
-        )
-        self.assertIn(
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
-            MODULE.static_analysis_workflow_issues(mutated),
-        )
-
-    def test_static_analysis_uses_only_configured_first_party_units(self):
-        insecure = """\
-steps:
-  - run: |
-      find src -type f -name '*.cpp' > tidy_files.txt
-      cmake -DKLOGG_USE_SENTRY=OFF
-"""
-        issues = MODULE.static_analysis_workflow_issues(insecure)
-        self.assertIn(
-            "clang-tidy TU scope must come from the configured compile database",
-            issues,
-        )
-        self.assertIn(
-            "static analysis must configure optional Sentry production code",
-            issues,
-        )
-
-        secure = """\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-"""
-        self.assertEqual(MODULE.static_analysis_workflow_issues(secure), [])
-
-    def test_static_analysis_configures_vectorscan_production_code(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "static-analysis.yml"
-        ).read_text()
-        self.assertIn("-DKLOGG_USE_VECTORSCAN=ON", workflow)
-        self.assertNotIn("-DKLOGG_USE_VECTORSCAN=OFF", workflow)
-
-        insecure = workflow.replace(
-            "-DKLOGG_USE_VECTORSCAN=ON",
-            "-DKLOGG_USE_VECTORSCAN=OFF",
-            1,
-        )
-        self.assertIn(
-            "static analysis must configure optional Vectorscan production code",
-            MODULE.static_analysis_workflow_issues(insecure),
-        )
-
-    def test_static_analysis_configure_requires_the_prefetched_cpm_cache(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "static-analysis.yml"
-        ).read_text()
-        message = (
-            "static analysis configure must use the prefetched CPM cache "
-            "fully disconnected"
-        )
-        self.assertNotIn(message, MODULE.static_analysis_workflow_issues(workflow))
-
-        without_cache = workflow.replace(
-            '            -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \\\n',
-            "",
-            1,
-        )
-        self.assertNotEqual(without_cache, workflow)
-        self.assertIn(message, MODULE.static_analysis_workflow_issues(without_cache))
-
-    def test_static_analysis_cppcheck_scope_resolves_relative_compile_entries(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "static-analysis.yml"
-        ).read_text()
-        message = "cppcheck TU scope must resolve relative compile database entries"
-        self.assertNotIn(message, MODULE.static_analysis_workflow_issues(workflow))
-
-        without_filter = workflow.replace(
-            "          python3 scripts/filter_compile_database.py \\\n"
-            "            \"$KLOGG_BUILD_ROOT/compile_commands.json\" \"$KLOGG_WORKSPACE\" \\\n"
-            "            /tmp/cppcheck_files.nul /tmp/cc_src.json\n",
-            "          cp \"$KLOGG_BUILD_ROOT/compile_commands.json\" /tmp/cc_src.json\n",
-            1,
-        )
-        self.assertNotEqual(without_filter, workflow)
-        self.assertIn(message, MODULE.static_analysis_workflow_issues(without_filter))
-
-    def test_static_analysis_changed_path_discovery_excludes_deleted_files(self):
-        # A PR that deletes a src/ file must not feed the deleted path to
-        # clang-tidy/cppcheck; both gates discover changed paths with
-        # `git diff --name-only -z` and must pass --diff-filter=d.
-        workflow = (
-            ROOT / ".github" / "workflows" / "static-analysis.yml"
-        ).read_text()
-        message = "changed-path discovery must exclude deleted files (--diff-filter=d)"
-        self.assertNotIn(message, MODULE.static_analysis_workflow_issues(workflow))
-
-        insecure = workflow.replace(" --diff-filter=d", "", 1)
-        self.assertNotEqual(insecure, workflow)
-        self.assertIn(message, MODULE.static_analysis_workflow_issues(insecure))
-
-    def test_static_analysis_sentry_flag_must_belong_to_the_real_configure(self):
-        workflow = """\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT"
-      cmake -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -P verify_sentry.cmake
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-"""
-        self.assertIn(
-            "static analysis must configure optional Sentry production code",
-            MODULE.static_analysis_workflow_issues(workflow),
-        )
-
-    def test_static_analysis_requires_nul_consumers_for_the_tu_list(self):
-        workflow = """\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -n 1 clang-tidy < tidy_files.nul
-"""
-        issues = MODULE.static_analysis_workflow_issues(workflow)
-        self.assertIn(
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
-            issues,
-        )
-
-    def test_static_analysis_noop_tokens_and_overrides_are_rejected(self):
-        workflow = """\
-steps:
-  - run: |
-      echo "python3 scripts/first_party_compile_units.py db src > tidy_files.txt"
-      find src -type f -name '*.cpp' > tidy_files.txt
-      cmake -S . -B build -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -DKLOGG_USE_SENTRY=OFF
-"""
-        issues = MODULE.static_analysis_workflow_issues(workflow)
-        self.assertIn(
-            "clang-tidy TU scope must come from the configured compile database",
-            issues,
-        )
-        self.assertIn(
-            "static analysis must configure optional Sentry production code",
-            issues,
-        )
-
-    def test_static_analysis_rejects_wrong_scope_and_fake_consumers(self):
-        workflow = """\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      python3 scripts/first_party_compile_units.py wrong.json src/ui --null > tidy_files.nul
-      xargs -0 -n 1 echo clang-tidy < tidy_files.nul
-      xargs -0 -n 1 bash -c 'echo clang-tidy "$1" || exit 0' _ < tidy_files.nul || true
-"""
-        issues = MODULE.static_analysis_workflow_issues(workflow)
-        self.assertIn(
-            "clang-tidy TU scope must come from the configured compile database",
-            issues,
-        )
-        self.assertIn(
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
-            issues,
-        )
-
-    def test_static_analysis_consumers_must_forward_each_tu_to_clang_tidy(self):
-        workflow = """\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" src/benign.cpp' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" src/benign.cpp || exit 0' _ < tidy_files.nul || true
-"""
-        self.assertIn(
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
-            MODULE.static_analysis_workflow_issues(workflow),
-        )
-
-    def test_static_analysis_consumers_reject_xargs_batch_and_fixed_arguments(self):
-        consumers = (
-            (
-                "xargs -0 -n 2 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ < tidy_files.nul",
-                "xargs -0 -n 2 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ < tidy_files.nul || true",
-            ),
-            (
-                "xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ src/benign.cpp < tidy_files.nul",
-                "xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ src/benign.cpp < tidy_files.nul || true",
-            ),
-            (
-                "xargs -0 -n 1 true bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ < tidy_files.nul",
-                "xargs -0 -n 1 true bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ < tidy_files.nul || true",
-            ),
-            (
-                "xargs -0 -n 1 -a benign.nul bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ < tidy_files.nul",
-                "xargs -0 -n 1 -a benign.nul bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ < tidy_files.nul || true",
-            ),
-            (
-                "xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ < tidy_files.nul < benign.nul",
-                "xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ < tidy_files.nul < benign.nul || true",
-            ),
-        )
-        for strict_consumer, report_consumer in consumers:
-            with self.subTest(strict_consumer=strict_consumer):
-                workflow = f"""\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      {strict_consumer}
-      {report_consumer}
-"""
-                self.assertIn(
-                    "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
-                    MODULE.static_analysis_workflow_issues(workflow),
-                )
-
-    def test_static_analysis_requires_the_strict_pr_consumer(self):
-        workflow = """\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-"""
-        self.assertIn(
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
-            MODULE.static_analysis_workflow_issues(workflow),
-        )
-
-    def test_static_analysis_strict_consumer_must_propagate_exit_status(self):
-        workflow = """\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"; exit 0' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-"""
-        self.assertIn(
-            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
-            MODULE.static_analysis_workflow_issues(workflow),
-        )
-
-    def test_static_analysis_rejects_later_sentry_reconfigure_override(self):
-        workflow = """\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      cmake -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=OFF
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-"""
-        self.assertIn(
-            "static analysis must configure optional Sentry production code",
-            MODULE.static_analysis_workflow_issues(workflow),
-        )
-
-    def test_static_analysis_rejects_typed_and_unset_sentry_reconfiguration(self):
-        reconfigures = (
-            'cmake -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY:BOOL=OFF',
-            'cmake -B "$KLOGG_BUILD_ROOT" -U KLOGG_USE_SENTRY',
-            'cmake -B "$KLOGG_BUILD_ROOT" -UKLOGG_USE_SENTRY',
-            'cmake -B"$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY:BOOL=OFF',
-            'cmake -B"$KLOGG_BUILD_ROOT" -UKLOGG_USE_SENTRY',
-            'cmake -B="$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY:BOOL=OFF',
-            'cmake -B="$KLOGG_BUILD_ROOT" -UKLOGG_USE_SENTRY',
-            'cmake -B "$KLOGG_BUILD_ROOT"',
-            'cmake -B "$KLOGG_BUILD_ROOT" --fresh',
-        )
-        for reconfigure in reconfigures:
-            with self.subTest(reconfigure=reconfigure):
-                workflow = f"""\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      {reconfigure}
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-"""
-                self.assertIn(
-                    "static analysis must configure optional Sentry production code",
-                    MODULE.static_analysis_workflow_issues(workflow),
-                )
-
-    def test_static_analysis_rejects_all_false_sentry_spellings(self):
-        for false_value in ("OFF", "FALSE", "NO", "0"):
-            with self.subTest(false_value=false_value):
-                workflow = f"""\
-env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -DKLOGG_USE_SENTRY={false_value}
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-"""
-                self.assertIn(
-                    "static analysis must configure optional Sentry production code",
-                    MODULE.static_analysis_workflow_issues(workflow),
-                )
-
     def test_static_analysis_uses_the_shared_complete_cpm_cache_key(self):
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
         self.assertNotIn("KLOGG_CPM_CACHE_KEY_SUFFIX", workflow)
@@ -4960,6 +4394,199 @@ steps:
             ),
             [],
         )
+
+
+class SharedAnalysisPhasePolicyTest(unittest.TestCase):
+    """The workflow owns event context; the shared runner owns execution policy."""
+
+    MESSAGE = "shared analysis phases must delegate with exact context and fail closed"
+
+    @staticmethod
+    def phase_runs(role):
+        context = f'--role {role} --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT"'
+        runner = 'sh scripts/run_linux_analysis.sh '
+        if role == "static":
+            scope = ' --analysis-mode "$KLOGG_ANALYSIS_MODE" --analysis-base-sha "${KLOGG_ANALYSIS_BASE:-}"'
+            return {
+                "Configure (generate compile_commands.json)": runner + "configure " + context,
+                "Generate Qt UI headers for analysis": runner + "static-prepare " + context + ' --jobs "$(nproc)"',
+                "Run clang-tidy": runner + "static-tidy " + context + scope + ' --clang-tidy-diff "$CLANG_TIDY_DIFF" --jobs "$(nproc)"',
+                "Run cppcheck (warning+style over src/)": runner + "static-cppcheck " + context + scope,
+            }
+        return {
+            "Configure (Debug + coverage)": runner + "configure " + context + ' --cpm-source-cache "$KLOGG_CPM_SOURCE_CACHE"',
+            "Build tests": runner + "coverage-build " + context + ' --jobs "$(nproc)"',
+            "Run tests": runner + "coverage-test " + context + ' --jobs "$(nproc)"',
+            "Generate coverage report": runner + "coverage-report " + context + ' --report-dir "$KLOGG_WORKSPACE/coverage_report"',
+            "Enforce coverage ratchet": runner + 'coverage-ratchet --role coverage --workspace "$GITHUB_WORKSPACE" --report-dir "$GITHUB_WORKSPACE/coverage_report" --analysis-base-sha "$base_sha"',
+        }
+
+    @classmethod
+    def delegated_workflow(cls, role):
+        filename = "static-analysis.yml" if role == "static" else "coverage.yml"
+        workflow = (ROOT / ".github/workflows" / filename).read_text()
+        job = "static-analysis" if role == "static" else "coverage"
+        runs = cls.phase_runs(role)
+        for step in MODULE.workflow_job_steps(workflow)[job]:
+            fields, _ = MODULE.workflow_step_fields(step)
+            name = fields.get("name")
+            if name in runs:
+                prefix = ""
+                suffix = ""
+                env = ""
+                if name == "Enforce coverage ratchet":
+                    prefix = fields["run"].split("sh scripts/run_linux_analysis.sh", 1)[0].rstrip() + "\n"
+                    env = (
+                        "        env:\n"
+                        "          EVENT_NAME: ${{ github.event_name }}\n"
+                        "          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}\n"
+                        "          PUSH_BASE_SHA: ${{ github.event.before }}\n"
+                    )
+                if name == "Generate coverage report":
+                    prefix = "set -euo pipefail\n"
+                    suffix = '\ncp -R "$KLOGG_WORKSPACE/coverage_report" "$GITHUB_WORKSPACE/"'
+                body = textwrap.indent(prefix + runs[name] + suffix, "          ")
+                replacement = f"      - name: {name}\n        shell: bash\n{env}        run: |\n{body}"
+                workflow = workflow.replace("\n".join(step), replacement, 1)
+        return workflow
+
+    @staticmethod
+    def issues(role, workflow):
+        checker = MODULE.static_analysis_workflow_issues if role == "static" else MODULE.coverage_workflow_issues
+        return checker(workflow)
+
+    def test_shared_analysis_accepts_complete_ordered_delegation(self):
+        for role in ("static", "coverage"):
+            filename = "static-analysis.yml" if role == "static" else "coverage.yml"
+            with self.subTest(role=role):
+                self.assertEqual(self.issues(role, (ROOT / ".github/workflows" / filename).read_text()), [])
+                self.assertEqual(self.issues(role, self.delegated_workflow(role)), [])
+
+    def test_shared_analysis_accepts_formatting_and_reordered_options(self):
+        for role in ("static", "coverage"):
+            workflow = self.delegated_workflow(role)
+            for name, command in self.phase_runs(role).items():
+                reordered = command.replace(f"--role {role} ", "") + f" --role {role}"
+                formatted = reordered.replace(" --", " \\\n            --") + " # phase context"
+                with self.subTest(role=role, step=name):
+                    self.assertEqual(self.issues(role, workflow.replace(command, formatted, 1)), [])
+
+    def test_static_event_modes_retain_isolated_full_audits(self):
+        workflow = self.delegated_workflow("static")
+        for old, new in (
+            ("cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}", "cancel-in-progress: true"),
+            ('pull_request) base_sha="$PR_BASE_SHA"', 'pull_request) base_sha=HEAD^'),
+            ('push) base_sha="$PUSH_BASE_SHA"', 'push) base_sha=HEAD^'),
+            ('if [ "$MANUAL_MODE" = "full-report" ]; then', 'if true; then'),
+        ):
+            with self.subTest(mutation=old):
+                self.assertNotEqual(workflow.replace(old, new, 1), workflow)
+                self.assertIn("clang-tidy findings must fail both pull requests and master pushes", self.issues("static", workflow.replace(old, new, 1)))
+
+    def test_shared_analysis_requires_every_phase_and_exact_context(self):
+        for role in ("static", "coverage"):
+            workflow = self.delegated_workflow(role)
+            for name, command in self.phase_runs(role).items():
+                for replacement in (
+                    "true", command.replace(f"--role {role}", "--role codeql"),
+                    command.replace(f"--role {role}", ""), command + f" --role {role}",
+                    command + " --unknown value", command + " --build-dir /tmp/other",
+                    command + ' --jobs "$(nproc)"',
+                    command.replace('"$KLOGG_BUILD_ROOT"', '"/tmp/other"') if "--build-dir" in command else command + ' --build-dir "$KLOGG_BUILD_ROOT"',
+                    command.replace('"$KLOGG_WORKSPACE"', '"$GITHUB_WORKSPACE"') if role == "static" or "coverage-ratchet" not in command else command.replace('"$GITHUB_WORKSPACE"', '"$KLOGG_WORKSPACE"'),
+                ):
+                    with self.subTest(role=role, step=name, replacement=replacement):
+                        mutated = workflow.replace(command, replacement, 1)
+                        self.assertNotEqual(mutated, workflow)
+                        self.assertIn(self.MESSAGE, self.issues(role, mutated))
+
+    def test_shared_analysis_validates_each_phase_argument(self):
+        for role in ("static", "coverage"):
+            workflow = self.delegated_workflow(role)
+            for name, command in self.phase_runs(role).items():
+                for match in re.finditer(r'(--[a-z-]+) ("[^"]*"|[^ ]+)', command):
+                    argument, value = match.group(0), match.group(2)
+                    replacements = ["", match.group(1) + " wrong", argument + " " + argument]
+                    if value.startswith('"$'):
+                        replacements.extend((argument.replace(value, "'" + value[1:-1] + "'"), argument.replace(value, value[1:-1])))
+                    for replacement in replacements:
+                        with self.subTest(role=role, step=name, argument=argument, replacement=replacement):
+                            mutated = workflow.replace(command, command.replace(argument, replacement, 1), 1)
+                            self.assertIn(self.MESSAGE, self.issues(role, mutated))
+
+    def test_shared_analysis_rejects_optional_or_failure_masked_jobs(self):
+        for role in ("static", "coverage"):
+            workflow = self.delegated_workflow(role)
+            job = "static-analysis" if role == "static" else "coverage"
+            for field in ("if: false", "continue-on-error: true", "continue-on-error: ${{ always() }}", '"if": false', "<<: {if: false}"):
+                with self.subTest(role=role, field=field):
+                    mutated = workflow.replace(f"  {job}:\n", f"  {job}:\n    {field}\n", 1)
+                    self.assertIn(self.MESSAGE, self.issues(role, mutated))
+
+    def test_shared_analysis_rejects_shell_skips_failure_masking_and_spoofs(self):
+        for role in ("static", "coverage"):
+            workflow = self.delegated_workflow(role)
+            for name, command in self.phase_runs(role).items():
+                for replacement in (
+                    "# " + command, "echo '" + command + "'", ": '" + command + "'",
+                    "cat <<'EXAMPLE'\n          " + command + "\n          EXAMPLE",
+                    command + " || true", command + " && true", command + "; true",
+                    command + " | cat", command + " &", "! " + command,
+                    "if false; then\n          " + command + "\n          fi",
+                    "false &&\n          " + command, "exit 0\n          " + command,
+                    "set +e\n          " + command + "\n          true",
+                    "function ignored() {\n          " + command + "\n          }",
+                    'trap "exit 0" ERR\n          ' + command,
+                    command + ' "',
+                ):
+                    with self.subTest(role=role, step=name, replacement=replacement):
+                        self.assertIn(self.MESSAGE, self.issues(role, workflow.replace(command, replacement, 1)))
+
+    def test_shared_analysis_rejects_optional_or_ambiguous_steps(self):
+        for role in ("static", "coverage"):
+            workflow = self.delegated_workflow(role)
+            for name in self.phase_runs(role):
+                marker = f"      - name: {name}\n"
+                for extra in (
+                    "        if: false\n", "        continue-on-error: true\n",
+                    "        continue-on-error: ${{ always() }}\n",
+                    "        run: true\n", "        shell: sh\n",
+                    "        env:\n          KLOGG_BUILD_ROOT: /tmp/other\n",
+                    "        uses: ./fake\n", '        "if": false\n',
+                    "        <<: {continue-on-error: true}\n",
+                ):
+                    with self.subTest(role=role, step=name, extra=extra):
+                        self.assertIn(self.MESSAGE, self.issues(role, workflow.replace(marker, marker + extra, 1)))
+
+    def test_shared_analysis_rejects_reordered_duplicate_and_wrong_job_phases(self):
+        for role in ("static", "coverage"):
+            workflow = self.delegated_workflow(role)
+            job = "static-analysis" if role == "static" else "coverage"
+            steps = MODULE.workflow_job_steps(workflow)[job]
+            phase_steps = ["\n".join(step) for step in steps
+                           if MODULE.workflow_step_fields(step)[0].get("name") in self.phase_runs(role)]
+            swapped = workflow.replace(phase_steps[0], "__FIRST_PHASE__", 1).replace(
+                phase_steps[1], phase_steps[0], 1
+            ).replace("__FIRST_PHASE__", phase_steps[1], 1)
+            mutations = {
+                "reordered": swapped,
+                "duplicate": workflow.replace(phase_steps[0], phase_steps[0] + "\n" + phase_steps[0], 1),
+                "missing": workflow.replace(phase_steps[0], "", 1),
+                "wrong job": workflow.replace(f"  {job}:\n", "  decoy:\n", 1),
+                "extra job": workflow + "\n  decoy:\n    steps:\n" + phase_steps[0] + "\n",
+                "unknown steps alias": workflow.replace("    steps:\n", "    steps: *unknown\n", 1),
+            }
+            for kind, mutated in mutations.items():
+                with self.subTest(role=role, mutation=kind):
+                    self.assertNotEqual(mutated, workflow)
+                    self.assertIn(self.MESSAGE, self.issues(role, mutated))
+
+    def test_shared_analysis_cannot_reintroduce_inline_analyzer_policy(self):
+        for role, command in (("static", "clang-tidy src/example.cpp"), ("static", "python3 scripts/first_party_compile_units.py db src"), ("coverage", "gcovr --json"), ("coverage", "cmake --build build_root")):
+            workflow = self.delegated_workflow(role)
+            workflow += '\n      - name: Inline override\n        shell: bash\n        run: ' + command + '\n'
+            with self.subTest(role=role, command=command):
+                self.assertIn(self.MESSAGE, self.issues(role, workflow))
 
 
 class ReleaseDownloadPublicationLintTest(unittest.TestCase):
