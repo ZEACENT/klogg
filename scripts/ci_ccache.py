@@ -33,9 +33,10 @@ def environment(label: str) -> dict[str, str]:
         "CCACHE_MAXSIZE": BUDGETS[label],
         "CCACHE_COMPRESS": "true",
         "CCACHE_COMPRESSLEVEL": "6",
-        # Hosted runner/compiler mtimes are not a stable toolchain identity.
-        # Hash compiler bytes instead; do not weaken header or flag checks.
-        "CCACHE_COMPILERCHECK": "content",
+        # Immutable Linux images preserve compiler metadata and existing master
+        # seeds use mtime. Switching that policy makes restore-only PRs cold on
+        # every run. Native macOS runner mtimes can vary, so hash compiler bytes.
+        "CCACHE_COMPILERCHECK": "mtime" if label.startswith("ubuntu-") else "content",
     }
 
 

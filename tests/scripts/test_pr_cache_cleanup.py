@@ -351,7 +351,7 @@ class CleanupWorkflowTests(unittest.TestCase):
         for name, block in jobs.items():
             condition = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'"
             if name == "apply":
-                condition += " && inputs.apply && inputs.confirmation == 'delete-closed-pr-caches'"
+                condition += " && inputs.apply && inputs.confirmation == 'delete-closed-pr-caches' && false"
             self.assertEqual(lint.workflow_job_direct_value(block, "if"), "${{ " + condition + " }}")
             permissions = lint.workflow_mapping_block(block, "permissions", 4)
             self.assertIsNotNone(permissions)
@@ -398,6 +398,9 @@ class CleanupWorkflowTests(unittest.TestCase):
             ("environment: pr-cache-cleanup", "# environment: pr-cache-cleanup"),
             (" && inputs.apply", " || inputs.apply"),
             (" && inputs.confirmation == 'delete-closed-pr-caches'", ""),
+            (" && false", ""),
+            (" && false", " && true"),
+            (" && false", " || false"),
             ("github.ref == 'refs/heads/master'", "github.ref == 'refs/heads/master' || true"),
             ("workflow_dispatch:", "workflow_dispatch: [malformed]"),
             ("on:\n", "on:\non:\n"),

@@ -182,12 +182,60 @@ are explicitly incomplete. Cold and warm compile-wall distributions are separate
 with sample count, p50 and maximum. Phase/job/wall values are reported per run;
 no workflow-level p50 is fabricated from incomplete or mixed matrix samples.
 
+CMake options must be a nonempty recorded string-valued mapping, as emitted by
+`ci_build_observation.py`; absent, empty or malformed options cannot qualify a
+group. Build durations must be finite nonnegative numbers, not booleans. Measured
+cache samples additionally require all three nonnegative integer delta counters
+and at least one cacheable request. Missing/malformed counters or zero requests
+leave the hit rate null and the comparison incomplete, while preserving valid
+compile-wall samples. Explicitly disabled caches do not require hit-rate evidence.
+Malformed non-object provenance is an artifact error; missing/null legacy
+provenance remains readable but cannot establish comparable identity. These
+checks do not relabel the baseline: the offline command above still reproduces
+its stored derived report unchanged.
+
 Sccache JSON `counts` are summed; `adv_counts` are overlapping detail and are not
 added again. Before/after deltas use an exclusive per-job server. Counter decreases
 invalidate measurement. Sccache does not expose a reset epoch in these counters:
 no server reset/restart or concurrent unrelated client is allowed inside the
 measurement interval. The Windows helper's zeroed raw report is supplementary,
 not a replacement for per-build deltas.
+
+## PR #80 first run: incomplete observation
+
+[`evidence/pr80-39045173443`](evidence/pr80-39045173443) retains the first PR run's
+API records and 14 build-metrics payloads. The additional `windows-cache-*.json`
+files retain artifacts 12105768589 (x86), 12106281413 (ASan), and 12106468997
+(x64 release); the artifact API records identify their names and originating run.
+The API head is `9ca328069d0d510a9a9e064ec64d7123f1c52dcc`, while the compiled
+merge SHA recorded in all reports is `9b9a66f4203dd55800565f2899b8456964e0d912`.
+The overall run failed, and every cache-state label remains `unknown`. It is
+not an accepted cold or warm performance sample.
+
+All three Windows jobs passed using uncached fallback: their cache reports say
+`enabled: false`, `validated: false`, and `missing Windows compiler/toolchain
+identity`. Native Windows uppercases environment names; copying `os.environ`
+into a case-sensitive dictionary broke the mixed-case VS/SDK lookup. The fix
+normalizes lookup keys, not identity values, and tests actual workflow inputs in
+native-uppercase form. A later hosted run must prove activation and reuse.
+
+Linux/macOS restored exact shared cache entries but their build deltas were
+mostly misses. Linux release hits ranged from 0/953 to 16/953; macOS Intel had
+3/722 and ARM 4/720. A real seeded-object regression reproduces a concrete cause:
+switching `compiler_check` from the established `mtime` policy to `content`
+alone invalidates the seed, without changing compiler or source. Linux PRs are
+restore-only and cannot replace shared seeds, so they retain explicit `mtime`
+inside the unchanged, digest-verified images. Native macOS retains `content`
+for runner metadata variation and can save its own guarded PR namespace. The
+probe does not attribute every CI miss; later reports must demonstrate reuse.
+
+The observed workflow envelope was 59m55s, Windows x64 configure/build 27m23s,
+and macOS Intel configure/build 29m23s. These are not controlled comparisons
+against PR #79: identities/cache states differ and baseline compiled identity is
+unknown. Native ADB and iOS jobs still compiled sources, and the native
+qualification gate was skipped. Green individual jobs or restored archive keys
+therefore cannot establish either the speed targets or acquisition-free core
+reuse.
 
 ## Remaining acceptance
 

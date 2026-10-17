@@ -1,4 +1,5 @@
 """Reuse must not silently invalidate the already-published environment locks."""
+import copy
 import json
 from pathlib import Path
 import unittest
@@ -31,8 +32,17 @@ class ProductionEnvironmentCompatibilityTest(unittest.TestCase):
                 receipt_path = ROOT / evidence["receipt"]
                 self.assertEqual(CONSUMER._digest(receipt_path.read_bytes()), evidence["digest"])
                 receipt = read(evidence["receipt"])
-                self.assertEqual(CONSUMER.core.policy_identity(policy), receipt["policy_digest"],
+                policy_digest = CONSUMER.core.policy_identity(policy)
+                self.assertEqual(policy_digest, receipt["policy_digest"],
                                  "do not change locked verifier bytes in an unrelated performance change")
+                CONSUMER._validate_receipt(receipt, catalog, family, locked, policy_digest)
+                for field in ("recipe_digest", "input_digest"):
+                    with self.subTest(binding=field):
+                        mismatched = copy.deepcopy(receipt)
+                        mismatched["candidate"][field] = "sha256:" + "f" * 64
+                        self.assertNotEqual(mismatched["candidate"][field], locked[field])
+                        with self.assertRaisesRegex(CONSUMER.core.ContractError, field + " mismatch"):
+                            CONSUMER._validate_receipt(mismatched, catalog, family, locked, policy_digest)
 
 
 if __name__ == "__main__":

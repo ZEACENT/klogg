@@ -4,8 +4,10 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,7 +40,18 @@ def metric(state, duration, run_id):
             "provenance": {"sha": "a" * 40, "run_id": str(run_id), "run_attempt": "1",
                            "arch": "x64", "config": "Release/asan", "cache_state": state,
                            "environment": "image@sha256:abc", "build_type": "Release",
-                           "cmake_options": "-DFOO=ON", "compilers": {"CXX": {"id": "Clang", "version": "18"}}}}
+                           "cmake_options": {"FOO": "ON"}, "compilers": {"CXX": {"id": "Clang", "version": "18"}}}}
+
+
+def comparable_metrics():
+    return [metric("cold", 100, 1)] + [metric("warm", 20, index) for index in (2, 3, 4)]
+
+
+def metrics_zip(payload, filename="metrics.json"):
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr(filename, json.dumps(payload))
+    return stream.getvalue()
 
 
 class ReportTest(unittest.TestCase):
@@ -112,6 +125,96 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(result["artifact_id"], 4)
         self.assertIsNone(result["provenance"])
 
+    def test_missing_or_malformed_cmake_options_never_complete_comparison(self):
+        for options in (None, {}, [], "", "-DFOO=ON", False, 1, {"FOO": None}):
+            with self.subTest(options=options):
+                metrics = comparable_metrics()
+                for item in metrics:
+                    item["provenance"]["cmake_options"] = options
+                group = REPORT.compare_metrics(metrics)[0]
+                self.assertFalse(group["complete"])
+                self.assertEqual(group["warm"]["samples"], 3)
+        metrics = comparable_metrics()
+        for item in metrics:
+            del item["provenance"]["cmake_options"]
+        self.assertFalse(REPORT.compare_metrics(metrics)[0]["complete"])
+
+    def test_measured_comparison_requires_valid_nonzero_request_counters(self):
+        valid = metric("warm", 20, 5)["cache_deltas"]
+        invalid = [None, [], [1], "", "counters", False, {},
+                   {key: 0 for key in valid},
+                   {key: value for key, value in valid.items() if key != "cache_miss"}]
+        for key in valid:
+            invalid.extend({**valid, key: value}
+                           for value in (-1, True, False, 1.5, float("nan"), float("inf"), "1"))
+        for deltas in invalid:
+            with self.subTest(deltas=deltas):
+                metrics = comparable_metrics()
+                metrics[-1]["cache_deltas"] = deltas
+                self.assertIsNone(REPORT.cache_hit_percent(metrics[-1]))
+                group = REPORT.compare_metrics(metrics)[0]
+                self.assertFalse(group["complete"])
+                self.assertIn("cache-hit evidence", " ".join(group["issues"]))
+                self.assertEqual(group["warm"]["samples"], 3)
+                self.assertEqual(group["current_run_cache_hit_percent"], [80.0] * 3 + [None])
+        metrics = comparable_metrics()
+        del metrics[-1]["cache_deltas"]
+        self.assertFalse(REPORT.compare_metrics(metrics)[0]["complete"])
+
+    def test_cache_rate_bounds_and_disabled_cache_without_counters(self):
+        for hits, misses, expected in ((0, 1, 0.0), (1, 0, 100.0)):
+            metrics = comparable_metrics()
+            for item in metrics:
+                item["cache_deltas"] = {"direct_cache_hit": hits, "preprocessed_cache_hit": 0,
+                                        "cache_miss": misses}
+            group = REPORT.compare_metrics(metrics)[0]
+            self.assertTrue(group["complete"])
+            self.assertEqual(group["current_run_cache_hit_percent"], [expected] * 4)
+        metrics = comparable_metrics()
+        for item in metrics:
+            item["object_cache"] = "disabled"
+            del item["cache_deltas"]
+        group = REPORT.compare_metrics(metrics)[0]
+        self.assertTrue(group["complete"])
+        self.assertEqual(group["current_run_cache_hit_percent"], [None] * 4)
+
+    def test_invalid_duration_cannot_complete_even_with_enough_other_samples(self):
+        for duration in (None, True, False, -1, float("nan"), float("inf"), -float("inf"), "20"):
+            with self.subTest(duration=duration):
+                group = REPORT.compare_metrics(comparable_metrics() + [metric("warm", duration, 5)])[0]
+                self.assertFalse(group["complete"])
+                self.assertEqual(group["warm"], {"samples": 3, "p50_ms": 20, "max_ms": 20})
+        metrics = comparable_metrics()
+        metrics[0]["build_wall_ms"] = 0
+        metrics[-1]["build_wall_ms"] = 0.5
+        self.assertTrue(REPORT.compare_metrics(metrics)[0]["complete"])
+
+    def test_legacy_missing_provenance_remains_readable_and_incomplete(self):
+        for provenance in (None, {}):
+            with self.subTest(provenance=provenance):
+                payload = {"build_wall_ms": 100, "provenance": provenance}
+                self.assertEqual(REPORT.read_metrics_zip(metrics_zip(payload), 1, 1), payload)
+                self.assertFalse(REPORT.compare_metrics([payload])[0]["complete"])
+        payload = {"build_wall_ms": 100}
+        self.assertEqual(REPORT.read_metrics_zip(metrics_zip(payload), 1, 1), payload)
+        self.assertFalse(REPORT.compare_metrics([payload])[0]["complete"])
+
+    def test_malformed_provenance_in_offline_comparison_is_rejected(self):
+        for provenance in ([], [1], "", "bad", False, True, 0, 1):
+            payload = metric("warm", 20, 1)
+            payload["provenance"] = provenance
+            with self.subTest(provenance=provenance), self.assertRaisesRegex(ValueError, "provenance"):
+                REPORT.compare_metrics([payload])
+
+    def test_stored_baseline_replays_without_relabeling_legacy_evidence(self):
+        directory = ROOT / "docs/ci/evidence/pr79-39027449860"
+        result = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/ci_perf_report.py"), "report",
+                                 str(directory / "evidence.json"), "--dag", str(directory / "dag.json")],
+                                check=True, text=True, capture_output=True)
+        report = json.loads(result.stdout)
+        self.assertEqual(report, json.loads((directory / "report.json").read_text(encoding="utf-8")))
+        self.assertFalse(any(group["complete"] for group in report["build_comparisons"]))
+
     def test_failed_jobs_are_reported_not_silently_dropped(self):
         data = evidence()
         data["jobs"][1]["conclusion"] = "failure"
@@ -146,21 +249,57 @@ class CollectionTest(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 REPORT.collect("owner/repo", 1, Path(directory) / "evidence", api=api)
 
+    def test_malformed_provenance_records_artifact_error_and_keeps_later_metrics(self):
+        for provenance in ([], [1], "", "bad", False, True, 0, 1):
+            with self.subTest(provenance=provenance):
+                invalid = metric("warm", 20, 1)
+                invalid["provenance"] = provenance
+                valid = metric("cold", 100, 1)
+                artifacts = [{"id": identifier, "name": f"build-metrics-{identifier}",
+                              "workflow_run": {"id": 1, "head_sha": "a" * 40}}
+                             for identifier in (1, 2)]
+                def api(endpoint):
+                    if "/jobs?" in endpoint:
+                        return {"total_count": 1, "jobs": [job(1, 3, 13)]}
+                    if "/artifacts?" in endpoint:
+                        return {"total_count": 2, "artifacts": artifacts}
+                    return evidence()["run"]
+                def download(command, *, stdout, check):
+                    payload = invalid if command[-1].endswith("/1/zip") else valid
+                    stdout.write(metrics_zip(payload))
+                    return subprocess.CompletedProcess(command, 0)
+                with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                        REPORT.subprocess, "run", side_effect=download):
+                    output = Path(directory) / "receipt"
+                    result = REPORT.collect("owner/repo", 1, output, api=api)
+                    self.assertEqual(len(result["errors"]), 1)
+                    self.assertIn("artifact 1", result["errors"][0])
+                    self.assertIn("provenance", result["errors"][0])
+                    self.assertEqual([item["report"] for item in result["metrics"]], [valid])
+                    self.assertEqual(json.loads((output / "evidence.json").read_text()), result)
+                    self.assertFalse((output / "metrics-1.json").exists())
+
+    def test_artifact_wall_duration_must_be_finite_nonnegative_number(self):
+        for duration in (True, False, -1, float("nan"), float("inf"), -float("inf")):
+            with self.subTest(duration=duration), self.assertRaises(ValueError):
+                REPORT.read_metrics_zip(metrics_zip(metric("warm", duration, 1)), 1, 1)
+        for duration in (0, 0.5):
+            payload = metric("warm", duration, 1)
+            self.assertEqual(REPORT.read_metrics_zip(metrics_zip(payload), 1, 1), payload)
+
     def test_artifact_zip_is_read_without_extraction_and_rejects_wrong_run_and_paths(self):
         for filename, payload, valid in (
                 ("metrics.json", metric("warm", 5, 1), True),
                 ("../metrics.json", metric("warm", 5, 1), False),
                 ("metrics.json", metric("warm", 5, 9), False),
                 ("metrics.json", {"broken": True}, False)):
-            stream = io.BytesIO()
-            with zipfile.ZipFile(stream, "w") as archive:
-                archive.writestr(filename, json.dumps(payload))
+            raw = metrics_zip(payload, filename)
             with self.subTest(filename=filename, payload=payload):
                 if valid:
-                    self.assertEqual(REPORT.read_metrics_zip(stream.getvalue(), 1, 1), payload)
+                    self.assertEqual(REPORT.read_metrics_zip(raw, 1, 1), payload)
                 else:
                     with self.assertRaises(ValueError):
-                        REPORT.read_metrics_zip(stream.getvalue(), 1, 1)
+                        REPORT.read_metrics_zip(raw, 1, 1)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from datetime import datetime
 import hashlib
 import io
 import json
+import math
 from pathlib import Path, PurePosixPath
 import statistics
 import subprocess
@@ -31,6 +32,21 @@ def gh_json(endpoint):
                                      capture_output=True, text=True).stdout)
 
 
+def valid_build_duration(value):
+    """JSON booleans and non-finite floats are not duration evidence."""
+    return (type(value) in (int, float) and value >= 0
+            and (isinstance(value, int) or math.isfinite(value)))
+
+
+def metric_provenance(metric):
+    provenance = metric.get("provenance")
+    if provenance is None:
+        return {}  # Legacy metrics remain readable, but cannot establish identity.
+    if not isinstance(provenance, dict):
+        raise ValueError("artifact provenance must be an object")
+    return provenance
+
+
 def read_metrics_zip(raw, run_id, attempt):
     """Read the sole metrics JSON without trusting archive paths or importing code."""
     if len(raw) > MAX_METRICS_BYTES:
@@ -45,9 +61,9 @@ def read_metrics_zip(raw, run_id, attempt):
                 or path.suffix != ".json" or member.file_size > MAX_METRICS_BYTES):
             raise ValueError("unsafe or oversized metrics member")
         value = json.loads(archive.read(member))
-    if not isinstance(value, dict) or not isinstance(value.get("build_wall_ms"), (int, float)):
-        raise ValueError("missing build wall-time evidence")
-    provenance = value.get("provenance")
+    if not isinstance(value, dict) or not valid_build_duration(value.get("build_wall_ms")):
+        raise ValueError("missing or invalid build wall-time evidence")
+    provenance = metric_provenance(value)
     if provenance and (str(provenance.get("run_id")) != str(run_id)
                        or str(provenance.get("run_attempt")) != str(attempt)):
         raise ValueError("artifact provenance belongs to another run/attempt")
@@ -159,7 +175,7 @@ def phase(name):
 def cache_hit_percent(metric):
     delta = metric.get("cache_deltas", {})
     keys = ("direct_cache_hit", "preprocessed_cache_hit", "cache_miss")
-    if any(not isinstance(delta.get(key), int) or delta[key] < 0 for key in keys):
+    if not isinstance(delta, dict) or any(type(delta.get(key)) is not int or delta[key] < 0 for key in keys):
         return None
     hits = delta["direct_cache_hit"] + delta["preprocessed_cache_hit"]
     total = hits + delta["cache_miss"]
@@ -235,7 +251,7 @@ def compare_metrics(metrics):
     groups = {}
     keys = ("sha", "arch", "config", "environment", "build_type", "cmake_options", "compilers")
     for metric in metrics:
-        provenance = metric.get("provenance", {})
+        provenance = metric_provenance(metric)
         identity = {key: provenance.get(key) for key in keys}
         identity["object_cache"] = metric.get("object_cache")
         identity["cache_tool"] = metric.get("cache_tool", "ccache" if metric.get("object_cache") == "measured" else None)
@@ -245,15 +261,16 @@ def compare_metrics(metrics):
     for key, members in sorted(groups.items()):
         identity = json.loads(key)
         issues = []
-        required = ("sha", "arch", "config", "environment", "compilers", "build_type")
-        if any(not identity[field] for field in required):
+        options = identity["cmake_options"]
+        if (any(not identity[field] for field in keys) or not isinstance(options, dict)
+                or any(not isinstance(value, str) for value in options.values())):
             issues.append("missing SHA/toolchain/environment/architecture/configuration identity")
         if identity["object_cache"] == "unmeasured":
             issues.append("object cache measurement unavailable")
         values = {"cold": [], "warm": []}
         seen, hit_rates = set(), []
         for member in members:
-            provenance = member.get("provenance", {})
+            provenance = metric_provenance(member)
             sample = (provenance.get("run_id"), provenance.get("run_attempt"))
             if not all(sample) or sample in seen:
                 issues.append("missing or duplicate run/attempt sample")
@@ -261,11 +278,14 @@ def compare_metrics(metrics):
             seen.add(sample)
             state = provenance.get("cache_state", "unknown")
             wall = member.get("build_wall_ms")
-            if state not in values or not isinstance(wall, (int, float)) or wall < 0:
+            if state not in values or not valid_build_duration(wall):
                 issues.append("unknown cache state or unavailable build duration")
                 continue
             values[state].append(wall)
-            hit_rates.append(cache_hit_percent(member))
+            hit_rate = cache_hit_percent(member)
+            hit_rates.append(hit_rate)
+            if identity["object_cache"] == "measured" and hit_rate is None:
+                issues.append("measured cache requires valid current-run cache-hit evidence")
         summaries = {state: {"samples": len(samples), "p50_ms": statistics.median(samples) if samples else None,
                              "max_ms": max(samples) if samples else None} for state, samples in values.items()}
         if len(values["cold"]) < 1 or len(values["warm"]) < 3:

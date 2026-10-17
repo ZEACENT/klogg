@@ -7,7 +7,9 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -146,6 +148,64 @@ class WindowsObjectCacheTest(unittest.TestCase):
             CACHE.cache_identity({**self.env, "KLOGG_CMAKE_OPTS": "-DCMAKE_BUILD_TYPE=Debug"}, self.lock, self.compiler)
         with self.assertRaisesRegex(ValueError, "mismatch"):
             CACHE.cache_identity({**self.env, "VSCMD_ARG_TGT_ARCH": "x86"}, self.lock, self.compiler)
+
+    def test_native_windows_environment_shape_activates_all_real_ci_jobs(self):
+        # Run 39045173443 exposed a boundary our mixed-case unit fixtures missed:
+        # Windows os.environ iterates uppercase keys, and main() copies it to a
+        # case-sensitive dict even though the Actions log retains mixed casing.
+        jobs = QUALITY.workflow_job_blocks((ROOT / ".github/workflows/ci-build.yml").read_text())
+        action = (ROOT / ".github/actions/prepare-workspace-env/action.yml").read_text()
+        options = re.findall(r'echo "KLOGG_CMAKE_OPTS=(.*)" >> \$GITHUB_ENV', action)
+        self.assertEqual(len(options), 1)
+        for name in ("WindowsPackages", "WindowsX86", "WindowsAsan"):
+            with self.subTest(job=name):
+                # A job's direct fields/child env mapping share the step parser's
+                # grammar; substitute only its header, keeping real env values.
+                _, children = QUALITY.workflow_step_fields(["  - name: fixture", *jobs[name][1:]])
+                job_env = {key: value for key, value in children["env"].items() if "${{" not in value}
+                runner_env = {key: value for key, value in self.env.items()
+                              if key.startswith("GITHUB_") or key == "RUNNER_TEMP"}
+                native = {**runner_env, **job_env, "GITHUB_WORKSPACE": str(self.root),
+                          "VCToolsVersion": "14.44.35207", "WindowsSDKVersion": "10.0.26100.0\\",
+                          "VSCMD_ARG_TGT_ARCH": job_env["KLOGG_CONFIG_ARCH"]}
+                native["KLOGG_CMAKE_OPTS"] = options[0].replace(
+                    "${{ inputs.cmake-options }}", job_env["KLOGG_CONFIG_CMAKE_OPTS"])
+                self.assertNotIn("${{", native["KLOGG_CMAKE_OPTS"])
+                native = {key.upper(): value for key, value in native.items()}
+                with mock.patch.object(CACHE, "NATIVE_WINDOWS", True), \
+                        mock.patch.object(CACHE.os, "environ", native), \
+                        mock.patch.object(CACHE.shutil, "which", return_value=str(self.compiler)), \
+                        mock.patch.object(CACHE, "install", return_value=self.executable), \
+                        mock.patch.object(CACHE, "run", return_value="sccache " + self.lock["version"] + "\n"), \
+                        mock.patch.object(sys, "argv", ["ci_windows_object_cache.py", "prepare"]):
+                    self.assertEqual(CACHE.main(), 0)
+                prepared = json.loads((self.root / CACHE.STATE_NAME).read_text())
+                self.assertTrue(prepared["ready"], prepared["reason"])
+                self.assertEqual(prepared["identity"]["VCToolsVersion"], native["VCTOOLSVERSION"])
+                self.assertEqual(prepared["identity"]["WindowsSDKVersion"], native["WINDOWSSDKVERSION"])
+                self.assertEqual(prepared["identity"]["KLOGG_CONFIG_ARCH"], job_env["KLOGG_CONFIG_ARCH"])
+                self.assertEqual(prepared["identity"]["sanitizer"], job_env["KLOGG_SANITIZER"])
+                with mock.patch.object(CACHE.os, "environ", native), \
+                        mock.patch.object(CACHE, "run", return_value=""), \
+                        mock.patch.object(sys, "argv", ["ci_windows_object_cache.py", "activate"]):
+                    self.assertEqual(CACHE.main(), 0)
+                activated = json.loads((self.root / CACHE.STATE_NAME).read_text())
+                self.assertTrue(activated["enabled"], activated["reason"])
+                self.assertTrue(activated["reset"])
+
+    def test_windows_key_casing_does_not_change_identity_or_weaken_required_fields(self):
+        expected = CACHE.cache_identity(self.env, self.lock, self.compiler)
+        for transform in (str.upper, str.lower):
+            with self.subTest(casing=transform.__name__):
+                normalized = {transform(key): value for key, value in self.env.items()}
+                self.assertEqual(CACHE.cache_identity(normalized, self.lock, self.compiler), expected)
+        for key in ("VCToolsVersion", "WindowsSDKVersion", "KLOGG_QT_VERSION", "VSCMD_ARG_TGT_ARCH"):
+            with self.subTest(missing=key):
+                missing = {name.upper(): value for name, value in self.env.items() if name != key}
+                with self.assertRaisesRegex(ValueError, "missing Windows compiler/toolchain identity: " + key):
+                    CACHE.cache_identity(missing, self.lock, self.compiler)
+        with self.assertRaisesRegex(ValueError, "ambiguous Windows environment variable: VCTOOLSVERSION"):
+            CACHE.cache_identity({**self.env, "VCTOOLSVERSION": "conflicting-toolchain"}, self.lock, self.compiler)
 
     def test_event_namespaces_cannot_write_master_from_pr_or_dispatch(self):
         day = "20261017"

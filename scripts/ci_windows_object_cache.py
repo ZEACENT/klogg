@@ -82,19 +82,30 @@ def install(lock, temporary_root):
 
 
 def cache_identity(env, lock, compiler, preload=PRELOAD):
+    # Windows os.environ is case-insensitive and iterates uppercase names. Once
+    # copied to dict, mixed-case VS lookups stop working. Normalize lookup keys,
+    # not values or serialized identity names: real toolchain changes must still
+    # change the fingerprint, and spelling alone must not create another cache.
+    windows_env = {}
+    for key, value in env.items():
+        name = key.upper()
+        if name in windows_env and windows_env[name] != value:
+            raise ValueError(f"ambiguous Windows environment variable: {name}")
+        windows_env[name] = value
     required = ("KLOGG_CONFIG_ARCH", "KLOGG_QT_VERSION", "KLOGG_QT_ARCH", "KLOGG_LABEL",
                 "VCToolsVersion", "WindowsSDKVersion", "VSCMD_ARG_TGT_ARCH")
-    if any(not env.get(key) for key in required):
-        raise ValueError("missing Windows compiler/toolchain identity")
-    arch = env["KLOGG_CONFIG_ARCH"]
-    if arch not in {"x64", "x86"} or env["VSCMD_ARG_TGT_ARCH"] != arch:
+    missing = [key for key in required if not windows_env.get(key.upper())]
+    if missing:
+        raise ValueError("missing Windows compiler/toolchain identity: " + ", ".join(missing))
+    arch = windows_env["KLOGG_CONFIG_ARCH"]
+    if arch not in {"x64", "x86"} or windows_env["VSCMD_ARG_TGT_ARCH"] != arch:
         raise ValueError("MSVC target architecture mismatch")
-    if "-DCMAKE_BUILD_TYPE=RelWithDebInfo" not in env.get("KLOGG_CMAKE_OPTS", "").split():
+    if "-DCMAKE_BUILD_TYPE=RelWithDebInfo" not in windows_env.get("KLOGG_CMAKE_OPTS", "").split():
         raise ValueError("Windows object cache requires RelWithDebInfo")
-    identity = {key: env[key] for key in required}
+    identity = {key: windows_env[key.upper()] for key in required}
     identity.update({"compiler_sha256": digest(compiler), "config": "RelWithDebInfo",
-                     "cmake_options": env["KLOGG_CMAKE_OPTS"],
-                     "sanitizer": env.get("KLOGG_SANITIZER", ""),
+                     "cmake_options": windows_env["KLOGG_CMAKE_OPTS"],
+                     "sanitizer": windows_env.get("KLOGG_SANITIZER", ""),
                      "sccache_sha256": lock["archive_sha256"], "preload_sha256": digest(preload)})
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
     return f"windows-sccache-v1-{fingerprint}", identity

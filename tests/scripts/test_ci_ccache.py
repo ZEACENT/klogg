@@ -116,7 +116,8 @@ class CcacheBudgetTest(unittest.TestCase):
             with self.subTest(label=label):
                 values = module.environment(label)
                 self.assertEqual(values["CCACHE_MAXSIZE"], size)
-                self.assertEqual(values["CCACHE_COMPILERCHECK"], "content")
+                expected_check = "mtime" if label.startswith("ubuntu-") else "content"
+                self.assertEqual(values["CCACHE_COMPILERCHECK"], expected_check)
                 self.assertEqual(values["CCACHE_COMPRESS"], "true")
         with self.assertRaises(ValueError):
             module.environment("unknown")
@@ -170,6 +171,35 @@ class CcacheBudgetTest(unittest.TestCase):
                     stats = dict(line.split() for line in run(["ccache", "--print-stats"]).stdout.splitlines())
                     self.assertEqual(int(stats["cache_miss"]), 2)
                     header.write_text("#define VALUE 0\n")
+
+    @unittest.skipUnless(shutil.which("ccache") and shutil.which("clang"), "ccache/clang unavailable")
+    def test_linux_policy_reuses_existing_immutable_toolchain_seed(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "probe.c"
+            source.write_text("int main(void) { return 0; }\n")
+            obj = root / "probe.o"
+            command = ["ccache", shutil.which("clang"), "-c", str(source), "-o", str(obj)]
+            base = {**os.environ, "CCACHE_DIR": str(root / "cache"), "CCACHE_BASEDIR": str(root)}
+
+            def compile_with(settings):
+                env = {**base, **settings}
+                subprocess.run(command, env=env, check=True, capture_output=True, text=True)
+                obj.unlink()
+                stats = subprocess.run(["ccache", "--print-stats"], env=env, check=True,
+                                       capture_output=True, text=True).stdout
+                return {key: int(value) for key, value in (line.split() for line in stats.splitlines())}
+
+            # Existing Linux master entries use ccache's mtime default. A PR is
+            # restore-only and cannot replace that seed with a new hash policy.
+            seeded = compile_with({"CCACHE_COMPILERCHECK": "mtime"})
+            self.assertEqual(seeded["cache_miss"], 1)
+            reused = compile_with(module.environment("ubuntu-22.04-deb"))
+            self.assertEqual(reused["cache_miss"], 1, "unchanged qualified compiler seed must remain reusable")
+            self.assertEqual(reused.get("direct_cache_hit", 0) + reused.get("preprocessed_cache_hit", 0), 1)
+            changed = compile_with({"CCACHE_COMPILERCHECK": "content"})
+            self.assertEqual(changed["cache_miss"], 2, "changing compiler identity policy alone invalidates objects")
 
     def test_size_formats_and_unknown_units_fail_closed(self):
         module = load_module()

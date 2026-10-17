@@ -1,8 +1,9 @@
 # Closed-PR cache cleanup
 
 `ci-cache-cleanup.yml` is a manual-only maintenance workflow. Its default is a
-read-only audit. It does not run on PR events, pushes, or a schedule, and it does
-not change the build workflow's cache budgets.
+read-only audit. The current rollout is **audit-only**: a literal false interlock
+keeps the apply job disabled even when dispatch inputs request deletion. It does
+not run on PR events, pushes, or a schedule, and it does not change build budgets.
 
 ## Deletion policy
 
@@ -63,9 +64,17 @@ Before enabling apply, a repository administrator must configure the
 - No approval bypass where repository policy supports that restriction.
 
 **Merely naming an environment in YAML does not configure approval protection.**
-The workflow does not create or modify those repository settings.
+The workflow does not create or modify those repository settings. During PR #80
+review, the environment API returned 404: the documented protection was not yet
+configured. Local workflow tests could validate the environment name but not
+that external state, so an executable rollout interlock is required.
 
-To request deletion, dispatch the workflow from `master` with `apply` true and
+After the protection rules are configured, verify them through the environment
+API and remove the literal false interlock in a separately reviewed change with
+updated regression coverage. Dispatch inputs alone cannot enable deletion.
+Until then, `apply` is always skipped and the audit remains available.
+
+Once that reviewed activation is complete, request deletion from `master` with `apply` true and
 `confirmation` exactly `delete-closed-pr-caches`. Review the completed read-only
 audit before approving the environment. Apply is a separate job with
 `actions: write`, checks out the trusted dispatch SHA rather than a PR head, and

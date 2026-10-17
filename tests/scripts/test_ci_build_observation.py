@@ -1,10 +1,12 @@
 """Observation wrapper stays outside immutable environment policy inputs."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("ci_build_observation", ROOT / "scripts/ci_build_observation.py")
@@ -21,13 +23,15 @@ class ObservationTest(unittest.TestCase):
         (self.build / "compile_commands.json").write_text("[]")
         self.output = self.build / "ci-build-metrics-123-2.json"
 
-    def run_build(self, **kwargs):
+    def run_build(self, *, environment=None, **kwargs):
         ticks = iter((0, 1))
         options = dict(command=["cmake", "--build", str(self.build)], repo_root=self.build,
                        build_root=self.build, output=self.output, object_cache="disabled",
                        clock=lambda: next(ticks), runner=lambda command, **kw: subprocess.CompletedProcess(command, 0, "", ""))
         options.update(kwargs)
-        return MODULE.run_build(**options)
+        # Build and bind must use the same test identity, not the runner's SHA.
+        with mock.patch.dict(os.environ, environment or {}, clear=True):
+            return MODULE.run_build(**options)
 
     def test_provenance_reads_generated_compiler_identity_without_executing_cmake(self):
         compiler = self.build / "CMakeFiles/3.30/CMakeCXXCompiler.cmake"
@@ -45,19 +49,41 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual(report["provenance"]["compilers"], {})
         self.assertEqual(report["provenance"]["cache_state"], "unknown")
 
+    def test_build_fixture_does_not_inherit_runner_provenance(self):
+        # Reproduce the Actions environment even when this suite runs locally.
+        ambient = {"GITHUB_SHA": "b" * 40, "GITHUB_RUN_ID": "999", "GITHUB_RUN_ATTEMPT": "9",
+                   "KLOGG_CONFIG_ARCH": "runner-arch", "KLOGG_LABEL": "runner-label",
+                   "KLOGG_CONFIG_PACKAGE_TAG": "runner-package", "KLOGG_CI_CACHE_STATE": "warm",
+                   "KLOGG_CI_ENVIRONMENT_IDENTITY": "runner-image", "ImageOS": "runner-os",
+                   "ImageVersion": "runner-version"}
+        with mock.patch.dict(os.environ, ambient):
+            provenance = self.run_build()["provenance"]
+        for key in ("sha", "arch"):
+            self.assertIsNone(provenance[key])
+        self.assertEqual(provenance["run_id"], "123")
+        self.assertEqual(provenance["run_attempt"], "2")
+        self.assertEqual(provenance["config"], "")
+        self.assertEqual(provenance["environment"], "")
+        self.assertEqual(provenance["cache_state"], "unknown")
+
     def test_host_binding_preserves_measurement_and_rejects_stale_identity(self):
-        report = self.run_build()
         env = {"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
                "KLOGG_CONFIG_ARCH": "x64", "KLOGG_LABEL": "ubuntu", "KLOGG_CONFIG_PACKAGE_TAG": "vs-gen"}
+        report = self.run_build(environment=env)
+        self.assertEqual(report["provenance"]["sha"], env["GITHUB_SHA"])
+        self.assertEqual(report["provenance"]["arch"], env["KLOGG_CONFIG_ARCH"])
         bound = MODULE.bind_environment(self.output, "image@sha256:abc", env)
         self.assertEqual(bound["provenance"]["compilers"], report["provenance"]["compilers"])
         self.assertEqual(bound["provenance"]["environment"], "image@sha256:abc")
         self.assertEqual(bound["provenance"]["config"], "ubuntu/vs-gen")
         original = self.output.read_bytes()
-        for change in ({"GITHUB_SHA": "b" * 40}, {"GITHUB_RUN_ID": "999"}):
-            with self.assertRaisesRegex(MODULE.MetricsError, "mismatch"):
-                MODULE.bind_environment(self.output, "image@sha256:abc", dict(env, **change))
-            self.assertEqual(self.output.read_bytes(), original)
+        for change in ({"GITHUB_SHA": "b" * 40}, {"GITHUB_RUN_ID": "999"},
+                       {"GITHUB_RUN_ATTEMPT": "3"}, {"KLOGG_CONFIG_ARCH": "arm64"},
+                       {"KLOGG_LABEL": "other"}, {"KLOGG_CONFIG_PACKAGE_TAG": "other"}):
+            with self.subTest(change=change):
+                with self.assertRaisesRegex(MODULE.MetricsError, "mismatch"):
+                    MODULE.bind_environment(self.output, "image@sha256:abc", dict(env, **change))
+                self.assertEqual(self.output.read_bytes(), original)
 
     def test_host_binding_enriches_legacy_linux_report_from_local_cmake_files(self):
         self.output.write_text(json.dumps({"build_wall_ms": 10, "object_cache": "measured"}))

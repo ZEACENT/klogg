@@ -187,6 +187,8 @@ public:
             QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
         }
         QObject::disconnect( stateConnection );
+        INFO( "Transport startup diagnostic: " << this->lastError().toStdString() );
+        REQUIRE( completed );
         return connected;
     }
 
@@ -261,27 +263,43 @@ protected:
 class LegacyLogcatFormatFailureTransport
     : public GenerationDrivenProcessTransport<AdbProcessTransport> {
 public:
-    LegacyLogcatFormatFailureTransport()
+    explicit LegacyLogcatFormatFailureTransport( bool reportStarted )
         : GenerationDrivenProcessTransport<AdbProcessTransport>(
               QString{}, QStringLiteral( "serial-123" ), {} )
+        , reportStarted_( reportStarted )
     {
     }
 
 protected:
-    Command streamingCommand() const override
+    void startProcessAsync( QProcess& process ) override
     {
-#ifdef Q_OS_WIN
-        return Command{ QStringLiteral( "cmd" ),
-                        { QStringLiteral( "/c" ),
-                          QStringLiteral( "echo Invalid parameter year to -v 1>&2 & exit /b 1" ) } };
-#else
-        return Command{
-            QStringLiteral( "/bin/sh" ),
-            { QStringLiteral( "-c" ),
-              QStringLiteral( "echo 'Invalid parameter year to -v' >&2; exit 1" ) }
-        };
-#endif
+        // This case owns normalization and terminal notification ordering, not
+        // operating-system child scheduling. Real redirected-stderr capture is
+        // covered by StartupStderrFailureTransport below.
+        QFile stderrCapture( stderrFilePath() );
+        REQUIRE( stderrCapture.open( QIODevice::WriteOnly ) );
+        const auto rejection = QByteArrayLiteral( "Invalid parameter year to -v\n" );
+        REQUIRE( stderrCapture.write( rejection ) == rejection.size() );
+        stderrCapture.close();
+
+        const QPointer<QProcess> processGuard( &process );
+        REQUIRE( QMetaObject::invokeMethod(
+            &process,
+            [ processGuard, reportStarted = reportStarted_ ] {
+                REQUIRE( processGuard );
+                if ( reportStarted ) {
+                    REQUIRE( QMetaObject::invokeMethod( processGuard.data(), "started",
+                                                        Qt::DirectConnection ) );
+                }
+                REQUIRE( QMetaObject::invokeMethod(
+                    processGuard.data(), "finished", Qt::DirectConnection, Q_ARG( int, 1 ),
+                    Q_ARG( QProcess::ExitStatus, QProcess::NormalExit ) ) );
+            },
+            Qt::QueuedConnection ) );
     }
+
+private:
+    bool reportStarted_;
 };
 
 class ReentrantReconnectAdbProcessTransport final : public ImmediateFailureAdbProcessTransport {
@@ -1244,12 +1262,40 @@ TEST_CASE( "AdbProcessTransport surfaces immediate post-start failures as transp
 
 TEST_CASE( "AdbProcessTransport explains legacy logcat wall-time format rejection" )
 {
-    LegacyLogcatFormatFailureTransport transport;
+    const auto reportStarted = GENERATE( false, true );
+    CAPTURE( reportStarted );
+    LegacyLogcatFormatFailureTransport transport( reportStarted );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    QString errorAtTerminalState;
+    QStringList notifications;
+    QObject::connect( &transport, &LiveSourceTransport::stateChanged,
+                      [ & ]( LiveSourceTransport::Generation generation,
+                             LiveSourceTransport::State state ) {
+                          CHECK( generation == 1 );
+                          if ( state == LiveSourceTransport::State::Error ) {
+                              errorAtTerminalState = transport.lastError();
+                              notifications.append( QStringLiteral( "terminal-state" ) );
+                          }
+                          CHECK( state != LiveSourceTransport::State::Connected );
+                      } );
+    QObject::connect( &transport, &LiveSourceTransport::errorOccurred,
+                      [ & ]( LiveSourceTransport::Generation generation, const QString& error ) {
+                          CHECK( generation == 1 );
+                          CHECK( error == errorAtTerminalState );
+                          notifications.append( QStringLiteral( "error-notification" ) );
+                      } );
 
     REQUIRE_FALSE( transport.startAndWait() );
+    CAPTURE( transport.lastError().toStdString() );
     CHECK( transport.lastError().contains( QStringLiteral( "Android 7.0" ) ) );
     CHECK( transport.lastError().contains( QStringLiteral( "source-device wall time" ) ) );
     CHECK( transport.lastError().contains( QStringLiteral( "Invalid parameter year to -v" ) ) );
+    CHECK( errorAtTerminalState == transport.lastError() );
+    REQUIRE( errorSpy.count() == 1 );
+    CHECK( errorSpy.at( 0 ).at( 1 ).toString() == transport.lastError() );
+    CHECK( notifications == QStringList{ QStringLiteral( "terminal-state" ),
+                                        QStringLiteral( "error-notification" ) } );
 }
 
 TEST_CASE( "OptionsDialog exposes no legacy live-source executable or raw-argument controls" )
@@ -2827,7 +2873,9 @@ TEST_CASE( "ProcessLiveSourceTransport surfaces real stderr on startup failure" 
 {
     StartupStderrFailureTransport transport;
 
-    REQUIRE_FALSE( transport.startAndWait() );
+    const auto connected = transport.startAndWait();
+    CAPTURE( connected, transport.lastError().toStdString() );
+    REQUIRE_FALSE( connected );
     // stderr is redirected to a file via setStandardErrorFile(); the startup
     // path must read that file (not readAllStandardError(), which is empty).
     REQUIRE( transport.lastError().contains( QStringLiteral( "startup-boom" ) ) );

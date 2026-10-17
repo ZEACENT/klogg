@@ -1,0 +1,725 @@
+{
+  "artifacts": [
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106875365/zip",
+      "created_at": "2026-10-17T16:10:24Z",
+      "digest": "sha256:12a2cd64f04a0d271b4e3a7c8f7267dd610e368bb606ba4f6bbdba3192850c44",
+      "expired": false,
+      "expires_at": "2026-10-24T16:10:22Z",
+      "id": 12106875365,
+      "name": "macos-intel-qt6-asan-ubsan-test-diagnostics",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjg3NTM2NQ==",
+      "size_in_bytes": 28045,
+      "updated_at": "2026-10-17T16:10:24Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106875365",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106610314/zip",
+      "created_at": "2026-10-17T15:55:30Z",
+      "digest": "sha256:ac1c1d4b21b47665e065580269d0daed3e8faaea81ecb0ceab12960735713626",
+      "expired": false,
+      "expires_at": "2026-10-24T15:55:29Z",
+      "id": 12106610314,
+      "name": "build-metrics-ubuntu-22.04-ubsan-ubsan",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjYxMDMxNA==",
+      "size_in_bytes": 13110,
+      "updated_at": "2026-10-17T15:55:30Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106610314",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106468997/zip",
+      "created_at": "2026-10-17T16:14:35Z",
+      "digest": "sha256:384403c3d30307634e972093f6ca982a64292c8985c16163171ee1ce99a86b8e",
+      "expired": false,
+      "expires_at": "2026-10-24T16:14:34Z",
+      "id": 12106468997,
+      "name": "windows-object-cache-x64-qt6",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjQ2ODk5Nw==",
+      "size_in_bytes": 978,
+      "updated_at": "2026-10-17T16:14:35Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106468997",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106389461/zip",
+      "created_at": "2026-10-17T16:14:33Z",
+      "digest": "sha256:12d799247c6cc1487edf26ba7bae80f20bd01dd89663c02ec65a9e962dd4197f",
+      "expired": false,
+      "expires_at": "2026-10-24T16:14:33Z",
+      "id": 12106389461,
+      "name": "build-metrics-x64-qt6-vs-avx2",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjM4OTQ2MQ==",
+      "size_in_bytes": 18014,
+      "updated_at": "2026-10-17T16:14:33Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106389461",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106383602/zip",
+      "created_at": "2026-10-17T16:22:57Z",
+      "digest": "sha256:29c1eb9c49284008957876038a5f4cf09de131a774e7c97406ad631150afce57",
+      "expired": false,
+      "expires_at": "2026-10-24T16:22:55Z",
+      "id": 12106383602,
+      "name": "build-metrics-intel-qt6-vs-gen",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjM4MzYwMg==",
+      "size_in_bytes": 17333,
+      "updated_at": "2026-10-17T16:22:57Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106383602",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106281413/zip",
+      "created_at": "2026-10-17T15:55:37Z",
+      "digest": "sha256:76b08dbc03eba7786fa252fbe0cfb9fb8a742db3cabb775966f373d5f7d9f8d1",
+      "expired": false,
+      "expires_at": "2026-10-24T15:55:36Z",
+      "id": 12106281413,
+      "name": "windows-object-cache-x64-qt6-asan",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjI4MTQxMw==",
+      "size_in_bytes": 978,
+      "updated_at": "2026-10-17T15:55:37Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106281413",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106270545/zip",
+      "created_at": "2026-10-17T15:39:51Z",
+      "digest": "sha256:044b3cb87a053ac90d44a59e98d87e8c56c45053cbf294280542c8cd9f24135e",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12106270545,
+      "name": "adb-helper-macos-x86_64",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjI3MDU0NQ==",
+      "size_in_bytes": 3110589,
+      "updated_at": "2026-10-17T15:39:51Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106270545",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106192549/zip",
+      "created_at": "2026-10-17T15:55:33Z",
+      "digest": "sha256:c4526878eb6069bb89c35e3d5b0f71747c0084e69ba67a174d14f5f4e0869add",
+      "expired": false,
+      "expires_at": "2026-10-24T15:55:32Z",
+      "id": 12106192549,
+      "name": "build-metrics-ubuntu-24.04-deb-vs-gen",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjE5MjU0OQ==",
+      "size_in_bytes": 14275,
+      "updated_at": "2026-10-17T15:55:33Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106192549",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106094323/zip",
+      "created_at": "2026-10-17T16:05:17Z",
+      "digest": "sha256:3e7ddeceb38c448f057c6c3e912fd816a944678095c8f1bca730fa99d19a0577",
+      "expired": false,
+      "expires_at": "2026-10-24T16:05:16Z",
+      "id": 12106094323,
+      "name": "build-metrics-intel-qt6-asan-ubsan-asan-ubsan",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjA5NDMyMw==",
+      "size_in_bytes": 16991,
+      "updated_at": "2026-10-17T16:05:17Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106094323",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106086388/zip",
+      "created_at": "2026-10-17T15:48:04Z",
+      "digest": "sha256:c50ba88db0d44572f4188b53aed53564e413d06ef6aed33730f158d8ecb39497",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12106086388,
+      "name": "ios-native-x86_64",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjA4NjM4OA==",
+      "size_in_bytes": 60321474,
+      "updated_at": "2026-10-17T15:48:04Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106086388",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106086119/zip",
+      "created_at": "2026-10-17T15:45:16Z",
+      "digest": "sha256:00e34cea138be4205108597ab1ecfa9845e3252542456c034ca815ee0201d7e2",
+      "expired": false,
+      "expires_at": "2026-10-24T15:45:16Z",
+      "id": 12106086119,
+      "name": "build-metrics-ubuntu-22.04-tsan-tsan",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjA4NjExOQ==",
+      "size_in_bytes": 13004,
+      "updated_at": "2026-10-17T15:45:16Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106086119",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106052007/zip",
+      "created_at": "2026-10-17T15:52:39Z",
+      "digest": "sha256:45d70d802e213ccf10eb6aa7e4cbfb53cc4d6896107b812903ea23ce0e9c2e2f",
+      "expired": false,
+      "expires_at": "2026-10-24T15:52:38Z",
+      "id": 12106052007,
+      "name": "build-metrics-ubuntu-22.04-deb-vs-gen",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjA1MjAwNw==",
+      "size_in_bytes": 14271,
+      "updated_at": "2026-10-17T15:52:39Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106052007",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106022180/zip",
+      "created_at": "2026-10-17T15:55:36Z",
+      "digest": "sha256:69941ae4d1ebb7c0010e6544f9a8d4b3ed17209c645791f440a4f3cef1a6064d",
+      "expired": false,
+      "expires_at": "2026-10-24T15:55:36Z",
+      "id": 12106022180,
+      "name": "build-metrics-x64-qt6-asan-asan",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjAyMjE4MA==",
+      "size_in_bytes": 16531,
+      "updated_at": "2026-10-17T15:55:36Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106022180",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106010193/zip",
+      "created_at": "2026-10-17T15:28:25Z",
+      "digest": "sha256:affbc66ef68ea8a20d543475b9152f688379e67c2ee96fdf93332b59fca4def7",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12106010193,
+      "name": "boost-root",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNjAxMDE5Mw==",
+      "size_in_bytes": 125884004,
+      "updated_at": "2026-10-17T15:28:25Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12106010193",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105980258/zip",
+      "created_at": "2026-10-17T15:28:39Z",
+      "digest": "sha256:7f449ac52f7fa5b6331f3f3b45ebc2c4ad805e20d5883f5860209dd596357426",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105980258,
+      "name": "msys2-tools",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTk4MDI1OA==",
+      "size_in_bytes": 111625680,
+      "updated_at": "2026-10-17T15:28:39Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105980258",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105962873/zip",
+      "created_at": "2026-10-17T15:49:51Z",
+      "digest": "sha256:4be7da4d02892e567a99c64650fdd064add5cf8a66db98a488555397334082a6",
+      "expired": false,
+      "expires_at": "2026-10-24T15:49:50Z",
+      "id": 12105962873,
+      "name": "build-metrics-ubuntu-26.04-deb-vs-gen",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTk2Mjg3Mw==",
+      "size_in_bytes": 15560,
+      "updated_at": "2026-10-17T15:49:51Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105962873",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105928257/zip",
+      "created_at": "2026-10-17T15:51:00Z",
+      "digest": "sha256:4f7a42d66a8dc9b69f7831ee79d74003a2a28e7b83c5ca9eaad53d9d0a07e1f8",
+      "expired": false,
+      "expires_at": "2026-10-24T15:50:59Z",
+      "id": 12105928257,
+      "name": "build-metrics-ubuntu-20.04-appimage-vs-gen",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTkyODI1Nw==",
+      "size_in_bytes": 15470,
+      "updated_at": "2026-10-17T15:51:00Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105928257",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105921064/zip",
+      "created_at": "2026-10-17T15:33:25Z",
+      "digest": "sha256:cb61ea1d8f431a6174c32b2ad5a9c9971c73015c4c3469bc5cf4cba8e7e0d444",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105921064,
+      "name": "ios-native-arm64",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTkyMTA2NA==",
+      "size_in_bytes": 60563034,
+      "updated_at": "2026-10-17T15:33:25Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105921064",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105877934/zip",
+      "created_at": "2026-10-17T15:46:50Z",
+      "digest": "sha256:49e5416ff7c5dd74d475a3c2bc04062538fd4f50a89aaaed1d3821b7eae7b2e8",
+      "expired": false,
+      "expires_at": "2026-10-24T15:46:49Z",
+      "id": 12105877934,
+      "name": "build-metrics-x86-qt5-QTRegex",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTg3NzkzNA==",
+      "size_in_bytes": 16195,
+      "updated_at": "2026-10-17T15:46:50Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105877934",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105873673/zip",
+      "created_at": "2026-10-17T15:52:19Z",
+      "digest": "sha256:1b6528c30c942a7cd202b51dd209d209a6a072f261f680d7eb6a9e0242d68a3b",
+      "expired": false,
+      "expires_at": "2026-10-24T15:52:17Z",
+      "id": 12105873673,
+      "name": "build-metrics-intel-qt6-first-party-tsan-tsan",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTg3MzY3Mw==",
+      "size_in_bytes": 16986,
+      "updated_at": "2026-10-17T15:52:19Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105873673",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105850828/zip",
+      "created_at": "2026-10-17T15:29:08Z",
+      "digest": "sha256:015ed0a9b3c21eeb4cd7c6a91ce0be9401c02fc464f98cf988e2d6c62ef0cf40",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105850828,
+      "name": "adb-helper-package-core",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTg1MDgyOA==",
+      "size_in_bytes": 212676,
+      "updated_at": "2026-10-17T15:29:08Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105850828",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105841249/zip",
+      "created_at": "2026-10-17T15:32:46Z",
+      "digest": "sha256:421f583ac4fd5a07a38fdd4dba558c069f886ada26eeba858191e578ae7794aa",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105841249,
+      "name": "adb-helper-linux-arm64",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTg0MTI0OQ==",
+      "size_in_bytes": 11921318,
+      "updated_at": "2026-10-17T15:32:46Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105841249",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105829064/zip",
+      "created_at": "2026-10-17T15:55:25Z",
+      "digest": "sha256:83420642e0c2ae4a883f4db68015db58e5272b2bbb558c927c8db0cbce429d9e",
+      "expired": false,
+      "expires_at": "2026-10-24T15:55:24Z",
+      "id": 12105829064,
+      "name": "build-metrics-arm64-qt6-vs-arm64",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTgyOTA2NA==",
+      "size_in_bytes": 17332,
+      "updated_at": "2026-10-17T15:55:25Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105829064",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105821394/zip",
+      "created_at": "2026-10-17T15:33:28Z",
+      "digest": "sha256:f20ce77d946ab53faec1134e75ab0f8479523905be13fcda1e176cc26b690b7a",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105821394,
+      "name": "ios-native-source-assets",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTgyMTM5NA==",
+      "size_in_bytes": 56871593,
+      "updated_at": "2026-10-17T15:33:28Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105821394",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105796082/zip",
+      "created_at": "2026-10-17T15:29:00Z",
+      "digest": "sha256:094457267f524b3c4f406adb84eaa7ecb67a04ef9f470f6860e3e33ebc62faf1",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105796082,
+      "name": "cpm-cache",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTc5NjA4Mg==",
+      "size_in_bytes": 435789908,
+      "updated_at": "2026-10-17T15:29:00Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105796082",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105781145/zip",
+      "created_at": "2026-10-17T15:28:26Z",
+      "digest": "sha256:66ce2158e3a4c5d48126ff765d450fd8eceaf85ea6ffdf2d760db8c4bf39494e",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105781145,
+      "name": "ios-native-source-cache",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTc4MTE0NQ==",
+      "size_in_bytes": 56826090,
+      "updated_at": "2026-10-17T15:28:26Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105781145",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105768589/zip",
+      "created_at": "2026-10-17T15:46:51Z",
+      "digest": "sha256:0b2052b7b60bbb7e4c3a8892ec26427014014d8d893a84380f953bc12c16dc61",
+      "expired": false,
+      "expires_at": "2026-10-24T15:46:50Z",
+      "id": 12105768589,
+      "name": "windows-object-cache-x86-qt5",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTc2ODU4OQ==",
+      "size_in_bytes": 978,
+      "updated_at": "2026-10-17T15:46:51Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105768589",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105751949/zip",
+      "created_at": "2026-10-17T15:34:27Z",
+      "digest": "sha256:71d5aa92d49ac4792505e1ba2f7606907835d38bde20fc70e99c06551ea21820",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105751949,
+      "name": "adb-helper-macos-arm64",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTc1MTk0OQ==",
+      "size_in_bytes": 2899394,
+      "updated_at": "2026-10-17T15:34:27Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105751949",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105676557/zip",
+      "created_at": "2026-10-17T15:28:23Z",
+      "digest": "sha256:5ed739819d62b40f137516bd54fe35530d2bfe7d52a8e328618c5ab5289e7b52",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105676557,
+      "name": "klogg_version",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTY3NjU1Nw==",
+      "size_in_bytes": 329,
+      "updated_at": "2026-10-17T15:28:23Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105676557",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105631911/zip",
+      "created_at": "2026-10-17T15:29:08Z",
+      "digest": "sha256:8f961e42f545fa6ca73b140c342a63cfbf2e24b2fc5ded79bcdad8bf96839f7b",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105631911,
+      "name": "adb-helper-package-support",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTYzMTkxMQ==",
+      "size_in_bytes": 215961,
+      "updated_at": "2026-10-17T15:29:08Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105631911",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105547998/zip",
+      "created_at": "2026-10-17T15:47:32Z",
+      "digest": "sha256:00429748f53617eb4711d51b323f4106217f8b1d5cbb25bb82187df62a93b04c",
+      "expired": false,
+      "expires_at": "2026-10-24T15:47:31Z",
+      "id": 12105547998,
+      "name": "build-metrics-ubuntu-22.04-asan-lsan-asan",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTU0Nzk5OA==",
+      "size_in_bytes": 13113,
+      "updated_at": "2026-10-17T15:47:32Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105547998",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105417762/zip",
+      "created_at": "2026-10-17T15:28:18Z",
+      "digest": "sha256:0870b69baf757675e0970a73b086e870117a6f037461fee9559630792aeeeaba",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105417762,
+      "name": "linuxdeployqt",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTQxNzc2Mg==",
+      "size_in_bytes": 29629334,
+      "updated_at": "2026-10-17T15:28:18Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105417762",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105243471/zip",
+      "created_at": "2026-10-17T15:28:29Z",
+      "digest": "sha256:c7d57aba317a9f69be59f249e1c64805b7fdf653d3a0d5a4a074bdcb575c9830",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105243471,
+      "name": "openssl-archive",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTI0MzQ3MQ==",
+      "size_in_bytes": 15795726,
+      "updated_at": "2026-10-17T15:28:29Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105243471",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105199377/zip",
+      "created_at": "2026-10-17T15:34:16Z",
+      "digest": "sha256:5f35b27e39ac92029cf66e9301d9fc9709128cacc8a2b6063f7be62ebde5136c",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105199377,
+      "name": "adb-helper-linux-x86_64",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTE5OTM3Nw==",
+      "size_in_bytes": 12351664,
+      "updated_at": "2026-10-17T15:34:16Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105199377",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105014115/zip",
+      "created_at": "2026-10-17T15:38:46Z",
+      "digest": "sha256:105c2afb466af7b6241d1e658a8e2c4b41bc104ccc7b7c0917781b290b2a7f32",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12105014115,
+      "name": "adb-helper-windows-x86_64",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNTAxNDExNQ==",
+      "size_in_bytes": 13739579,
+      "updated_at": "2026-10-17T15:38:46Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12105014115",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    },
+    {
+      "archive_download_url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12104474865/zip",
+      "created_at": "2026-10-17T15:28:37Z",
+      "digest": "sha256:efdb9306d40d858c4d84ecef2ea3cbbe86a0a1c63043a552b4cf7d374786ff3a",
+      "expired": false,
+      "expires_at": "2027-01-15T15:28:11Z",
+      "id": 12104474865,
+      "name": "adb-helper-source-cache",
+      "node_id": "MDg6QXJ0aWZhY3QxMjEwNDQ3NDg2NQ==",
+      "size_in_bytes": 403764602,
+      "updated_at": "2026-10-17T15:28:37Z",
+      "url": "https://api.github.com/repos/ZEACENT/klogg/actions/artifacts/12104474865",
+      "workflow_run": {
+        "head_branch": "worktree-master-ci-opt",
+        "head_repository_id": 1094649085,
+        "head_sha": "9ca328069d0d510a9a9e064ec64d7123f1c52dcc",
+        "id": 39045173443,
+        "repository_id": 1094649085
+      }
+    }
+  ],
+  "total_count": 36
+}
