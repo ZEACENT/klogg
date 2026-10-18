@@ -266,6 +266,60 @@ esac
                 self.assertNotEqual(result.returncode, 0, mode)
                 self.assertNotIn("should-publish=true", emitted)
 
+    def test_continuous_pat_preflight_fails_early_without_remote_writes(self):
+        workflow = CONTINUOUS_WORKFLOW.read_text(encoding="utf-8")
+        name = "      - name: Verify continuous publisher PAT"
+        self.assertIn(name, workflow, "publisher must check its PAT before preparation")
+        step = workflow_section(CONTINUOUS_WORKFLOW, name, "      - name:")
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        for mode in ("missing", "empty", "invalid", "success"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                fake_gh = root / "gh"
+                fake_gh.write_text(
+                    '#!/usr/bin/env bash\nset -euo pipefail\n'
+                    'printf "%s\\n" "$*" >> "$FAKE_GH_CALLS"\n'
+                    'test "$*" = "api --method GET /user" || exit 2\n'
+                    'test "$GITHUB_TOKEN" = "dummy-preflight-token" || exit 2\n'
+                    'if [ "$FAKE_GH_MODE" = invalid ]; then\n'
+                    '  printf "gh: Bad credentials (HTTP 401)\\n" >&2\n'
+                    '  exit 1\nfi\n'
+                    'printf "{\\"login\\":\\"fixture\\"}\\n"\n',
+                    encoding="utf-8",
+                )
+                fake_gh.chmod(0o755)
+                calls = root / "calls"
+                env = {
+                    "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                    "HOME": str(root), "GH_CONFIG_DIR": str(root / "config"),
+                    "GH_PROMPT_DISABLED": "1", "FAKE_GH_MODE": mode,
+                    "FAKE_GH_CALLS": str(calls),
+                }
+                if mode != "missing":
+                    env["GITHUB_TOKEN"] = "" if mode == "empty" else "dummy-preflight-token"
+                result = subprocess.run(
+                    ["bash", "-c", script], cwd=ROOT, env=env,
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                output = result.stdout + result.stderr
+                self.assertNotIn("dummy-preflight-token", output)
+                if mode == "success":
+                    self.assertEqual(result.returncode, 0, output)
+                    self.assertNotIn("::error::", output)
+                else:
+                    self.assertNotEqual(result.returncode, 0, output)
+                    self.assertIn("::error::KLOGG_GITHUB_TOKEN", output)
+                    self.assertIn("repo and workflow scopes", output)
+                    if mode in ("missing", "empty"):
+                        self.assertIn("missing or empty", output)
+                    else:
+                        self.assertIn("authentication failed", output)
+                        self.assertIn("HTTP 401", output)
+                self.assertEqual(
+                    calls.read_text() if calls.exists() else "",
+                    "" if mode in ("missing", "empty") else "api --method GET /user\n",
+                )
+
     def test_release_cleanup_uses_the_optional_scalar_lookup(self):
         continuous = workflow_section(
             CONTINUOUS_WORKFLOW,

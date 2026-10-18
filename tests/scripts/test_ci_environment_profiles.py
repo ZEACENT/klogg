@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+import os
 import pathlib
 import re
 import shlex
@@ -15,6 +17,8 @@ ROOT = pathlib.Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import ci_environment as ci
 import ci_environment_profiles as profiles_api
+import qualify_ci_analysis as analysis
+import run_ci_analysis as ordinary_analysis
 
 RECIPES = ROOT / "ci/environments/recipes.json"
 PROFILES = ROOT / "ci/environments/profiles.json"
@@ -283,49 +287,68 @@ class EnvironmentProfilesTest(unittest.TestCase):
                 for key in set(environment) & set(image_env):
                     self.assertEqual(environment[key], image_env[key], key)
 
-    def analysis_workflow_options(self, workflow, configure_name):
-        configure = workflow.split("- name: " + configure_name, 1)[1].split("- name:", 1)[0]
-        options = [token.replace('"', '') for token in re.findall(r"-D[^\s\\]+", configure)]
-        if "-DCPM_SOURCE_CACHE=$KLOGG_CPM_SOURCE_CACHE" in options:
-            # The source checkout can be private while the authenticated cache
-            # remains at its original runtime location. Prove the alias first.
-            for binding in ('source_root=$(cd "$GITHUB_WORKSPACE" && pwd -P)',
-                            r'''printf 'KLOGG_CPM_SOURCE_CACHE=%s/cpm_cache\n' "$source_root" >> "$GITHUB_ENV"'''):
-                self.assertRegex(workflow, r"(?m)^[ \t]*" + re.escape(binding) + r"[ \t]*$")
-            options = [token.replace("$KLOGG_CPM_SOURCE_CACHE", "@WORKSPACE@/cpm_cache") for token in options]
-        return [
-            token.replace("$KLOGG_WORKSPACE", "@WORKSPACE@").replace("$GITHUB_WORKSPACE", "@WORKSPACE@")
-            for token in options
-        ]
+    def observe_analysis_configure(self, role, *, document=None, cache=None):
+        """Run configure through a real subprocess and record the CMake boundary."""
+        tools = self.root / "fake-tools"
+        tools.mkdir(exist_ok=True)
+        receipt = self.root / "configure-command.json"
+        cmake = tools / "cmake"
+        cmake.write_text(
+            "#!" + sys.executable + "\n"
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['CONFIGURE_RECEIPT']).write_text(json.dumps({"
+            "'args': sys.argv[1:], 'cwd': os.getcwd()}))\n", encoding="utf-8")
+        cmake.chmod(0o755)
+        workspace = self.root / "private workspace"
+        workspace.mkdir(exist_ok=True)
+        build = workspace / "build"
+        environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
+                           CONFIGURE_RECEIPT=str(receipt))
+        kwargs = {} if cache is None else {"cpm_source_cache": cache}
+        configure = analysis.configure if role == "codeql" else ordinary_analysis.configure
+        configure(role, workspace, build, subprocess.run, environment,
+                  self.profiles if document is None else document, **kwargs)
+        observed = json.loads(receipt.read_text())
+        self.assertEqual(observed["cwd"], str(workspace.resolve()))
+        self.assertEqual(observed["args"][:4], ["-S", str(workspace), "-B", str(build)])
+        return observed["args"][4:], workspace
 
-    def test_runtime_cache_alias_requires_original_checkout_binding(self):
-        workflow = (ROOT / ".github/workflows/coverage.yml").read_text(encoding="utf-8")
-        source = 'source_root=$(cd "$GITHUB_WORKSPACE" && pwd -P)'
-        cache = r'''printf 'KLOGG_CPM_SOURCE_CACHE=%s/cpm_cache\n' "$source_root" >> "$GITHUB_ENV"'''
-        for old, new in ((source, 'source_root="$private_parent/source"'),
-                         (cache, cache.replace('"$source_root"', '"$private_parent/source"')),
-                         (cache, "# cache binding omitted"),
-                         (source, "# " + source), (cache, "# " + cache)):
-            with self.subTest(binding=new):
-                self.assertIn(old, workflow)
-                with self.assertRaises(AssertionError):
-                    self.analysis_workflow_options(workflow.replace(old, new, 1), "Configure (Debug + coverage)")
+    def test_analysis_roles_execute_ordered_profile_options_with_runtime_workspace(self):
+        for role in ("static", "coverage", "codeql"):
+            with self.subTest(role=role):
+                options, workspace = self.observe_analysis_configure(role)
+                config = profiles_api.profile_configuration(self.profiles, ANALYSIS, role)
+                self.assertEqual(options, [value.replace("@WORKSPACE@", str(workspace))
+                                           for value in config["cmake_options"]])
+                self.assertEqual(config["role"], role)
+                self.assertFalse(config["package"])
+                self.assertEqual(config["environment"]["KLOGG_QT_VERSION"], "6.9.3")
+                self.assertIn("-DCPM_SOURCE_CACHE=" + str(workspace / "cpm_cache"), options)
+                self.assertNotIn("/usr/local", " ".join(options))
+                self.assertIn("@WORKSPACE@", " ".join(config["cmake_options"]))
 
-    def test_analysis_roles_keep_their_own_options_and_workspace_is_runtime_only(self):
-        for profile, workflow_name, configure_name in (("static", "static-analysis.yml", "Configure (generate compile_commands.json)"),
-                                                        ("coverage", "coverage.yml", "Configure (Debug + coverage)"),
-                                                        ("codeql", "codeql-analysis.yml", "Configure traced build")):
-            workflow = (ROOT / ".github/workflows" / workflow_name).read_text(encoding="utf-8")
-            options = self.analysis_workflow_options(workflow, configure_name)
-            config = profiles_api.profile_configuration(self.profiles, ANALYSIS, profile)
-            self.assertEqual(config["cmake_options"], ["-G", "Ninja"] + options)
-            self.assertEqual(config["role"], profile)
-            self.assertFalse(config["package"])
-            self.assertEqual(config["environment"]["KLOGG_QT_VERSION"], "6.9.3")
-            env = profiles_api.profile_environment(self.profiles, ANALYSIS, profile, workspace="/__w/klogg/klogg")
-            self.assertIn("-DCPM_SOURCE_CACHE=/__w/klogg/klogg/cpm_cache", shlex.split(env["KLOGG_CMAKE_OPTS"]))
-            self.assertNotIn("/usr/local", env["KLOGG_CMAKE_OPTS"])
-            self.assertIn("@WORKSPACE@", " ".join(config["cmake_options"]))
+    def test_configure_consumes_profile_order_not_a_second_inline_policy(self):
+        document = copy.deepcopy(self.profiles)
+        for role in ("static", "coverage", "codeql"):
+            with self.subTest(role=role):
+                config = document["families"][ANALYSIS][role]["configuration"]
+                config["cmake_options"] += ["-DMODEL_ORDER=first", "-DMODEL_ORDER=last"]
+                options, workspace = self.observe_analysis_configure(role, document=document)
+                expected = profiles_api.profile_configuration(document, ANALYSIS, role)["cmake_options"]
+                self.assertEqual(options, [value.replace("@WORKSPACE@", str(workspace)) for value in expected])
+                self.assertLess(options.index("-DMODEL_ORDER=first"), options.index("-DMODEL_ORDER=last"))
+
+    def test_coverage_cache_override_changes_only_the_authenticated_cache_path(self):
+        original = copy.deepcopy(self.profiles)
+        default, workspace = self.observe_analysis_configure("coverage")
+        cache = self.root / "original checkout" / "authenticated cpm cache"
+        actual, _ = self.observe_analysis_configure("coverage", cache=cache)
+        expected = ["-DCPM_SOURCE_CACHE=" + str(cache) if value.startswith("-DCPM_SOURCE_CACHE=")
+                    else value for value in default]
+        self.assertEqual(actual, expected)
+        self.assertEqual(sum(value.startswith("-DCPM_SOURCE_CACHE=") for value in actual), 1)
+        self.assertNotIn("-DCPM_SOURCE_CACHE=" + str(workspace / "cpm_cache"), actual)
+        self.assertEqual(self.profiles, original, "runtime paths must not mutate the qualification policy")
 
     def test_verifier_content_changes_policy_not_recipe_or_application_sha(self):
         recipe = ci.recipe_identity(self.catalog, "jammy-qt5", self.root)

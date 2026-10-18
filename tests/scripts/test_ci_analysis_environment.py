@@ -88,7 +88,24 @@ def model_tool(tool, arguments):
                 "acquired namespace parent was replaced")
         return build
 
+    # The ordinary adapter and imported engine are real. Only external tools
+    # are seams; shell functions would disappear across the Python boundary.
+    if tool == "python3" and pathlib.Path(arguments[0]).name == "run_ci_analysis.py":
+        require(path(arguments[0]) == workspace / "scripts/run_ci_analysis.py",
+                "ordinary analysis helper must execute from the original checkout")
+        phase = arguments[1]
+        expected_source = (pathlib.Path(state["private"]) / "source"
+                           if state["role"] == "coverage" and phase != "coverage-ratchet" else workspace)
+        require(path(option("--workspace")) == expected_source, "shared phase changed its workspace")
+        require(option("--role") == state["role"], "shared phase changed its role")
+        if phase == "coverage-ratchet":
+            require("--build-dir" not in arguments, "ratchet must not depend on the private build")
+        state_path.write_text(json.dumps(state))
+        os.execv(os.environ["MODEL_PYTHON"], [os.environ["MODEL_PYTHON"]] + arguments)
+
     try:
+        if os.environ.get("MODEL_FAIL_TOOL") == tool:
+            raise ValueError("MODEL injected " + tool + " failure")
         if tool == "mktemp":
             if "-d" in arguments:
                 require(not os.environ.get("MODEL_FAIL_ALLOCATION"), "allocation failed")
@@ -161,7 +178,10 @@ def model_tool(tool, arguments):
                 require(path(cache) == workspace / "cpm_cache", "configure must retain the original authenticated cache")
                 require("-DFETCHCONTENT_FULLY_DISCONNECTED=ON" in arguments, "configure must remain disconnected")
                 build.mkdir(parents=True, exist_ok=True)
-                (build / "compile_commands.json").write_text("[]\n")
+                database = [{"directory": str(build), "file": str(filename),
+                             "arguments": ["c++", "-c", str(filename)]}
+                            for filename in (source / "src/example.cpp", workspace / "cpm_cache/efsw/src/vendor.cpp")]
+                (build / "compile_commands.json").write_text(json.dumps(database))
                 state.update(build=str(build), source=str(source))
         elif tool == "ctest":
             require(str(build_path(str(cwd))) == state.get("build"), "CTest changed build directory")
@@ -214,27 +234,19 @@ def model_tool(tool, arguments):
                     require(path(option(name)) == workspace / ".github/baselines" / filename, "ratchet floor moved")
                 require(sorted(state.get("coverage_reports", [])) == ["coverage.json", "index.html"],
                         "ratchet requires both reports from this execution")
-                spec = importlib.util.spec_from_file_location("analysis_summary_ratchet", ROOT / "scripts/enforce_coverage_ratchet.py")
-                ratchet = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(ratchet)
-                issues = ratchet.evaluate(path(option("--summary")).read_text(), path(option("--line-floor")).read_text(),
-                                          path(option("--branch-floor")).read_text())
-                require(not issues, "coverage summary rejected: " + "; ".join(issues))
+                state_path.write_text(json.dumps(state))
+                result = subprocess.run([os.environ["MODEL_PYTHON"]] + arguments,
+                                        check=False, capture_output=True, text=True)
+                state = json.loads(state_path.read_text())
+                require(result.returncode == 0, "coverage summary rejected: " + result.stdout + result.stderr)
                 state["ratcheted"] = True
             else:
                 require(cwd == workspace, "static tools must retain original source context")
                 build = pathlib.Path(state["build"])
-                if script == "first_party_compile_units.py":
-                    require(path(arguments[1]) == build / "compile_commands.json", "TU list used another build")
-                    require(path(arguments[2]) == workspace / "src", "TU list source changed")
-                    sys.stdout.write(str(workspace / "src/example.cpp") + "\0")
-                elif script == "filter_compile_database.py":
-                    require(path(arguments[1]) in (build / "compile_commands.json", temporary / "cc_src.json"),
-                            "filtered database used another build")
-                    require(path(arguments[2]) == workspace, "filtered database source changed")
-                    path(arguments[-1]).write_text("[]\n")
-                elif script == "run_changed_clang_tidy.py":
+                if script == "run_changed_clang_tidy.py":
                     require(path(option("--build-dir")) == build, "clang-tidy used another build")
+                    require(option("--base") == os.environ["KLOGG_ANALYSIS_BASE"], "clang-tidy base changed")
+                    require(option("--clang-tidy-diff") == os.environ["CLANG_TIDY_DIFF"], "clang-tidy-diff changed")
                 else:
                     raise ValueError("MODEL unexpected Python script: " + script)
         elif tool == "clang-tidy":
@@ -243,6 +255,12 @@ def model_tool(tool, arguments):
         elif tool == "cppcheck":
             project = next(value.split("=", 1)[1] for value in arguments if value.startswith("--project="))
             require(path(project).is_file() and cwd == workspace, "cppcheck source/database changed")
+            require(path(project).parent == pathlib.Path(state["build"]), "cppcheck scratch escaped private build")
+            records = json.loads(path(project).read_text())
+            require([record["file"] for record in records] == [str(workspace / "src/example.cpp")],
+                    "cppcheck must analyze first-party units and exclude the cache")
+            require(("--error-exitcode=1" in arguments) == (os.environ["KLOGG_ANALYSIS_MODE"] == "changed-strict"),
+                    "cppcheck strictness changed")
         elif tool == "codeql-init":
             require(state.get("prebuilt") and state.get("plan_checked"), "CodeQL init preceded prebuild/plan")
             state["codeql_initialized"] = True
@@ -270,8 +288,8 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
         "coverage": ("coverage.yml", "coverage"),
     }
     CONSUMERS = {
-        "static": {"Configure (generate compile_commands.json)", "Build first-party clang-tidy TU list",
-                   "Generate Qt UI headers for analysis", "Run clang-tidy", "Run cppcheck (warning+style over src/)"},
+        "static": {"Configure (generate compile_commands.json)", "Generate Qt UI headers for analysis",
+                   "Run clang-tidy", "Run cppcheck (warning+style over src/)"},
         "codeql": {"Configure traced build", "Prebuild vendored dependencies outside CodeQL tracing",
                    "Verify traced build contains only first-party work", "Build traced application"},
         "coverage": {"Configure (Debug + coverage)", "Build tests", "Run tests", "Generate coverage report",
@@ -288,7 +306,9 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="analysis-namespace-", dir=str(ROOT / "tests/scripts"))
         self.addCleanup(self.temporary.cleanup)
         self.root = pathlib.Path(self.temporary.name).resolve()
-        self.workspace = self.root / "foreign workspace"
+        # Profile environment rendering deliberately accepts only canonical
+        # shell-safe workspace paths, as used by the Linux job mount.
+        self.workspace = self.root / "foreign-workspace"
         self.workspace.mkdir()
         self.tmp = self.root / "container-tmp"
         self.tmp.mkdir()
@@ -304,17 +324,40 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
             GIT_COMMITTER_NAME="Namespace fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid",
             MODEL_FIXTURE=str(self.root), MODEL_TMP=str(self.tmp), MODEL_STATE=str(self.state),
             MODEL_PYTHON=sys.executable, MODEL_MODULE=str(pathlib.Path(__file__).resolve()),
+            PYTHONDONTWRITEBYTECODE="1",
             MODEL_GIT=shutil.which("git"), MODEL_RM=shutil.which("rm"),
             GITHUB_WORKSPACE=str(self.workspace), GITHUB_ENV=str(self.github_env),
             KLOGG_WORKSPACE=str(self.workspace), KLOGG_BUILD_ROOT="build_root",
             KLOGG_ANALYSIS_MODE="changed-strict", CLANG_TIDY_DIFF="fixture-tidy-diff", EVENT_NAME="pull_request",
         )
         self.git("init", "-q", "-b", "main")
-        for name, content in (("src/example.cpp", "int base;\n"), ("scripts/enforce_coverage_ratchet.py", "fixture\n"),
+        for name, content in (("src/example.cpp", "int base;\n"),
                               (".github/baselines/coverage-line.txt", "1\n"), (".github/baselines/coverage-branch.txt", "1\n")):
             path = self.workspace / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
+        for relative in ("scripts/run_linux_analysis.sh", "scripts/qualify_ci_analysis.py", "scripts/run_ci_analysis.py",
+                         "scripts/ci_build_metrics.py", "scripts/ci_environment.py", "scripts/ci_environment_profiles.py",
+                         "scripts/first_party_compile_units.py", "scripts/filter_compile_database.py",
+                         "scripts/prefetch_adb_helper_sources.py", "scripts/enforce_coverage_ratchet.py",
+                         "ci/environments/profiles.json"):
+            destination = self.workspace / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, destination)
+        self.helper = self.workspace / "scripts/run_ci_analysis.py"
+        self.helper_source = self.helper.read_text()
+        tools = self.root / "tools"
+        tools.mkdir()
+        for tool in ("mktemp", "git", "rm", "cmake", "ctest", "gcovr", "python3", "cppcheck", "clang-tidy"):
+            executable = tools / tool
+            executable.write_text('#!/bin/sh\nexec "$MODEL_PYTHON" "$MODEL_MODULE" --analysis-model '
+                                  + tool + ' "$@"\n')
+            executable.chmod(0o755)
+        for tool in ("nproc", "getconf"):
+            executable = tools / tool
+            executable.write_text('#!/bin/sh\nprintf "2\\n"\n')
+            executable.chmod(0o755)
+        self.environment["PATH"] = str(tools) + os.pathsep + os.environ.get("PATH", "")
         self.git("add", ".")
         self.git("commit", "-qm", "base")
         self.base = self.git("rev-parse", "HEAD")
@@ -340,9 +383,7 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
         return {str(path.relative_to(self.workspace)): (path.read_bytes(), path.stat().st_mode, path.stat().st_ino,
                                                        path.stat().st_nlink)
                 for path in self.workspace.rglob("*") if path.is_file()
-                and (".git" in path.parts or "cpm_cache" in path.parts or path.relative_to(self.workspace).as_posix()
-                     in ("src/example.cpp", "scripts/enforce_coverage_ratchet.py", ".github/baselines/coverage-line.txt",
-                         ".github/baselines/coverage-branch.txt"))}
+                and "coverage_report" not in path.relative_to(self.workspace).parts}
 
     def workflow(self, role):
         return (ROOT / ".github/workflows" / self.ROLES[role][0]).read_text()
@@ -350,7 +391,14 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
     def steps(self, role, text):
         return self.quality.workflow_job_steps(text)[self.ROLES[role][1]]
 
-    def execute(self, role, text=None, fail_allocation=False, static_mode="full-report", stop_after=None):
+    def execute(self, role, text=None, fail_allocation=False, static_mode="full-report",
+                helper_mutation=None, event="pull_request", fail_tool=None):
+        helper = self.helper_source
+        if helper_mutation:
+            old, new = helper_mutation
+            self.assertIn(old, helper)
+            helper = helper.replace(old, new, 1)
+        self.helper.write_text(helper)
         self.state.write_text(json.dumps({"calls": [], "role": role, "job_uid": 0, "workspace_uid": 21123}))
         self.github_env.write_text("")
         # Each scenario models a fresh job: prior upload data cannot mask an
@@ -359,13 +407,12 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
         global_config = pathlib.Path(self.environment["GIT_CONFIG_GLOBAL"])
         if global_config.exists():
             global_config.unlink()
-        environment = dict(self.environment, KLOGG_ANALYSIS_MODE=static_mode)
+        environment = dict(self.environment, KLOGG_ANALYSIS_MODE=static_mode, EVENT_NAME=event,
+                           PUSH_BASE_SHA=self.base)
         if fail_allocation:
             environment["MODEL_FAIL_ALLOCATION"] = "1"
-        functions = "\n".join(
-            '{}() {{ "$MODEL_PYTHON" "$MODEL_MODULE" --analysis-model {} "$@"; }}'.format(tool, tool)
-            for tool in ("mktemp", "git", "rm", "cmake", "ctest", "gcovr", "python3", "cppcheck", "clang-tidy"))
-        functions += '\nexport -f clang-tidy\nnproc() { printf "2\\n"; }\ngetconf() { printf "2\\n"; }\n'
+        if fail_tool:
+            environment["MODEL_FAIL_TOOL"] = fail_tool
         result = None
         for step in self.steps(role, text if text is not None else self.workflow(role)):
             fields, children = self.quality.workflow_step_fields(step)
@@ -387,15 +434,15 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
                 working = fields.get("working-directory", str(self.workspace))
                 working = re.sub(r"\$\{\{ env\.([A-Z_]+) \}\}", lambda match: environment[match.group(1)], working)
                 cwd = pathlib.Path(working)
-                command = ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", functions + script]
+                command = ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", script]
             result = subprocess.run(command, cwd=cwd, env=environment, check=False, capture_output=True, text=True)
             if result.returncode:
                 break
             for line in self.github_env.read_text().splitlines():
                 key, value = line.split("=", 1)
                 environment[key] = value
-            if name == stop_after:
-                break
+        self.assertEqual(self.helper.read_text(), helper, "analysis changed the original executor")
+        self.helper.write_text(self.helper_source)
         self.assertEqual(self.source_inventory(), self.original, "original checkout/cache changed")
         return result, json.loads(self.state.read_text())
 
@@ -408,6 +455,17 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
                 self.assertEqual(private.stat().st_ino, state["private_inode"])
                 self.assertEqual(private.stat().st_mode & 0o777, 0o700)
                 self.assertIn(private, pathlib.Path(state["build"]).parents)
+                if role in ("static", "coverage"):
+                    shared = [call for call in state["calls"] if call["tool"] == "python3"
+                              and pathlib.Path(call["args"][0]).name == "run_ci_analysis.py"]
+                    expected = (["configure", "static-prepare", "static-tidy", "static-cppcheck"]
+                                if role == "static" else ["configure", "coverage-build", "coverage-test",
+                                                          "coverage-report", "coverage-ratchet"])
+                    self.assertEqual([call["args"][1] for call in shared], expected)
+                    for step in self.steps(role, self.workflow(role)):
+                        fields, _ = self.quality.workflow_step_fields(step)
+                        if fields.get("name", "").startswith("Configure ("):
+                            self.assertNotRegex(fields["run"], r"\b(?:rm|mkdir)\b")
                 if role == "coverage":
                     source = pathlib.Path(state["source"])
                     actual = subprocess.run([self.environment["MODEL_GIT"], "-C", str(source), "rev-parse", "HEAD"],
@@ -444,18 +502,23 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("MODEL", result.stderr)
 
-    def test_changed_scope_clang_tidy_uses_the_same_private_build(self):
-        # The production cppcheck branch needs Bash 4. Exercise its full-report
-        # path on macOS Bash 3, and exercise changed clang-tidy separately.
-        text = self.workflow("static")
-        result, _ = self.execute("static", static_mode="changed-strict", stop_after="Run clang-tidy")
+    def test_changed_scope_static_tools_use_the_same_private_build(self):
+        result, state = self.execute("static", static_mode="changed-strict")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        old = '--build-dir "$KLOGG_BUILD_ROOT"'
-        self.assertIn(old, text)
-        result, _ = self.execute("static", text.replace(old, '--build-dir "$GITHUB_WORKSPACE/build_root"', 1),
-                                 static_mode="changed-strict", stop_after="Run clang-tidy")
+        tidy = [call for call in state["calls"] if call["tool"] == "python3"
+                and pathlib.Path(call["args"][0]).name == "run_changed_clang_tidy.py"]
+        self.assertEqual(len(tidy), 1)
+        self.assertTrue(any(call["tool"] == "cppcheck" and "--error-exitcode=1" in call["args"]
+                            for call in state["calls"]))
+        text = self.workflow("static")
+        step = next(step for step in self.steps("static", text)
+                    if self.quality.workflow_step_fields(step)[0].get("name") == "Run clang-tidy")
+        old = "\n".join(step)
+        new = old.replace('--build-dir "$KLOGG_BUILD_ROOT"', '--build-dir "$GITHUB_WORKSPACE/build_root"')
+        self.assertNotEqual(old, new)
+        result, _ = self.execute("static", text.replace(old, new, 1), static_mode="changed-strict")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("clang-tidy used another build", result.stderr)
+        self.assertRegex(result.stderr, "build directory|clang-tidy used another build")
 
     def test_coverage_filters_private_source_and_transports_reports(self):
         result, state = self.execute("coverage")
@@ -475,41 +538,26 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
             self.assertEqual((report / path.name).read_bytes(), path.read_bytes())
 
     def test_each_gcovr_call_requires_private_source_filter_context(self):
-        text = self.workflow("coverage")
-        marker = "          gcovr \\\n"
-        self.assertEqual(text.count(marker), 2)
-        for index in range(2):
-            with self.subTest(call=index):
-                start = text.find(marker) if index == 0 else text.rfind(marker)
-                wrapper = '          ( cd "$GITHUB_WORKSPACE"; mkdir -p coverage_report; gcovr \\\n'
-                mutated = text[:start] + text[start:].replace(marker, wrapper, 1)
-                if index == 0:
-                    end = "            | tee coverage_report/summary.txt"
-                    mutated = mutated.replace(end, "          ) | tee coverage_report/summary.txt", 1)
-                else:
-                    end = '            "$KLOGG_BUILD_ROOT"\n'
-                    self.assertIn(end, mutated)
-                    mutated = mutated.replace(end, end + "          )\n", 1)
-                result, state = self.execute("coverage", mutated)
+        # Mutate only the fixture copy of the real helper, not the workflow or
+        # its invocation boundary. Relative gcovr filters must use private cwd.
+        mutations = (
+            ('build]).stdout',
+             'build], cwd=pathlib.Path(os.environ["GITHUB_WORKSPACE"])).stdout'),
+            ('report / "coverage.json", build])',
+             'report / "coverage.json", build], cwd=pathlib.Path(os.environ["GITHUB_WORKSPACE"]))'),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation[0]):
+                result, state = self.execute("coverage", helper_mutation=mutation)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(len(state["coverage_selections"]), 2)
-                for call, selection in enumerate(state["coverage_selections"]):
-                    self.assertEqual(selection["first_party"], call != index)
-                    self.assertEqual(selection["original_checkout"], call == index)
-                    self.assertFalse(selection["vendor"])
-                self.assertIn("below the ratchet floor" if index == 0 else "JSON report omitted", result.stderr)
-        field = "        working-directory: ${{ env.KLOGG_WORKSPACE }}\n"
-        self.assertIn(field, text)
-        result, state = self.execute("coverage", text.replace(field, "", 1))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(len(state["coverage_selections"]), 2)
-        self.assertFalse(any(selection["first_party"] for selection in state["coverage_selections"]))
+                self.assertFalse(state.get("ratcheted"))
+                self.assertIn("reporting working directory", result.stderr)
 
     def test_coverage_transport_cannot_reuse_stale_reports_or_hide_copy_failure(self):
         text = self.workflow("coverage")
-        transport = 'cp -R coverage_report "$GITHUB_WORKSPACE/"'
+        transport = 'cp -R "$KLOGG_WORKSPACE/coverage_report" "$GITHUB_WORKSPACE/"'
         self.assertIn(transport, text)
-        for replacement in (":", 'cp -R coverage_report "$GITHUB_WORKSPACE/missing-parent/destination/"'):
+        for replacement in (":", 'cp -R "$KLOGG_WORKSPACE/coverage_report" "$GITHUB_WORKSPACE/missing-parent/destination/"'):
             with self.subTest(transport=replacement):
                 stale = self.workspace / "coverage_report"
                 stale.mkdir(exist_ok=True)
@@ -523,29 +571,18 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
                 self.assertIn("100.0%", (staged / "summary.txt").read_text())
                 self.assertTrue(all(selection["first_party"] for selection in state["coverage_selections"]))
 
-    def test_coverage_missing_print_summary_is_rejected(self):
-        text = self.workflow("coverage")
-        argument = '--print-summary "$KLOGG_BUILD_ROOT"'
-        self.assertIn(argument, text)
-        result, _ = self.execute("coverage", text.replace(argument, '"$KLOGG_BUILD_ROOT"', 1))
-        summary_path = self.workspace / "coverage_report/summary.txt"
-        summary = summary_path.read_text() if summary_path.exists() else "<not published>"
-        self.assertNotEqual(result.returncode, 0, "MODEL accepted summary: " + repr(summary))
-
-    def test_coverage_report_modes_are_required(self):
-        text = self.workflow("coverage")
-        for old, new in (("--html-details ", ""), ("--html-self-contained ", ""),
-                         ('--html-title "Klogg line/branch coverage" ', ""),
-                         ("--json --json-pretty", "--json-pretty"), ("--json --json-pretty", "--json")):
-            self.assertIn(old, text)
-            with self.subTest(missing=old):
-                result, _ = self.execute("coverage", text.replace(old, new, 1))
+    def test_coverage_report_modes_and_summary_are_required(self):
+        for argument in ('"--print-summary", ', '"--html-details", ', '"--html-self-contained", ',
+                         '"--html-title", "Klogg line/branch coverage",', '"--json", ', '"--json-pretty", '):
+            with self.subTest(missing=argument):
+                result, state = self.execute("coverage", helper_mutation=(argument, ""))
                 self.assertNotEqual(result.returncode, 0)
                 self.assertRegex(result.stderr, "HTML report mode|JSON report mode")
+                self.assertFalse(state.get("ratcheted"))
 
     def test_actual_ratchet_rejects_corrupted_synthetic_summaries(self):
         text = self.workflow("coverage")
-        consumer = 'python3 scripts/enforce_coverage_ratchet.py "${args[@]}"'
+        consumer = 'python3 scripts/run_ci_analysis.py coverage-ratchet'
         self.assertIn(consumer, text)
         corruptions = ((":", "missing a parseable 'lines'"),
                        ("printf '%s\\n' 'not a percentage'", "missing a parseable 'lines'"),
@@ -559,21 +596,59 @@ class AnalysisWorkflowNamespaceTest(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertFalse(state.get("ratcheted"))
 
+    def test_coverage_ratchet_preserves_original_context_for_each_event(self):
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            with self.subTest(event=event):
+                result, state = self.execute("coverage", event=event)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(state["ratcheted"])
+                ratchet = next(call for call in state["calls"] if call["tool"] == "python3"
+                               and pathlib.Path(call["args"][0]).name == "enforce_coverage_ratchet.py")
+                self.assertEqual(ratchet["cwd"], str(self.workspace))
+                self.assertEqual(ratchet["args"][ratchet["args"].index("--base-sha") + 1], self.base)
+        result, state = self.execute("coverage", event="unknown-event")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported coverage ratchet event", result.stdout + result.stderr)
+        self.assertFalse(state.get("ratcheted"))
+
+    def test_tool_failures_stop_before_successful_consumers(self):
+        for role, tools in (("static", ("cmake", "clang-tidy", "cppcheck")),
+                            ("coverage", ("cmake", "ctest", "gcovr"))):
+            for tool in tools:
+                with self.subTest(role=role, tool=tool):
+                    result, state = self.execute(role, fail_tool=tool)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("injected " + tool + " failure", result.stderr)
+                    self.assertFalse(state.get("ratcheted"))
+
+    def test_coverage_cache_alias_is_bound_to_the_original_checkout(self):
+        text = self.workflow("coverage")
+        source = 'source_root=$(cd "$GITHUB_WORKSPACE" && pwd -P)'
+        cache = r'''printf 'KLOGG_CPM_SOURCE_CACHE=%s/cpm_cache\n' "$source_root" >> "$GITHUB_ENV"'''
+        for old, new in ((source, 'source_root="$private_parent/source"'),
+                         (cache, cache.replace('"$source_root"', '"$private_parent/source"')),
+                         (cache, "# cache binding omitted"), (source, "# " + source), (cache, "# " + cache)):
+            with self.subTest(binding=new):
+                self.assertIn(old, text)
+                result, state = self.execute("coverage", text.replace(old, new, 1))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(state.get("ratcheted"))
+
     def test_consumer_and_parent_mutations_fail_observably(self):
         mutations = {
             "static": [('KLOGG_BUILD_ROOT=%s/build_root', 'KLOGG_BUILD_ROOT=build_root'),
-                       ('"$KLOGG_BUILD_ROOT/compile_commands.json"', '"$GITHUB_WORKSPACE/build_root/compile_commands.json"'),
-                       ('clang-tidy -p "$KLOGG_BUILD_ROOT"', 'clang-tidy -p "$GITHUB_WORKSPACE/build_root"')],
+                       ('--build-dir "$KLOGG_BUILD_ROOT"', '--build-dir "$GITHUB_WORKSPACE/build_root"')],
             "coverage": [('git -C "$private_parent/source" checkout --detach "$source_head"',
                           'git -C "$private_parent/source" checkout --detach main'),
                          ('--no-hardlinks --no-checkout', '--no-checkout'),
                          ('"$source_root/.git"', '"$source_root"'),
-                         ('"$KLOGG_WORKSPACE"', '"$GITHUB_WORKSPACE"'),
-                         ('"$KLOGG_BUILD_ROOT"', '"$GITHUB_WORKSPACE/build_root"'),
-                         ('-DCPM_SOURCE_CACHE="$KLOGG_CPM_SOURCE_CACHE"', '-DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache"'),
-                         ('-o coverage_report/index.html', '-o "$KLOGG_BUILD_ROOT/index.html"'),
-                         ('-o coverage_report/coverage.json', '-o "$KLOGG_BUILD_ROOT/coverage.json"'),
-                         ('--summary coverage_report/summary.txt', '--summary "$KLOGG_BUILD_ROOT/summary.txt"'),
+                         ('--workspace "$KLOGG_WORKSPACE"', '--workspace "$GITHUB_WORKSPACE"'),
+                         ('--build-dir "$KLOGG_BUILD_ROOT"', '--build-dir "$GITHUB_WORKSPACE/build_root"'),
+                         ('--cpm-source-cache "$KLOGG_CPM_SOURCE_CACHE"', '--cpm-source-cache "$KLOGG_WORKSPACE/cpm_cache"'),
+                         ('--report-dir "$KLOGG_WORKSPACE/coverage_report"', '--report-dir "$KLOGG_BUILD_ROOT/coverage_report"'),
+                         ('--workspace "$GITHUB_WORKSPACE"', '--workspace "$KLOGG_WORKSPACE"'),
+                         ('--report-dir "$GITHUB_WORKSPACE/coverage_report"', '--report-dir "$KLOGG_BUILD_ROOT/coverage_report"'),
+                         ('python3 scripts/run_ci_analysis.py configure', 'python3 "$KLOGG_WORKSPACE/scripts/run_ci_analysis.py" configure'),
                          ('path: coverage_report/', 'path: build_root/')],
         }
         for role, changes in mutations.items():

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "run": {
+    "GITHUB_RUN_ID": "39045173443",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_SHA": "9b9a66f4203dd55800565f2899b8456964e0d912"
+  },
+  "validated": false,
+  "measurement_scope": "since successful pre-configure zero-stats",
+  "targets_measured": false,
+  "restore": {
+    "PRIMARY_CACHE_MATCH": "",
+    "MASTER_CACHE_MATCH": "",
+    "PRIMARY_CACHE_OUTCOME": "skipped",
+    "MASTER_CACHE_OUTCOME": "skipped"
+  },
+  "activation": {
+    "enabled": false,
+    "ready": false,
+    "run": {
+      "GITHUB_RUN_ID": "39045173443",
+      "GITHUB_RUN_ATTEMPT": "1",
+      "GITHUB_SHA": "9b9a66f4203dd55800565f2899b8456964e0d912"
+    },
+    "reason": "missing Windows compiler/toolchain identity"
+  },
+  "reason": "missing Windows compiler/toolchain identity"
+}

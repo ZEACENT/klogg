@@ -34,13 +34,14 @@ runs:
       shell: sh
       run: |
         case "$RUNNER_OS" in
-          Windows) object_cache=disabled ;;
+          Windows) object_cache=${KLOGG_WINDOWS_OBJECT_CACHE:-disabled} ;;
           macOS) object_cache=measured ;;
           *) echo "::error::unreviewed native build metrics platform: $RUNNER_OS"; exit 1 ;;
         esac
-        python3 scripts/ci_build_metrics.py run-build \
+        python3 scripts/ci_build_observation.py run-build \
           --repo-root "$KLOGG_WORKSPACE" \
           --build-root "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT" \
           --output "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/ci-build-metrics-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" \
           --object-cache "$object_cache" \
+          --cache-tool "${KLOGG_OBJECT_CACHE_TOOL:-ccache}" \
           -- cmake --build "$KLOGG_BUILD_ROOT" -t ci_build

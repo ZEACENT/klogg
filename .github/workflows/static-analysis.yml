@@ -184,132 +184,31 @@ jobs:
           private_parent=$(mktemp -d /tmp/klogg-analysis.XXXXXXXX)
           printf 'KLOGG_BUILD_ROOT=%s/build_root\n' "$private_parent" >> "$GITHUB_ENV"
 
+      # The ordinary adapter reuses the unchanged qualification primitives.
+      # Keep phase orchestration out of the workflow and signed verifier bytes.
       - name: Configure (generate compile_commands.json)
         shell: bash
         run: |
-          rm -rf "$KLOGG_BUILD_ROOT"
-          cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DKLOGG_BUILD_TESTS=ON \
-            -DKLOGG_USE_VECTORSCAN=ON \
-            -DKLOGG_USE_LTO=OFF \
-            -DKLOGG_USE_SENTRY=ON \
-            -DKLOGG_GENERIC_CPU=ON \
-            -DKLOGG_UI_AUTOGEN_ORIGIN_DEPENDS=OFF \
-            -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
-            -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-
-      - name: Build first-party clang-tidy TU list
-        shell: bash
-        run: |
-          python3 scripts/first_party_compile_units.py \
-            "$KLOGG_BUILD_ROOT/compile_commands.json" \
-            "$KLOGG_WORKSPACE/src" \
-            --null \
-            > tidy_files.nul
-          echo "clang-tidy: configured first-party TU list is ready."
+          python3 scripts/run_ci_analysis.py configure --role static \
+            --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT"
 
       - name: Generate Qt UI headers for analysis
         shell: bash
-        # klogg_ui_autogen is detached from its link dependencies in this
-        # configuration, so build the generated version.h producer explicitly;
-        # clang-tidy analyzes klogg_version.cpp and fails without it.
-        run: cmake --build "$KLOGG_BUILD_ROOT" --target klogg_ui_autogen generate_version -j"$(nproc)"
+        run: |
+          python3 scripts/run_ci_analysis.py static-prepare --role static \
+            --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" --jobs "$(nproc)"
 
       - name: Run clang-tidy
         shell: bash
         run: |
-          set -euo pipefail
-          if [ "$KLOGG_ANALYSIS_MODE" = "full-report" ]; then
-            export KLOGG_BUILD_ROOT
-            xargs -0 -P "$(nproc)" -n 1 bash -c '
-              clang-tidy -p "$KLOGG_BUILD_ROOT" \
-                --extra-arg=-Wno-unknown-warning-option "$1"
-            ' _ < tidy_files.nul
-            echo "clang-tidy: manual full src/ audit complete (findings report-only)."
-          else
-            python3 scripts/run_changed_clang_tidy.py \
-              --base "$KLOGG_ANALYSIS_BASE" \
-              --build-dir "$KLOGG_BUILD_ROOT" \
-              --clang-tidy-diff "$CLANG_TIDY_DIFF" \
-              --jobs "$(nproc)"
-          fi
+          python3 scripts/run_ci_analysis.py static-tidy --role static \
+            --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" \
+            --analysis-mode "$KLOGG_ANALYSIS_MODE" --analysis-base-sha "${KLOGG_ANALYSIS_BASE:-}" \
+            --clang-tidy-diff "$CLANG_TIDY_DIFF" --jobs "$(nproc)"
 
       - name: Run cppcheck (warning+style over src/)
         shell: bash
         run: |
-          set -u
-          # cppcheck's -i does NOT exclude paths when --project is used (the JSON
-          # database pins the exact TU set), so first filter compile_commands.json
-          # down to first-party src/ TUs, dropping cpm_cache / _deps / build_root
-          # autogen / tests / benchmarks / 3rdparty. The first four suppressions
-          # are cppcheck Qt/preprocessor limitations. Every legacy warning/style
-          # baseline entry is location-qualified in tests/cppcheck_suppressions.txt
-          # so the same diagnostic ID at any new location still fails the gate.
-          BASE="${KLOGG_ANALYSIS_BASE:-}"
-          # Filter compile_commands.json to first-party src/ TUs (cppcheck's -i
-          # does not exclude paths under --project, so we hand it a filtered DB).
-          python3 scripts/first_party_compile_units.py \
-            "$KLOGG_BUILD_ROOT/compile_commands.json" \
-            "$KLOGG_WORKSPACE/src" --null > /tmp/cppcheck_files.nul
-          python3 scripts/filter_compile_database.py \
-            "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE" \
-            /tmp/cppcheck_files.nul /tmp/cc_src.json
-
-          if [ "$KLOGG_ANALYSIS_MODE" = "changed-strict" ] && [ -n "$BASE" ]; then
-            # PRs and pushes scope cppcheck to their authoritative changed src/
-            # TUs so the same strict policy protects both event paths.
-            # in UNCHANGED files -- e.g. a redundantInitialization false positive
-            # in styles.cpp's theme logic -- don't block the gate. New issues in
-            # touched files are still caught (the whole changed TU is checked).
-            changed_paths_file=$(mktemp)
-            trap 'rm -f "$changed_paths_file"' EXIT
-            if ! git -c core.quotePath=false diff --name-only -z --diff-filter=d "$BASE" HEAD -- src/ \
-                 > "$changed_paths_file"; then
-              echo "::error::failed to discover changed cppcheck paths"
-              exit 1
-            fi
-            mapfile -d '' -t changed_paths < "$changed_paths_file"
-            changed_src=()
-            changed_headers=()
-            for file in "${changed_paths[@]}"; do
-              case "${file,,}" in
-                *.c|*.cc|*.cpp|*.cxx) changed_src+=("$file") ;;
-                *.h|*.hh|*.hpp|*.hxx) changed_headers+=("$file") ;;
-              esac
-            done
-            if [ "${#changed_src[@]}" -eq 0 ] && [ "${#changed_headers[@]}" -eq 0 ]; then
-              echo "cppcheck: no changed C/C++ files under src/; skipping."
-              exit 0
-            fi
-            if [ "${#changed_headers[@]}" -gt 0 ]; then
-              echo "cppcheck: changed header present; checking all first-party src/ TUs."
-              CC_PROJECT=/tmp/cc_src.json
-            else
-              printf '%s\0' "${changed_src[@]}" > /tmp/changed_src.nul
-              python3 scripts/filter_compile_database.py \
-                /tmp/cc_src.json "$KLOGG_WORKSPACE" \
-                /tmp/changed_src.nul /tmp/cc_changed.json
-              CC_PROJECT=/tmp/cc_changed.json
-            fi
-            CC_EXTRA="--error-exitcode=1"
-          else
-            # The manual whole-tree audit reports legacy findings without making
-            # them a merge gate; configuration and tool failures remain fatal.
-            CC_PROJECT=/tmp/cc_src.json
-            CC_EXTRA=""
-          fi
-
-          cppcheck \
-            --project="$CC_PROJECT" \
-            --enable=warning,style \
-            $CC_EXTRA \
-            --inline-suppr \
-            --quiet \
-            --suppress=missingInclude \
-            --suppress=syntaxError \
-            --suppress=unknownMacro \
-            --suppress=preprocessorErrorDirective \
-            --suppressions-list=tests/cppcheck_suppressions.txt
+          python3 scripts/run_ci_analysis.py static-cppcheck --role static \
+            --workspace "$KLOGG_WORKSPACE" --build-dir "$KLOGG_BUILD_ROOT" \
+            --analysis-mode "$KLOGG_ANALYSIS_MODE" --analysis-base-sha "${KLOGG_ANALYSIS_BASE:-}"

@@ -1,0 +1,256 @@
+{
+  "source_sha": "f4c3d005ca2204b23489855988175ecd6f994e48",
+  "workflow_path": ".github/workflows/ci-build.yml",
+  "workflow_sha256": "cef4a0ef37456dcdd7cdb3cc7ece67c36909a820c674ce550effbd0efbf3cc82",
+  "note": "Explicit needs from workflow at API run head (not compiled merge SHA); matrix jobs expanded to actual API IDs; skipped branches omitted.",
+  "jobs": {
+    "117381132997": {
+      "workflow_job": "ReleaseQualificationPreflight",
+      "needs": []
+    },
+    "117381133115": {
+      "workflow_job": "PrefetchWindowsTools",
+      "needs": []
+    },
+    "117381133116": {
+      "workflow_job": "DependencyModePreflight",
+      "needs": []
+    },
+    "117381133158": {
+      "workflow_job": "PrefetchBoost",
+      "needs": []
+    },
+    "117381133160": {
+      "workflow_job": "PrefetchOpenSsl",
+      "needs": []
+    },
+    "117381133229": {
+      "workflow_job": "PrefetchCpmCache",
+      "needs": []
+    },
+    "117381133322": {
+      "workflow_job": "PrefetchLinuxDeployQt",
+      "needs": []
+    },
+    "117381147647": {
+      "workflow_job": "PrefetchAdbHelperSources",
+      "needs": [
+        "DependencyModePreflight"
+      ]
+    },
+    "117381147651": {
+      "workflow_job": "SaveVersion",
+      "needs": [
+        "DependencyModePreflight"
+      ]
+    },
+    "117381147669": {
+      "workflow_job": "PrefetchIosNativeSources",
+      "needs": [
+        "DependencyModePreflight"
+      ]
+    },
+    "117381181356": {
+      "workflow_job": "BuildIosNativeArm64",
+      "needs": [
+        "SaveVersion",
+        "PrefetchIosNativeSources"
+      ]
+    },
+    "117381181390": {
+      "workflow_job": "BuildIosNativeX64",
+      "needs": [
+        "SaveVersion",
+        "PrefetchIosNativeSources"
+      ]
+    },
+    "117381229746": {
+      "workflow_job": "BuildAdbHelperLegalAssets",
+      "needs": [
+        "SaveVersion",
+        "PrefetchAdbHelperSources"
+      ]
+    },
+    "117381351265": {
+      "workflow_job": "BuildAdbMacArm64",
+      "needs": [
+        "BuildAdbHelperLegalAssets"
+      ]
+    },
+    "117381351286": {
+      "workflow_job": "BuildAdbMacX64",
+      "needs": [
+        "BuildAdbHelperLegalAssets"
+      ]
+    },
+    "117381351303": {
+      "workflow_job": "BuildAdbLinuxX64",
+      "needs": [
+        "BuildAdbHelperLegalAssets"
+      ]
+    },
+    "117381351339": {
+      "workflow_job": "BuildAdbLinuxArm64",
+      "needs": [
+        "BuildAdbHelperLegalAssets"
+      ]
+    },
+    "117381351364": {
+      "workflow_job": "BuildAdbWindowsX64",
+      "needs": [
+        "BuildAdbHelperLegalAssets"
+      ]
+    },
+    "117381363806": {
+      "workflow_job": "WindowsAsan",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "PrefetchWindowsTools",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117381363842": {
+      "workflow_job": "WindowsX86",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "PrefetchOpenSsl",
+        "PrefetchWindowsTools",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117381363846": {
+      "workflow_job": "LinuxSanitizers",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117381363884": {
+      "workflow_job": "LinuxTsan",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117381363909": {
+      "workflow_job": "MacSanitizers",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117381363939": {
+      "workflow_job": "MacSanitizers",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117381363949": {
+      "workflow_job": "LinuxSanitizers",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117382283400": {
+      "workflow_job": "LinuxPackages",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchLinuxDeployQt",
+        "BuildAdbLinuxX64",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117382283405": {
+      "workflow_job": "LinuxPackages",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchLinuxDeployQt",
+        "BuildAdbLinuxX64",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117382283406": {
+      "workflow_job": "LinuxPackages",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchLinuxDeployQt",
+        "BuildAdbLinuxX64",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117382283415": {
+      "workflow_job": "LinuxPackages",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchLinuxDeployQt",
+        "BuildAdbLinuxX64",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117382305858": {
+      "workflow_job": "MacArmPackages",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "BuildAdbMacArm64",
+        "BuildIosNativeArm64",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117383118152": {
+      "workflow_job": "WindowsPackages",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "PrefetchWindowsTools",
+        "BuildAdbWindowsX64",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117383775211": {
+      "workflow_job": "MacPackages",
+      "needs": [
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "BuildAdbMacX64",
+        "BuildIosNativeX64",
+        "ReleaseQualificationPreflight"
+      ]
+    },
+    "117390218181": {
+      "workflow_job": "ci-gate",
+      "needs": [
+        "BuildAdbLinuxArm64",
+        "LinuxPackages",
+        "LinuxSanitizers",
+        "LinuxTsan",
+        "MacPackages",
+        "MacArmPackages",
+        "MacSanitizers",
+        "WindowsPackages",
+        "WindowsX86",
+        "WindowsAsan"
+      ]
+    }
+  }
+}

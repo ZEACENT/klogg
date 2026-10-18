@@ -1,0 +1,91 @@
+{
+  "job_id": 117382283415,
+  "job_name": "Linux ubuntu-20.04-appimage [vs-gen]",
+  "run_id": 39027449860,
+  "head_sha": "f4c3d005ca2204b23489855988175ecd6f994e48",
+  "source": "https://api.github.com/repos/ZEACENT/klogg/actions/jobs/117382283415/logs",
+  "log_sha256": "75f4e3de7b677645176b40556e9227ecff3e79904be7878af8f20b608e5ec53f",
+  "note": "Exact selected log lines with original 1-based line numbers; ccache -s totals are accumulated, NOT current-build deltas.",
+  "lines": [
+    {
+      "line": 576,
+      "text": "2026-10-17T11:14:32.0507620Z   path: /home/runner/work/klogg/klogg/.ccache"
+    },
+    {
+      "line": 577,
+      "text": "2026-10-17T11:14:32.0508003Z   key: ubuntu-20.04-appimage-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 578,
+      "text": "2026-10-17T11:14:32.0508510Z   restore-keys: ubuntu-20.04-appimage-ccache-v2-"
+    },
+    {
+      "line": 579,
+      "text": ""
+    },
+    {
+      "line": 580,
+      "text": "2026-10-17T11:14:32.0508918Z   enableCrossOsArchive: false"
+    },
+    {
+      "line": 581,
+      "text": "2026-10-17T11:14:32.0509276Z   fail-on-cache-miss: false"
+    },
+    {
+      "line": 582,
+      "text": "2026-10-17T11:14:32.0509580Z   lookup-only: false"
+    },
+    {
+      "line": 603,
+      "text": "2026-10-17T11:14:32.0517289Z ##[endgroup]"
+    },
+    {
+      "line": 604,
+      "text": "2026-10-17T11:14:32.3074389Z Cache hit for: ubuntu-20.04-appimage-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 605,
+      "text": "2026-10-17T11:14:33.4837858Z Received 121634816 of 408001874 (29.8%), 116.0 MBs/sec"
+    },
+    {
+      "line": 606,
+      "text": "2026-10-17T11:14:34.4836592Z Received 239075328 of 408001874 (58.6%), 114.0 MBs/sec"
+    },
+    {
+      "line": 607,
+      "text": "2026-10-17T11:14:35.4855725Z Received 373293056 of 408001874 (91.5%), 118.6 MBs/sec"
+    },
+    {
+      "line": 608,
+      "text": "2026-10-17T11:14:35.8129549Z Received 408001874 of 408001874 (100.0%), 116.9 MBs/sec"
+    },
+    {
+      "line": 610,
+      "text": "2026-10-17T11:14:35.8241000Z [command]/usr/bin/tar -xf /home/runner/work/_temp/400f1fd1-df30-4f68-b876-9ece35626a17/cache.tzst -P -C /home/runner/work/klogg/klogg --use-compress-program unzstd"
+    },
+    {
+      "line": 611,
+      "text": "2026-10-17T11:14:36.2637680Z Cache restored successfully"
+    },
+    {
+      "line": 612,
+      "text": "2026-10-17T11:14:36.3151924Z Cache restored from key: ubuntu-20.04-appimage-ccache-v2-2026-10-17"
+    },
+    {
+      "line": 613,
+      "text": "2026-10-17T11:14:36.3284586Z Prepare all required actions"
+    },
+    {
+      "line": 614,
+      "text": "2026-10-17T11:14:36.3343031Z ##[group]Run ./.github/actions/prepare-workspace-env"
+    },
+    {
+      "line": 615,
+      "text": "2026-10-17T11:14:36.3343782Z with:"
+    },
+    {
+      "line": 616,
+      "text": "2026-10-17T11:14:36.3344133Z   arch: x64"
+    }
+  ]
+}

@@ -1250,6 +1250,50 @@ class IosNativeReleaseContractTest(unittest.TestCase):
             self.assertEqual(self.tree_bytes(core), core_before)
             self.assertEqual(self.tree_bytes(stack), stack_before)
 
+    def test_source_archive_identity_does_not_depend_on_python_gzip_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "upstream.tar.gz"
+            source.write_bytes(b"locked upstream source\n" * 4096)
+            lock = {
+                "sources": [{"archive_file": source.name,
+                             "archive_sha256": LEGAL_MODULE.sha256(source)}],
+                "patches": [],
+            }
+            lock_path = root / "lock.json"
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            gzip_file = LEGAL_MODULE.gzip.GzipFile
+            archives = []
+            for default_level in (6, 9):
+                with self.subTest(default_level=default_level):
+                    # Model the different host Python defaults from the Intel
+                    # and ARM producers without mocking the compressed bytes.
+                    def host_gzip(*args, **kwargs):
+                        kwargs.setdefault("compresslevel", default_level)
+                        return gzip_file(*args, **kwargs)
+
+                    output = root / f"source-{default_level}.tar.gz"
+                    with mock.patch.object(LEGAL_MODULE.gzip, "GzipFile", host_gzip):
+                        LEGAL_MODULE.write_deterministic_source_archive(
+                            output, lock_path, lock, root, ROOT
+                        )
+                    with tarfile.open(output, "r:gz") as archive:
+                        self.assertEqual(
+                            archive.extractfile(f"archives/{source.name}").read(),
+                            source.read_bytes(),
+                        )
+                        self.assertEqual(
+                            archive.extractfile("libimobiledevice.lock.json").read(),
+                            lock_path.read_bytes(),
+                        )
+                        self.assertTrue(all(member.mtime == 0 for member in archive))
+                    archives.append(output.read_bytes())
+            self.assertEqual(
+                hashlib.sha256(archives[0]).hexdigest(),
+                hashlib.sha256(archives[1]).hexdigest(),
+                "independent native producers must bind to the same source archive",
+            )
+
     def test_architectures_share_core_but_keep_distinct_dylib_bound_sboms(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

@@ -1,0 +1,76 @@
+name: "Audit or Clean Closed PR Caches"
+
+# Manual-only rollout. Never execute a PR checkout with cache-write privileges.
+# Before enabling apply, configure the pr-cache-cleanup environment with required
+# reviewers, prevent self-review, and restrict deployment branches to master.
+# GitHub does not provide atomic cache compare-and-delete: approve a quiet window
+# without PR reopens/reruns. The script aborts on every observed metadata change.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Reserved: apply is disabled until approval protection is configured"
+        type: boolean
+        required: true
+        default: false
+      confirmation:
+        description: "For apply only, type delete-closed-pr-caches"
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: closed-pr-cache-cleanup
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Plan only; report protected master and platform cache usage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/pr_cache_cleanup.py --repo "$GITHUB_REPOSITORY"
+
+  apply:
+    needs: audit
+    # Rollout interlock: the approval environment has not been configured yet.
+    # Remove only in a reviewed change after required reviewers, self-review
+    # prevention and master-only deployment protection are verified via the API.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.apply && inputs.confirmation == 'delete-closed-pr-caches' && false }}
+    environment: pr-cache-cleanup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Replan and recheck each exact cache ID before deletion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLEANUP_CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/pr_cache_cleanup.py --repo "$GITHUB_REPOSITORY" \
+            --apply --confirm "$CLEANUP_CONFIRMATION"
