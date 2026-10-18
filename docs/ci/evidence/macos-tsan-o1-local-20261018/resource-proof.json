@@ -1,0 +1,81 @@
+{
+  "baseline": {
+    "QT_RCC_SOURCE_DATE_OVERRIDE": null,
+    "SOURCE_DATE_EPOCH": null,
+    "build": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o2_profile_experiment",
+    "html_sha256": "734acbeefc91b810209c68e0a648852d23bfc94fc8b45416edab0eb22f49d2b4",
+    "input_mtime_ms": 1792318802094,
+    "normalized_byte_range": [
+      205150,
+      205187
+    ],
+    "payload_sha256": "2f406c80c5b46fec28c2577e7d8f666c57acc5a64c21f6c0e6fb51f58d23ca02",
+    "qrc_sha256": "12ca108f50ca19af2a1bcb88d80dad7d0427f4302688f802ab1b30fae5dda375",
+    "raw_cpp_sha256": "0232d9740d4c00a21d48272949b1643c65297248a6f9e6e9c26cff6524ea3a31",
+    "rcc_executable": "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/qt/6.9.3/macos/libexec/rcc",
+    "rcc_options": [
+      "--no-zstd",
+      "-name",
+      "documentation"
+    ],
+    "rcc_sha256": "78a3f99884cb660e1175955d42c6f13873f89d01855b9b760bc0356c52152f3f",
+    "rcc_version": "rcc 6.9.3",
+    "resource_count": 1,
+    "resource_timestamp_ms": 1792318802094,
+    "source": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o2_profile_experiment/src/app/klogg_documentation_resources_autogen/UJRFS7BNZX/qrc_documentation.cpp",
+    "timestamp_only_normalized_cpp_sha256": "04327618698050a73e264526741c144d79b2c5e844451deb1d497fed26e10024"
+  },
+  "exploratory": {
+    "QT_RCC_SOURCE_DATE_OVERRIDE": null,
+    "SOURCE_DATE_EPOCH": null,
+    "build": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o1_profile_experiment",
+    "html_sha256": "734acbeefc91b810209c68e0a648852d23bfc94fc8b45416edab0eb22f49d2b4",
+    "input_mtime_ms": 1792320232642,
+    "normalized_byte_range": [
+      205150,
+      205187
+    ],
+    "payload_sha256": "2f406c80c5b46fec28c2577e7d8f666c57acc5a64c21f6c0e6fb51f58d23ca02",
+    "qrc_sha256": "12ca108f50ca19af2a1bcb88d80dad7d0427f4302688f802ab1b30fae5dda375",
+    "raw_cpp_sha256": "14d04c9a6bc1f8bf9bf801c647694f0b097cc944faa645052c8a4d91376d9c72",
+    "rcc_executable": "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/qt/6.9.3/macos/libexec/rcc",
+    "rcc_options": [
+      "--no-zstd",
+      "-name",
+      "documentation"
+    ],
+    "rcc_sha256": "78a3f99884cb660e1175955d42c6f13873f89d01855b9b760bc0356c52152f3f",
+    "rcc_version": "rcc 6.9.3",
+    "resource_count": 1,
+    "resource_timestamp_ms": 1792320232642,
+    "source": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o1_profile_experiment/src/app/klogg_documentation_resources_autogen/XX4P3P7MJX/qrc_documentation.cpp",
+    "timestamp_only_normalized_cpp_sha256": "04327618698050a73e264526741c144d79b2c5e844451deb1d497fed26e10024"
+  },
+  "normalization": "Only the exact 8-byte documentation.html resource timestamp, parsed from the sole file entry in the 44-byte root+file Qt resource structure. No generated-source comment, path, or code normalization was needed. Actual files and mtimes were not modified.",
+  "pure_o1": {
+    "QT_RCC_SOURCE_DATE_OVERRIDE": null,
+    "SOURCE_DATE_EPOCH": null,
+    "build": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_pure_o1_profile_experiment",
+    "html_sha256": "734acbeefc91b810209c68e0a648852d23bfc94fc8b45416edab0eb22f49d2b4",
+    "input_mtime_ms": 1792321379968,
+    "normalized_byte_range": [
+      205150,
+      205187
+    ],
+    "payload_sha256": "2f406c80c5b46fec28c2577e7d8f666c57acc5a64c21f6c0e6fb51f58d23ca02",
+    "qrc_sha256": "12ca108f50ca19af2a1bcb88d80dad7d0427f4302688f802ab1b30fae5dda375",
+    "raw_cpp_sha256": "742f71974b2616a18135689537bafc094e708cf62b17e4df0f4bf0c8f5adfca3",
+    "rcc_executable": "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/qt/6.9.3/macos/libexec/rcc",
+    "rcc_options": [
+      "--no-zstd",
+      "-name",
+      "documentation"
+    ],
+    "rcc_sha256": "78a3f99884cb660e1175955d42c6f13873f89d01855b9b760bc0356c52152f3f",
+    "rcc_version": "rcc 6.9.3",
+    "resource_count": 1,
+    "resource_timestamp_ms": 1792321379968,
+    "source": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_pure_o1_profile_experiment/src/app/klogg_documentation_resources_autogen/SEG7SVATT3/qrc_documentation.cpp",
+    "timestamp_only_normalized_cpp_sha256": "04327618698050a73e264526741c144d79b2c5e844451deb1d497fed26e10024"
+  }
+}

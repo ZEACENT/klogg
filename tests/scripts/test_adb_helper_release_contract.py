@@ -731,6 +731,54 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                        "inputs.qualification-mode == 'validation'"):
             self.assertIn(marker, condition)
 
+    def assert_authenticated_package_support_download(self, workflow, job):
+        steps = [CI_MODULE.workflow_step_fields(step)
+                 for step in CI_MODULE.workflow_job_steps(workflow)[job]]
+        guard = "${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}"
+        ready_steps = [(index, fields, children) for index, (fields, children) in enumerate(steps)
+                       if fields.get("id") == "native-ready"]
+        self.assertEqual(len(ready_steps), 1)
+        ready_index, ready, ready_children = ready_steps[0]
+        self.assertEqual(ready.get("if"), guard)
+        self.assertEqual(ready_children.get("env", {}).get("GH_TOKEN"), "${{ github.token }}")
+        self.assertEqual(
+            " ".join(CI_MODULE.active_script_content(ready.get("run", "")).split()),
+            'python3 scripts/ci_native_rendezvous.py --architecture "$KLOGG_IOS_ARCHITECTURE" '
+            '--receipt "$RUNNER_TEMP/native-ready.json"',
+        )
+        downloads = [(index, fields, children["with"]) for index, (fields, children) in enumerate(steps)
+                     if fields.get("uses", "").startswith("actions/download-artifact@")
+                     and children.get("with", {}).get("artifact-ids") ==
+                     "${{ steps.native-ready.outputs.support-artifact-id }}"]
+        self.assertEqual(len(downloads), 1)
+        download_index, download, settings = downloads[0]
+        self.assertGreater(download_index, ready_index)
+        self.assertEqual(download.get("if"), guard)
+        self.assertNotIn("name", settings)
+        self.assertEqual(settings.get("path"), "${{ github.workspace }}/prefetch_artifacts/adb-helper/release")
+        finalizers = [(index, children["with"]) for index, (fields, children) in enumerate(steps)
+                      if fields.get("uses") == "./.github/actions/agent-build"
+                      and "finalize" in children.get("with", {}).get("phase", "")]
+        self.assertEqual(len(finalizers), 1)
+        self.assertGreater(finalizers[0][0], download_index)
+        self.assertEqual(finalizers[0][1].get("native-receipt"), "${{ runner.temp }}/native-ready.json")
+
+    def test_authenticated_support_download_rejects_unbound_or_unguarded_mutations(self):
+        workflow = self.required_text(CI_BUILD)
+        mutations = (
+            workflow.replace("steps.native-ready.outputs.support-artifact-id", "steps.native-ready.outputs.full-release-artifact-id"),
+            workflow.replace("if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}", "if: ${{ always() }}"),
+            workflow.replace("python3 scripts/ci_native_rendezvous.py", "# python3 scripts/ci_native_rendezvous.py"),
+            workflow.replace("artifact-ids: ${{ steps.native-ready.outputs.support-artifact-id }}",
+                             "artifact-ids: ${{ steps.native-ready.outputs.support-artifact-id }}\n          name: adb-helper-release-assets"),
+            workflow.replace("native-receipt: ${{ runner.temp }}/native-ready.json", "native-receipt: unbound.json"),
+        )
+        for job in ("MacPackages", "MacArmPackages"):
+            self.assert_authenticated_package_support_download(workflow, job)
+            for changed in mutations:
+                with self.subTest(job=job, mutation=changed[:40]), self.assertRaises(AssertionError):
+                    self.assert_authenticated_package_support_download(changed, job)
+
     def test_adb_package_support_and_full_release_artifacts_have_distinct_ownership(self):
         workflow = self.required_text(CI_BUILD)
         records = CI_MODULE.workflow_artifact_records(workflow)
@@ -835,7 +883,11 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     for kind, artifact, condition in records.get(job, [])
                     if kind == "downloads"
                 }
-                self.assertIn((package_support, expected_condition), downloads)
+                if job in {"MacPackages", "MacArmPackages"}:
+                    self.assert_authenticated_package_support_download(workflow, job)
+                    self.assertNotIn(package_support, {artifact for artifact, _ in downloads})
+                else:
+                    self.assertIn((package_support, expected_condition), downloads)
                 self.assertNotIn(full_release, {artifact for artifact, _ in downloads})
 
         continuous = self.required_text(CI_CONTINUOUS)

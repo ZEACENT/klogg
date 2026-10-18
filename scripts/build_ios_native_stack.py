@@ -238,6 +238,30 @@ def stage_artifact(prefix: pathlib.Path, artifact_root: pathlib.Path,
     return identities
 
 
+def compiler_launcher_options(launcher: pathlib.Path | None) -> list[str]:
+    """Keep optional object caching explicit and reproducible without CI modules."""
+    if launcher is None:
+        return []
+    # These values become shell compiler commands inside Autotools and make.
+    # Restrict them to single executable paths, not shell/CMake command lists.
+    def executable_path(value: str) -> str:
+        if not pathlib.Path(value).is_absolute() or not re.fullmatch(r"/[A-Za-z0-9_./+\-]+", value):
+            raise BuildError("compiler launcher and compiler must be absolute shell-safe executable paths")
+        return value
+
+    selected = executable_path(str(launcher))
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise BuildError("compiler launcher is not executable")
+    compiler = executable_path(run(["xcrun", "--find", "clang"]).strip())
+    cxx = executable_path(run(["xcrun", "--find", "clang++"]).strip())
+    # Direct Xcode clang bypasses /usr/bin/clang's SDK selection. Preserve that
+    # behavior explicitly instead of accidentally compiling against host headers.
+    sdk = executable_path(run(["xcrun", "--show-sdk-path"]).strip())
+    return [f"-DKLOGG_IOS_COMPILER_LAUNCHER={selected}",
+            f"-DKLOGG_IOS_C_COMPILER={compiler}", f"-DKLOGG_IOS_CXX_COMPILER={cxx}",
+            f"-DKLOGG_IOS_SDK_ROOT={sdk}"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository-root", required=True, type=pathlib.Path)
@@ -248,6 +272,8 @@ def main() -> int:
     parser.add_argument("--architecture", choices=("x86_64", "arm64"), required=True)
     parser.add_argument("--parallel", default=str(os.cpu_count() or 2))
     parser.add_argument("--inspection-only", action="store_true")
+    parser.add_argument("--compiler-launcher", type=pathlib.Path,
+                        help="Optional executable-only compiler launcher; cache environment is inherited")
     args = parser.parse_args()
 
     if platform.system() != "Darwin":
@@ -259,6 +285,7 @@ def main() -> int:
     if not native_build and not args.inspection_only:
         raise BuildError("cross-built thin macOS artifacts require --inspection-only")
 
+    launcher_options = compiler_launcher_options(args.compiler_launcher)
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
     target = deployment_target(lock, args.architecture)
     shutil.rmtree(args.work_root, ignore_errors=True)
@@ -301,6 +328,7 @@ def main() -> int:
         f"-DKLOGG_IOS_PARALLEL={args.parallel}",
         f"-DKLOGG_IOS_SOURCE_DATE_EPOCH={lock['release_policy']['source_date_epoch']}",
         "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        *launcher_options,
     ])
     run([
         "cmake", "--build", str(superbuild), "--target", "klogg_ios_native_stack",

@@ -47,7 +47,7 @@ def lifecycle(text, job, event, failed_stage=None, own_pr=True):
             stage = "package"
         elif children.get("with", {}).get("name", "").startswith(("packages-", "symbols-")):
             stage = "upload"
-        elif uses.startswith("actions/cache/save@"):
+        elif uses == "./.github/actions/save-verified-compiler-cache":
             stage = "save"
         if not stage:
             continue
@@ -102,6 +102,8 @@ class CacheSaveLifecycleTest(unittest.TestCase):
         boundary = bad.index("\n  MacArmPackages:")
         late = bad[:boundary] + block + bad[boundary:]
         for mutation in (late, late + "\n# " + block.replace("\n", "\n# "),
+                         text.replace("./.github/actions/save-verified-compiler-cache",
+                                      "actions/cache/save@" + LINT.REVIEWED_ACTION_REVISIONS["actions/cache"]),
                          text.replace("success() && github.event_name == 'push'", "always() && github.event_name == 'push'"),
                          text.replace("python3 scripts/ci_ccache.py trim", "printf 'python3 scripts/ci_ccache.py trim'")):
             with self.subTest(mutation=mutation[:80]):
@@ -216,11 +218,30 @@ class CcacheBudgetTest(unittest.TestCase):
         module = load_module()
         fields = next(fields for fields, _ in rows(WORKFLOW.read_text(), "LinuxPackages")
                       if fields.get("name") == "Enable ccache compiler launcher")
+        for external_config in (False, True):
+            with self.subTest(external_config=external_config):
+                self.assert_linux_launcher(fields, module, external_config)
+
+    def assert_linux_launcher(self, fields, module, external_config):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             github_env = root / "github-env"
             env = {**os.environ, **module.environment("ubuntu-22.04-deb"),
                    "GITHUB_ENV": str(github_env), "KLOGG_CMAKE_OPTS": "-G Ninja"}
+            if external_config:
+                config = root / "trusted-config" / "ccache.conf"
+                config.parent.mkdir()
+                config.write_text("max_size = 500M\ncompiler_check = mtime\n")
+                env.update(KLOGG_CCACHE_CONTAINER_CONFIG=str(config),
+                           CCACHE_PREFIX="/nonexistent-inherited-prefix",
+                           CCACHE_PREFIX_CPP="/nonexistent-inherited-preprocessor",
+                           CCACHE_SLOPPINESS="time_macros",
+                           CCACHE_REMOTE_STORAGE="file:/nonexistent-remote-storage")
+                cache = root / "cache"
+                cache.mkdir()
+                (cache / "ccache.conf").write_text("prefix_command = /nonexistent-cache-prefix\n")
+            else:
+                env.pop("KLOGG_CCACHE_CONTAINER_CONFIG", None)
             subprocess.run(["bash", "-eu", "-c", fields["run"]], env=env, check=True, capture_output=True)
             options = github_env.read_text().strip().split("=", 1)[1]
             source = root / "probe.c"
@@ -240,6 +261,15 @@ class CcacheBudgetTest(unittest.TestCase):
                                    env=env, text=True, capture_output=True)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             self.assertIn("CCACHE_MAXSIZE=500M", built.stdout)
+            if external_config:
+                self.assertIn("CCACHE_CONFIGPATH=" + str(config), built.stdout)
+                self.assertIn("CCACHE_PREFIX=", built.stdout)
+                self.assertIn("CCACHE_REMOTE_STORAGE=", built.stdout)
+                for setting in ("prefix_command", "prefix_command_cpp", "remote_storage", "sloppiness"):
+                    values = [line.split(setting + " =", 1)[1].strip()
+                              for line in log.read_text().splitlines() if setting + " =" in line]
+                    self.assertTrue(values, setting)
+                    self.assertEqual(set(values), {""}, setting)
             effective = [line for line in log.read_text().splitlines() if "max_size =" in line]
             self.assertTrue(effective)
             for line in effective:

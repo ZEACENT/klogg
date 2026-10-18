@@ -1,0 +1,158 @@
+{
+  "build_root": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_pure_o1_profile_experiment",
+  "ctest": {
+    "disabled": 0,
+    "failures": 0,
+    "junit_sha256": "1a037a25e55cbfc4599be0e515c94bea4430803eedddbdf6025f18f3aa86261c",
+    "names": [
+      "adb_compiler_portability_contract",
+      "adb_helper_cycle8_release_contract",
+      "adb_helper_hardening_contract",
+      "adb_helper_release_contract",
+      "adb_helper_verifier_contract",
+      "adb_libusb_fallback_contract",
+      "adb_manifest_fallback_contract",
+      "adb_source_closure_contract",
+      "adb_source_context_contract",
+      "application_identity_contract",
+      "external_source_asset_package_contract",
+      "ios_compiler_portability_contract",
+      "ios_native_release_contract",
+      "klogg_configuration_preapplication_tests",
+      "klogg_crash_collector_protocol_tests",
+      "klogg_directory_io_lifetime_tests",
+      "klogg_ios_native_contract_tests",
+      "klogg_ios_protocol_tests",
+      "klogg_itests",
+      "klogg_itests_filewatcher_low_fd",
+      "klogg_itests_filewatcher_teardown_timeout",
+      "klogg_live_capture_benchmark_contract_tests",
+      "klogg_livelog_controller_tests",
+      "klogg_livelog_migration_notice_tests",
+      "klogg_livelog_restore_arming_tests",
+      "klogg_livelog_session_spec_tests",
+      "klogg_search_start_trace_absent",
+      "klogg_search_start_trace_empty",
+      "klogg_search_start_trace_enabled",
+      "klogg_smoke",
+      "klogg_tests",
+      "klogg_vectorscan_tests",
+      "libimobiledevice_ostrace_patch_contract",
+      "live_capture_benchmark_contract",
+      "live_capture_results_contract",
+      "live_session_ui_retirement_contract",
+      "livelog_controller_retirement_contract",
+      "prepare_efsw_git_contract",
+      "static_link_policy_contract",
+      "windows_runtime_verifier_contract"
+    ],
+    "skipped": 0,
+    "tests": 40
+  },
+  "effective_compile_flags": {
+    "commands": 835,
+    "debug": {
+      "-g": 16,
+      "-g1": 819
+    },
+    "optimization": {
+      "-O1": 835
+    }
+  },
+  "profile": "pure-o1",
+  "role": "accepted pure optimization-only candidate",
+  "stages": {
+    "build": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/cmake",
+        "--build",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_pure_o1_profile_experiment",
+        "--target",
+        "ci_build",
+        "--parallel",
+        "4"
+      ],
+      "log_sha256": "5ceb023b0522792d7225de3118375b60bcbef30271f7105c31bc15be006e1745",
+      "memory_sample_count": 297,
+      "memory_samples_sha256": "494403c15192404f56790e607d40f01cdb1f64db281229c4c51b50e1e6f3506f",
+      "peak_process_tree_rss_kib": 1830956,
+      "returncode": 0,
+      "time_report_sha256": "70866a0674fed572c8bb78a7899f84ea0da1b11eae7c302fe22505ac9ae14aad",
+      "wall_seconds": 617.0192275373265
+    },
+    "configure": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/cmake",
+        "-S",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt",
+        "-B",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_pure_o1_profile_experiment",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        "-DKLOGG_GENERIC_CPU=OFF",
+        "-DKLOGG_USE_LTO=OFF",
+        "-DKLOGG_USE_SENTRY=OFF",
+        "-DENABLE_SANITIZER_THREAD=ON",
+        "-DKLOGG_CI_LIGHT_DEBUG=ON",
+        "-DKLOGG_OSX_DEPLOYMENT_TARGET=15.0",
+        "-DKLOGG_BUILD_TESTS=ON",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_INSTALL_PREFIX=/usr",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+        "-DCMAKE_C_COMPILER_LAUNCHER=",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER=",
+        "-DCMAKE_PREFIX_PATH=/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/qt/6.9.3/macos",
+        "-DBOOST_ROOT=/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/boost",
+        "-DBoost_NO_SYSTEM_PATHS=ON",
+        "-DBoost_NO_BOOST_CMAKE=ON",
+        "-DCPM_SOURCE_CACHE=/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache",
+        "-DCMAKE_PROJECT_INCLUDE=/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/cmake/CiMacosTsanProfile.cmake",
+        "-DKLOGG_CI_MACOS_TSAN_O1=ON"
+      ],
+      "log_sha256": "2d17e5a15bd1f4f8d579120b793ab78bff51583672318386326a4bed684be334",
+      "memory_sample_count": 18,
+      "memory_samples_sha256": "98c1cb2d53718fe29cddc6234efb5e79ec5d04af3df6eafb3a25f16ee9a757ca",
+      "peak_process_tree_rss_kib": 71680,
+      "returncode": 0,
+      "time_report_sha256": "969066d4621d9a0ac48fb983e8e7ad7ce2393f339e6d92860366633f22114633",
+      "wall_seconds": 35.59230795735493
+    },
+    "ctest": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/ctest",
+        "--test-dir",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_pure_o1_profile_experiment",
+        "--verbose",
+        "--output-on-failure",
+        "--parallel",
+        "8",
+        "--output-junit",
+        "/private/tmp/klogg-tsan-o1-experiment.7mkGzv/pure-o1/pure-o1-ctest.xml"
+      ],
+      "log_sha256": "45e1cc75150f5dc7d6381dce1553fdc3213153c9ec8cb92688f1396e133273dc",
+      "memory_sample_count": 139,
+      "memory_samples_sha256": "bcced6fea24c37d3b08f5631c58d9fb4f5f54cf39c8ad5bccc1cb1511421188c",
+      "peak_process_tree_rss_kib": 1066600,
+      "returncode": 0,
+      "time_report_sha256": "1e79b01f6d28392f8b3e241528f545ae961214075eddf80b38aa1210626c2241",
+      "wall_seconds": 290.867276777979
+    },
+    "profile_guard": {
+      "command": [
+        "python3",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/scripts/verify_macos_tsan_profile.py",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_pure_o1_profile_experiment/compile_commands.json"
+      ],
+      "log_sha256": "517990c72a5823aff48718a59bb8824aa35c2700625ed0c7dc8baac49a687aaf",
+      "memory_sample_count": 1,
+      "memory_samples_sha256": "4086a69c528aeb29a5af5fb3ff0848f2c70e251de852536e4531926680ee3523",
+      "peak_process_tree_rss_kib": 2468,
+      "returncode": 0,
+      "time_report_sha256": "53ed5320701d324d51e540c443576bbdc4e6946ea19abe28ed89278f0d146391",
+      "wall_seconds": 1.678506244905293
+    }
+  },
+  "total_ci_build_and_ctest_wall_seconds": 907.8865043153055
+}

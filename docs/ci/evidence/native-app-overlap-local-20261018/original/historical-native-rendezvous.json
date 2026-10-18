@@ -1,0 +1,30 @@
+{
+  "artifacts": {
+    "adb-helper-macos-x86_64": {
+      "artifact_id": 12123063706,
+      "producer_attempt": 1,
+      "producer_id": 117569983983,
+      "producer_name": "Source-built ADB helper macos-x86_64"
+    },
+    "adb-helper-package-support": {
+      "artifact_id": 12122654285,
+      "producer_attempt": 1,
+      "producer_id": 117569884854,
+      "producer_name": "Build ADB helper legal assets"
+    },
+    "ios-native-x86_64": {
+      "artifact_id": 12123123095,
+      "producer_attempt": 1,
+      "producer_id": 117569880742,
+      "producer_name": "iOS native stack x86_64"
+    }
+  },
+  "identity": {
+    "head_sha": "f0ea6a09935c8c1a3407811446536482427fc931",
+    "repository": "ZEACENT/klogg",
+    "run_attempt": 1,
+    "run_id": 39091756819,
+    "sha": "f0ea6a09935c8c1a3407811446536482427fc931"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,35 @@
+{
+  "helper_path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_native_overlap/package-stage/klogg.app/Contents/MacOS/helpers/adb",
+  "helper_sha256": "71df6906e50967a771316c23a4aec2bbfde4ea1f63fe28cc489733bfa8688de2",
+  "host_version": "0029",
+  "passed_probes": [
+    "version",
+    "complete-client",
+    "loopback-private-server",
+    "smart-socket-host-version",
+    "no-lingering-process"
+  ],
+  "receipt_kind": "binary-smoke",
+  "required_probe": {
+    "arguments": [
+      "server",
+      "nodaemon"
+    ],
+    "environment": {
+      "ADB_SERVER_SOCKET": "tcp:57696"
+    },
+    "name": "production-server-invocation",
+    "scrubbed_environment": [
+      "ADB_VENDOR_KEYS",
+      "ADB_SERVER_PORT",
+      "ANDROID_ADB_SERVER_PORT",
+      "ANDROID_ADB_SERVER_ADDRESS"
+    ]
+  },
+  "schema_version": 1,
+  "server_endpoint": "tcp:127.0.0.1:57696",
+  "server_pid": 23530,
+  "stability_host_version": "0029",
+  "stability_window_seconds": 0.25,
+  "version_output": "Android Debug Bridge version 1.0.41\nVersion 37.0.0-android-tools\nInstalled as /Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_native_overlap/package-stage/klogg.app/Contents/MacOS/helpers/adb\nRunning on Darwin 25.6.0 (x86_64)"
+}

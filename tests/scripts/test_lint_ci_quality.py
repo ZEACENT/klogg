@@ -1129,13 +1129,13 @@ jobs:
             "PrefetchIosNativeSources": {"DependencyModePreflight"},
             "BuildIosNativeX64": {"SaveVersion", "PrefetchIosNativeSources"},
             "BuildIosNativeArm64": {"SaveVersion", "PrefetchIosNativeSources"},
-            "MacPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacX64", "BuildIosNativeX64", "ReleaseQualificationPreflight"},
-            "MacArmPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacArm64", "BuildIosNativeArm64", "ReleaseQualificationPreflight"},
+            "MacPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "ReleaseQualificationPreflight"},
+            "MacArmPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "ReleaseQualificationPreflight"},
             "MacSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "ReleaseQualificationPreflight"},
             "WindowsPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "BuildAdbWindowsX64", "ReleaseQualificationPreflight"},
             "WindowsX86": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchOpenSsl", "PrefetchWindowsTools", "ReleaseQualificationPreflight"},
             "WindowsAsan": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "ReleaseQualificationPreflight"},
-            "ci-gate": {"BuildAdbLinuxArm64", "LinuxPackages", "LinuxSanitizers", "LinuxTsan", "MacPackages", "MacArmPackages", "MacSanitizers", "WindowsPackages", "WindowsX86", "WindowsAsan"},
+            "ci-gate": {"BuildAdbLinuxArm64", "BuildAdbMacX64", "BuildAdbMacArm64", "BuildIosNativeX64", "BuildIosNativeArm64", "LinuxPackages", "LinuxSanitizers", "LinuxTsan", "MacPackages", "MacArmPackages", "MacSanitizers", "WindowsPackages", "WindowsX86", "WindowsAsan"},
             "DispatchContinuous": {"ci-gate"},
         }
         self.assertEqual(needs, expected_needs)
@@ -2457,16 +2457,12 @@ jobs:
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchBoost",
-                "BuildAdbMacX64",
-                "BuildIosNativeX64",
                 "ReleaseQualificationPreflight",
             },
             "MacArmPackages": {
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchBoost",
-                "BuildAdbMacArm64",
-                "BuildIosNativeArm64",
                 "ReleaseQualificationPreflight",
             },
             "WindowsPackages": {
@@ -2490,6 +2486,10 @@ jobs:
             needs.get("ci-gate"),
             {
                 "BuildAdbLinuxArm64",
+                "BuildAdbMacX64",
+                "BuildAdbMacArm64",
+                "BuildIosNativeX64",
+                "BuildIosNativeArm64",
                 "LinuxPackages",
                 "LinuxSanitizers",
                 "LinuxTsan",
@@ -3787,16 +3787,18 @@ jobs:
 
     def test_ccache_is_saved_only_after_tests_and_package_qualification(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
-        linux = workflow.split("  LinuxPackages:", 1)[1].split("\n  LinuxSanitizers:", 1)[0]
-        self.assertGreater(
-            linux.index("- name: Save ccache for the Linux build"),
-            linux.index("- uses: ./.github/actions/docker-run-tests"),
-        )
-        mac = workflow.split("  MacPackages:", 1)[1].split("\n  MacArmPackages:", 1)[0]
-        self.assertGreater(
-            mac.index("- name: Save ccache for the macOS build"),
-            mac.index("- uses: ./.github/actions/agent-package-mac"),
-        )
+        job_steps = MODULE.workflow_job_steps(workflow)
+        for job, platform, qualifier in (
+            ("LinuxPackages", "Linux", "docker-run-tests"),
+            ("MacPackages", "macOS", "agent-package-mac"),
+        ):
+            with self.subTest(job=job):
+                rows = [MODULE.workflow_step_fields(step)[0] for step in job_steps[job]]
+                save = next(i for i, fields in enumerate(rows)
+                            if fields.get("name") == f"Save ccache for the {platform} build")
+                qualified = next(i for i, fields in enumerate(rows)
+                                 if fields.get("uses") == "./.github/actions/" + qualifier)
+                self.assertGreater(save, qualified)
 
     def test_ccache_entries_use_the_effective_repository_budget(self):
         good = (ROOT / ".github/workflows/ci-build.yml").read_text()

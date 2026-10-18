@@ -1,0 +1,526 @@
+{
+  "build_root": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o1_profile_experiment",
+  "changed_debug_commands": [
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/alloc-aligned.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc-aligned.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/alloc-aligned.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc-aligned.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc-aligned.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/alloc-posix.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc-posix.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/alloc-posix.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc-posix.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc-posix.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/alloc.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/alloc.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/alloc.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/arena.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/arena.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/arena.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/arena.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/arena.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/bitmap.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/bitmap.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/bitmap.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/bitmap.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/bitmap.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/heap.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/heap.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/heap.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/heap.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/heap.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/init.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/init.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/init.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/init.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/init.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/libc.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/libc.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/libc.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/libc.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/libc.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/options.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/options.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/options.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/options.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/options.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/os.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/os.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/os.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/os.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/os.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/page.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/page.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/page.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/page.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/page.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/prim/prim.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/prim/prim.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/prim/prim.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/prim/prim.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/prim/prim.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/random.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/random.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/random.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/random.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/random.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/segment-map.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/segment-map.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/segment-map.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/segment-map.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/segment-map.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/segment.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/segment.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/segment.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/segment.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/segment.c.o"
+    },
+    {
+      "baseline": {
+        "all_debug_flags": [
+          "-g1",
+          "-g"
+        ],
+        "effective_debug": "-g",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/stats.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/stats.c.o"
+      },
+      "candidate": {
+        "all_debug_flags": [
+          "-g1",
+          "-g",
+          "-g1"
+        ],
+        "effective_debug": "-g1",
+        "source": "/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/src/stats.c",
+        "target_object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/stats.c.o"
+      },
+      "object": "_deps/mimalloc-build/CMakeFiles/mimalloc-static.dir/src/stats.c.o"
+    }
+  ],
+  "ctest": {
+    "disabled": 0,
+    "failures": 0,
+    "junit_sha256": "4c231cc75906e3cab4f516e280ae30b4e0995c9f70adf5eb6229c7736ff40786",
+    "names": [
+      "adb_compiler_portability_contract",
+      "adb_helper_cycle8_release_contract",
+      "adb_helper_hardening_contract",
+      "adb_helper_release_contract",
+      "adb_helper_verifier_contract",
+      "adb_libusb_fallback_contract",
+      "adb_manifest_fallback_contract",
+      "adb_source_closure_contract",
+      "adb_source_context_contract",
+      "application_identity_contract",
+      "external_source_asset_package_contract",
+      "ios_compiler_portability_contract",
+      "ios_native_release_contract",
+      "klogg_configuration_preapplication_tests",
+      "klogg_crash_collector_protocol_tests",
+      "klogg_directory_io_lifetime_tests",
+      "klogg_ios_native_contract_tests",
+      "klogg_ios_protocol_tests",
+      "klogg_itests",
+      "klogg_itests_filewatcher_low_fd",
+      "klogg_itests_filewatcher_teardown_timeout",
+      "klogg_live_capture_benchmark_contract_tests",
+      "klogg_livelog_controller_tests",
+      "klogg_livelog_migration_notice_tests",
+      "klogg_livelog_restore_arming_tests",
+      "klogg_livelog_session_spec_tests",
+      "klogg_search_start_trace_absent",
+      "klogg_search_start_trace_empty",
+      "klogg_search_start_trace_enabled",
+      "klogg_smoke",
+      "klogg_tests",
+      "klogg_vectorscan_tests",
+      "libimobiledevice_ostrace_patch_contract",
+      "live_capture_benchmark_contract",
+      "live_capture_results_contract",
+      "live_session_ui_retirement_contract",
+      "livelog_controller_retirement_contract",
+      "prepare_efsw_git_contract",
+      "static_link_policy_contract",
+      "windows_runtime_verifier_contract"
+    ],
+    "skipped": 0,
+    "tests": 40
+  },
+  "effective_compile_flags": {
+    "commands": 835,
+    "debug": {
+      "-g1": 835
+    },
+    "optimization": {
+      "-O1": 835
+    }
+  },
+  "excluded_from_activation_reason": "Also reduced mimalloc-static debug from -g to -g1; final pure-O1 profile does not change debug flags.",
+  "profile": "o1",
+  "role": "exploratory only; not used to authorize activation",
+  "stages": {
+    "build": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/cmake",
+        "--build",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o1_profile_experiment",
+        "--target",
+        "ci_build",
+        "--parallel",
+        "4"
+      ],
+      "log_sha256": "d253575d33ac726314e147a458e6d08c6bb3b8cecc2df3aa8fb53dcabacee244",
+      "memory_sample_count": 332,
+      "memory_samples_sha256": "cd8f4c485b86624bba070d5c7a8be28e0803684b82ebcc5ee145d99846321bec",
+      "peak_process_tree_rss_kib": 1831824,
+      "returncode": 0,
+      "time_report_sha256": "60e548152b5ba87da60f43638b921e1c65228a91a20002e2f44bab63d10349cc",
+      "wall_seconds": 693.7930593471974
+    },
+    "configure": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/cmake",
+        "-S",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt",
+        "-B",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o1_profile_experiment",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        "-DKLOGG_GENERIC_CPU=OFF",
+        "-DKLOGG_USE_LTO=OFF",
+        "-DKLOGG_USE_SENTRY=OFF",
+        "-DENABLE_SANITIZER_THREAD=ON",
+        "-DKLOGG_CI_LIGHT_DEBUG=ON",
+        "-DKLOGG_OSX_DEPLOYMENT_TARGET=15.0",
+        "-DKLOGG_BUILD_TESTS=ON",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_INSTALL_PREFIX=/usr",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+        "-DCMAKE_C_COMPILER_LAUNCHER=",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER=",
+        "-DCMAKE_PREFIX_PATH=/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/qt/6.9.3/macos",
+        "-DBOOST_ROOT=/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/boost",
+        "-DBoost_NO_SYSTEM_PATHS=ON",
+        "-DBoost_NO_BOOST_CMAKE=ON",
+        "-DCPM_SOURCE_CACHE=/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache",
+        "-DCMAKE_PROJECT_INCLUDE=/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/cmake/CiMacosTsanProfile.cmake",
+        "-DKLOGG_CI_MACOS_TSAN_O1=ON"
+      ],
+      "log_sha256": "d64bbcdb23dbcd3130b500ece2926646c1bb8dd3310eadb8d28fad9e6cc82c49",
+      "memory_sample_count": 19,
+      "memory_samples_sha256": "5c379228a16cd2c972fc2c1c0803accb1ead8c9d5abfdd383c7c7e49d65e3932",
+      "peak_process_tree_rss_kib": 60112,
+      "returncode": 0,
+      "time_report_sha256": "a85cdcfb83598bec12644c218dcf6fed1c4e5de9ddc7d3b882c270955aba23f6",
+      "wall_seconds": 37.536571349948645
+    },
+    "ctest": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/ctest",
+        "--test-dir",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o1_profile_experiment",
+        "--verbose",
+        "--output-on-failure",
+        "--parallel",
+        "8",
+        "--output-junit",
+        "/tmp/klogg-tsan-o1-experiment.7mkGzv/o1-ctest.xml"
+      ],
+      "log_sha256": "5d66ef356f81b26375826a12fafa5085883aa85b37713b261654a91912340e3b",
+      "memory_sample_count": 140,
+      "memory_samples_sha256": "3e59083d39b995f4da2d3b920a7a59db2b2e57792edcc19942f8ea8a339f5d90",
+      "peak_process_tree_rss_kib": 1025952,
+      "returncode": 0,
+      "time_report_sha256": "255b56937dadc002b6eea0b623c926277f102aa5cecdf06a689ca41ca6362e27",
+      "wall_seconds": 293.32743748184294
+    },
+    "profile_guard": {
+      "command": [
+        "python3",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/scripts/verify_macos_tsan_profile.py",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o1_profile_experiment/compile_commands.json"
+      ],
+      "log_sha256": "8bc75071e5ec5964dad45229d884f3a2d334d91e5fa9d2b22fc3787258fdf98e",
+      "memory_sample_count": 1,
+      "memory_samples_sha256": "123e17ed6af103960e237723c232eeb77d92bc8d537978a739117e8ec7530b7b",
+      "peak_process_tree_rss_kib": 2000,
+      "returncode": 0,
+      "time_report_sha256": "7e0673f750adc8e91f065426bdde3f3a2e263f487c75e60d76e1c9ba6071eb4d",
+      "wall_seconds": 1.621384914033115
+    },
+    "scope": {
+      "command": [
+        "bash",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/scripts/verify_sanitizer_scope.sh",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o1_profile_experiment"
+      ],
+      "log_sha256": "501741d3798c920fb11a193d49b8ab6039dad537145a60013e57eaadd98bbbb5",
+      "memory_sample_count": 1,
+      "memory_samples_sha256": "d6d2e85670b99f5aa12ba204cb85c885164762ffa253093fb74ae7d53ba33c78",
+      "peak_process_tree_rss_kib": 1724,
+      "returncode": 0,
+      "time_report_sha256": "a6117a0958017363eaae05eba3ec986c76f5466b6d8379f63b6acb2ad51351ed",
+      "wall_seconds": 0.2702549840323627
+    }
+  },
+  "total_ci_build_and_ctest_wall_seconds": 987.1204968290403
+}

@@ -1,0 +1,67 @@
+{
+  "archive": {
+    "file_name": "ios-native-corresponding-source.tar.gz",
+    "sha256": "f7a181e9a042600c0928748b258bae76d6c446e44d0e658762d57fe640ef0b66"
+  },
+  "component": "ios-native",
+  "distribution": {
+    "package_required": false,
+    "release_required": true
+  },
+  "lock_sha256": "d703d60b34800fc7d9a580286881a429f77a0af57f3a85d8b550dbbc7044686d",
+  "package_support_assets": [
+    {
+      "file_name": "NOTICE-ios-native.txt",
+      "kind": "notices",
+      "sha256": "c9b890f4ae240738c98abd5bca7a443d4355ca5d40af94ac62c2cfe9ab551578"
+    },
+    {
+      "file_name": "licenses/openssl-LICENSE.txt",
+      "kind": "license:openssl",
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+    },
+    {
+      "file_name": "licenses/curl-COPYING",
+      "kind": "license:curl",
+      "sha256": "82f2f4427d6545ee5aaac4f0b80428da6cc8ba41c2cf5da3a03680ec327b9681"
+    },
+    {
+      "file_name": "licenses/libplist-COPYING",
+      "kind": "license:libplist",
+      "sha256": "7619c753cac95d4740220223bde48a032606fcaccde5e546f9bc444c81ab356d"
+    },
+    {
+      "file_name": "licenses/libplist-COPYING.LESSER",
+      "kind": "license:libplist",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "file_name": "licenses/libtatsu-COPYING",
+      "kind": "license:libtatsu",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "file_name": "licenses/libimobiledevice-glue-COPYING",
+      "kind": "license:libimobiledevice-glue",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "file_name": "licenses/libusbmuxd-COPYING",
+      "kind": "license:libusbmuxd",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "file_name": "licenses/libimobiledevice-COPYING",
+      "kind": "license:libimobiledevice",
+      "sha256": "7619c753cac95d4740220223bde48a032606fcaccde5e546f9bc444c81ab356d"
+    }
+  ],
+  "patch_chain_sha256": "6447ec45519cec847640d899de3861ad34b1320d93c6e3445ca2692e87cf036f",
+  "receipt_kind": "component-source-set",
+  "schema_version": 1,
+  "source_identity": {
+    "final_tree_sha256": "dc0ef5f499295cab2678810ac6cea0ea85be00e554a6395a81a36b6373bdab15",
+    "manifest_or_closure_sha256": "ea533b2e4834ee8cdef8380529aaf0bcacd1817c62e7c31919512c5b308a01ae",
+    "tree_hash_algorithm": "sha256"
+  }
+}

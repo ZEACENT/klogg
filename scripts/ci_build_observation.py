@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -27,13 +28,20 @@ MetricsError = legacy.MetricsError
 def build_provenance(build_root, environment=None):
     """Read generated compiler files as data, never execute CMake to inspect them."""
     env = os.environ if environment is None else environment
+    artifact_id = env.get("KLOGG_CI_CACHE_ARTIFACT_ID") or None
+    legacy_key = env.get("KLOGG_CI_CACHE_RESTORE_KEY") or None
     result = {"sha": env.get("GITHUB_SHA"), "run_id": env.get("GITHUB_RUN_ID"),
               "run_attempt": env.get("GITHUB_RUN_ATTEMPT"), "arch": env.get("KLOGG_CONFIG_ARCH"),
               "config": "/".join(filter(None, (env.get("KLOGG_LABEL"), env.get("KLOGG_CONFIG_PACKAGE_TAG")))),
               "cache_state": env.get("KLOGG_CI_CACHE_STATE", "unknown"),
+              "cache_restore_key": None if artifact_id else legacy_key,
+              "cache_artifact_id": artifact_id,
+              "cache_transport": "verified-artifact" if artifact_id else "actions-cache" if legacy_key else "none",
+              "superseded_cache_restore_key": legacy_key if artifact_id else None,
+              "cache_compiler_check": env.get("CCACHE_COMPILERCHECK"),
               "environment": env.get("KLOGG_CI_ENVIRONMENT_IDENTITY") or
                              "/".join(filter(None, (env.get("ImageOS"), env.get("ImageVersion")))),
-              "cmake_options": {}, "build_type": None, "compilers": {}}
+              "cmake_options": {}, "build_type": None, "compilers": {}, "source_root": None}
     for language in ("C", "CXX"):
         paths = list(Path(build_root).glob(f"CMakeFiles/*/CMake{language}Compiler.cmake"))
         if len(paths) != 1:
@@ -50,6 +58,8 @@ def build_provenance(build_root, environment=None):
     cache = Path(build_root) / "CMakeCache.txt"
     if cache.is_file():
         for line in cache.read_text(encoding="utf-8").splitlines():
+            if line.startswith("CMAKE_HOME_DIRECTORY:INTERNAL="):
+                result["source_root"] = line.split("=", 1)[1]
             match = re.fullmatch(r"([^:#/][^:]*)\:(BOOL|STRING|PATH|FILEPATH)=(.*)", line)
             if not match:
                 continue
@@ -101,7 +111,7 @@ def bind_environment(metrics, identity, environment=None):
     for key in ("sha", "run_id", "run_attempt", "arch", "config"):
         if previous.get(key) and context.get(key) and str(previous[key]) != str(context[key]):
             raise MetricsError("metrics provenance mismatch: " + key)
-    for key in ("compilers", "cmake_options", "build_type"):
+    for key in ("compilers", "cmake_options", "build_type", "source_root"):
         if previous.get(key):
             context[key] = previous[key]
     context["environment"] = identity
@@ -157,6 +167,145 @@ def run_build(command, *, repo_root, build_root, output, object_cache, runner=No
     return report
 
 
+def aggregate_phases(prepare, finalize):
+    """Combine build invocation durations, never unrelated Ninja time origins."""
+    for name, report in (("prepare", prepare), ("finalize", finalize)):
+        if (not isinstance(report, dict) or report.get("measurement_scope") != "phase"
+                or report.get("phase") != name or type(report.get("build_wall_ms")) is not int
+                or report["build_wall_ms"] < 0):
+            raise ValueError("missing or invalid native build phase: " + name)
+    before, after = prepare.get("provenance"), finalize.get("provenance")
+    required = ("sha", "run_id", "run_attempt", "arch", "config", "environment", "source_root", "build_type")
+    for provenance in (before, after):
+        if not isinstance(provenance, dict) or any(
+                not isinstance(provenance.get(key), str) or not provenance[key] for key in required):
+            raise ValueError("native phase lacks complete source/run/toolchain identity")
+        if (not re.fullmatch(r"[0-9a-f]{40}", provenance["sha"])
+                or any(not re.fullmatch(r"[1-9][0-9]*", provenance[key]) for key in ("run_id", "run_attempt"))):
+            raise ValueError("invalid native phase run/SHA identity")
+        compilers = provenance.get("compilers")
+        if (not isinstance(compilers, dict) or not compilers
+                or any(not isinstance(compiler, dict) or not compiler.get("id") or not compiler.get("version")
+                       for compiler in compilers.values())):
+            raise ValueError("native phase lacks compiler identity")
+    if ({key: value for key, value in before.items() if key != "cmake_options"}
+            != {key: value for key, value in after.items() if key != "cmake_options"}):
+        raise ValueError("native phase provenance mismatch")
+    gates = ("KLOGG_ADB_HELPER_REQUIRED", "KLOGG_ENABLE_IOS_NATIVE_STACK")
+    options_before, options_after = before.get("cmake_options"), after.get("cmake_options")
+    if (not isinstance(options_before, dict) or not isinstance(options_after, dict)
+            or any(options_before.get(key) != "OFF" or options_after.get(key) != "ON" for key in gates)
+            or {key: value for key, value in options_before.items() if key not in gates}
+            != {key: value for key, value in options_after.items() if key not in gates}):
+        raise ValueError("unexpected native phase CMake option difference")
+    measured = (prepare.get("object_cache") == finalize.get("object_cache") == "measured"
+                and prepare.get("cache_tool") == finalize.get("cache_tool") == "ccache")
+    counters = (prepare.get("cache_deltas"), finalize.get("cache_deltas"))
+    valid_counters = measured and all(
+        isinstance(counter, dict) and all(type(counter.get(key)) is int and counter[key] >= 0
+                                         for key in legacy.CACHE_COUNTERS)
+        for counter in counters)
+    return {"schema_version": 1, "measurement_scope": "phased-build",
+            "build_wall_ms": prepare["build_wall_ms"] + finalize["build_wall_ms"],
+            "build_wall_definition": "sum of prepare/finalize build invocations; excludes configure, native wait, tests and packaging",
+            "object_cache": "measured" if measured else "unmeasured",
+            "cache_tool": "ccache" if measured else None,
+            "cache_deltas": {key: sum(counter[key] for counter in counters) for key in legacy.CACHE_COUNTERS}
+                            if valid_counters else None,
+            "provenance": after, "phases": {"prepare": prepare, "finalize": finalize}}
+
+
+def publish_phased_build(build_root, expected):
+    """Publish optional complete evidence only after final native build success."""
+    build = Path(build_root)
+    try:
+        prefix = f"{expected['run_id']}-{expected['run_attempt']}"
+        phases = [json.loads((build / f"ci-build-phase-{prefix}-{phase}.json").read_text(encoding="utf-8"))
+                  for phase in ("prepare", "finalize")]
+        report = aggregate_phases(*phases)
+        for key in ("sha", "run_id", "run_attempt"):
+            if str(report["provenance"][key]) != str(expected[key]):
+                raise ValueError("phased build is not the current invocation: " + key)
+        output = build / f"ci-build-metrics-{prefix}.json"
+        if output.exists() or output.is_symlink():
+            raise ValueError("whole phased-build observation already exists")
+        replace_report(output, report)
+        print("KLOGG_BUILD_METRICS_JSON=" + json.dumps(report, sort_keys=True), flush=True)
+        return report
+    except (OSError, ValueError, KeyError) as error:
+        print(f"notice: optional whole phased-build observation unavailable: {error}", file=sys.stderr)
+        return None
+
+
+def phase_log_delta(before, after):
+    """An append-only Ninja log proves phase-local work; compaction does not.
+
+    Never truncate .ninja_log to simplify measurement: Ninja needs its command
+    hashes to retain prepared objects across the second configure.
+    """
+    if not before:
+        return after
+    if not after.startswith(before):
+        return None
+    return before.splitlines()[0] + "\n" + after[len(before):]
+
+
+def run_phase(command, *, repo_root, build_root, output, phase, object_cache="measured",
+              runner=None, clock=None, provenance=None, configure=None):
+    if phase not in ("prepare", "finalize"):
+        raise ValueError("unknown native build phase")
+    runner = subprocess.run if runner is None else runner
+    clock = time.monotonic if clock is None else clock
+    build, path = Path(build_root), Path(output)
+    if path.exists() or path.is_symlink():
+        raise MetricsError("phase observation already exists")
+    log = build / ".ninja_log"
+    before = log.read_text(encoding="utf-8") if log.exists() else ""
+    counters = None
+    if object_cache == "measured":
+        try:
+            counters = legacy.ccache_counters(runner)
+        except Exception as error:
+            print(f"notice: phase cache counters unavailable: {error}", file=sys.stderr)
+    started = clock()
+    try:
+        runner(command, check=True)
+    finally:
+        wall = max(0, round((clock() - started) * 1000))
+        # Preserve raw command-hash evidence, including on failed builds.
+        try:
+            after = log.read_text(encoding="utf-8")
+            path.with_suffix(".ninja-log.txt").write_text(after, encoding="utf-8")
+        except OSError as error:
+            after = ""
+            print(f"notice: phase raw Ninja log unavailable: {error}", file=sys.stderr)
+    try:
+        report = {"schema_version": 1, "measurement_scope": "phase", "phase": phase,
+                  "build_wall_ms": wall, "object_cache": object_cache,
+                  "cache_tool": "ccache" if object_cache == "measured" else None,
+                  "provenance": build_provenance(build), "cache_deltas": None,
+                  "ninja_log": path.with_suffix(".ninja-log.txt").name,
+                  "compilation_state": "unknown"}
+        report["provenance"].update(provenance or {})
+        if configure is not None:
+            report["configure"] = configure
+        delta = phase_log_delta(before, after)
+        if delta:
+            database = json.loads((build / "compile_commands.json").read_text(encoding="utf-8"))
+            measured = legacy.measure(delta, database, str(repo_root), str(build), wall, object_cache)
+            report.update(measured)
+            report["compilation_state"] = "measured"
+        else:
+            report["compilation_unknown_reason"] = "Ninja log unavailable or compacted across phase boundary"
+        if counters is not None:
+            report["cache_deltas"] = legacy.cache_deltas(counters, legacy.ccache_counters(runner))
+        replace_report(path, report)
+        return report
+    except Exception as error:
+        print(f"notice: optional phase observation unavailable: {error}", file=sys.stderr)
+        return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="mode", required=True)
@@ -172,13 +321,16 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.mode == "bind-environment":
-            bind_environment(args.metrics, args.identity)
+            report = bind_environment(args.metrics, args.identity)
         else:
             command = args.command[1:] if args.command[:1] == ["--"] else args.command
             if not command:
                 parser.error("build command required after --")
-            run_build(command, repo_root=args.repo_root, build_root=args.build_root, output=args.output,
-                      object_cache=args.object_cache, cache_tool=args.cache_tool)
+            report = run_build(command, repo_root=args.repo_root, build_root=args.build_root, output=args.output,
+                               object_cache=args.object_cache, cache_tool=args.cache_tool)
+        if report is not None:
+            # Preserve current-run evidence even when optional artifact transport fails.
+            print("KLOGG_BUILD_METRICS_JSON=" + json.dumps(report, sort_keys=True))
         return 0
     except subprocess.CalledProcessError as error:
         return error.returncode or 1

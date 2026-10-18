@@ -50,7 +50,8 @@ class WindowsObjectCacheWorkflowTest(unittest.TestCase):
         stats = self.step("windows-cache-report")
         self.assertIn("always()", stats["if"])
         save = self.step("save-windows-cache")
-        self.assertIn("actions/cache/save@", save["uses"])
+        self.assertEqual(save["uses"], "./.github/actions/save-verified-compiler-cache")
+        self.assertNotIn("continue-on-error", save)
         for guard in ("success()", "steps.run-tests.outcome == 'success'",
                       "steps.windows-cache-report.outputs.validated == 'true'",
                       "steps.windows-cache.outputs.save-key != ''"):
@@ -387,7 +388,32 @@ class WindowsObjectCacheTest(unittest.TestCase):
             CACHE.bound_cache(cache, 1)
         self.assertEqual(self.compiler.read_bytes(), b"compiler identity")
 
+    def test_preload_probe_skips_only_when_required_cmake_policies_are_unavailable(self):
+        for policies in ("CMP0000\n", "CMP0000\nCMP0091\n"):
+            with self.subTest(policies=policies):
+                def old_cmake(command, **_):
+                    if command == ["cmake", "--help-policy-list"]:
+                        return subprocess.CompletedProcess(command, 0, stdout=policies, stderr="")
+                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="Unknown CMake policy")
+
+                case = WindowsObjectCacheTest(
+                    "test_preload_preserves_real_msvc_crt_toolchain_symbols_and_lto_defaults")
+                result = unittest.TestResult()
+                with mock.patch.object(subprocess, "run", side_effect=old_cmake) as runner:
+                    case.run(result)
+                self.assertEqual(len(result.skipped), 1, result.failures + result.errors)
+                self.assertIn("CMP0141", result.skipped[0][1])
+                self.assertEqual(result.testsRun, 1)
+                self.assertTrue(result.wasSuccessful())
+                runner.assert_called_once_with(
+                    ["cmake", "--help-policy-list"], capture_output=True, text=True, check=True)
+
     def test_preload_preserves_real_msvc_crt_toolchain_symbols_and_lto_defaults(self):
+        policies = subprocess.run(["cmake", "--help-policy-list"],
+                                  capture_output=True, text=True, check=True)
+        missing = {"CMP0091", "CMP0141"} - set(policies.stdout.splitlines())
+        if missing:
+            self.skipTest("MSVC policy probe requires CMake 3.25+: missing " + ", ".join(sorted(missing)))
         # Exercise CMake's actual platform initialization, not a hand-written
         # approximation: the legacy baseline puts /MD and /MDd in config flags.
         for policy in ("OLD", "NEW"):

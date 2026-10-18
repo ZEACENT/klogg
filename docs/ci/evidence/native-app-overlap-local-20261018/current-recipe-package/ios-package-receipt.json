@@ -1,0 +1,173 @@
+{
+  "application": {
+    "path": "/var/folders/82/wqqr5srs7rgbfwgfkk6132y40000gn/T/klogg-app-current-ios-n_niq4g5/build/package-stage/klogg.app/Contents/MacOS/klogg",
+    "rpaths": [
+      "@executable_path/../Frameworks",
+      "@executable_path/../Frameworks/ios-native/lib"
+    ],
+    "sha256": "6f85de08d1141bcee3251f30c18f6d3c7f84fa38753d87a3ecdf75f2ec2791cf"
+  },
+  "architecture": "x86_64",
+  "build_receipt_sha256": "4420053537ec8bc74cc3e20a9f1722070511090502572d45a31be5874e98fdeb",
+  "dylibs": [
+    {
+      "architectures": [
+        "x86_64"
+      ],
+      "deployment_target": "15.0",
+      "imports": [
+        "@rpath/libcrypto.3.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "install_name": "@rpath/libcrypto.3.dylib",
+      "name": "libcrypto.3.dylib",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "18ce157ff57c232d23914e4afcf774b2b54acc4566736fe020c3d1c4154950c1"
+    },
+    {
+      "architectures": [
+        "x86_64"
+      ],
+      "deployment_target": "15.0",
+      "imports": [
+        "@rpath/libcurl.4.dylib",
+        "@rpath/libssl.3.dylib",
+        "@rpath/libcrypto.3.dylib",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+        "/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "install_name": "@rpath/libcurl.4.dylib",
+      "name": "libcurl.4.dylib",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "376bb7f6ca79319e40da3e3449e1473618233eabcc95d1eb349cdfe25d3c0cb9"
+    },
+    {
+      "architectures": [
+        "x86_64"
+      ],
+      "deployment_target": "15.0",
+      "imports": [
+        "@rpath/libimobiledevice-1.0.6.dylib",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration",
+        "@rpath/libssl.3.dylib",
+        "@rpath/libcrypto.3.dylib",
+        "@rpath/libusbmuxd-2.0.7.dylib",
+        "@rpath/libimobiledevice-glue-1.0.0.dylib",
+        "/usr/lib/libSystem.B.dylib",
+        "@rpath/libplist-2.0.4.dylib"
+      ],
+      "install_name": "@rpath/libimobiledevice-1.0.6.dylib",
+      "name": "libimobiledevice-1.0.6.dylib",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "669648b89dd49adb4a493023e9d6aacd28075e89b7f3346e1943543c5bb7a2b5"
+    },
+    {
+      "architectures": [
+        "x86_64"
+      ],
+      "deployment_target": "15.0",
+      "imports": [
+        "@rpath/libimobiledevice-glue-1.0.0.dylib",
+        "/usr/lib/libSystem.B.dylib",
+        "@rpath/libplist-2.0.4.dylib"
+      ],
+      "install_name": "@rpath/libimobiledevice-glue-1.0.0.dylib",
+      "name": "libimobiledevice-glue-1.0.0.dylib",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "2638ae29e5df609e28f32cef9d9ceb2f6e72dfe5a7666f243b081c98d3812ae0"
+    },
+    {
+      "architectures": [
+        "x86_64"
+      ],
+      "deployment_target": "15.0",
+      "imports": [
+        "@rpath/libplist-2.0.4.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "install_name": "@rpath/libplist-2.0.4.dylib",
+      "name": "libplist-2.0.4.dylib",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "6a7859851592e99154d16c06b1c95cc6237aa111e98da87050022e9429acefe3"
+    },
+    {
+      "architectures": [
+        "x86_64"
+      ],
+      "deployment_target": "15.0",
+      "imports": [
+        "@rpath/libssl.3.dylib",
+        "@rpath/libcrypto.3.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "install_name": "@rpath/libssl.3.dylib",
+      "name": "libssl.3.dylib",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "4f8939a57324b45366780ffe995ba4d3d89a91b9403d3e9ebb3ddd1770a3c991"
+    },
+    {
+      "architectures": [
+        "x86_64"
+      ],
+      "deployment_target": "15.0",
+      "imports": [
+        "@rpath/libtatsu.0.dylib",
+        "@rpath/libcurl.4.dylib",
+        "@rpath/libplist-2.0.4.dylib",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+        "/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "install_name": "@rpath/libtatsu.0.dylib",
+      "name": "libtatsu.0.dylib",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "18f0705354bd7119ee279b1ae59a675d2ece031e5af2dde797e887e7b2d21485"
+    },
+    {
+      "architectures": [
+        "x86_64"
+      ],
+      "deployment_target": "15.0",
+      "imports": [
+        "@rpath/libusbmuxd-2.0.7.dylib",
+        "@rpath/libimobiledevice-glue-1.0.0.dylib",
+        "@rpath/libplist-2.0.4.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "install_name": "@rpath/libusbmuxd-2.0.7.dylib",
+      "name": "libusbmuxd-2.0.7.dylib",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "6729fe6e67609d5fc7b01b95bb6e3ed79a76fe65d72d6a87162510de12ec2440"
+    }
+  ],
+  "legal_receipt_sha256": "e541aad70de188e0963924e94286d13967896c39ccd32a7254e13c89a7633c5f",
+  "lock_sha256": "d703d60b34800fc7d9a580286881a429f77a0af57f3a85d8b550dbbc7044686d",
+  "overlay_receipt_sha256": "7f9235a1e809c638bce54335dd2a35b691b436c4c25d958d6b02cc137905bf30",
+  "receipt_kind": "ios-native-package",
+  "sbom_sha256": "8ca6590733a6fc8491783ff0021cba02541e9c52ea79511f8d1ac93398e91703",
+  "schema_version": 2,
+  "source_receipt_sha256": "c2dbd56e23f28c1b8b7ab91073060c53bb8a83c3e074a23db824d893386078a9",
+  "source_set_receipt_sha256": "c2dbd56e23f28c1b8b7ab91073060c53bb8a83c3e074a23db824d893386078a9",
+  "stack_root": "/var/folders/82/wqqr5srs7rgbfwgfkk6132y40000gn/T/klogg-app-current-ios-n_niq4g5/build/package-stage/klogg.app/Contents/Frameworks/ios-native",
+  "status": "passed"
+}

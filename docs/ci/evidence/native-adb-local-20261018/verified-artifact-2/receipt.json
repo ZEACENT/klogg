@@ -1,0 +1,86 @@
+{
+  "binary_verification": {
+    "architectures": [
+      "x86_64"
+    ],
+    "complete_client_probe": "passed",
+    "deployment_target": "15.0",
+    "dynamic_imports": [
+      "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+      "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+      "/usr/lib/libc++.1.dylib",
+      "/usr/lib/libSystem.B.dylib"
+    ],
+    "glibc_maximum_required": null,
+    "imports_by_binary": {
+      "adb": [
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+        "/usr/lib/libc++.1.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ]
+    },
+    "libusb_replacement_probe": "not-applicable",
+    "native_frameworks": [
+      "IOKit",
+      "CoreFoundation"
+    ],
+    "observed_runtime_edges": [],
+    "runtime_closure": [],
+    "runtime_load_evidence": [],
+    "runtime_loads": [],
+    "schema_version": 2,
+    "version_probe": "passed",
+    "windows_system_imports_by_binary": {}
+  },
+  "helper": {
+    "executable": true,
+    "kind": "complete-adb-executable",
+    "path": "helpers/adb",
+    "sha256": "4f4579a2af9f58ddcecd00f3a98431a7da557f7eeb37e00f24ee195f28952973",
+    "symlink": false
+  },
+  "layout": "artifact",
+  "lock_sha256": "f15849fb8dff5f3ed581685c61d5bfc7e88c888175c577fcd825a2f46b63a554",
+  "qualification": {
+    "release_qualified": false,
+    "required_receipts": [
+      "binary-build",
+      "binary-smoke",
+      "package-verification"
+    ],
+    "validation_class": "locally-buildable",
+    "verified_receipts": []
+  },
+  "receipt_kind": "binary-build",
+  "release_assets": [
+    {
+      "kind": "licenses",
+      "path": "adb-helper-licenses.tar.gz",
+      "sha256": "1480bbe6331d9ac4a008f78d9129a3024ea6e99d4b4eb1d82c16531dec9141de"
+    },
+    {
+      "kind": "notices",
+      "path": "adb-helper-notices.tar.gz",
+      "sha256": "2bc41d3147aaa58f9afb3cfda4f820cc981ead16749d076f0fc4623419a202a3"
+    },
+    {
+      "kind": "sbom",
+      "path": "adb-helper-sbom.spdx.json",
+      "sha256": "4b3260df251c9e4ab3b42cc05519ac8d02dc2dd3c294e0d98e6c9e250ff54987"
+    },
+    {
+      "kind": "source-manifest",
+      "path": "adb-helper-source-manifest.json",
+      "sha256": "2bc2754f88915374575a9d664fa8020687ad9a59367415be383131251235351d"
+    },
+    {
+      "kind": "source-set-receipt",
+      "path": "adb-helper-source-set-receipt.json",
+      "sha256": "2eb66f58d1dc623ebd2010903fce2d2d6f460793a7133a282ca9ea1d058e1f8c"
+    }
+  ],
+  "schema_version": 1,
+  "source_set_receipt_sha256": "2eb66f58d1dc623ebd2010903fce2d2d6f460793a7133a282ca9ea1d058e1f8c",
+  "target": "macos-x86_64"
+}

@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "kind": "ordinary-native-compiler-cache",
+  "run": {
+    "GITHUB_RUN_ID": "local-ios-object-parity",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_SHA": "f0ea6a09935c8c1a3407811446536482427fc931"
+  },
+  "component": "ios-native",
+  "target": "x86_64",
+  "identity": {
+    "core": "dfabec0527438c6ef7d170ee29692cdca5242c0c713f4b4f3baf2a15abd66f41",
+    "compiler_sha256": "d2e4bf622758eee1bf7267c060497fb2c41e098d37b0fca8be73898dc7e14eda",
+    "compiler": "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: x86_64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+    "sdk": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    "sdk_version": "26.5",
+    "xcode": "Xcode 26.6\nBuild version 17F113",
+    "cmake": "cmake version 3.31.6\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).",
+    "ninja": "1.12.1",
+    "ccache": "ccache version 4.13.6",
+    "compiler_check": "content",
+    "component": "ios-native",
+    "target": "x86_64",
+    "compiler_path": "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang",
+    "cxx": {
+      "path": "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+      "resolved_path": "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang",
+      "sha256": "d2e4bf622758eee1bf7267c060497fb2c41e098d37b0fca8be73898dc7e14eda",
+      "version": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
+    },
+    "host_tools": {
+      "autoreconf": {
+        "path": "/usr/local/bin/autoreconf",
+        "resolved_path": "/usr/local/Cellar/autoconf/2.73/bin/autoreconf",
+        "sha256": "81a68761807eb427f956b9d547c9e8ed97100af684dc41567c275edc5a49168b",
+        "version": "autoreconf (GNU Autoconf) 2.73"
+      },
+      "autoconf": {
+        "path": "/usr/local/bin/autoconf",
+        "resolved_path": "/usr/local/Cellar/autoconf/2.73/bin/autoconf",
+        "sha256": "497404021b1baf6fb0ee56139a6c4fdf983910ef11f6ba473da1081fc3c42232",
+        "version": "autoconf (GNU Autoconf) 2.73"
+      },
+      "automake": {
+        "path": "/usr/local/bin/automake",
+        "resolved_path": "/usr/local/Cellar/automake/1.18.1_1/bin/automake",
+        "sha256": "788ef775c899e7396714f36970008dff80db31cbb6a13e91673cdb3a5ecfd7af",
+        "version": "automake (GNU automake) 1.18.1"
+      },
+      "aclocal": {
+        "path": "/usr/local/bin/aclocal",
+        "resolved_path": "/usr/local/Cellar/automake/1.18.1_1/bin/aclocal",
+        "sha256": "ed879fa4c345847a22ed0aa1a1e543d7eec6b13ca03e7f649dabe0621f1dc482",
+        "version": "aclocal (GNU automake) 1.18.1"
+      },
+      "glibtoolize": {
+        "path": "/usr/local/bin/glibtoolize",
+        "resolved_path": "/usr/local/Cellar/libtool/2.6.2/bin/glibtoolize",
+        "sha256": "52cda626b28ab9056ab801df711c33769bcee8db71897bc6f7b6cfd65788772a",
+        "version": "glibtoolize (GNU libtool) 2.6.2"
+      },
+      "pkg-config": {
+        "path": "/usr/local/bin/pkg-config",
+        "resolved_path": "/usr/local/Cellar/pkgconf/3.0.5/bin/pkgconf",
+        "sha256": "825b44107e89baadc046a44173f6f2ced50e79f4748afdb66bf2a385a9632168",
+        "version": "3.0.5"
+      },
+      "perl": {
+        "path": "/usr/bin/perl",
+        "resolved_path": "/usr/bin/perl",
+        "sha256": "53bce3db7e095b596fa42626b55edc63e3388d7afecf45a0b1ecc5211721c812",
+        "version": "This is perl 5, version 34, subversion 1 (v5.34.1) built for darwin-thread-multi-2level"
+      },
+      "m4": {
+        "path": "/usr/bin/m4",
+        "resolved_path": "/usr/bin/m4",
+        "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
+        "version": "GNU M4 1.4.6"
+      },
+      "make": {
+        "path": "/usr/bin/make",
+        "resolved_path": "/usr/bin/make",
+        "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
+        "version": "GNU Make 3.81"
+      },
+      "glibtool": {
+        "path": "/usr/local/bin/glibtool",
+        "resolved_path": "/usr/local/Cellar/libtool/2.6.2/bin/glibtool",
+        "sha256": "ecee743db78b5c1de69e22a229a38ca57ab4f4610fb569299b6c9871c50c3dc8",
+        "version": "glibtool (GNU libtool) 2.6.2"
+      }
+    },
+    "homebrew": {
+      "autoconf": "autoconf 2.73",
+      "automake": "automake 1.18.1_1",
+      "libtool": "libtool 2.6.2",
+      "pkgconf": "pkgconf 3.0.5",
+      "m4": "m4 1.4.21",
+      "perl": null
+    },
+    "build_tools": {
+      "cmake": {
+        "sha256": "628cc585a8853d7429cf7337a0d4b67baed77a5c9d81f0f89aadd0e657c30667",
+        "version": "cmake version 3.31.6"
+      },
+      "ninja": {
+        "sha256": "a46eca0aae6e8b7792dde0580b766f948fba5fb58fca8127078f7374573af6d5",
+        "version": "1.12.1"
+      },
+      "ccache": {
+        "sha256": "d61103b76849f12e2113ccded292f3c2de6d9520efdfe38c517c8c13ff3823b1",
+        "version": "ccache version 4.13.6"
+      }
+    },
+    "tool_environment": {
+      "DEVELOPER_DIR": "/Applications/Xcode_26.6.app/Contents/Developer",
+      "SDKROOT": "",
+      "CPATH": "",
+      "C_INCLUDE_PATH": "",
+      "CPLUS_INCLUDE_PATH": "",
+      "LIBRARY_PATH": ""
+    }
+  },
+  "keys": {
+    "primary-key": "native-ios-ccache-v1-x86_64-3e830ec34dad77f935c9b0b0dffc54d3e095d6eacad624a838baa401c7033a14-master-2026-10-18",
+    "primary-prefix": "native-ios-ccache-v1-x86_64-3e830ec34dad77f935c9b0b0dffc54d3e095d6eacad624a838baa401c7033a14-master-",
+    "master-key": "native-ios-ccache-v1-x86_64-3e830ec34dad77f935c9b0b0dffc54d3e095d6eacad624a838baa401c7033a14-master-2026-10-18",
+    "master-prefix": "native-ios-ccache-v1-x86_64-3e830ec34dad77f935c9b0b0dffc54d3e095d6eacad624a838baa401c7033a14-master-",
+    "save-key": "",
+    "own-pr": "false"
+  },
+  "budget_bytes": 128000000,
+  "budget_status": "provisional",
+  "cache_deltas": {
+    "cache_miss": 0,
+    "direct_cache_hit": 3095,
+    "preprocessed_cache_hit": 0
+  },
+  "restored_keys": {
+    "KLOGG_NATIVE_PRIMARY_MATCH": "",
+    "KLOGG_NATIVE_MASTER_MATCH": ""
+  },
+  "build_and_verification_wall_ms": 243313.886575,
+  "occupancy_before_bytes": 28448086,
+  "occupancy_before_cleanup_bytes": 28448078,
+  "occupancy_after_cleanup_bytes": 28448078,
+  "statistics_before": {
+    "autoconf_test": 0,
+    "bad_compiler_arguments": 0,
+    "bad_input_file": 0,
+    "bad_output_file": 0,
+    "cache_miss": 0,
+    "cache_size_kibibyte": 31092,
+    "called_for_link": 0,
+    "called_for_preprocessing": 0,
+    "cleanups_performed": 0,
+    "compile_failed": 0,
+    "compiler_check_failed": 0,
+    "compiler_produced_empty_output": 0,
+    "compiler_produced_no_output": 0,
+    "compiler_produced_stdout": 0,
+    "could_not_find_compiler": 0,
+    "could_not_use_modules": 0,
+    "could_not_use_precompiled_header": 0,
+    "direct_cache_hit": 0,
+    "direct_cache_miss": 0,
+    "disabled": 0,
+    "error_hashing_extra_file": 0,
+    "files_in_cache": 4106,
+    "internal_error": 0,
+    "local_storage_hit": 0,
+    "local_storage_miss": 0,
+    "local_storage_read_hit": 0,
+    "local_storage_read_miss": 0,
+    "local_storage_write": 0,
+    "max_cache_size_kibibyte": 125000,
+    "max_files_in_cache": 0,
+    "missing_cache_file": 0,
+    "modified_input_file": 0,
+    "multiple_source_files": 0,
+    "no_input_file": 0,
+    "output_to_stdout": 0,
+    "preprocessed_cache_hit": 0,
+    "preprocessed_cache_miss": 0,
+    "preprocessor_error": 0,
+    "recache": 0,
+    "remote_storage_error": 0,
+    "remote_storage_hit": 0,
+    "remote_storage_miss": 0,
+    "remote_storage_read_hit": 0,
+    "remote_storage_read_miss": 0,
+    "remote_storage_timeout": 0,
+    "remote_storage_write": 0,
+    "stats_updated_timestamp": 1792308399,
+    "stats_zeroed_timestamp": 1792308399,
+    "unsupported_code_directive": 0,
+    "unsupported_compiler_option": 0,
+    "unsupported_environment_variable": 0,
+    "unsupported_source_encoding": 0,
+    "unsupported_source_language": 0
+  },
+  "statistics_after": {
+    "autoconf_test": 199,
+    "bad_compiler_arguments": 0,
+    "bad_input_file": 0,
+    "bad_output_file": 0,
+    "cache_miss": 0,
+    "cache_size_kibibyte": 31092,
+    "called_for_link": 40,
+    "called_for_preprocessing": 68,
+    "cleanups_performed": 0,
+    "compile_failed": 59,
+    "compiler_check_failed": 0,
+    "compiler_produced_empty_output": 0,
+    "compiler_produced_no_output": 0,
+    "compiler_produced_stdout": 0,
+    "could_not_find_compiler": 0,
+    "could_not_use_modules": 0,
+    "could_not_use_precompiled_header": 0,
+    "direct_cache_hit": 3095,
+    "direct_cache_miss": 84,
+    "disabled": 0,
+    "error_hashing_extra_file": 0,
+    "files_in_cache": 4106,
+    "internal_error": 0,
+    "local_storage_hit": 3095,
+    "local_storage_miss": 0,
+    "local_storage_read_hit": 6190,
+    "local_storage_read_miss": 143,
+    "local_storage_write": 0,
+    "max_cache_size_kibibyte": 125000,
+    "max_files_in_cache": 0,
+    "missing_cache_file": 0,
+    "modified_input_file": 0,
+    "multiple_source_files": 0,
+    "no_input_file": 97,
+    "output_to_stdout": 0,
+    "preprocessed_cache_hit": 0,
+    "preprocessed_cache_miss": 59,
+    "preprocessor_error": 25,
+    "recache": 0,
+    "remote_storage_error": 0,
+    "remote_storage_hit": 0,
+    "remote_storage_miss": 0,
+    "remote_storage_read_hit": 0,
+    "remote_storage_read_miss": 0,
+    "remote_storage_timeout": 0,
+    "remote_storage_write": 0,
+    "stats_updated_timestamp": 1792308625,
+    "stats_zeroed_timestamp": 1792308399,
+    "unsupported_code_directive": 0,
+    "unsupported_compiler_option": 0,
+    "unsupported_environment_variable": 0,
+    "unsupported_source_encoding": 0,
+    "unsupported_source_language": 1
+  },
+  "effective_config": "(default) absolute_paths_in_stderr = false\n(environment) base_dir = /private/tmp/klogg-ios-object-parity.DCs0HH\n(environment) cache_dir = /private/tmp/klogg-ios-object-parity.DCs0HH/native-ios-objects-x86_64\n(default) ceiling_dirs = /Users/johnsonv\n(default) ceiling_markers = .git\n(default) compiler = \n(environment) compiler_check = content\n(default) compiler_type = auto\n(environment) compression = true\n(environment) compression_level = 6\n(default) cpp_extension = \n(default) debug = false\n(default) debug_dir = \n(default) debug_level = 2\n(default) depend_mode = false\n(default) direct_mode = true\n(default) disable = false\n(default) extra_files_to_hash = \n(default) file_clone = false\n(default) hard_link = false\n(default) hash_dir = true\n(default) ignore_headers_in_manifest = \n(default) ignore_options = \n(default) inode_cache = true\n(default) keep_comments_cpp = false\n(default) libexec_dirs = /usr/local/Cellar/ccache/4.13.6_1/libexec\n(default) log_file = \n(default) max_files = 0\n(environment) max_size = 128.0 MB\n(default) msvc_dep_prefix = Note: including file:\n(default) msvc_utf8 = true\n(default) namespace = \n(default) path = \n(default) pch_external_checksum = false\n(environment) prefix_command = \n(environment) prefix_command_cpp = \n(default) read_only = false\n(default) read_only_direct = false\n(default) recache = false\n(default) remote_only = false\n(environment) remote_storage = \n(default) reshare = false\n(default) response_file_format = auto\n(default) safe_dirs = \n(environment) sloppiness = \n(default) stats = true\n(default) stats_log = \n(default) temporary_dir = /private/tmp/klogg-ios-object-parity.DCs0HH/native-ios-objects-x86_64/tmp\n(default) umask ="
+}

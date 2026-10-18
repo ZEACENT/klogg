@@ -1,0 +1,179 @@
+{
+  "copied_original_payloads": [
+    {
+      "path": "master-run.json",
+      "sha256": "2ebd50f926d77e6dc34a894295af0d45c046c19d05cf4ec3a7c1c8a1049d43d3"
+    },
+    {
+      "path": "master-jobs.json",
+      "sha256": "8968a2ad87149accba30b2b740bd519e18d12bacebd9f335378f2f79df466096"
+    },
+    {
+      "path": "master-artifacts.json",
+      "sha256": "22e3125f0b4d20a10034b11c0766fa81ba2e64771db04248aaef9a5c3c6c2aa8"
+    },
+    {
+      "path": "master-metrics-12123702295.json",
+      "sha256": "ab672e4ef5eeab162fed656f5970517a8f9633c9d34c99b5ddf68a3576382848"
+    },
+    {
+      "path": "master-metrics-12124390078.json",
+      "sha256": "5cd607384d3b262e6c120f2531e18fb7d78fba8b642fad5ba6d3c3b69b04ff3a"
+    },
+    {
+      "path": "master-metrics-12123723146.json",
+      "sha256": "66125e659f363f2c30e3cc43d1f16e66a9459131faeecef223cb6d466ed972c3"
+    },
+    {
+      "path": "master-metrics-12122799965.json",
+      "sha256": "9633cc38003969aa3588bfbfe22c22c452d6072da41fce44da347f61890276b2"
+    },
+    {
+      "path": "master-metrics-12122568143.json",
+      "sha256": "a2dfee36340dc7cde0c3c8ff90e1da5f5051b1e4d363bdde6f9aa292bad24b08"
+    },
+    {
+      "path": "master-metrics-12122314943.json",
+      "sha256": "c45fe0fe63434315bfb9f67aceded5955c0f5d8d07458e9cf98b45aaca3f4ebf"
+    },
+    {
+      "path": "master-metrics-12123581194.json",
+      "sha256": "5260b8d88064d6ac8b5d30c156c6c5d3059889ac93416e721b6b7ed2141d5e23"
+    },
+    {
+      "path": "master-metrics-12123231995.json",
+      "sha256": "13b50ca00d572575fb6ffb6209c38d0bbcb06d4eb38dec260f4a0696a59ceae7"
+    },
+    {
+      "path": "master-metrics-12122939254.json",
+      "sha256": "c8a503910e80a33e20b58ba6cfb04afa88f0479b8c99e985739550e6ac8a683c"
+    },
+    {
+      "path": "master-metrics-12122364466.json",
+      "sha256": "b291dc7ccdcc55dbbb8a843f23c6f6ffd2b0838a26854b56bddda6eb870feb34"
+    },
+    {
+      "path": "master-metrics-12123646495.json",
+      "sha256": "d3d4679260f2146edd9666d5c2ca5e0f9464364e541f39430fd9c005a460b3c2"
+    },
+    {
+      "path": "master-metrics-12123697582.json",
+      "sha256": "60d077a3410fb5d10855b3da1b73877bf4fe641ac5676a04011e97b7cd99c182"
+    },
+    {
+      "path": "master-metrics-12123905743.json",
+      "sha256": "5451ce89ef549ec84e97693a72025525c5295393a7ab446dfef33b0c1f4308e1"
+    },
+    {
+      "path": "master-windows-cache-12124290969.json",
+      "sha256": "b50015f8b8b8a17090a646f09462e3bceeeea86d9fe1ebde6c31e874fe4296df"
+    },
+    {
+      "path": "master-windows-cache-12123407120.json",
+      "sha256": "a47e25d3119247c603c2c692c1e307fb3e5f9ba27b7a9eb0767b7feed0f2509e"
+    },
+    {
+      "path": "master-windows-cache-12123681630.json",
+      "sha256": "35e9b3d1d26517e8dd3f5450c6c6a1fcd86e90667ff076aab51e9f3652e0c1e3"
+    },
+    {
+      "path": "pr-run.json",
+      "sha256": "e452679fb9c8f166dfcf34425ec4220e3497643831fb17190addf9a2a446294c"
+    },
+    {
+      "path": "pr-jobs.json",
+      "sha256": "cdfbb79770c432015dee7f785349285f96646a0ad6d85ca5e548777b80634be8"
+    },
+    {
+      "path": "pr-artifacts.json",
+      "sha256": "ccbd90154963b67fa345608b10b47a0f0cc923ab6b54c64b6ce2acfbb5f7631f"
+    },
+    {
+      "path": "pr-metrics-12109077606.json",
+      "sha256": "4bb57e53f058eef2fa063a8f37a83f3dab1152e030dbe9275373c433887a0980"
+    },
+    {
+      "path": "pr-metrics-12109079162.json",
+      "sha256": "24c258aa04cb049f277e18cbf39443e11e001e53b6f7d65cb4318658bd5e5989"
+    },
+    {
+      "path": "pr-metrics-12108354797.json",
+      "sha256": "266a0cfc8d2b27c573c5d1e5b937d6aa46c3dd718309f1ae0389787b0c76bc68"
+    },
+    {
+      "path": "pr-metrics-12110180075.json",
+      "sha256": "3f640b3b2e861720d3623b53efaf65adb1264a12e7e1a0f7865100aa7f14d996"
+    },
+    {
+      "path": "pr-metrics-12108848723.json",
+      "sha256": "abb610b7621621c1ed2bfd1f9da571558dcb25b6ba28b6ca01e3ebaf54363e69"
+    },
+    {
+      "path": "pr-metrics-12109080268.json",
+      "sha256": "8b39fad49e16107e5c69316490a81e579492fc32718e590f421f2d0595b02808"
+    },
+    {
+      "path": "pr-metrics-12109136432.json",
+      "sha256": "a57f074a8c955697f5c503dcfcbe86679db450a8a94ace74db75ace321b50099"
+    },
+    {
+      "path": "pr-metrics-12108323057.json",
+      "sha256": "b7362af1cd992093dbd985d313149f9eff0cda79aed5f5a2c9aee0e7ea660230"
+    },
+    {
+      "path": "pr-metrics-12108985992.json",
+      "sha256": "2394cf069c49f07b4f9511a1c33d9d7ced344d2eaf368b2877a4780facd3e511"
+    },
+    {
+      "path": "pr-metrics-12108489548.json",
+      "sha256": "7c6b1048dc26fb9e0f85ff8032c56e8b497ce147762f643242461b05acd694a9"
+    },
+    {
+      "path": "pr-metrics-12108758699.json",
+      "sha256": "6cc7a775d800789f2851cef5aedd1e26a11a3f599405b3e1a5c630407a8c8d6a"
+    },
+    {
+      "path": "pr-metrics-12108294192.json",
+      "sha256": "69424700893de05a738f836212adeaaba89935a91b5caaa5b4c142e8e902a25b"
+    },
+    {
+      "path": "pr-metrics-12109457243.json",
+      "sha256": "e6138ae34e39ba2cdd80fd21027b259feb1ab7b8db488ff865f87b09b4eee6dd"
+    },
+    {
+      "path": "pr-metrics-12109143034.json",
+      "sha256": "d1a5cd7d7d5dbefcfb130724f847ff20de1a6ba52acda986df5dbd1346d8c950"
+    },
+    {
+      "path": "pr-windows-cache-12110065165.json",
+      "sha256": "aad5002c2410bdb11bee1941f8112ea0495bfef0d7d105aadc78354fb1028f23"
+    },
+    {
+      "path": "pr-windows-cache-12109022070.json",
+      "sha256": "188a5f1af6d446ce28180fab767ec1e95d368b18542e3fe1ef3c21fccb8fa4f8"
+    },
+    {
+      "path": "pr-windows-cache-12109192813.json",
+      "sha256": "712e0a71c751fd8707e12dae98abf145dbbfa8afc1f71bacdbafed9d593010bf"
+    },
+    {
+      "path": "annotations-117570017250.json",
+      "sha256": "3b3251f4d74c7265bf625507018118f857cd7cfd0b1997eaef02472248e27511"
+    },
+    {
+      "path": "annotations-117572346019.json",
+      "sha256": "d15465f4ce86bedef65c16299115a28e63af73c390256bc77681a787664c482c"
+    },
+    {
+      "path": "caches.json",
+      "sha256": "cbea6cd0c6210519ec02c3117adc42dbade1e5181fc65f8ac6cc8d0fcc24ef99"
+    },
+    {
+      "path": "cache-usage.json",
+      "sha256": "6b27a77426c707751075651a5702cb8c1886394cb9a74943f0bd2bc05115eef5"
+    }
+  ],
+  "master_logs_zip_sha256": "ae8302cc4d33879287013b88ea86638bb0ed0c3e3f72192a4b44a8134fef0f11",
+  "pr_logs_zip_sha256": "9c2891ccb00aea5e39c500cc5661f490fe1344d7cc613e45f1b34506c221dc09",
+  "notes": "Evidence joins and selected line indexes are derived; copied API/metric payloads are unchanged. No cache-state relabeling."
+}

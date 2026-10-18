@@ -1,0 +1,56 @@
+{
+  "MACOSX_DEPLOYMENT_TARGET": "15.0",
+  "SOURCE_DATE_EPOCH": 1780963200,
+  "architecture": "x86_64",
+  "deployment_target": "15.0",
+  "dylibs": [
+    {
+      "name": "libcrypto.3.dylib",
+      "sha256": "18ce157ff57c232d23914e4afcf774b2b54acc4566736fe020c3d1c4154950c1"
+    },
+    {
+      "name": "libcurl.4.dylib",
+      "sha256": "376bb7f6ca79319e40da3e3449e1473618233eabcc95d1eb349cdfe25d3c0cb9"
+    },
+    {
+      "name": "libimobiledevice-1.0.6.dylib",
+      "sha256": "669648b89dd49adb4a493023e9d6aacd28075e89b7f3346e1943543c5bb7a2b5"
+    },
+    {
+      "name": "libimobiledevice-glue-1.0.0.dylib",
+      "sha256": "2638ae29e5df609e28f32cef9d9ceb2f6e72dfe5a7666f243b081c98d3812ae0"
+    },
+    {
+      "name": "libplist-2.0.4.dylib",
+      "sha256": "6a7859851592e99154d16c06b1c95cc6237aa111e98da87050022e9429acefe3"
+    },
+    {
+      "name": "libssl.3.dylib",
+      "sha256": "4f8939a57324b45366780ffe995ba4d3d89a91b9403d3e9ebb3ddd1770a3c991"
+    },
+    {
+      "name": "libtatsu.0.dylib",
+      "sha256": "18f0705354bd7119ee279b1ae59a675d2ece031e5af2dde797e887e7b2d21485"
+    },
+    {
+      "name": "libusbmuxd-2.0.7.dylib",
+      "sha256": "6729fe6e67609d5fc7b01b95bb6e3ed79a76fe65d72d6a87162510de12ec2440"
+    }
+  ],
+  "lock_sha256": "d703d60b34800fc7d9a580286881a429f77a0af57f3a85d8b550dbbc7044686d",
+  "native_qualified": true,
+  "qualification": "native",
+  "receipt_kind": "ios-native-build",
+  "schema_version": 1,
+  "toolchain": {
+    "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+    "cmake": "cmake version 3.31.6",
+    "ninja": "1.12.1",
+    "sdk_path": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    "sdk_version": "26.5",
+    "xcode": [
+      "Xcode 26.6",
+      "Build version 17F113"
+    ]
+  }
+}

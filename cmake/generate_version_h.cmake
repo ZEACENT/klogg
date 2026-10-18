@@ -42,4 +42,17 @@ file(APPEND ${VERSION_HEADER_TMP} "#define KLOGG_COMMIT \"${GIT_COMMIT_HASH}\"\n
 file(APPEND ${VERSION_HEADER_TMP} "#define KLOGG_VERSION \"${BUILD_VERSION}\"\n\n")
 
 file(APPEND ${VERSION_HEADER_TMP} "#endif // GENERATED_KLOGG_VERSION_H\n")
-file(RENAME ${VERSION_HEADER_TMP} generated/version.h)
+# Preserve the existing header timestamp when only the always-run version target
+# is dirty. Otherwise a later native build phase needlessly relinks its consumers.
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E compare_files ${VERSION_HEADER_TMP} generated/version.h
+  RESULT_VARIABLE VERSION_HEADER_DIFFERENT
+  OUTPUT_QUIET
+  ERROR_QUIET
+)
+if(VERSION_HEADER_DIFFERENT EQUAL 0)
+  file(REMOVE ${VERSION_HEADER_TMP})
+else()
+  # Keep atomic replacement when the generated version really changes.
+  file(RENAME ${VERSION_HEADER_TMP} generated/version.h)
+endif()

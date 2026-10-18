@@ -1,0 +1,19 @@
+{
+  "loaded_platform_plugins": [
+    "dyld[23655]: <60918B70-BE43-32DF-AE98-6BFA4E3110B9> /Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_native_overlap/package-stage/klogg.app/Contents/PlugIns/platforms/libqcocoa.dylib"
+  ],
+  "platforms": [
+    "cocoa"
+  ],
+  "runtime_log": {
+    "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_native_overlap/macos-qt-startup-smoke.log",
+    "sha256": "1a46728d2f6e2467fef951a813db094538deea513ea3acb2e19e5c5283d603f4",
+    "size": 96292
+  },
+  "verifier_exit_code": 0,
+  "verifier_output": "macOS Qt bundle verified: /Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_native_overlap/package-stage/klogg.app",
+  "version_lines": [
+    "klogg 26.10.18.1324",
+    "Built 2026-10-18 from f0ea6a09(v22.06-422-gf0ea6a09)"
+  ]
+}

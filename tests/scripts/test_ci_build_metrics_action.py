@@ -86,6 +86,23 @@ class NativeBuildMetricsActionTest(unittest.TestCase):
 
 
 class BuildMetricsUploadWorkflowTest(unittest.TestCase):
+    def test_windows_exact_restore_still_revalidates_after_qualification(self):
+        steps = QUALITY.workflow_job_steps(CI_BUILD.read_text())["WindowsPackages"]
+        save = next(QUALITY.workflow_step_fields(step)[0] for step in steps
+                    if QUALITY.workflow_step_fields(step)[0].get("id") == "save-windows-cache")
+        context = {"success": True, "steps.run-tests.outcome": "success",
+                   "steps.windows-cache-report.outputs.validated": "true",
+                   "steps.windows-cache.outputs.save-key": "windows-sccache-master-today",
+                   "steps.restore-windows-cache.outputs.cache-matched-key": "windows-sccache-master-today"}
+        # A seed can disappear between restore and qualification. The final
+        # verifier must run even when the original restore was an exact hit.
+        self.assertTrue(cache_expression(save["if"], context))
+        for field, value in (("success", False), ("steps.run-tests.outcome", "failure"),
+                             ("steps.windows-cache-report.outputs.validated", "false"),
+                             ("steps.windows-cache.outputs.save-key", "")):
+            with self.subTest(field=field):
+                self.assertFalse(cache_expression(save["if"], dict(context, **{field: value})))
+
     def test_every_build_uploads_only_its_current_report_after_platform_observation(self):
         steps = QUALITY.workflow_job_steps(CI_BUILD.read_text())
         for job in QUALITY.CI_BUILD_PACKAGE_ENABLEMENT:
@@ -96,15 +113,25 @@ class BuildMetricsUploadWorkflowTest(unittest.TestCase):
                                                     "./.github/actions/agent-build")]
                 metrics = [(index, fields, children.get("with")) for index, (fields, children)
                            in enumerate(parsed) if fields.get("name") == "Upload current-run build metrics"]
-                self.assertEqual(len(builds), 1)
+                observed_builds = list(builds)
+                self.assertEqual(len(builds), 2 if job.startswith('Mac') else 1)
+                if job.startswith('Mac'):
+                    early, early_options = parsed[builds[0]]
+                    self.assertEqual(early.get('if'), "${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}")
+                    self.assertEqual(early_options.get('with'), {'phase': 'prepare'})
+                    self.assertEqual(parsed[builds[-1]][1]['with']['phase'],
+                                     "${{ env.KLOGG_PACKAGE_ENABLED == 'true' && 'finalize' || 'full' }}")
+                builds = builds[-1:]
                 self.assertEqual(len(metrics), 1)
                 index, fields, options = metrics[0]
                 if job.startswith("Linux"):
                     self.assertEqual(index, builds[0] + 2)
                     binding, settings = parsed[builds[0] + 1]
                     self.assertEqual(binding.get("name"), "Bind build metrics to verified Linux environment")
-                    self.assertEqual(settings.get("env"), {"KLOGG_CI_ENVIRONMENT_IDENTITY":
-                                                           "${{ steps.linux-environment.outputs.image }}"})
+                    self.assertEqual(settings.get("env"), {
+                        "KLOGG_CI_ENVIRONMENT_IDENTITY": "${{ steps.linux-environment.outputs.image }}",
+                        "KLOGG_CI_CACHE_ARTIFACT_ID": "${{ steps.restore-shared-compiler-cache.outputs.artifact-id }}",
+                        "KLOGG_CI_CACHE_RESTORE_KEY": "${{ steps.restore-ccache.outputs.cache-matched-key }}"})
                     self.assertIn("scripts/ci_build_observation.py bind-environment", binding.get("run", ""))
                     self.assertIn('--identity "$KLOGG_CI_ENVIRONMENT_IDENTITY"', binding["run"])
                     resolver = next(row for row, _ in parsed if row.get("id") == "linux-environment")
@@ -119,6 +146,16 @@ class BuildMetricsUploadWorkflowTest(unittest.TestCase):
                     self.assertLess(index, release_upload)
                 else:
                     self.assertEqual(index, builds[0] + 1)
+                if not job.startswith("Linux"):
+                    restore = ("steps.restore-windows-cache.outputs.cache-matched-key || "
+                               "steps.restore-windows-master-cache.outputs.cache-matched-key"
+                               if job.startswith("Windows") else
+                               "steps.restore-pr-ccache.outputs.cache-matched-key || "
+                               "steps.restore-ccache.outputs.cache-matched-key")
+                    for build_index in observed_builds:
+                        self.assertEqual(parsed[build_index][1].get("env"), {
+                            "KLOGG_CI_CACHE_ARTIFACT_ID": "${{ steps.restore-shared-compiler-cache.outputs.artifact-id }}",
+                            "KLOGG_CI_CACHE_RESTORE_KEY": "${{ " + restore + " }}"})
                 self.assertEqual(fields.get("uses"), "actions/upload-artifact@" +
                                  QUALITY.REVIEWED_ACTION_REVISIONS["actions/upload-artifact"])
                 self.assertEqual(fields.get("if"),
@@ -127,7 +164,7 @@ class BuildMetricsUploadWorkflowTest(unittest.TestCase):
                                  "env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}")
                 self.assertEqual(fields.get("continue-on-error"), "true")
                 self.assertEqual(options, {
-                    "name": "build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}",
+                    "name": "build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}",
                     "path": ("${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-"
                              "${{ github.run_id }}-${{ github.run_attempt }}.json"),
                     "if-no-files-found": "warn", "retention-days": "7", "compression-level": "0",
@@ -162,7 +199,7 @@ def cache_template(template, context):
 
 class NativeCompilerCacheWorkflowTest(unittest.TestCase):
     MAC_JOBS = ("MacPackages", "MacArmPackages", "MacSanitizers")
-    SHARED_KEY = "${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}"
+    SHARED_KEY = "${{ env.KLOGG_LABEL }}-ccache-content-v1-${{ steps.ccache-generation.outputs.current }}"
     PATH = "${{ github.workspace }}/.ccache"
     REVISION = QUALITY.REVIEWED_ACTION_REVISIONS["actions/cache"]
 
@@ -188,15 +225,21 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
                 "steps.restore-pr-ccache.outcome": "skipped",
                 "steps.restore-pr-ccache.outputs.cache-matched-key": "", "success": success}
 
-    PR_KEY = ("${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-"
+    PR_KEY = ("${{ env.KLOGG_LABEL }}-ccache-content-pr-v1-${{ github.event.pull_request.number }}-"
               "${{ steps.ccache-generation.outputs.current }}")
-    PR_PREFIX = "${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-"
+    PR_PREFIX = "${{ env.KLOGG_LABEL }}-ccache-content-pr-v1-${{ github.event.pull_request.number }}-"
+    PR_RESTORE_PREFIXES = PR_PREFIX + "\n${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-"
+    SHARED_RESTORE_PREFIXES = "${{ env.KLOGG_LABEL }}-ccache-content-v1-\n${{ env.KLOGG_LABEL }}-ccache-v2-"
 
     def project(self, rows, context, own_hit=False, restore_success=True, cap_success=True):
         """Apply real step conditions and restore results in workflow order."""
         context = dict(context)
         restores, saves, bounded = [], [], False
         for fields, children in rows:
+            if fields.get("uses") in ("./.github/actions/restore-compiler-object-artifact",
+                                      "./.github/actions/export-compiler-object-artifact"):
+                # Shared artifacts have their own admission/order contract tests.
+                continue
             name = fields.get("name")
             options = children.get("with", {})
             if name != "Bound macOS ccache before save" and options.get("path") != self.PATH:
@@ -216,7 +259,7 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
                     context["steps.restore-pr-ccache.outcome"] = "success" if restore_success else "failure"
                     context["success"] = restore_success
                     context["steps.restore-pr-ccache.outputs.cache-matched-key"] = key if own_hit and restore_success else ""
-            elif fields.get("uses", "").startswith("actions/cache/save@"):
+            elif fields.get("uses") == "./.github/actions/save-verified-compiler-cache":
                 self.assertTrue(bounded, "compiler archive saved without successful cap step")
                 saves.append(key)
             else:
@@ -230,10 +273,11 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
             own_restore, options = self.named(rows, "Restore own-PR ccache for the macOS build")
             self.assertEqual(own_restore["id"], "restore-pr-ccache")
             self.assertEqual(own_restore["uses"], "actions/cache/restore@" + self.REVISION)
-            self.assertEqual(options["with"], {"path": self.PATH, "key": self.PR_KEY, "restore-keys": self.PR_PREFIX})
+            self.assertEqual(options["with"], {"path": self.PATH, "key": self.PR_KEY, "restore-keys": self.PR_RESTORE_PREFIXES})
             own_save, options = self.named(rows, "Save own-PR ccache for the macOS build")
-            self.assertEqual(own_save["uses"], "actions/cache/save@" + self.REVISION)
-            self.assertEqual(options["with"], {"path": self.PATH, "key": self.PR_KEY})
+            self.assertEqual(own_save["uses"], "./.github/actions/save-verified-compiler-cache")
+            self.assertEqual(options["with"], {"path": self.PATH, "key": self.PR_KEY,
+                                               "descriptor": "${{ steps.shared-cache-descriptor.outputs.descriptor }}"})
             for fields in (own_restore, own_save):
                 self.assertNotIn("continue-on-error", fields)
             names = [fields.get("name") for fields, _ in rows]
@@ -246,13 +290,13 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
             for label in ("intel-qt6", "arm64-qt6", "intel-qt6-asan-ubsan", "intel-qt6-first-party-tsan"):
                 for number in (1, 10, 123):
                     context = self.context("pull_request", label=label, number=number)
-                    shared = label + "-ccache-v2-2026-10-14"
-                    private_prefix = label + "-ccache-pr-v1-" + str(number) + "-"
+                    shared = label + "-ccache-content-v1-2026-10-14"
+                    private_prefix = label + "-ccache-content-pr-v1-" + str(number) + "-"
                     private = private_prefix + "2026-10-14"
                     for hit in (False, True):
                         restores, saves, bounded = self.project(rows, context, own_hit=hit)
-                        self.assertEqual(restores, [(private, [private_prefix])]
-                                         + ([] if hit else [(shared, [label + "-ccache-v2-"])]))
+                        self.assertEqual(restores, [(private, [private_prefix, label + "-ccache-pr-v1-" + str(number) + "-"])]
+                                         + ([] if hit else [(shared, [label + "-ccache-content-v1-", label + "-ccache-v2-"])]))
                         self.assertEqual(saves, [private])
                         self.assertTrue(bounded)
             for values, shared_write in (
@@ -274,8 +318,8 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
             ):
                 context = self.context(**values)
                 restores, saves, bounded = self.project(rows, context, own_hit=True)
-                self.assertEqual(restores, [("intel-qt6-ccache-v2-2026-10-14", ["intel-qt6-ccache-v2-"])], values)
-                self.assertEqual(saves, ["intel-qt6-ccache-v2-2026-10-14"] if shared_write else [], values)
+                self.assertEqual(restores, [("intel-qt6-ccache-content-v1-2026-10-14", ["intel-qt6-ccache-content-v1-", "intel-qt6-ccache-v2-"])], values)
+                self.assertEqual(saves, ["intel-qt6-ccache-content-v1-2026-10-14"] if shared_write else [], values)
                 self.assertEqual(bounded, shared_write, values)
             for event in ("push", "pull_request", "workflow_dispatch", "schedule"):
                 self.assertEqual(self.project(rows, self.context(event, success=False)), ([], [], False))
@@ -287,8 +331,8 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
         # ZEACENT/klogg itself has fork=true; cross-repo identity is the boundary.
         for job in self.MAC_JOBS:
             restores, saves, bounded = self.project(self.rows(job=job), self.context("pull_request", fork=True))
-            self.assertEqual(restores[0][0], "intel-qt6-ccache-pr-v1-123-2026-10-14")
-            self.assertEqual(saves, ["intel-qt6-ccache-pr-v1-123-2026-10-14"])
+            self.assertEqual(restores[0][0], "intel-qt6-ccache-content-pr-v1-123-2026-10-14")
+            self.assertEqual(saves, ["intel-qt6-ccache-content-pr-v1-123-2026-10-14"])
             self.assertTrue(bounded)
 
     def test_failed_primary_restore_or_cap_cannot_publish_any_compiler_archive(self):
@@ -300,7 +344,7 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
                 self.assertTrue(restores)
                 self.assertEqual((saves, bounded), ([], False))
             restores, saves, bounded = self.project(rows, self.context("pull_request"), restore_success=False)
-            self.assertEqual(restores, [("intel-qt6-ccache-pr-v1-123-2026-10-14", ["intel-qt6-ccache-pr-v1-123-"])])
+            self.assertEqual(restores, [("intel-qt6-ccache-content-pr-v1-123-2026-10-14", ["intel-qt6-ccache-content-pr-v1-123-", "intel-qt6-ccache-pr-v1-123-"])])
             self.assertEqual((saves, bounded), ([], False))
 
     def test_four_native_labels_keep_arch_qt_and_sanitizer_identity(self):
@@ -351,9 +395,9 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
             ("github.event.pull_request.head.repo.full_name == github.repository", "true"),
             ("toJSON(github.event.pull_request.head.repo.id) == github.repository_id", "true"),
             ("github.repository == 'ZEACENT/klogg'", "true"),
-            ("-ccache-pr-v1-${{ github.event.pull_request.number }}-", "-ccache-v2-"),
-            ("key: " + self.PR_KEY, "key: intel-qt6-ccache-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}"),
-            ("restore-keys: " + self.PR_PREFIX, "restore-keys: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-"),
+            ("-ccache-content-pr-v1-${{ github.event.pull_request.number }}-", "-ccache-content-v1-"),
+            ("key: " + self.PR_KEY, "key: intel-qt6-ccache-content-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}"),
+            (self.PR_PREFIX, "${{ env.KLOGG_LABEL }}-ccache-content-pr-v1-"),
             ("if: ${{ success() && github.event_name == 'push' }}",
              "if: ${{ success() && (github.event_name == 'push' || github.event_name == 'pull_request') }}"),
             ("steps.restore-pr-ccache.outcome == 'success'", "true"),
@@ -390,15 +434,16 @@ class NativeCompilerCacheWorkflowTest(unittest.TestCase):
             restore, options = self.named(rows, "Restore ccache for the macOS build")
             self.assertEqual(restore["uses"], "actions/cache/restore@" + self.REVISION)
             self.assertEqual(options["with"], {"path": self.PATH, "key": self.SHARED_KEY,
-                                               "restore-keys": "${{ env.KLOGG_LABEL }}-ccache-v2-"})
+                                               "restore-keys": self.SHARED_RESTORE_PREFIXES})
             bound, _ = self.named(rows, "Bound macOS ccache before save")
             self.assertEqual(bound["shell"], "sh")
             self.assertEqual(QUALITY.active_script_content(bound["run"]).strip(),
                              'python3 scripts/ci_ccache.py trim --label "$KLOGG_LABEL"')
             save, options = self.named(rows, "Save ccache for the macOS build")
-            self.assertEqual(save["uses"], "actions/cache/save@" + self.REVISION)
+            self.assertEqual(save["uses"], "./.github/actions/save-verified-compiler-cache")
             self.assertEqual(save["if"], "${{ success() && github.event_name == 'push' }}")
-            self.assertEqual(options["with"], {"path": self.PATH, "key": self.SHARED_KEY})
+            self.assertEqual(options["with"], {"path": self.PATH, "key": self.SHARED_KEY,
+                                               "descriptor": "${{ steps.shared-cache-descriptor.outputs.descriptor }}"})
             for step in (bound, save):
                 self.assertNotIn("continue-on-error", step)
                 for event, succeeds, enabled in (("push", True, True), ("push", False, False),

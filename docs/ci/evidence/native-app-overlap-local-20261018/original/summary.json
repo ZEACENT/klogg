@@ -1,0 +1,83 @@
+{
+  "action_wall_seconds": {
+    "finalize_including_configure": 288.48,
+    "prepare_including_configure": 1162.07,
+    "selected_ctest_process": 19.29
+  },
+  "build_only_ms": {
+    "finalize": 277506,
+    "prepare": 1115446
+  },
+  "current_recipe_proof": "Independent proof in ../current-recipe-package used this original app binary, not the later stabilized build.",
+  "frozen_package_directory": "/tmp/klogg-app-overlap-harness.0byfr4/package-stage-baseline",
+  "github_context_role": "Historical run identity binds downloaded native dependency fixtures; it is not a new CI execution.",
+  "historical_proof": "Authenticated same-run master39091756819 full ADB/iOS artifacts; checksum, receipt and GH attestation checks passed.",
+  "host": {
+    "architecture": "x86_64",
+    "boost": "1.86.0",
+    "cmake": "3.31.6",
+    "explicit_build_parallelism": 4,
+    "logical_cpus": 8,
+    "memory_bytes": 34359738368,
+    "ninja": "1.12.1",
+    "qt": "6.9.3",
+    "xcode": "26.6 (17F113)"
+  },
+  "hosted_ci_execution": false,
+  "kind": "local-native-overlap-acceptance",
+  "limitations": [
+    "One mostly-cold local prepare; not cold-plus-three-warm hosted CI evidence.",
+    "Finalization replayed207 vectorscan and2 generated resource compile edges, all cache hits; test links were not all retained.",
+    "No end-to-end hosted CI duration or performance improvement is claimed."
+  ],
+  "local_configuration_differences": [
+    "Pinned Qt and Boost roots supplied explicitly; Boost_NO_SYSTEM_PATHS/Boost_NO_BOOST_CMAKE enabled to avoid host Boost1.90.",
+    "CMAKE_BUILD_PARALLEL_LEVEL=4; this is local functional acceptance, not hosted-runner performance qualification."
+  ],
+  "object_filesystem_observation": {
+    "changed_object_mtimes": 209,
+    "prepared_objects_including_configure_probes": 724,
+    "retained_object_mtimes": 515
+  },
+  "raw_ninja_logs": {
+    "finalize": {
+      "frozen_path": "/tmp/klogg-app-overlap-harness.0byfr4/raw-baseline/ci-build-phase-39091756819-1-finalize.ninja-log.txt",
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_native_overlap/ci-build-phase-39091756819-1-finalize.ninja-log.txt",
+      "sha256": "d34a73e9336e2706a22bd03bb64513fffc8cddc5553dd7c5b0504b3b59cd1b69",
+      "size": 136115
+    },
+    "prepare": {
+      "frozen_path": "/tmp/klogg-app-overlap-harness.0byfr4/raw-baseline/ci-build-phase-39091756819-1-prepare.ninja-log.txt",
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_native_overlap/ci-build-phase-39091756819-1-prepare.ninja-log.txt",
+      "sha256": "f8eb203c59d9a632a863ad18d9ab7c8adc3ad1426f808f932a2078ee06b77ff0",
+      "size": 105848
+    }
+  },
+  "schema_version": 1,
+  "selected_ctest": {
+    "ctest_reported_seconds": 18.76,
+    "failed": 0,
+    "full_suite_run": false,
+    "log_sha256": "cce51cb9345dcd6764d6d021e7b7b8c3f93f452dd64bccfde339dd779022caa0",
+    "names": [
+      "klogg_smoke",
+      "adb_helper_verifier_contract",
+      "ios_native_release_contract",
+      "klogg_ios_native_contract_tests"
+    ],
+    "passed": 4
+  },
+  "source_root": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt",
+  "source_script_sha256": {
+    ".github/actions/agent-build/action.yml": "eb5bccd701b0f288fb3676ba622f3215c7a39261c28901536cb365c121d007f6",
+    ".github/actions/agent-package-mac/action.yml": "83cc06fbfa2b1508804a7d00b3d2ab05dea345f7e5647e356c11e5cc064119d6",
+    "3rdparty/CMakeLists.txt": "b61571215c302fe40c9e487a0d9c7790aa9960e6e63823b96f25ec6a5dcce91a",
+    "CMakeLists.txt": "8ea9a4d299c016e43bc4a3be247b710c7b579dda2ab9ed0c3915ffe884743779",
+    "cmake/generate_version_h.cmake": "a39ead530f2a2375fd110b89f4f1a3c896fa39c0ec79e7f6b7c2262743abfe4c",
+    "scripts/ci_build_observation.py": "cfbb3ec84da5a8f09badae505592fceabfc66ed79957586f6c7ea2c87a1b0829",
+    "scripts/ci_native_overlap.py": "a586f363a5cc06627eab7eb1fdb09260c332d04fc5015ec0d50877f125e348b8",
+    "scripts/ci_native_rendezvous.py": "75acdf0459e0c37cbd7937a627708cf1f24be57203b78265ef0b99593c1bb1c7"
+  },
+  "source_sha": "f0ea6a09935c8c1a3407811446536482427fc931",
+  "source_state": "working tree with uncommitted overlap implementation; source-script hashes captured after acceptance"
+}

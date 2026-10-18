@@ -751,16 +751,127 @@ qualification, privilege boundaries, and event projections. They do not replace
 real image builds, full sanitizer tests, package smoke tests, CodeQL tracing,
 anonymous retrieval, or current-head cross-platform acceptance.
 
-`scripts/ci_build_metrics.py run-build` wraps the single unchanged `ci_build`
-invocation on Linux, macOS, and Windows. Each build leg attempts to upload
-`ci-build-metrics-<run-id>-<attempt>.json` with the fresh Ninja log summary,
-measured build wall time, and current-run global ccache counter deltas where
-available. Missing or invalid telemetry and failed metrics uploads cannot
-change a successful build's status; no report is published without fresh
-valid evidence. Windows reports its object cache as `disabled`; no Windows
-object-cache hit is inferred.
-Work-time sums are not elapsed time or critical-path measurements. Do not
-serialize normal builds, delete live Ninja logs, invent cache hit rates, or
-turn timing reports into CI wall-clock gates. Historical object counts do not
-justify introducing a compiled Vectorscan bundle without fresh warmed-cache
-end-to-end evidence.
+### Ordinary compiler-object acceleration
+
+Compiler-object reuse has two separate transports. The existing Actions cache
+service retains ref-scoped master/own-PR daily generations; its save composite
+now confirms current-version lookup and exact-ref/key REST persistence with a
+bounded fresh retry. A green cache-action outcome alone is not proof of storage.
+The separate restore/export compiler-object artifact composites bridge canonical
+`ZEACENT/klogg` same-repository PRs and master under an explicit **shared
+trusted-code policy**. This is not hostile-PR isolation, and does not make
+GitHub's PR-scoped cache entries directly visible to master. Fork PRs and workflow
+dispatches do not participate in the cross-ref artifact bridge.
+
+Descriptors bind actual toolchain/configuration, dependency inputs, producer
+policy and existing byte allowances. Application SHA is not a reuse key: each
+ccache/sccache invocation still validates its own source, header and flag inputs.
+Admission checks immutable artifact digest, successful producing job/required
+gates, and policy at the authenticated compiled checkout, distinguishing PR head
+from merge checkout. Unrelated failed/cancelled aggregate jobs do not negate a
+successful lane; a later failed execution of that producer is not ignored.
+Archived cache configuration, build/install trees and packaged executables are
+not imported. Snapshots retain the existing per-label object cap, bounded
+candidate/download/extraction budgets and two-day retention. Artifact storage is
+separate from the Actions-cache quota; these bounds do not establish a
+repository-wide storage budget or cost reduction.
+
+Validated backend saves can stamp an optional repository/context-bound acquisition
+hint. Application hints must match the current source tree to preserve that
+backend over an artifact import; native dependency hints do not depend on the
+application tree. Hints are guidance, not attestations or proof of warmth, and
+are excluded from shared archives. Without a matching hint, discovery prefers an
+authenticated current-tree application snapshot, then the newest compatible one.
+Source-tree matching is a priority/freshness rule, not a compiler-compatibility
+requirement. Export suppression requires a snapshot younger than one day that
+covers the current application tree or matching native dependency identity.
+A retained backend reports available artifact metadata without an imported
+artifact ID, preserving backend attribution in build metrics. Hosted acquisition,
+refresh and storage acceptance still require measurement.
+
+These are ordinary compiler objects, not production compiler environments or
+qualified native binary cores.
+
+Ordinary macOS ADB and iOS builders retain compiler objects outside their fresh
+build/install directories. ADB uses CMake launchers; iOS has an optional
+executable-only launcher propagated through its original Autotools/OpenSSL
+compiler commands with explicit selected compilers and SDK. Full source-build,
+link, smoke/verification, legal-overlay and receipt work still runs. Dependency
+qualification/publisher modes do not use these ordinary cache paths. Native-core
+publication, lock activation and host-closure refusal conditions are unchanged.
+
+Package-enabled macOS application jobs now use prepare/rendezvous/finalize:
+perform an initial native-OFF configure and exactly one identical precompile
+stabilization configure, then prepare objects and test binaries while native
+producers run; require authenticated successful same-run native producers and
+verify their artifacts; then enable the native gates and finish `ci_build` in
+the same Ninja tree before tests and package qualification. The extra configure
+settles pinned generated-header state without changing protected dependency
+source, pre-seeding feature results or rolling back timestamps. Package-free sanitizer jobs retain a single
+full build. This is guarded overlap, not permission to package before native
+verification or to reuse a prior run's native bundle.
+
+The original macOS TSan scope is first-party code plus mimalloc and TBB, not all
+source-built dependencies or prebuilt Qt. Only the Intel macOS TSan row now opts
+into the accepted pure-`-O1` profile via `KLOGG_CI_MACOS_TSAN_O1=ON` and
+`CMAKE_PROJECT_INCLUDE=cmake/CiMacosTsanProfile.cmake`; the module remains
+default-off elsewhere. The full/macOS/thread build path checks generated commands
+between configure and build. Existing per-command debug flags, sanitizer scope,
+LTO-off, CPU flags, concurrency, job name and timeout remain unchanged. The Linux
+instrumented-Qt TSan lane remains responsible for Qt-internal race coverage.
+
+### Measurement boundaries
+
+The qualification-bound `scripts/ci_build_metrics.py` and Docker build action
+remain byte-for-byte unchanged. Single-build native jobs use the ordinary
+`scripts/ci_build_observation.py` wrapper; Linux binds host provenance after its
+qualified action. Each build leg attempts to upload
+`ci-build-metrics-<run-id>-<attempt>.json` with build wall time and current-run
+cache deltas, and mirrors available reports in the log before artifact upload.
+Missing or invalid optional telemetry cannot change a successful build's status.
+Windows reports measured sccache deltas only when activation succeeds, otherwise
+its cache is explicitly disabled; no hit is inferred from a green build.
+
+Overlap jobs retain prepare/finalize reports and raw Ninja logs. A complete phased
+report is published only after finalization and sums the two build invocations,
+not configure, native wait, tests or packaging. Separate Ninja invocation clocks
+are not combined into a fictitious whole-build timeline. A compacted log leaves
+phase compilation analysis unknown. Compare single-build and phased-build scopes
+separately; preserve native wait and end-to-end job/workflow intervals as distinct
+measurements.
+
+Restored backend keys, authenticated artifact IDs and compiler-check policy are
+evidence, not automatic warm labels. See [master cache migration](ci/MASTER_CACHE_MIGRATION.md)
+and the [performance baseline](ci/PERFORMANCE_BASELINE.md) for retained historic
+measurements, local Intel ADB/iOS results and remaining acceptance. The accepted
+local iOS cohort measured 420.933s cold versus 243.085s warm median (42.25% less
+full native-stack wall time), with one 4,219.992s sampled host-startup stall
+explicitly excluded and replaced. Its 100% warm cacheable-call hit rate is not
+100% elimination of build work. Hosted cold plus three-warm cohorts, real overlap
+benefit, native ARM behavior and cross-ref acquisition/refresh behavior remain
+unproven here. The 20-30 minute whole-workflow target is not claimed achieved.
+
+[Local pure-O1 TSan evidence](ci/evidence/macos-tsan-o1-local-20261018) records
+whole `ci_build` 1,061.966s -> 617.019s and full 40-entry CTest
+324.472s -> 290.867s, with all tests passing and none skipped. Combined build/test
+wall fell 34.52% in that one sequential local pair, excluding configure and setup;
+this is not a hosted guarantee. All 835 commands retain the exact debug mix
+(819 `-g1`, 16 `-g`) and original sanitizer/other flags; only optimization changes
+to `-O1`, apart from documented generated-resource path normalization. The
+separate mixed optimization/light-debug exploration is not activation evidence.
+
+[Local application-overlap receipts](ci/evidence/native-app-overlap-local-20261018)
+establish avoided finalization work: vectorscan compile edges 207 -> 0, `libhs`
+rearchives 1 -> 0 and prepared-test relinks 8 -> 0; two cache-served Qt resource
+edges remain. The added precompile configure cost 12.256s locally. Original and
+stabilized prepare cache states differ (717 versus 3 misses), so their total
+wall times are not a matched causal speedup. Only four selected CTest entries
+were run, not full CTest. Historical-native-fixture runs are separate from the
+current iOS recipe's local assembled/rebound package proof, which Cocoa-smoked
+the original application binary without recompilation or GitHub artifact IDs.
+See the retained scope/strategy records before using these results as evidence.
+
+Work-time sums are not elapsed time or critical-path measurements. Do not delete
+live Ninja logs, invent cache hit rates, or turn timing reports into CI wall-clock
+gates. Historical object counts do not justify introducing a compiled Vectorscan
+bundle without fresh warmed-cache end-to-end evidence.

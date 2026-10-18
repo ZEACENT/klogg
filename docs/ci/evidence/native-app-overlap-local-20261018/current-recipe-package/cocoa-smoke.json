@@ -1,0 +1,19 @@
+{
+  "loaded_platform_plugins": [
+    "dyld[82411]: <60918B70-BE43-32DF-AE98-6BFA4E3110B9> /private/var/folders/82/wqqr5srs7rgbfwgfkk6132y40000gn/T/klogg-app-current-ios-n_niq4g5/build/package-stage/klogg.app/Contents/PlugIns/platforms/libqcocoa.dylib"
+  ],
+  "platforms": [
+    "cocoa"
+  ],
+  "runtime_log": {
+    "path": "/var/folders/82/wqqr5srs7rgbfwgfkk6132y40000gn/T/klogg-app-current-ios-n_niq4g5/build/macos-qt-startup-smoke.log",
+    "sha256": "ea9d1a7c32bd0e270b17f05182bc78802276e14886cff3da9e4ab0fa03150bd7",
+    "size": 96532
+  },
+  "verifier_exit_code": 0,
+  "verifier_output": "macOS Qt bundle verified: /private/var/folders/82/wqqr5srs7rgbfwgfkk6132y40000gn/T/klogg-app-current-ios-n_niq4g5/build/package-stage/klogg.app",
+  "version_lines": [
+    "klogg 26.10.18.1324",
+    "Built 2026-10-18 from f0ea6a09(v22.06-422-gf0ea6a09)"
+  ]
+}

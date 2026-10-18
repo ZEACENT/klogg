@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "scope": "Local dirty-worktree final script quality gate; not hosted workflow or production qualification evidence",
+  "checkout_head": "f0ea6a09935c8c1a3407811446536482427fc931",
+  "dirty": true,
+  "branch": "worktree-ci-build-latency",
+  "command": [
+    "python3",
+    "scripts/run_ci_quality.py",
+    "--json"
+  ],
+  "identity_environment": {
+    "GITHUB_SHA": "f0ea6a09935c8c1a3407811446536482427fc931",
+    "GITHUB_RUN_ID": "39091756819",
+    "GITHUB_RUN_ATTEMPT": "1"
+  },
+  "identity_note": "Historical Actions variables supply local test-contract context, not the identity of a new hosted run.",
+  "checks": [
+    {
+      "command": [
+        "/usr/local/opt/python@3.14/bin/python3.14",
+        "scripts/lint_repo_hygiene.py"
+      ],
+      "durationSeconds": 7.689,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "/usr/local/opt/python@3.14/bin/python3.14",
+        "scripts/lint_platform_fragile.py"
+      ],
+      "durationSeconds": 37.714,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "/usr/local/opt/python@3.14/bin/python3.14",
+        "scripts/lint_test_determinism.py"
+      ],
+      "durationSeconds": 2.358,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "/usr/local/opt/python@3.14/bin/python3.14",
+        "scripts/lint_linux_package_runtime.py"
+      ],
+      "durationSeconds": 0.059,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "/usr/local/opt/python@3.14/bin/python3.14",
+        "scripts/lint_ci_quality.py"
+      ],
+      "durationSeconds": 1.305,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "/usr/local/opt/python@3.14/bin/python3.14",
+        "scripts/lint_translation_catalogs.py"
+      ],
+      "durationSeconds": 0.121,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "/usr/local/opt/python@3.14/bin/python3.14",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/scripts",
+        "-p",
+        "test_*.py"
+      ],
+      "durationSeconds": 1125.752,
+      "returncode": 0
+    }
+  ],
+  "script_tests": {
+    "run": 2468,
+    "passed": 2460,
+    "skipped": 8,
+    "failures": 0,
+    "errors": 0
+  },
+  "complete_output": {
+    "path": "/private/tmp/claude-501/-Users-johnsonv-ws-klogg--claude-worktrees-ci-speed-opt/75e8d06e-1ec7-41d4-83fe-25c1b6b970af/tasks/b5p1qvwna.output",
+    "sha256": "f7ff8998577357ae089d228dd2d3bc043206da4224e514bd2ea130cd3b42c8dd"
+  },
+  "limitations": [
+    "Eight tests skipped; aggregate unittest output does not enumerate their reasons.",
+    "Hosted cold plus three comparable warm runs remain pending.",
+    "This is the script quality suite, not a new C++ CTest run."
+  ]
+}

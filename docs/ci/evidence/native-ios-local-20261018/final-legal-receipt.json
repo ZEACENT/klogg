@@ -1,0 +1,68 @@
+{
+  "architecture": "x86_64",
+  "build_receipt_sha256": "4420053537ec8bc74cc3e20a9f1722070511090502572d45a31be5874e98fdeb",
+  "deployment_target": "15.0",
+  "license_files": [
+    {
+      "license": "Apache-2.0",
+      "path": "licenses/openssl-LICENSE.txt",
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a",
+      "source": "openssl"
+    },
+    {
+      "license": "curl",
+      "path": "licenses/curl-COPYING",
+      "sha256": "82f2f4427d6545ee5aaac4f0b80428da6cc8ba41c2cf5da3a03680ec327b9681",
+      "source": "curl"
+    },
+    {
+      "license": "LGPL-2.1-or-later",
+      "path": "licenses/libplist-COPYING",
+      "sha256": "7619c753cac95d4740220223bde48a032606fcaccde5e546f9bc444c81ab356d",
+      "source": "libplist"
+    },
+    {
+      "license": "LGPL-2.1-or-later",
+      "path": "licenses/libplist-COPYING.LESSER",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c",
+      "source": "libplist"
+    },
+    {
+      "license": "LGPL-2.1-or-later",
+      "path": "licenses/libtatsu-COPYING",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c",
+      "source": "libtatsu"
+    },
+    {
+      "license": "LGPL-2.1-or-later",
+      "path": "licenses/libimobiledevice-glue-COPYING",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c",
+      "source": "libimobiledevice-glue"
+    },
+    {
+      "license": "LGPL-2.1-or-later",
+      "path": "licenses/libusbmuxd-COPYING",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c",
+      "source": "libusbmuxd"
+    },
+    {
+      "license": "LGPL-2.1-or-later",
+      "path": "licenses/libimobiledevice-COPYING",
+      "sha256": "7619c753cac95d4740220223bde48a032606fcaccde5e546f9bc444c81ab356d",
+      "source": "libimobiledevice"
+    }
+  ],
+  "lock_sha256": "d703d60b34800fc7d9a580286881a429f77a0af57f3a85d8b550dbbc7044686d",
+  "notice": {
+    "path": "NOTICE-ios-native.txt",
+    "sha256": "c9b890f4ae240738c98abd5bca7a443d4355ca5d40af94ac62c2cfe9ab551578"
+  },
+  "package": "app-bundled dynamic dylib closure",
+  "receipt_kind": "legal",
+  "sbom": {
+    "path": "ios-native-sbom.spdx.json",
+    "sha256": "8ca6590733a6fc8491783ff0021cba02541e9c52ea79511f8d1ac93398e91703"
+  },
+  "schema_version": 1,
+  "source_set_receipt_sha256": "c2dbd56e23f28c1b8b7ab91073060c53bb8a83c3e074a23db824d893386078a9"
+}

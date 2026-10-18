@@ -1,5 +1,7 @@
 """Observation wrapper stays outside immutable environment policy inputs."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -43,6 +45,49 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual(report["provenance"]["build_type"], "Release")
         self.assertEqual(report["provenance"]["cache_state"], "warm")
         self.assertEqual(report["provenance"]["run_id"], "123")
+
+    def test_restore_identity_does_not_claim_a_warm_cache(self):
+        env = {"KLOGG_CI_CACHE_RESTORE_KEY": "intel-qt6-ccache-v2-2026-10-17",
+               "CCACHE_COMPILERCHECK": "content"}
+        provenance = self.run_build(environment=env)["provenance"]
+        self.assertEqual(provenance["cache_restore_key"], env["KLOGG_CI_CACHE_RESTORE_KEY"])
+        self.assertEqual(provenance["cache_compiler_check"], "content")
+        self.assertEqual(provenance["cache_state"], "unknown")
+
+    def test_verified_artifact_is_effective_transport_not_superseded_legacy_key(self):
+        env = {"KLOGG_CI_CACHE_RESTORE_KEY": "legacy-key", "KLOGG_CI_CACHE_ARTIFACT_ID": "456"}
+        provenance = self.run_build(environment=env)["provenance"]
+        self.assertEqual(provenance["cache_artifact_id"], "456")
+        self.assertEqual(provenance["cache_transport"], "verified-artifact")
+        self.assertIsNone(provenance["cache_restore_key"])
+        self.assertEqual(provenance["superseded_cache_restore_key"], "legacy-key")
+        self.assertEqual(provenance["cache_state"], "unknown")
+        self.assertEqual(MODULE.build_provenance(self.build, {"KLOGG_CI_CACHE_RESTORE_KEY": "legacy"})["cache_transport"], "actions-cache")
+        self.assertEqual(MODULE.build_provenance(self.build, {})["cache_transport"], "none")
+
+    def test_source_root_comes_from_generated_cmake_cache(self):
+        (self.build / "CMakeCache.txt").write_text("CMAKE_HOME_DIRECTORY:INTERNAL=/verified/source\n")
+        self.assertEqual(MODULE.build_provenance(self.build, {})["source_root"], "/verified/source")
+
+    def test_cli_retains_complete_current_report_in_logs_before_artifact_transport(self):
+        report = self.run_build(provenance={"sha": "a" * 40, "config": "escaped\nvalue"})
+        for mode, function, arguments in (
+            ("run-build", "run_build", ["--repo-root", str(self.build), "--build-root", str(self.build),
+                                       "--output", str(self.output), "--", "cmake", "--build", str(self.build)]),
+            ("bind-environment", "bind_environment", ["--metrics", str(self.output), "--identity", "digest"]),
+        ):
+            for value in (report, None):
+                with self.subTest(mode=mode, available=value is not None):
+                    output = io.StringIO()
+                    with mock.patch.object(MODULE, function, return_value=value), contextlib.redirect_stdout(output):
+                        self.assertEqual(MODULE.main([mode, *arguments]), 0)
+                    lines = output.getvalue().splitlines()
+                    if value is None:
+                        self.assertEqual(lines, [])
+                    else:
+                        self.assertEqual(len(lines), 1)
+                        self.assertTrue(lines[0].startswith("KLOGG_BUILD_METRICS_JSON="))
+                        self.assertEqual(json.loads(lines[0].split("=", 1)[1]), report)
 
     def test_missing_identity_is_unknown(self):
         report = self.run_build()

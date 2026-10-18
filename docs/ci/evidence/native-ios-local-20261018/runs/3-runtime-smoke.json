@@ -1,0 +1,8 @@
+{
+  "curl_version": "passed",
+  "dylibs": 8,
+  "openssl_version": "passed",
+  "plist_alloc_free": "passed",
+  "required_symbols": "passed",
+  "runtime_load": "passed"
+}

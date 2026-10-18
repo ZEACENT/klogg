@@ -1,0 +1,127 @@
+{
+  "architecture": "x86_64",
+  "compiler_cache_compatibility": {
+    "build_tools": {
+      "ccache": {
+        "sha256": "d61103b76849f12e2113ccded292f3c2de6d9520efdfe38c517c8c13ff3823b1",
+        "version": "ccache version 4.13.6"
+      },
+      "cmake": {
+        "sha256": "628cc585a8853d7429cf7337a0d4b67baed77a5c9d81f0f89aadd0e657c30667",
+        "version": "cmake version 3.31.6"
+      },
+      "ninja": {
+        "sha256": "a46eca0aae6e8b7792dde0580b766f948fba5fb58fca8127078f7374573af6d5",
+        "version": "1.12.1"
+      }
+    },
+    "ccache": "ccache version 4.13.6",
+    "cmake": "cmake version 3.31.6\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).",
+    "compiler": "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: x86_64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+    "compiler_check": "content",
+    "compiler_path": "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang",
+    "compiler_sha256": "d2e4bf622758eee1bf7267c060497fb2c41e098d37b0fca8be73898dc7e14eda",
+    "component": "ios-native",
+    "core": "dfabec0527438c6ef7d170ee29692cdca5242c0c713f4b4f3baf2a15abd66f41",
+    "cxx": {
+      "path": "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+      "resolved_path": "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang",
+      "sha256": "d2e4bf622758eee1bf7267c060497fb2c41e098d37b0fca8be73898dc7e14eda",
+      "version": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
+    },
+    "homebrew": {
+      "autoconf": "autoconf 2.73",
+      "automake": "automake 1.18.1_1",
+      "libtool": "libtool 2.6.2",
+      "m4": "m4 1.4.21",
+      "perl": null,
+      "pkgconf": "pkgconf 3.0.5"
+    },
+    "host_tools": {
+      "aclocal": {
+        "path": "/usr/local/bin/aclocal",
+        "resolved_path": "/usr/local/Cellar/automake/1.18.1_1/bin/aclocal",
+        "sha256": "ed879fa4c345847a22ed0aa1a1e543d7eec6b13ca03e7f649dabe0621f1dc482",
+        "version": "aclocal (GNU automake) 1.18.1"
+      },
+      "autoconf": {
+        "path": "/usr/local/bin/autoconf",
+        "resolved_path": "/usr/local/Cellar/autoconf/2.73/bin/autoconf",
+        "sha256": "497404021b1baf6fb0ee56139a6c4fdf983910ef11f6ba473da1081fc3c42232",
+        "version": "autoconf (GNU Autoconf) 2.73"
+      },
+      "automake": {
+        "path": "/usr/local/bin/automake",
+        "resolved_path": "/usr/local/Cellar/automake/1.18.1_1/bin/automake",
+        "sha256": "788ef775c899e7396714f36970008dff80db31cbb6a13e91673cdb3a5ecfd7af",
+        "version": "automake (GNU automake) 1.18.1"
+      },
+      "autoreconf": {
+        "path": "/usr/local/bin/autoreconf",
+        "resolved_path": "/usr/local/Cellar/autoconf/2.73/bin/autoreconf",
+        "sha256": "81a68761807eb427f956b9d547c9e8ed97100af684dc41567c275edc5a49168b",
+        "version": "autoreconf (GNU Autoconf) 2.73"
+      },
+      "glibtool": {
+        "path": "/usr/local/bin/glibtool",
+        "resolved_path": "/usr/local/Cellar/libtool/2.6.2/bin/glibtool",
+        "sha256": "ecee743db78b5c1de69e22a229a38ca57ab4f4610fb569299b6c9871c50c3dc8",
+        "version": "glibtool (GNU libtool) 2.6.2"
+      },
+      "glibtoolize": {
+        "path": "/usr/local/bin/glibtoolize",
+        "resolved_path": "/usr/local/Cellar/libtool/2.6.2/bin/glibtoolize",
+        "sha256": "52cda626b28ab9056ab801df711c33769bcee8db71897bc6f7b6cfd65788772a",
+        "version": "glibtoolize (GNU libtool) 2.6.2"
+      },
+      "m4": {
+        "path": "/usr/bin/m4",
+        "resolved_path": "/usr/bin/m4",
+        "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
+        "version": "GNU M4 1.4.6"
+      },
+      "make": {
+        "path": "/usr/bin/make",
+        "resolved_path": "/usr/bin/make",
+        "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
+        "version": "GNU Make 3.81"
+      },
+      "perl": {
+        "path": "/usr/bin/perl",
+        "resolved_path": "/usr/bin/perl",
+        "sha256": "53bce3db7e095b596fa42626b55edc63e3388d7afecf45a0b1ecc5211721c812",
+        "version": "This is perl 5, version 34, subversion 1 (v5.34.1) built for darwin-thread-multi-2level"
+      },
+      "pkg-config": {
+        "path": "/usr/local/bin/pkg-config",
+        "resolved_path": "/usr/local/Cellar/pkgconf/3.0.5/bin/pkgconf",
+        "sha256": "825b44107e89baadc046a44173f6f2ced50e79f4748afdb66bf2a385a9632168",
+        "version": "3.0.5"
+      }
+    },
+    "ninja": "1.12.1",
+    "sdk": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    "sdk_version": "26.5",
+    "target": "x86_64",
+    "tool_environment": {
+      "CPATH": "",
+      "CPLUS_INCLUDE_PATH": "",
+      "C_INCLUDE_PATH": "",
+      "DEVELOPER_DIR": "/Applications/Xcode_26.6.app/Contents/Developer",
+      "LIBRARY_PATH": "",
+      "SDKROOT": ""
+    },
+    "xcode": "Xcode 26.6\nBuild version 17F113"
+  },
+  "producer_toolchain": {
+    "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+    "cmake": "cmake version 3.31.6",
+    "ninja": "1.12.1",
+    "sdk_path": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    "sdk_version": "26.5",
+    "xcode": [
+      "Xcode 26.6",
+      "Build version 17F113"
+    ]
+  }
+}
