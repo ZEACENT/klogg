@@ -76,6 +76,14 @@ an older success. No equality with the consumer's whole application SHA is
 required. Only bounded object data is admitted before sccache activation, never
 compiler tools, build trees, PDB bundles or replayed configuration.
 
+Concurrent uploads can shift the repository's offset pages and repeat an artifact
+ID. Cross-page repeats are accepted only when all admission metadata agrees;
+same-page duplicates, malformed IDs and contradictions still fail closed, with
+unchanged selected-artifact revalidation and three-page/twelve-candidate/
+one-download/300-second limits. The deterministic regression proves this pagination
+case exists; the older combined duplicate/invalid-listing error does not identify
+which payload condition occurred on a historical Windows x86 run.
+
 `export-compiler-object-artifact` runs after current-run cache validation and the
 original tests/enabled package checks. The sccache server is stopped before
 snapshot export. Snapshots use existing per-label object limits, bounded

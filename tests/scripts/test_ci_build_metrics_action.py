@@ -2,8 +2,12 @@
 import ast
 import importlib.util
 import json
+import os
 import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -84,8 +88,70 @@ class NativeBuildMetricsActionTest(unittest.TestCase):
         self.assertIn('--object-cache "$object_cache"', body)
         self.assertIn('-- cmake --build "$KLOGG_BUILD_ROOT" -t ci_build', body)
 
+    @unittest.skipUnless(shutil.which("sh"), "requires the action's POSIX shell")
+    def test_execution_diagnostics_only_opt_in_macos_tsan_without_changing_build(self):
+        body = self.bodies["build"]
+        stub = ('python3() { printf \'%s\\n\' "$@" > "$CAPTURE"; '
+                'printf \'%s\' "${NINJA_STATUS-}" > "$STATUS"; return "$FAKE_EXIT"; }\n')
+        with tempfile.TemporaryDirectory(prefix="native action ") as directory:
+            root = pathlib.Path(directory)
+            for runner, sanitizer, code in (("macOS", "thread", 0),
+                                            ("macOS", "thread", 9),
+                                            ("macOS", "address-undefined", 0),
+                                            ("macOS", "", 0),
+                                            ("Windows", "thread", 0)):
+                with self.subTest(runner=runner, sanitizer=sanitizer, code=code):
+                    env = dict(os.environ, RUNNER_OS=runner, KLOGG_SANITIZER=sanitizer,
+                               KLOGG_WORKSPACE=directory, KLOGG_BUILD_ROOT="build root",
+                               GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="2",
+                               CAPTURE=str(root / "args"), STATUS=str(root / "status"),
+                               NINJA_STATUS="inherited-status", FAKE_EXIT=str(code))
+                    result = subprocess.run([shutil.which("sh"), "-eu", "-c", stub + body],
+                                            cwd=root, env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, code, result.stderr)
+                    args = (root / "args").read_text().splitlines()
+                    status = (root / "status").read_text()
+                    enabled = runner == "macOS" and sanitizer == "thread"
+                    self.assertEqual("--execution-diagnostics" in args, enabled)
+                    if enabled:
+                        self.assertEqual(args[args.index("--execution-diagnostics") + 1],
+                                         "macos-tsan")
+                        self.assertIn("%r", status)
+                        self.assertIn("%e", status)
+                    else:
+                        self.assertEqual(status, "inherited-status")
+                    self.assertEqual(args[args.index("--") + 1:],
+                                     ["cmake", "--build", "build root", "-t", "ci_build"])
+                    self.assertEqual(args[args.index("--build-root") + 1],
+                                     directory + "/build root")
+
 
 class BuildMetricsUploadWorkflowTest(unittest.TestCase):
+    def test_partial_tsan_diagnostics_upload_never_exports_build_objects(self):
+        jobs = QUALITY.workflow_job_steps(CI_BUILD.read_text())
+        for job in ("MacPackages", "MacArmPackages", "MacSanitizers"):
+            with self.subTest(job=job):
+                parsed = [QUALITY.workflow_step_fields(step) for step in jobs[job]]
+                diagnostic = [(i, fields, children["with"])
+                              for i, (fields, children) in enumerate(parsed)
+                              if fields.get("name") == "Upload macOS TSan execution diagnostics"]
+                self.assertEqual(len(diagnostic), 1)
+                index, fields, options = diagnostic[0]
+                build = max(i for i, (row, _) in enumerate(parsed)
+                            if row.get("uses") == "./.github/actions/agent-build")
+                self.assertGreater(index, build)
+                self.assertEqual(fields["if"],
+                                 "${{ always() && env.KLOGG_SANITIZER == 'thread' && "
+                                 "hashFiles(format('{0}/ci-build-diagnostics.jsonl', "
+                                 "env.KLOGG_BUILD_ROOT)) != '' }}")
+                self.assertEqual(fields["continue-on-error"], "true")
+                self.assertEqual(fields["timeout-minutes"], "2")
+                self.assertEqual(options["path"].splitlines(), [
+                    "${{ env.KLOGG_BUILD_ROOT }}/ci-build-diagnostics.jsonl",
+                    "${{ env.KLOGG_BUILD_ROOT }}/ci-build-diagnostics.ninja-log.txt"])
+                self.assertIn("attempt-${{ github.run_attempt }}", options["name"])
+                self.assertTrue(options["name"].startswith("build-diagnostics-"))
+
     def test_windows_exact_restore_still_revalidates_after_qualification(self):
         steps = QUALITY.workflow_job_steps(CI_BUILD.read_text())["WindowsPackages"]
         save = next(QUALITY.workflow_step_fields(step)[0] for step in steps

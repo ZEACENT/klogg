@@ -625,6 +625,80 @@ class CompilerObjectTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ordinary"):
             transport.identity(env, self.repo, git=git)
 
+    def overlapping_artifact_pages(self, repeated=None):
+        # Two uploads arrive after offset page 1: its final unrelated entry and
+        # compatible artifact move onto page 2. Neither is a new artifact ID.
+        first = [{"id": number, "name": "unrelated"} for number in range(1000, 1099)] + [self.artifact]
+        repeated = self.artifact if repeated is None else repeated
+        pages = []
+        def metadata(endpoint):
+            if "/artifacts?" in endpoint:
+                page = int(endpoint.rsplit("=", 1)[1])
+                pages.append(page)
+                if page == 1:
+                    return {"total_count": 101, "artifacts": copy.deepcopy(first)}
+                self.assertEqual(page, 2)
+                return {"total_count": 103, "artifacts": [copy.deepcopy(first[-2]), copy.deepcopy(repeated),
+                                                           {"id": 999, "name": "unrelated-older"}]}
+            return self.api(endpoint)
+        return metadata, pages
+
+    def test_artifact_listing_page_churn_deduplicates_identical_ids_before_candidate_admission(self):
+        metadata, pages = self.overlapping_artifact_pages()
+        with mock.patch.object(transport, "_producer", wraps=transport._producer) as producer:
+            result = self.restore(metadata=metadata)
+        self.assertTrue(result["restored"])
+        self.assertEqual(result["artifact_id"], 101)
+        self.assertEqual(pages, [1, 2])
+        self.assertEqual(producer.call_count, 1)
+        self.assertEqual(self.downloads, [101])
+
+    def test_artifact_listing_page_churn_ignores_only_nonidentity_metadata_changes(self):
+        repeated = {**self.artifact, "updated_at": "2026-10-18T10:06:00Z"}
+        metadata, _ = self.overlapping_artifact_pages(repeated)
+        self.assertTrue(self.restore(metadata=metadata)["restored"])
+        self.assertEqual(self.downloads, [101])
+
+    def test_artifact_listing_repeated_id_with_conflicting_identity_fails_closed(self):
+        changes = ({"name": "different-artifact"}, {"size_in_bytes": self.artifact["size_in_bytes"] + 1},
+                   {"digest": "sha256:" + "e" * 64}, {"created_at": "2026-10-18T10:04:00Z"},
+                   {"expired": True}, {"workflow_run": {**self.artifact["workflow_run"], "head_sha": "e" * 40}})
+        for change in changes:
+            with self.subTest(change=change):
+                metadata, _ = self.overlapping_artifact_pages({**self.artifact, **change})
+                with self.assertRaisesRegex(ValueError, "(?:conflicting|duplicate).*artifact"):
+                    self.restore(metadata=metadata)
+                self.assertEqual(self.downloads, [])
+
+    def test_artifact_listing_invalid_entries_and_same_page_duplicates_remain_rejected(self):
+        invalid = (None, [], {}, {"id": None}, {"id": 0}, {"id": -1}, {"id": True},
+                   {"id": "101"}, {"id": 101.0})
+        for item in invalid:
+            with self.subTest(item=item):
+                with self.assertRaisesRegex(ValueError, "invalid artifact listing"):
+                    self.restore(metadata=lambda endpoint: {"total_count": 1, "artifacts": [item]})
+        with self.assertRaisesRegex(ValueError, "duplicate.*artifact"):
+            self.restore(metadata=lambda endpoint: {"total_count": 2, "artifacts": [self.artifact, self.artifact]})
+        self.assertEqual(self.downloads, [])
+
+    def test_artifact_listing_identity_comparison_preserves_field_presence_and_types(self):
+        self.assertNotEqual(transport.artifact_identity({"id": 101, "size_in_bytes": 1}),
+                            transport.artifact_identity({"id": 101, "size_in_bytes": True}))
+        self.assertNotEqual(transport.artifact_identity({"id": 101, "digest": None}),
+                            transport.artifact_identity({"id": 101}))
+
+    def test_artifact_listing_overlap_does_not_extend_page_or_download_limits(self):
+        pages = []
+        items = [{"id": number, "name": "unrelated"} for number in range(1000, 1100)]
+        def metadata(endpoint):
+            pages.append(endpoint)
+            return {"total_count": 10000, "artifacts": copy.deepcopy(items)}
+        result = self.restore(metadata=metadata)
+        self.assertFalse(result["restored"])
+        self.assertTrue(result["discovery_exhausted"])
+        self.assertEqual(len(pages), transport.MAX_PAGES)
+        self.assertEqual(self.downloads, [])
+
     def test_discovery_paginates_past_unrelated_newer_artifacts_and_is_bounded(self):
         def pages(endpoint):
             if "/artifacts?" in endpoint:

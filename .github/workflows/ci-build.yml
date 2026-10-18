@@ -2358,6 +2358,22 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+      # Best-effort partial evidence only; never a qualified cache or build report.
+      # Periodic log records survive even if job cancellation prevents this upload.
+      - name: Upload macOS TSan execution diagnostics
+        if: ${{ always() && env.KLOGG_SANITIZER == 'thread' && hashFiles(format('{0}/ci-build-diagnostics.jsonl', env.KLOGG_BUILD_ROOT)) != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-diagnostics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ env.KLOGG_BUILD_ROOT }}/ci-build-diagnostics.jsonl
+            ${{ env.KLOGG_BUILD_ROOT }}/ci-build-diagnostics.ninja-log.txt
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
       - name: Show ccache statistics
         shell: sh
         run: ccache -s 2>&1 || echo "ccache stats unavailable"

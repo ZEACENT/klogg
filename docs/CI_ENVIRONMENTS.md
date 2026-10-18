@@ -771,7 +771,11 @@ gates, and policy at the authenticated compiled checkout, distinguishing PR head
 from merge checkout. Unrelated failed/cancelled aggregate jobs do not negate a
 successful lane; a later failed execution of that producer is not ignored.
 Archived cache configuration, build/install trees and packaged executables are
-not imported. Snapshots retain the existing per-label object cap, bounded
+not imported. Offset-page repeats caused by concurrent uploads are deduplicated
+only when admission identity matches; same-page duplicates, invalid IDs and
+contradictions remain fatal. Selected-artifact verification and the existing
+three-page/twelve-candidate/one-download/300-second controls are unchanged.
+Snapshots retain the existing per-label object cap, bounded
 candidate/download/extraction budgets and two-day retention. Artifact storage is
 separate from the Actions-cache quota; these bounds do not establish a
 repository-wide storage budget or cost reduction.
@@ -834,6 +838,19 @@ cache deltas, and mirrors available reports in the log before artifact upload.
 Missing or invalid optional telemetry cannot change a successful build's status.
 Windows reports measured sccache deltas only when activation succeeds, otherwise
 its cache is explicitly disabled; no hit is inferred from a green build.
+
+macOS TSan additionally opts into an independent, best-effort diagnostic sampler
+and richer Ninja progress status without changing the build command, worker
+policy, timeout or qualification. Allowlisted numeric process/resource/cache
+facts, fixed process-role labels and a bounded raw completion tail are always
+marked `sampled-partial`; raw process names/paths, argv and full environments are
+not recorded.
+The optional `always()` upload is limited to the JSONL journal and Ninja-tail
+checkpoint, with a two-minute step limit; log records are flushed separately.
+The helper is policy-bound only for macOS application artifacts, not Linux,
+Windows or native dependency compiler artifacts. Diagnostic failures are nonfatal.
+A cancelled/timed-out job can prevent final upload, and these partial observations
+neither create a successful build report nor prove a previous timeout's cause.
 
 Overlap jobs retain prepare/finalize reports and raw Ninja logs. A complete phased
 report is published only after finalization and sums the two build invocations,

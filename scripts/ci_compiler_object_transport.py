@@ -64,6 +64,7 @@ MAX_SECONDS = 300
 RETENTION_DAYS = 2
 REFRESH_SECONDS = 86400
 TERMINAL_CONCLUSIONS = ("success", "failure", "cancelled")
+ARTIFACT_IDENTITY_FIELDS = ("id", "name", "expired", "created_at", "workflow_run", "digest", "size_in_bytes")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SAFE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
@@ -79,6 +80,12 @@ def canonical(value):
 
 def fingerprint(value):
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def artifact_identity(metadata):
+    # Compare every admission field, preserving missing/null and numeric types.
+    # updated_at and response URLs are not provenance or download inputs.
+    return canonical({key: metadata[key] for key in ARTIFACT_IDENTITY_FIELDS if key in metadata})
 
 
 def digest(path):
@@ -665,17 +672,31 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
         return result
     prefix = f"repos/{REPOSITORY}/actions/"
     name_prefix = artifact_name(ctx, 1).rsplit("-", 1)[0] + "-"
-    candidates, seen, exhausted = [], set(), True
+    candidates, seen, exhausted = [], {}, True
     for page in range(1, MAX_PAGES + 1):
         listing = get(prefix + f"artifacts?per_page=100&page={page}")
         artifacts = listing.get("artifacts")
         require(isinstance(artifacts, list) and len(artifacts) <= 100
                 and type(listing.get("total_count")) is int and listing["total_count"] >= len(artifacts),
                 "malformed compiler artifact listing")
+        page_seen = set()
         for item in artifacts:
-            require(isinstance(item, dict) and type(item.get("id")) is int and item["id"] > 0
-                    and item["id"] not in seen, "duplicate or invalid artifact listing")
-            seen.add(item["id"])
+            require(isinstance(item, dict) and type(item.get("id")) is int and item["id"] > 0,
+                    f"invalid artifact listing entry on page {page}")
+            identifier = item["id"]
+            require(identifier not in page_seen,
+                    f"duplicate artifact ID within listing page {page}: {identifier}")
+            page_seen.add(identifier)
+            observed = artifact_identity(item)
+            if identifier in seen:
+                # Repository offset pages are not a snapshot: concurrent uploads
+                # can shift previously seen IDs onto the next page. Deduplicate
+                # only stable identity, never contradictions, and do not extend
+                # page/candidate/download/deadline budgets to make up the overlap.
+                require(seen[identifier] == observed,
+                        f"conflicting artifact identity across listing pages: {identifier}")
+                continue
+            seen[identifier] = observed
             name = item.get("name")
             if not isinstance(name, str) or not name.startswith(name_prefix) or item.get("expired") is True:
                 continue
@@ -703,8 +724,7 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
     selected = None
     for _, identifier, attempt_number, listed in sorted(candidates, key=lambda item: item[:2], reverse=True)[:MAX_CANDIDATES]:
         artifact = get(prefix + f"artifacts/{identifier}")
-        require(all(artifact.get(key) == listed.get(key) for key in
-                    ("id", "name", "expired", "created_at", "workflow_run", "digest", "size_in_bytes")),
+        require(artifact_identity(artifact) == artifact_identity(listed),
                 "selected artifact metadata changed after discovery")
         require(isinstance(artifact.get("digest"), str)
                 and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"])

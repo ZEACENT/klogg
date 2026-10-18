@@ -196,6 +196,11 @@ Shared artifacts use existing per-label object caps, bounded candidate/download
 budgets and two-day retention. Their storage is distinct from the Actions-cache
 quota. Neither those bounds nor fewer duplicate uploads prove repository-wide
 storage or cost reduction; retained runs and concurrent lanes must be measured.
+Offset-page overlap from concurrent artifact uploads is deduplicated only for
+identical admission metadata. Same-page duplicates and identity contradictions
+remain fatal; three-page/twelve-candidate/one-download/300-second controls are
+unchanged. The deterministic overlap regression does not reconstruct a historical
+runner's unretained API payloads.
 
 The macOS TSan baseline covers first-party code plus mimalloc and TBB, not all
 source-built dependencies or prebuilt Qt. That scope, exact per-command debug
@@ -216,6 +221,25 @@ and child exit status. They call `ci_build_observation.py run-build` with the
 existing roots, output and object-cache mode, plus `--cache-tool ccache|sccache`.
 Windows activates sccache only after its helper confirms activation; absence
 remains disabled.
+
+Only macOS TSan opts into separate execution diagnostics. Its sampler leaves the
+original build command/runner, parallelism and job timeout unchanged; other lanes'
+inherited Ninja status is preserved. Process names become fixed role labels only;
+raw names/paths, argv and full environments are not recorded. Periodic
+`KLOGG_BUILD_DIAGNOSTIC_JSON` log records and the bounded JSONL/raw-Ninja-tail files
+are **sampled partial evidence**,
+not success-only build metrics. The optional two-minute `always()` upload selects
+exactly those two files. The journal keeps at most 4 MiB current plus one 4 MiB
+predecessor locally, and the Ninja checkpoint at most 2 MiB; the predecessor is
+not among the two upload paths. Probe errors or missing diagnostics cannot turn a
+successful build into a failure.
+
+Use these records to investigate progress and resource pressure, not to infer
+complete CPU utilization or current-build hit rates from sampled processes and
+cumulative ccache totals. Job cancellation may prevent the final record/upload;
+flushed logs can outlive that failure, but no final evidence is guaranteed.
+A timed-out hosted run still has no successful whole-build sample, and the new
+sampler cannot reconstruct an earlier run's missing process history.
 
 Package-enabled macOS overlap instead records `measurement_scope: phase` for
 prepare and finalize. Prepare performs exactly one additional identical

@@ -130,6 +130,16 @@ successful producing lane. A newer failed execution of that producer cannot be
 hidden behind an older successful snapshot. Missing checkout proof is a miss,
 not permission to trust a manifest's self-reported revision.
 
+Repository artifact pages are offset-based, not a stable snapshot: concurrent
+uploads can repeat an ID on a later page. Discovery now deduplicates cross-page
+IDs only when all admission fields match, while rejecting same-page duplicates,
+malformed IDs and conflicting identity. Selected-artifact revalidation still
+checks that identity before payload/provenance verification. The limits remain
+three pages, twelve candidate checks, one download and the 300-second deadline.
+A deterministic page-churn regression establishes this defect; the old combined
+"duplicate or invalid artifact listing" error alone does not prove the exact
+historical Windows x86 payload sequence.
+
 Snapshots have two-day retention and use the existing per-label object cap;
 candidate discovery, downloads and extraction are bounded. **Actions-artifact
 storage is distinct from the Actions-cache quota.** Per-snapshot caps and short
@@ -223,6 +233,35 @@ validation, not before it to escape the cold-build -> timeout -> no-seed loop.
 Production compiler-environment policy inputs and native-core refusal conditions
 remain unchanged. The old-CMake Windows preload probe skips only when required
 policies are unavailable; other Windows cache tests still run.
+
+### Best-effort hosted TSan timeout diagnostics
+
+The macOS TSan build opts into an independent diagnostic sampler while the
+original build runner remains authoritative. It adds Ninja running-job/elapsed
+status and periodically records allowlisted tool/cache facts, sampled descendant
+CPU/RSS, host memory/swap/load, cumulative ccache counters and a bounded raw Ninja
+completion tail. Process executable names are reduced to the fixed roles
+`compiler`, `cache`, `build-tool` or `other`; raw names/paths, command arguments,
+full environments and probe exception text are not recorded. Other lanes retain
+their inherited `NINJA_STATUS`. No build command, parallelism, timeout, sanitizer
+or qualification rule changes.
+
+Records are always `sampled-partial`, including shutdown, and are flushed to the
+log as `KLOGG_BUILD_DIAGNOSTIC_JSON=...`. The local journal is capped at 4 MiB plus
+one 4 MiB predecessor; the latest Ninja tail is capped at 2 MiB without modifying
+Ninja state. The optional `always()` upload has a two-minute step limit and selects
+only `ci-build-diagnostics.jsonl` and `ci-build-diagnostics.ninja-log.txt`, not
+build objects or a qualified metrics report. Sampler/probe failures are nonfatal;
+its control-pipe lifecycle and cleanup are separate from build execution.
+
+A job timeout or runner termination can prevent final sampling or upload; already
+flushed log records may be the only retained evidence. Short-lived processes can
+be missed, `ps` CPU values are not interval accounting, sampled RSS is not a
+whole-host peak, and cumulative cache snapshots are not current-build hit rates.
+A truncated completion tail cannot prove where all remaining time was spent.
+These diagnostics improve future observation; they do not retroactively prove
+why an earlier hosted build timed out, manufacture a complete failed-build report,
+or establish the workflow latency target.
 
 ## Local native-cache measurement
 

@@ -77,7 +77,13 @@ runs:
           macOS) object_cache=measured ;;
           *) echo "::error::unreviewed native build metrics platform: $RUNNER_OS"; exit 1 ;;
         esac
-        python3 scripts/ci_build_observation.py run-build \
+        set --
+        if [ "$RUNNER_OS" = macOS ] && [ "${KLOGG_SANITIZER:-}" = thread ]; then
+          # Diagnostic progress only: preserve Ninja's existing worker policy.
+          export NINJA_STATUS='[%f/%t running=%r elapsed=%e] '
+          set -- --execution-diagnostics macos-tsan
+        fi
+        python3 scripts/ci_build_observation.py run-build "$@" \
           --repo-root "$KLOGG_WORKSPACE" \
           --build-root "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT" \
           --output "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/ci-build-metrics-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" \

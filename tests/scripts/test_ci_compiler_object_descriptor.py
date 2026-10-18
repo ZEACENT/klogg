@@ -83,6 +83,26 @@ class CompilerDescriptorTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("usage:", result.stdout)
 
+    def test_macos_application_policy_binds_optional_execution_diagnostics(self):
+        helper = "scripts/ci_execution_diagnostics.py"
+        value = self.make()
+        self.assertIn(helper, value["policy_files"])
+        self.assertNotIn(helper, descriptor.COMMON_POLICY)
+        for platform in ("Linux", "Windows"):
+            self.assertNotIn(helper, descriptor.PLATFORM_POLICY[platform])
+        for policy in descriptor.NATIVE_POLICY.values():
+            self.assertNotIn(helper, policy)
+        for name in set(descriptor.transport.POLICY_FILES) | set(value["policy_files"]):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text("reviewed application policy\n")
+        original = descriptor.transport.context(value, self.root)
+        (self.root / helper).write_text("changed diagnostic child lifecycle\n")
+        changed = descriptor.transport.context(value, self.root)
+        self.assertNotEqual(original["policy_digest"], changed["policy_digest"])
+        self.assertEqual(original["compatibility_digest"], changed["compatibility_digest"])
+
     def test_macos_descriptor_binds_actual_tools_flags_qt_and_dependency_trees(self):
         result = self.make()
         self.assertEqual(result["kind"], "ccache")

@@ -141,14 +141,33 @@ def sccache_adapter(runner):
     return run
 
 
+def start_diagnostics(build_root, mode):
+    # Imported only on explicit opt-in; qualification-bound execution stays intact.
+    from ci_execution_diagnostics import start
+    return start(build_root, mode)
+
+
 def run_build(command, *, repo_root, build_root, output, object_cache, runner=None, clock=None,
-              provenance=None, cache_tool="ccache"):
+              provenance=None, cache_tool="ccache", execution_diagnostics=None):
     runner = subprocess.run if runner is None else runner
     if cache_tool not in ("ccache", "sccache"):
         raise MetricsError("unknown cache tool")
-    report = legacy.run_build(command, repo_root=repo_root, build_root=build_root, output=output,
-                              object_cache=object_cache, runner=sccache_adapter(runner) if cache_tool == "sccache" else runner,
-                              clock=clock)
+    diagnostics = None
+    if execution_diagnostics is not None:
+        try:
+            diagnostics = start_diagnostics(build_root, execution_diagnostics)
+        except Exception:
+            print("notice: optional execution diagnostics could not start", file=sys.stderr)
+    try:
+        report = legacy.run_build(command, repo_root=repo_root, build_root=build_root, output=output,
+                                  object_cache=object_cache, runner=sccache_adapter(runner) if cache_tool == "sccache" else runner,
+                                  clock=clock)
+    finally:
+        if diagnostics is not None:
+            try:
+                diagnostics.stop()
+            except Exception:
+                print("notice: optional execution diagnostics could not stop", file=sys.stderr)
     if report is None:
         return None
     try:
@@ -314,6 +333,7 @@ def main(argv=None):
         build.add_argument("--" + name, required=True)
     build.add_argument("--object-cache", choices=("measured", "disabled", "unmeasured"), default="measured")
     build.add_argument("--cache-tool", choices=("ccache", "sccache"), default="ccache")
+    build.add_argument("--execution-diagnostics", choices=("macos-tsan",), default=None)
     build.add_argument("command", nargs=argparse.REMAINDER)
     bind = commands.add_parser("bind-environment")
     bind.add_argument("--metrics", required=True, type=Path)
@@ -327,7 +347,8 @@ def main(argv=None):
             if not command:
                 parser.error("build command required after --")
             report = run_build(command, repo_root=args.repo_root, build_root=args.build_root, output=args.output,
-                               object_cache=args.object_cache, cache_tool=args.cache_tool)
+                               object_cache=args.object_cache, cache_tool=args.cache_tool,
+                               execution_diagnostics=args.execution_diagnostics)
         if report is not None:
             # Preserve current-run evidence even when optional artifact transport fails.
             print("KLOGG_BUILD_METRICS_JSON=" + json.dumps(report, sort_keys=True))

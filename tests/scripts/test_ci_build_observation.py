@@ -163,6 +163,47 @@ class ObservationTest(unittest.TestCase):
                 else:
                     self.assertEqual(report["cache_deltas"], {"direct_cache_hit": 4, "preprocessed_cache_hit": 0, "cache_miss": 0})
 
+    def test_execution_diagnostics_cli_is_explicit_and_default_off(self):
+        arguments = ["run-build", "--repo-root", str(self.build), "--build-root", str(self.build),
+                     "--output", str(self.output)]
+        for mode in (None, "macos-tsan"):
+            with self.subTest(mode=mode), mock.patch.object(MODULE, "run_build", return_value=None) as run:
+                extra = ["--execution-diagnostics", mode] if mode else []
+                self.assertEqual(MODULE.main([*arguments, *extra, "--", "cmake", "--build", str(self.build)]), 0)
+                self.assertEqual(run.call_args.kwargs.get("execution_diagnostics"), mode)
+
+    def test_diagnostics_never_replace_the_build_runner_and_stop_on_failure(self):
+        for failure in (None, subprocess.CalledProcessError(42, ["cmake"]), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                self.output.unlink(missing_ok=True)
+                session = mock.Mock()
+                command = ["cmake", "--build", str(self.build), "--parallel", "4"]
+                runner = mock.Mock(side_effect=failure) if failure else mock.Mock(
+                    return_value=subprocess.CompletedProcess(command, 0, "", ""))
+                with mock.patch.object(MODULE, "start_diagnostics", return_value=session, create=True) as start:
+                    if failure:
+                        with self.assertRaises(type(failure)):
+                            self.run_build(command=command, runner=runner, execution_diagnostics="macos-tsan")
+                        self.assertFalse(self.output.exists())
+                    else:
+                        self.run_build(command=command, runner=runner, execution_diagnostics="macos-tsan")
+                    start.assert_called_once_with(self.build, "macos-tsan")
+                    session.stop.assert_called_once_with()
+                    runner.assert_called_once_with(command, check=False)
+
+    def test_diagnostic_start_or_stop_failure_is_nonfatal_and_private(self):
+        for stage in ("start", "stop"):
+            with self.subTest(stage=stage):
+                self.output.unlink(missing_ok=True)
+                session = mock.Mock()
+                if stage == "stop":
+                    session.stop.side_effect = RuntimeError("PRIVATE_TOKEN=secret")
+                with mock.patch.object(MODULE, "start_diagnostics", return_value=session,
+                                       side_effect=RuntimeError("PRIVATE_TOKEN=secret") if stage == "start" else None,
+                                       create=True), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertIsNotNone(self.run_build(execution_diagnostics="macos-tsan"))
+                self.assertNotIn("secret", errors.getvalue())
+
     def test_build_failure_remains_authoritative(self):
         with self.assertRaises(subprocess.CalledProcessError) as raised:
             self.run_build(runner=lambda command, **kw: subprocess.CompletedProcess(command, 42, "", ""))

@@ -40,7 +40,7 @@ PLATFORM_POLICY = {
     "macOS": (
         ".github/actions/agent-build/action.yml", ".github/actions/agent-run-tests/action.yml",
         ".github/actions/agent-package-mac/action.yml", "scripts/ci_native_overlap.py",
-        "scripts/ci_native_rendezvous.py",
+        "scripts/ci_native_rendezvous.py", "scripts/ci_execution_diagnostics.py",
     ),
     "Linux": (
         ".github/actions/docker-build/action.yml", ".github/actions/docker-run-tests/action.yml",
