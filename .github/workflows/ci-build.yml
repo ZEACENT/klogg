@@ -2150,6 +2150,15 @@ jobs:
           fi
           echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON $PACKAGE_CMAKE_OPTS ${{ env.KLOGG_CONFIG_CMAKE_OPTS }}" >> $GITHUB_ENV
 
+      - name: Select Intel macOS TSan optimization profile
+        if: ${{ runner.os == 'macOS' && env.KLOGG_SANITIZER == 'thread' }}
+        shell: sh
+        run: |
+          # Nested dependency project() calls resolve relative includes anew.
+          # Match the measured absolute hook before deriving cache identity.
+          test -f "$KLOGG_WORKSPACE/cmake/CiMacosTsanProfile.cmake"
+          printf '%s\n' "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_PROJECT_INCLUDE=$KLOGG_WORKSPACE/cmake/CiMacosTsanProfile.cmake" >> "$GITHUB_ENV"
+
       - name: Configure effective ccache budget
         shell: bash
         run: python3 scripts/ci_ccache.py prepare --label "$KLOGG_LABEL" --github-env "$GITHUB_ENV"
@@ -2539,7 +2548,7 @@ jobs:
             # time (vectorscan dominates) and the ccache entry footprint.
             # The measured O1 profile preserves existing debug and sanitizer flags.
             # agent-build verifies generated commands before compiling.
-            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON -DKLOGG_CI_LIGHT_DEBUG=ON -DKLOGG_CI_MACOS_TSAN_O1=ON -DCMAKE_PROJECT_INCLUDE=cmake/CiMacosTsanProfile.cmake
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON -DKLOGG_CI_LIGHT_DEBUG=ON -DKLOGG_CI_MACOS_TSAN_O1=ON
             sanitizer: thread
 
     runs-on: ${{ matrix.config.os }}

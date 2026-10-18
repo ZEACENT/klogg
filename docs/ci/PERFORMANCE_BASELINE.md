@@ -200,10 +200,13 @@ storage or cost reduction; retained runs and concurrent lanes must be measured.
 The macOS TSan baseline covers first-party code plus mimalloc and TBB, not all
 source-built dependencies or prebuilt Qt. That scope, exact per-command debug
 flags and LTO-off are preserved. The Intel macOS TSan workflow row now explicitly
-enables the accepted pure-`-O1` profile through `KLOGG_CI_MACOS_TSAN_O1=ON` and
-`CMAKE_PROJECT_INCLUDE=cmake/CiMacosTsanProfile.cmake`; ordinary/module defaults
-remain off. A full/macOS/thread-only guard checks generated commands between
-configure and build. This optimization change is separate from compiler-object
+enables the accepted pure-`-O1` profile through `KLOGG_CI_MACOS_TSAN_O1=ON`.
+A macOS/thread-only runner step checks the profile beneath `$KLOGG_WORKSPACE` and
+appends the absolute checkout path to `cmake/CiMacosTsanProfile.cmake` as
+`CMAKE_PROJECT_INCLUDE` before cache identity is described. The matrix does not
+supply a relative include, which would fail for nested dependency `project()`
+calls. Ordinary/module defaults remain off. A full/macOS/thread-only guard checks
+generated commands between configure and build. This optimization change is separate from compiler-object
 reuse and does not activate the earlier mixed optimization/debug experiment.
 
 ## New observation/report contract

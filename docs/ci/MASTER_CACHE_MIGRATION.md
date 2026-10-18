@@ -191,8 +191,12 @@ starting application compilation:
 
 Package-free macOS sanitizer jobs retain a single full build without the native
 producer rendezvous. **Only the Intel macOS TSan row now explicitly opts into the
-accepted pure-`-O1` profile**, using `KLOGG_CI_MACOS_TSAN_O1=ON` and
-`CMAKE_PROJECT_INCLUDE=cmake/CiMacosTsanProfile.cmake`. The module remains
+accepted pure-`-O1` profile**, using the matrix flag `KLOGG_CI_MACOS_TSAN_O1=ON`.
+A macOS/thread-only runner step checks
+`$KLOGG_WORKSPACE/cmake/CiMacosTsanProfile.cmake` and appends its runner-resolved
+**absolute path** as `CMAKE_PROJECT_INCLUDE` through `GITHUB_ENV`, before the
+compiler-cache descriptor is created. This is not a relative matrix include:
+nested dependency `project()` calls must resolve the same file. The module remains
 default-off for ordinary/local and other builds. The shared build action checks
 the generated compilation commands between configure and build only for the
 full/macOS/thread path; configuration intent alone is not accepted as proof.

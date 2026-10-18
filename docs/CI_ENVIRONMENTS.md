@@ -813,9 +813,12 @@ verification or to reuse a prior run's native bundle.
 
 The original macOS TSan scope is first-party code plus mimalloc and TBB, not all
 source-built dependencies or prebuilt Qt. Only the Intel macOS TSan row now opts
-into the accepted pure-`-O1` profile via `KLOGG_CI_MACOS_TSAN_O1=ON` and
-`CMAKE_PROJECT_INCLUDE=cmake/CiMacosTsanProfile.cmake`; the module remains
-default-off elsewhere. The full/macOS/thread build path checks generated commands
+into the accepted pure-`-O1` profile via `KLOGG_CI_MACOS_TSAN_O1=ON`. A guarded
+macOS/thread runner step checks `$KLOGG_WORKSPACE/cmake/CiMacosTsanProfile.cmake`
+and appends that absolute checkout path as `CMAKE_PROJECT_INCLUDE` before cache
+descriptor generation. The matrix does not use a relative include: nested
+`project()` calls must load the same profile. The module remains default-off
+elsewhere. The full/macOS/thread build path checks generated commands
 between configure and build. Existing per-command debug flags, sanitizer scope,
 LTO-off, CPU flags, concurrency, job name and timeout remain unchanged. The Linux
 instrumented-Qt TSan lane remains responsible for Qt-internal race coverage.

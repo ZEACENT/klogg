@@ -1,6 +1,13 @@
 """Latency changes must preserve final native-artifact and publication gates."""
+import json
+import os
 from pathlib import Path
+import platform
 import re
+import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 from test_ci_environment_workflow import QUALITY
@@ -143,16 +150,135 @@ class SharedApplicationObjectsTest(unittest.TestCase):
 
 
 class MacTsanOptimizationTest(unittest.TestCase):
+    @staticmethod
+    def configure_with_workflow_options(text, workspace):
+        """Execute the actual option-producing shell steps, then nested CMake."""
+        block = '\n'.join(QUALITY.workflow_job_blocks(text)['MacSanitizers'])
+        configurations = block.split('        config:\n', 1)[1].split('    runs-on:', 1)[0]
+        tsan = next(row for row in configurations.split('          - os:')[1:]
+                    if 'label: intel-qt6-first-party-tsan' in row)
+        matrix_options = re.search(r'^\s+cmake_opts: (.+)$', tsan, re.M).group(1)
+        substitutions = {
+            'env.KLOGG_PACKAGE_ENABLED': 'false',
+            'env.KLOGG_ADB_HELPER_TARGET': 'macos-x86_64',
+            'env.KLOGG_CONFIG_CMAKE_OPTS': matrix_options,
+            'github.workspace': str(workspace),
+        }
+        env = dict(os.environ, KLOGG_WORKSPACE=str(workspace),
+                   KLOGG_PACKAGE_ENABLED='false', KLOGG_SANITIZER='thread',
+                   RUNNER_OS='macOS', GITHUB_ENV=str(workspace / 'github-env'))
+        developer = Path('/Applications/Xcode_26.6.app/Contents/Developer')
+        if developer.is_dir():
+            env['DEVELOPER_DIR'] = str(developer)
+        for fields, _ in steps(text, 'MacSanitizers'):
+            if fields.get('id') == 'shared-cache-descriptor':
+                break
+            if fields.get('name') not in (
+                'Disable Sentry on macOS', 'Select Intel macOS TSan optimization profile'
+            ):
+                continue
+            script = re.sub(r'\$\{\{\s*(.*?)\s*\}\}',
+                            lambda match: substitutions[match.group(1)], fields['run'])
+            subprocess.run([fields['shell'], '-eu', '-c', script], env=env,
+                           cwd=workspace, check=True, capture_output=True, text=True)
+            # GitHub imports GITHUB_ENV values between steps without shell eval.
+            for line in Path(env['GITHUB_ENV']).read_text().splitlines():
+                name, value = line.split('=', 1)
+                env[name] = value
+        # The action runs CMake from its build directory, not from the checkout.
+        build = workspace / 'build'
+        build.mkdir()
+        command = ['cmake', *shlex.split(env['KLOGG_CMAKE_OPTS']),
+                   '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', str(workspace)]
+        result = subprocess.run(command, cwd=build, env=env, check=False,
+                                capture_output=True, text=True)
+        return result, env['KLOGG_CMAKE_OPTS']
+
+    @staticmethod
+    def make_nested_project(workspace):
+        (workspace / 'cmake').mkdir()
+        shutil.copy2(ROOT / 'cmake/CiMacosTsanProfile.cmake', workspace / 'cmake')
+        (workspace / 'dependency').mkdir()
+        (workspace / 'CMakeLists.txt').write_text(
+            'cmake_minimum_required(VERSION 3.14)\n'
+            'project(workflow_profile_fixture LANGUAGES C CXX)\n'
+            'set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O2 -g1 -DNDEBUG")\n'
+            'add_compile_options(-fsanitize=thread)\n'
+            'add_subdirectory(dependency)\n'
+        )
+        (workspace / 'dependency/CMakeLists.txt').write_text(
+            'project(nested_dependency LANGUAGES C)\n'
+            'add_library(dependency STATIC dep.c)\n'
+            'target_compile_options(dependency PRIVATE -O3)\n'
+        )
+        (workspace / 'dependency/dep.c').write_text('int dependency(void) { return 7; }\n')
+
+    @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'x86_64',
+                         'the enabled profile requires Intel macOS AppleClang')
+    def test_actual_workflow_options_configure_nested_dependency_projects(self):
+        with tempfile.TemporaryDirectory(prefix='klogg-workflow-profile-') as directory:
+            workspace = Path(directory)
+            self.make_nested_project(workspace)
+            result, options = self.configure_with_workflow_options(WORKFLOW.read_text(), workspace)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            profile = next(option.split('=', 1)[1] for option in shlex.split(options)
+                           if option.startswith('-DCMAKE_PROJECT_INCLUDE='))
+            self.assertTrue(Path(profile).is_absolute(), profile)
+            self.assertEqual(Path(profile), workspace / 'cmake/CiMacosTsanProfile.cmake')
+            commands = json.loads((workspace / 'build/compile_commands.json').read_text())
+            self.assertEqual(len(commands), 1)
+            arguments = shlex.split(commands[0]['command'])
+            self.assertEqual([arg for arg in arguments if arg.startswith('-O')][-1], '-O1')
+            self.assertIn('-g1', arguments)
+            self.assertIn('-fsanitize=thread', arguments)
+
+    @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'x86_64',
+                         'the enabled profile requires Intel macOS AppleClang')
+    def test_relative_workflow_hook_mutation_fails_in_nested_project(self):
+        text = WORKFLOW.read_text()
+        absolute = '-DCMAKE_PROJECT_INCLUDE=$KLOGG_WORKSPACE/cmake/CiMacosTsanProfile.cmake'
+        self.assertEqual(text.count(absolute), 1)
+        broken = text.replace(absolute, '-DCMAKE_PROJECT_INCLUDE=cmake/CiMacosTsanProfile.cmake')
+        with tempfile.TemporaryDirectory(prefix='klogg-workflow-relative-') as directory:
+            workspace = Path(directory)
+            self.make_nested_project(workspace)
+            result, _ = self.configure_with_workflow_options(broken, workspace)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('dependency/CMakeLists.txt:1 (project)', result.stderr)
+            self.assertIn('project could not find requested file', result.stderr)
+
+    @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'x86_64',
+                         'the enabled profile requires Intel macOS AppleClang')
+    def test_workflow_profile_selection_fails_closed_if_hook_is_missing(self):
+        with tempfile.TemporaryDirectory(prefix='klogg-workflow-missing-') as directory:
+            workspace = Path(directory)
+            self.make_nested_project(workspace)
+            (workspace / 'cmake/CiMacosTsanProfile.cmake').unlink()
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.configure_with_workflow_options(WORKFLOW.read_text(), workspace)
+
     def test_only_intel_tsan_enables_measured_profile_and_checks_generated_commands(self):
         text = WORKFLOW.read_text()
         block = '\n'.join(QUALITY.workflow_job_blocks(text)['MacSanitizers'])
         configurations = block.split('        config:\n', 1)[1].split('    runs-on:', 1)[0]
         tsan = next(row for row in configurations.split('          - os:')[1:]
                     if 'label: intel-qt6-first-party-tsan' in row)
-        for option in ('-DKLOGG_CI_MACOS_TSAN_O1=ON',
-                       '-DCMAKE_PROJECT_INCLUDE=cmake/CiMacosTsanProfile.cmake'):
-            self.assertIn(option, tsan)
-            self.assertEqual(text.count(option), 1)
+        option = '-DKLOGG_CI_MACOS_TSAN_O1=ON'
+        self.assertIn(option, tsan)
+        self.assertEqual(text.count(option), 1)
+        self.assertNotIn('CMAKE_PROJECT_INCLUDE', configurations)
+        workflow_steps = steps(text, 'MacSanitizers')
+        names = [fields.get('name') for fields, _ in workflow_steps]
+        selection = names.index('Select Intel macOS TSan optimization profile')
+        constructor = names.index('Disable Sentry on macOS')
+        descriptor = next(index for index, (fields, _) in enumerate(workflow_steps)
+                          if fields.get('id') == 'shared-cache-descriptor')
+        self.assertLess(constructor, selection)
+        self.assertLess(selection, descriptor)
+        self.assertEqual(workflow_steps[selection][0]['if'],
+                         "${{ runner.os == 'macOS' && env.KLOGG_SANITIZER == 'thread' }}")
+        self.assertEqual(workflow_steps[selection][0]['shell'], 'sh')
+        self.assertNotRegex(workflow_steps[selection][0]['run'], r'\beval\b')
         action = (ROOT / '.github/actions/agent-build/action.yml').read_text()
         body = action.split('  steps:\n', 1)[1]
         wrapped = 'jobs:\n  NativeBuild:\n    steps:\n' + '\n'.join('  ' + line for line in body.splitlines())
