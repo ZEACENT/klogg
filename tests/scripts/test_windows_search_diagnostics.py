@@ -1396,6 +1396,25 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             with self.subTest(mutation=index), self.assertRaises(AssertionError):
                 self.assert_workflow_identity_contract(mutation)
 
+    def test_windows_helper_staging_contract_runs_natively_before_ctest(self):
+        source = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        windows = source.split("  WindowsPackages:", 1)[1].split("  WindowsX86:", 1)[0]
+        marker = "      - name: Verify Windows helper staging\n"
+        self.assertEqual(windows.count(marker), 1)
+        step = windows.split(marker, 1)[1].split("      - ", 1)[0]
+        lines = [line.strip() for line in step.splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(lines, [
+            "shell: pwsh",
+            "run: |",
+            "python -I tests/scripts/test_adb_helper_staging.py AdbHelperStagingScriptTest",
+            "exit $LASTEXITCODE",
+        ])
+        self.assertLess(windows.index(marker), windows.index("      - name: Verify Windows tests"))
+        for job in ("WindowsX86", "WindowsAsan"):
+            inherited = re.split(r"\n  \S", source.split("  " + job + ":", 1)[1], maxsplit=1)[0]
+            self.assertIn("steps: *windows_steps", inherited)
+
     def test_ci_exports_explicit_dump_and_collects_both_exe_symbol_pairs(self):
         source = (ROOT / ".github/workflows/ci-build.yml").read_text()
         setup = source.split("      - name: Configure crash dumps for Windows test binaries", 1)[1].split(

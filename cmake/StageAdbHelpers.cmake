@@ -63,7 +63,7 @@ function(adb_path_key path output)
 endfunction()
 
 # Ownership follows the directory entry being replaced, not a final helpers
-# symlink's target. Parent aliases are resolved, but rm always receives the
+# symlink's target. Parent aliases are resolved, but removal always receives the
 # original destination spelling so it cannot delete an unrelated link target.
 function(adb_entry_key path output)
   get_filename_component(parent "${path}" DIRECTORY)
@@ -208,12 +208,65 @@ foreach(destination IN LISTS helper_destinations)
   endif()
 endforeach()
 
+# Windows may keep an unchanged adb server image open. Reuse only a complete
+# byte-identical real directory tree, never a timestamp/stamp or symlink alias.
+# POSIX staging still refreshes source permissions as well as file contents.
+function(adb_helpers_match destination output)
+  set(${output} FALSE PARENT_SCOPE)
+  if(NOT IS_DIRECTORY "${destination}" OR IS_SYMLINK "${destination}")
+    return()
+  endif()
+  file(GLOB_RECURSE source_entries LIST_DIRECTORIES TRUE
+    RELATIVE "${SOURCE_HELPERS}" "${SOURCE_HELPERS}/*")
+  file(GLOB_RECURSE destination_entries LIST_DIRECTORIES TRUE
+    RELATIVE "${destination}" "${destination}/*")
+  if(NOT "${source_entries}" STREQUAL "${destination_entries}")
+    return()
+  endif()
+  foreach(entry IN LISTS source_entries)
+    set(source "${SOURCE_HELPERS}/${entry}")
+    set(target "${destination}/${entry}")
+    if(IS_SYMLINK "${source}" OR IS_SYMLINK "${target}")
+      return()
+    endif()
+    if(IS_DIRECTORY "${source}")
+      if(NOT IS_DIRECTORY "${target}")
+        return()
+      endif()
+    elseif(IS_DIRECTORY "${target}")
+      return()
+    else()
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E compare_files "${source}" "${target}"
+        RESULT_VARIABLE comparison_result
+      )
+      if(NOT "${comparison_result}" STREQUAL "0")
+        return()
+      endif()
+    endif()
+  endforeach()
+  set(${output} TRUE PARENT_SCOPE)
+endfunction()
+
 foreach(destination IN LISTS selected_destinations)
+  if(CMAKE_HOST_WIN32)
+    adb_helpers_match("${destination}" current)
+    if(current)
+      continue()
+    endif()
+  endif()
+  # Both commands are available in CMake 3.14. Unlink leaf symlinks explicitly;
+  # never hand their resolved targets to recursive removal.
+  if(IS_DIRECTORY "${destination}" AND NOT IS_SYMLINK "${destination}")
+    set(removal_command remove_directory)
+  else()
+    set(removal_command remove -f)
+  endif()
   execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${destination}"
+    COMMAND "${CMAKE_COMMAND}" -E ${removal_command} "${destination}"
     RESULT_VARIABLE removal_result
   )
-  if(NOT "${removal_result}" STREQUAL "0")
+  if(NOT "${removal_result}" STREQUAL "0" OR EXISTS "${destination}" OR IS_SYMLINK "${destination}")
     message(FATAL_ERROR "Removing stale ADB helpers failed: ${destination}")
   endif()
   execute_process(

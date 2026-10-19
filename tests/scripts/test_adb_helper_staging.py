@@ -391,11 +391,13 @@ class AdbHelperStagingScriptTest(unittest.TestCase):
         self.destination.mkdir(parents=True)
         (self.destination / "stale.dll").write_bytes(b"old runtime")
 
-    def stage(self, manifest, *, trace=False):
+    def stage(self, manifest, *, trace=False, windows_host=None):
         paths = self.root / "destinations.txt"
         paths.write_text(manifest, encoding="utf-8")
         script = ROOT / "cmake/StageAdbHelpers.cmake"
         command = [CMAKE]
+        if windows_host is not None:
+            command += ["-DCMAKE_HOST_WIN32=" + ("TRUE" if windows_host else "FALSE")]
         if trace:
             command += ["--trace-expand", "--trace-source=" + str(script)]
         command += ["-DSOURCE_HELPERS=" + str(self.source),
@@ -408,6 +410,161 @@ class AdbHelperStagingScriptTest(unittest.TestCase):
         self.assertEqual(result.stderr.count(" -E copy_directory "), 1)
         self.assertEqual((self.destination / "adb.exe").read_bytes(), b"verified runtime")
         self.assertFalse((self.destination / "stale.dll").exists())
+
+    def test_removal_command_is_available_in_cmake314(self):
+        result = self.stage(str(self.destination) + "\n", trace=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # cmake -E rm first appeared in 3.17, above the declared baseline.
+        self.assertNotIn(" -E rm ", result.stderr)
+        self.assertFalse((self.destination / "stale.dll").exists())
+
+    def test_windows_current_tree_is_reused_without_any_destructive_write(self):
+        (self.source / "nested/empty").mkdir(parents=True)
+        (self.source / "nested/.runtime").write_bytes(b"hidden runtime")
+        shutil.rmtree(self.destination)
+        shutil.copytree(self.source, self.destination)
+        paths = [self.destination, *self.destination.rglob("*")]
+        for path in paths:
+            os.utime(path, ns=(1000000000000000000, 1000000000000000000))
+        original = {path: (path.stat().st_ino, path.stat().st_mtime_ns) for path in paths}
+        for _ in range(2):
+            result = self.stage(str(self.destination) + "\n", trace=True, windows_host=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn(" -E copy_directory ", result.stderr)
+            self.assertNotIn(" -E remove", result.stderr)
+            self.assertNotIn(" -E rm ", result.stderr)
+            self.assertEqual({path: (path.stat().st_ino, path.stat().st_mtime_ns)
+                              for path in paths}, original)
+
+    def test_windows_current_tree_still_validates_source_and_overlap(self):
+        shutil.rmtree(self.destination)
+        shutil.copytree(self.source, self.destination)
+        original_source = self.source
+        self.source = self.destination
+        result = self.stage(str(self.destination) + "\n", windows_host=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", result.stdout + result.stderr)
+        self.source = original_source
+        shutil.rmtree(self.source)
+        result = self.stage(str(self.destination) + "\n", windows_host=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source directory is missing", result.stdout + result.stderr)
+        self.assertEqual((self.destination / "adb.exe").read_bytes(), b"verified runtime")
+
+    def test_windows_refresh_checks_complete_tree_types_and_bytes(self):
+        (self.source / "nested/empty").mkdir(parents=True)
+        (self.source / "nested/.runtime").write_bytes(b"hidden runtime")
+        for mutation in ("changed", "missing", "stale", "empty-directory", "type", "missing-root"):
+            with self.subTest(mutation=mutation):
+                shutil.rmtree(self.destination)
+                shutil.copytree(self.source, self.destination)
+                if mutation == "changed":
+                    target = self.destination / "adb.exe"
+                    old_stat = target.stat()
+                    target.write_bytes(b"corrupt! runtime")
+                    self.assertEqual(target.stat().st_size, old_stat.st_size)
+                    os.utime(target, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+                elif mutation == "missing":
+                    (self.destination / "nested/.runtime").unlink()
+                elif mutation == "stale":
+                    (self.destination / ".stale").write_bytes(b"obsolete runtime")
+                elif mutation == "empty-directory":
+                    (self.destination / "stale-empty").mkdir()
+                elif mutation == "type":
+                    (self.destination / "nested/empty").rmdir()
+                    (self.destination / "nested/empty").write_bytes(b"")
+                else:
+                    shutil.rmtree(self.destination)
+                result = self.stage(str(self.destination) + "\n", trace=True, windows_host=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stderr.count(" -E copy_directory "), 1)
+                self.assertEqual((self.destination / "adb.exe").read_bytes(), b"verified runtime")
+                self.assertEqual((self.destination / "nested/.runtime").read_bytes(), b"hidden runtime")
+                self.assertTrue((self.destination / "nested/empty").is_dir())
+                self.assertEqual(sorted(str(path.relative_to(self.destination))
+                                        for path in self.destination.rglob("*")),
+                                 sorted(str(path.relative_to(self.source))
+                                        for path in self.source.rglob("*")))
+
+    def test_windows_equal_byte_leaf_symlink_is_replaced_not_reused(self):
+        external = self.root / "external/helpers"
+        shutil.copytree(self.source, external)
+        shutil.rmtree(self.destination)
+        self.alias(self.destination, external)
+        result = self.stage(str(self.destination) + "\n", trace=True, windows_host=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.count(" -E copy_directory "), 1)
+        self.assertFalse(self.destination.is_symlink())
+        self.assertEqual((external / "adb.exe").read_bytes(), b"verified runtime")
+
+    def test_windows_equal_byte_nested_symlink_is_replaced_not_reused(self):
+        (self.source / "nested").mkdir()
+        (self.source / "nested/runtime.dll").write_bytes(b"runtime closure")
+        external = self.root / "external"
+        shutil.copytree(self.source, external)
+        shutil.rmtree(self.destination)
+        shutil.copytree(self.source, self.destination)
+        shutil.rmtree(self.destination / "nested")
+        self.alias(self.destination / "nested", external / "nested")
+        result = self.stage(str(self.destination) + "\n", trace=True, windows_host=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.count(" -E copy_directory "), 1)
+        self.assertFalse((self.destination / "nested").is_symlink())
+        self.assertEqual((external / "nested/runtime.dll").read_bytes(), b"runtime closure")
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX directory permissions")
+    def test_failed_removal_is_fatal_and_does_not_copy_over_remaining_tree(self):
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses directory permissions")
+        self.destination.parent.chmod(0o500)
+        try:
+            result = self.stage(str(self.destination) + "\n", trace=True, windows_host=False)
+        finally:
+            self.destination.parent.chmod(0o700)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Removing stale ADB helpers failed", result.stdout + result.stderr)
+        self.assertNotIn(" -E copy_directory ", result.stderr)
+        self.assertTrue(self.destination.is_dir())
+        self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX execute permissions")
+    def test_non_windows_refresh_preserves_source_permission_changes(self):
+        helper = self.source / "adb.exe"
+        helper.chmod(0o600)
+        result = self.stage(str(self.destination) + "\n", windows_host=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        helper.chmod(0o755)
+        result = self.stage(str(self.destination) + "\n", windows_host=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.destination / "adb.exe").stat().st_mode & 0o777, 0o755)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows file-sharing semantics")
+    def test_windows_locked_current_helper_is_reused_but_changed_helper_fails(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        result = self.stage(str(self.destination) + "\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        handle = kernel.CreateFileW(str(self.destination / "adb.exe"), 0x80000000,
+                                    1, None, 3, 0, None)
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value, ctypes.get_last_error())
+        try:
+            result = self.stage(str(self.destination) + "\n", trace=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn(" -E copy_directory ", result.stderr)
+            (self.source / "adb.exe").write_bytes(b"changed runtime")
+            result = self.stage(str(self.destination) + "\n")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Removing stale ADB helpers failed", result.stdout + result.stderr)
+            self.assertEqual((self.destination / "adb.exe").read_bytes(), b"verified runtime")
+        finally:
+            self.assertTrue(kernel.CloseHandle(handle))
 
     def test_destination_access_path_overlap_is_rejected_before_mutation(self):
         for order in ("forward", "reverse"):
