@@ -30,9 +30,12 @@ class AdbHelperStagingTest(unittest.TestCase):
         return result
 
     def configure(self, name, *, windows=True, multi=False, available=True, apple=False,
-                  producer_fails=False):
+                  producer_fails=False, cmake_options=(), after_targets=""):
         source = self.root / name
         source.mkdir()
+        (source / "cmake").mkdir()
+        shutil.copyfile(ROOT / "cmake/StageAdbHelpers.cmake",
+                        source / "cmake/StageAdbHelpers.cmake")
         stage = source / "verified helper" / "helpers"
         stage.mkdir(parents=True)
         (stage / "adb.exe").write_bytes(b"verified helper v1")
@@ -40,7 +43,11 @@ class AdbHelperStagingTest(unittest.TestCase):
         package = source / "package support"
         package.mkdir()
         (package / "NOTICE.txt").write_bytes(b"verified legal support")
-        (source / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        app_source = source / "src/app"
+        helper_source = source / "packaging/adb"
+        app_source.mkdir(parents=True)
+        helper_source.mkdir(parents=True)
+        (app_source / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
         app = (ROOT / "src/app/CMakeLists.txt").read_text(encoding="utf-8")
         block = app.split("add_dependencies(klogg klogg_adb_helper)", 1)[1]
         block = "add_dependencies(klogg klogg_adb_helper)" + block.split(
@@ -51,6 +58,11 @@ class AdbHelperStagingTest(unittest.TestCase):
                 'message(FATAL_ERROR "verified producer rejected input")\n', encoding="utf-8")
             producer = ('add_custom_target(klogg_adb_helper COMMAND "${CMAKE_COMMAND}" '
                         '-P "${CMAKE_SOURCE_DIR}/reject.cmake")\n')
+        (helper_source / "CMakeLists.txt").write_text(producer, encoding="utf-8")
+        (app_source / "CMakeLists.txt").write_text(
+            f"add_executable(klogg {'MACOSX_BUNDLE' if apple else ''} main.c)\n"
+            f"add_executable(klogg_portable {'MACOSX_BUNDLE' if apple else ''} main.c)\n"
+            + block + after_targets, encoding="utf-8")
         (source / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.14)\n"
             "project(HelperStaging C)\n"
@@ -60,16 +72,16 @@ class AdbHelperStagingTest(unittest.TestCase):
             'set(KLOGG_ADB_HELPER_STAGE "${CMAKE_SOURCE_DIR}/verified helper")\n'
             'set(KLOGG_ADB_HELPER_PACKAGE_STAGE "${CMAKE_SOURCE_DIR}/package support")\n'
             f"set(KLOGG_ADB_HELPER_AVAILABLE {'TRUE' if available else 'FALSE'})\n"
-            + producer + "add_custom_target(klogg_grep)\n"
+            "add_custom_target(klogg_grep)\n"
             "add_custom_target(ci_build)\n"
-            f"add_executable(klogg {'MACOSX_BUNDLE' if apple else ''} main.c)\n"
-            f"add_executable(klogg_portable {'MACOSX_BUNDLE' if apple else ''} main.c)\n" + block,
+            "add_subdirectory(packaging/adb)\n"
+            "add_subdirectory(src/app)\n",
             encoding="utf-8")
         build = source / "build"
         generator = "Ninja Multi-Config" if multi else "Ninja"
         self.run_command([CMAKE, "-S", str(source), "-B", str(build), "-G", generator,
                           "-DCMAKE_MAKE_PROGRAM=" + NINJA,
-                          "-DCMAKE_C_COMPILER=" + COMPILER])
+                          "-DCMAKE_C_COMPILER=" + COMPILER, *cmake_options])
         return build, stage
 
     def build(self, build, target="ci_build", *, config=None, check=True):
@@ -90,7 +102,8 @@ class AdbHelperStagingTest(unittest.TestCase):
                                           "klogg", "klogg_portable", "klogg_stage_adb_helpers"]).stdout
                 # Assert graph ownership, not whether a filesystem race happens
                 # to reproduce on this host. Each old POST_BUILD was a writer.
-                self.assertEqual(graph.count("copy_directory"), 1, graph)
+                self.assertEqual(graph.count("/cmake/StageAdbHelpers.cmake"), 1, graph)
+                self.assertNotIn(" -E copy_directory ", graph)
                 self.build(build, "all")
                 self.assertTrue(self.executable(build, "klogg").is_file())
                 self.assertTrue(self.executable(build, "klogg_portable").is_file())
@@ -126,6 +139,53 @@ class AdbHelperStagingTest(unittest.TestCase):
                 self.build(build, config=config)
                 self.assertEqual((build / "output" / config / "helpers/adb.exe").read_bytes(),
                                  b"verified helper v1")
+        self.assertFalse((build / "output/helpers").exists())
+
+    def test_single_config_output_override_can_be_absolute_or_relative(self):
+        for name, runtime in (("absolute", str(self.root / "custom debug")),
+                              ("relative", "relative debug")):
+            with self.subTest(name=name):
+                build, _ = self.configure(name, cmake_options=(
+                    "-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG=" + runtime))
+                self.build(build)
+                destination = (Path(runtime) if Path(runtime).is_absolute()
+                               else build / "src/app" / runtime)
+                executable = "klogg.exe" if os.name == "nt" else "klogg"
+                self.assertTrue((destination / executable).is_file())
+                self.assertTrue((destination / "helpers/adb.exe").is_file(),
+                                "helpers must follow the effective executable directory")
+                self.assertFalse((build / "output/helpers").exists())
+
+    def test_multi_config_override_has_no_extra_configuration_suffix(self):
+        capabilities = json.loads(self.run_command([CMAKE, "-E", "capabilities"]).stdout)
+        if "Ninja Multi-Config" not in {item["name"] for item in capabilities["generators"]}:
+            self.skipTest("this CMake does not provide Ninja Multi-Config")
+        runtime = self.root / "debug override"
+        build, _ = self.configure("config override", multi=True, cmake_options=(
+            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG=" + str(runtime),))
+        self.build(build, config="Debug")
+        executable = "klogg.exe" if os.name == "nt" else "klogg"
+        self.assertTrue((runtime / executable).is_file())
+        self.assertTrue((runtime / "helpers/adb.exe").is_file())
+        self.assertFalse((build / "output/Debug/helpers").exists())
+        self.build(build, config="Release")
+        self.assertTrue((build / "output/Release/helpers/adb.exe").is_file())
+
+    def test_late_target_directories_and_generator_expressions_are_resolved(self):
+        properties = (
+            'set_target_properties(klogg PROPERTIES RUNTIME_OUTPUT_DIRECTORY '
+            '"${CMAKE_BINARY_DIR}/regular-$<CONFIG>")\n'
+            'set_target_properties(klogg_portable PROPERTIES RUNTIME_OUTPUT_DIRECTORY '
+            '"${CMAKE_BINARY_DIR}/portable-$<CONFIG>")\n')
+        build, _ = self.configure("late properties", cmake_options=("-DCMAKE_BUILD_TYPE=Debug",),
+                                  after_targets=properties)
+        self.build(build, "klogg")
+        executable_suffix = ".exe" if os.name == "nt" else ""
+        self.assertTrue((build / "regular-Debug" / ("klogg" + executable_suffix)).is_file())
+        self.assertFalse((build / "portable-Debug" / ("klogg_portable" + executable_suffix)).exists())
+        self.build(build, "klogg_portable")
+        for directory in ("regular-Debug", "portable-Debug"):
+            self.assertTrue((build / directory / "helpers/adb.exe").is_file())
         self.assertFalse((build / "output/helpers").exists())
 
     def test_missing_verified_helper_fails_before_publishing_applications(self):
@@ -167,6 +227,59 @@ class AdbHelperStagingTest(unittest.TestCase):
         self.assertFalse((build / "output/helpers").exists())
         graph = self.run_command([NINJA, "-C", str(build), "-t", "commands", "ci_build"]).stdout
         self.assertNotIn("copy_directory", graph)
+
+
+@unittest.skipUnless(CMAKE, "requires CMake")
+class AdbHelperStagingScriptTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="adb staging data ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.source = self.root / "verified/helpers"
+        self.source.mkdir(parents=True)
+        (self.source / "adb.exe").write_bytes(b"verified runtime")
+        self.destination = self.root / "runtime/helpers"
+        self.destination.mkdir(parents=True)
+        (self.destination / "stale.dll").write_bytes(b"old runtime")
+
+    def stage(self, manifest, *, trace=False):
+        paths = self.root / "destinations.txt"
+        paths.write_text(manifest, encoding="utf-8")
+        script = ROOT / "cmake/StageAdbHelpers.cmake"
+        command = [CMAKE]
+        if trace:
+            command += ["--trace-expand", "--trace-source=" + str(script)]
+        command += ["-DSOURCE_HELPERS=" + str(self.source),
+                    "-DDESTINATIONS_FILE=" + str(paths), "-P", str(script)]
+        return subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=20)
+
+    def test_duplicate_destinations_are_copied_once(self):
+        result = self.stage((str(self.destination) + "\n") * 2, trace=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.count(" -E copy_directory "), 1)
+        self.assertEqual((self.destination / "adb.exe").read_bytes(), b"verified runtime")
+        self.assertFalse((self.destination / "stale.dll").exists())
+
+    def test_invalid_data_is_rejected_before_any_destination_is_removed(self):
+        marker = self.root / "must-not-execute"
+        invalid = ("", "relative/helpers", str(self.root / "not-helpers"), str(self.source),
+                   'file(WRITE "' + marker.as_posix() + '" "executed")')
+        for value in invalid:
+            with self.subTest(value=value):
+                manifest = str(self.destination) + "\n" + value + "\n" if value else ""
+                result = self.stage(manifest)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue((self.destination / "stale.dll").is_file())
+                self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
+                self.assertFalse(marker.exists())
+
+    def test_filesystem_staging_failure_is_not_ignored(self):
+        blocker = self.root / "not a directory"
+        blocker.write_bytes(b"keep this file")
+        result = self.stage(str(blocker / "helpers") + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(result.stdout + result.stderr, r"(?:Removing|Copying).*failed")
+        self.assertEqual(blocker.read_bytes(), b"keep this file")
 
 
 if __name__ == "__main__":

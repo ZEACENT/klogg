@@ -129,21 +129,21 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
       VERBATIM
     )
   else()
-    # Both executables share this directory. Give it one writer before either
-    # consumer, including direct target builds that do not relink the executable.
-    # TARGET_FILE_DIR would add reverse dependencies on older CMake versions.
-    get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-    if(is_multi_config)
-      set(adb_helpers_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/helpers")
-    else()
-      set(adb_helpers_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/helpers")
-    endif()
+    # Resolve final target paths at generation time, outside the build command:
+    # TARGET_FILE_DIR there would add reverse edges on older CMake versions.
+    # One writer deduplicates shared directories and refreshes direct builds.
+    set(adb_helper_destinations "${CMAKE_CURRENT_BINARY_DIR}/adb-helper-destinations-$<CONFIG>.txt")
+    file(GENERATE OUTPUT "${adb_helper_destinations}"
+      CONTENT "$<TARGET_FILE_DIR:klogg>/helpers\n$<TARGET_FILE_DIR:klogg_portable>/helpers\n"
+    )
     add_custom_target(klogg_stage_adb_helpers ALL
-      COMMAND ${CMAKE_COMMAND} -E rm -rf "${adb_helpers_dir}"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "${adb_helpers_dir}"
-      DEPENDS klogg_adb_helper
+      COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE_HELPERS=${KLOGG_ADB_HELPER_STAGE}/helpers"
+        "-DDESTINATIONS_FILE=${adb_helper_destinations}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/StageAdbHelpers.cmake"
       VERBATIM
     )
+    add_dependencies(klogg_stage_adb_helpers klogg_adb_helper)
     add_dependencies(klogg klogg_stage_adb_helpers)
     add_dependencies(klogg_portable klogg_stage_adb_helpers)
   endif()
