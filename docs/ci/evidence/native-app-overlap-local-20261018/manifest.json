@@ -1,0 +1,106 @@
+{
+  "excluded": [
+    "binaries",
+    "full logs",
+    "build trees"
+  ],
+  "files": {
+    "comparison.json": {
+      "sha256": "0c50f6f12416222ac741472525593d3055e13401cd7382059d6602c6e232fbfe",
+      "size": 1659
+    },
+    "configure-fixture.json": {
+      "sha256": "21ee454281134e51481da2f00694ffc468d8e97440981b63305648eab1dc8d00",
+      "size": 1404
+    },
+    "current-recipe-package/acceptance.json": {
+      "sha256": "cce0a0fe5520eb2adf47bbbdcab62122e7417a8e71fe1f723a6faf4584f9e149",
+      "size": 1093
+    },
+    "current-recipe-package/adb-smoke.json": {
+      "sha256": "d536f4687e57646a299e01acee991dca6c2bfcdd75ae38a7739d988af0f36338",
+      "size": 1266
+    },
+    "current-recipe-package/cocoa-smoke.json": {
+      "sha256": "579e22ad578d81c65a4dd9fb141dc71e82b5e1e4c7a76e8930860ff60ec916e1",
+      "size": 851
+    },
+    "current-recipe-package/ios-package-receipt.json": {
+      "sha256": "b17ecca4c338fe84086ddf6918faf0be900517f329f806763e26eea433b8ca84",
+      "size": 5984
+    },
+    "original/adb-smoke.json": {
+      "sha256": "89c919833c94831eb267b525c1df4c689a6f1536a0aa49730666968bd85cb1f1",
+      "size": 1242
+    },
+    "original/cocoa-smoke.json": {
+      "sha256": "9e2f2ff3cf6dfe19c2452fd7f2e7ee710228daae0c90f50b0c5f6a89e4c22033",
+      "size": 823
+    },
+    "original/finalize-phase.json": {
+      "sha256": "ffde29372a23ab24ce22ec32bdc438ff6e5cee03eebc402e7d3d9b0825c07a33",
+      "size": 11523
+    },
+    "original/historical-native-rendezvous.json": {
+      "sha256": "e789d8c1f1162d0c303408988b564f274fbc45d3bb76c406a749144043a6149f",
+      "size": 843
+    },
+    "original/ios-package-receipt.json": {
+      "sha256": "78c87fbef5c18944dc6797ec8674c5171f2e0f99d4539576b2e1235355dbdb5f",
+      "size": 5976
+    },
+    "original/ninja-analysis.json": {
+      "sha256": "f31b86fa5963410d366ed14f1d58a0ccf2778627e1b75bceb416630a26eda313",
+      "size": 7962
+    },
+    "original/phased-build.json": {
+      "sha256": "0b0da1056ae530d315599232d9cc0e1a4a16b82f6bbf839793ff25804570dce7",
+      "size": 41816
+    },
+    "original/prepare-phase.json": {
+      "sha256": "ebdd287bcf777a191f6780788087a6129d3d5135ec7fc9d10bbd3bc7b9c984d9",
+      "size": 20702
+    },
+    "original/summary.json": {
+      "sha256": "d43e5d15dbd66839721f2aa72c08950671dd319d88efb5bd187311ca2fffff3e",
+      "size": 4212
+    },
+    "stabilized/adb-smoke.json": {
+      "sha256": "f9308ada39a259e49cbf52b012319df485b4e369fbc4f49f96395f33d3ad28b3",
+      "size": 1242
+    },
+    "stabilized/cocoa-smoke.json": {
+      "sha256": "dd4c2d21db43649e17ebfe9cb56694a2df7161db9614c93430c58d150172fd5f",
+      "size": 823
+    },
+    "stabilized/finalize-phase.json": {
+      "sha256": "85e7fd755d5efc2ea652a1bc95e3fdc4589dadfcb3f46b3b150a25985220d260",
+      "size": 10745
+    },
+    "stabilized/ios-package-receipt.json": {
+      "sha256": "62f4b19d64806776656e1367e9846c237933b0c5e6a68444177f38b8d9602ca0",
+      "size": 5976
+    },
+    "stabilized/ninja-analysis.json": {
+      "sha256": "a811913f2a81f885c4669aea4649e2753acbfc5817020924a30b95313f97a155",
+      "size": 6072
+    },
+    "stabilized/phased-build.json": {
+      "sha256": "8e01e9500dc57b617b2c8bb5c6a411e9dffa58ea7354327c937e036856e4e1be",
+      "size": 41703
+    },
+    "stabilized/prepare-phase.json": {
+      "sha256": "6fa3b37a849642d896ccf6150783acc8626b200be98432bc3da9fa6a6e9aea04",
+      "size": 21212
+    },
+    "stabilized/summary.json": {
+      "sha256": "eb0ff15ce6f1920b6d2fcd468eb97fba95546b6bd5e5bf3b4bd091720aada4aa",
+      "size": 4790
+    }
+  },
+  "full_logs_retained_outside_repository": [
+    "/tmp/klogg-app-overlap-harness.0byfr4",
+    "/tmp/klogg-app-overlap-stabilized.FSpXkW"
+  ],
+  "schema_version": 1
+}

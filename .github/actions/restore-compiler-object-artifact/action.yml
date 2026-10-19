@@ -1,0 +1,46 @@
+name: Restore shared compiler object artifact
+description: Admit bounded same-repository compiler objects from a successful verified producing lane
+inputs:
+  descriptor:
+    description: Current compiler, dependency, policy and producer-step descriptor JSON
+    required: true
+  path:
+    description: Compiler cache data directory, never a build or install tree
+    required: true
+  github-token:
+    description: Read-only Actions and repository metadata token
+    required: false
+    default: ${{ github.token }}
+outputs:
+  restored:
+    description: Authenticated compatible compiler objects were imported
+    value: ${{ steps.restore.outputs.restored }}
+  export-needed:
+    description: No compatible snapshot younger than one day was imported
+    value: ${{ steps.restore.outputs.export-needed }}
+  artifact-id:
+    description: Immutable admitted Actions artifact ID
+    value: ${{ steps.restore.outputs.artifact-id }}
+  compatibility-key:
+    description: Compiler-input and producer-policy identity, independent of application SHA
+    value: ${{ steps.restore.outputs.compatibility-key }}
+  report:
+    description: Current-run transport provenance and observation JSON
+    value: ${{ steps.restore.outputs.report }}
+runs:
+  using: composite
+  steps:
+    - name: Authenticate and restore compiler object snapshot
+      id: restore
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        KLOGG_COMPILER_ARTIFACT_DESCRIPTOR: ${{ inputs.descriptor }}
+        KLOGG_COMPILER_ARTIFACT_CACHE: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        session="$(mktemp -d "$RUNNER_TEMP/compiler-object-restore.XXXXXX")"
+        python3 scripts/ci_compiler_object_transport.py restore \
+          --descriptor "$KLOGG_COMPILER_ARTIFACT_DESCRIPTOR" \
+          --cache "$KLOGG_COMPILER_ARTIFACT_CACHE" \
+          --output "$session/restore.json"

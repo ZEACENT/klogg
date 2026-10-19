@@ -1,0 +1,19 @@
+{
+  "application_build": "../original",
+  "application_recompiled": false,
+  "core_identity": "dfabec0527438c6ef7d170ee29692cdca5242c0c713f4b4f3baf2a15abd66f41",
+  "fixture_publication_version": "26.10.18.1324",
+  "initial_package_preserved": true,
+  "native_producer_evidence": "../native-ios-local-20261018",
+  "note": "Local current-recipe package/Cocoa acceptance is independent of historical GitHub artifact IDs and used the original application binary.",
+  "origin": "local accepted current-recipe native build; not a GitHub artifact",
+  "original_native_root": "/tmp/klogg-ios-object-parity.DCs0HH/original-3",
+  "package_app": "/var/folders/82/wqqr5srs7rgbfwgfkk6132y40000gn/T/klogg-app-current-ios-n_niq4g5/build/package-stage/klogg.app",
+  "physical_ios_device_capture_tested": false,
+  "receipt_sha256": {
+    "build": "4420053537ec8bc74cc3e20a9f1722070511090502572d45a31be5874e98fdeb",
+    "legal": "e541aad70de188e0963924e94286d13967896c39ccd32a7254e13c89a7633c5f",
+    "source_set": "c2dbd56e23f28c1b8b7ab91073060c53bb8a83c3e074a23db824d893386078a9"
+  },
+  "schema_version": 1
+}

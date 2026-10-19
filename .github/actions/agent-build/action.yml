@@ -1,9 +1,42 @@
 name: "Configure and build"
 description: "Generate the build files and build the code"
+inputs:
+  phase:
+    description: "full (fresh default), prepare (unpublishable objects), or finalize (verified native artifacts)"
+    default: full
+  native-receipt:
+    description: "Authenticated same-run native rendezvous receipt required by finalize"
+    default: ""
 runs:
   using: "composite"
   steps:
+    - name: Validate native build phase
+      shell: bash
+      env:
+        KLOGG_BUILD_PHASE: ${{ inputs.phase }}
+      run: |
+        case "$KLOGG_BUILD_PHASE" in
+          full|prepare|finalize) ;;
+          *) printf '%s\n' '::error::Unknown native build phase'; exit 1 ;;
+        esac
+
+    - name: Configure and build native overlap phase
+      if: ${{ inputs.phase != 'full' }}
+      shell: bash
+      env:
+        KLOGG_BUILD_PHASE: ${{ inputs.phase }}
+        KLOGG_NATIVE_RECEIPT: ${{ inputs.native-receipt }}
+      run: |
+        set -euo pipefail
+        args=(--phase "$KLOGG_BUILD_PHASE")
+        if [[ "$KLOGG_BUILD_PHASE" == finalize ]]; then
+          test -n "$KLOGG_NATIVE_RECEIPT"
+          args+=(--receipt "$KLOGG_NATIVE_RECEIPT")
+        fi
+        python3 scripts/ci_native_overlap.py "${args[@]}"
+
     - name: configure
+      if: ${{ inputs.phase == 'full' }}
       shell: sh
       run: |
         case " $KLOGG_CMAKE_OPTS " in
@@ -30,7 +63,13 @@ runs:
           sleep $((attempt * 10))
         done
 
+    - name: Verify generated macOS TSan optimization profile
+      if: ${{ inputs.phase == 'full' && runner.os == 'macOS' && env.KLOGG_SANITIZER == 'thread' }}
+      shell: sh
+      run: python3 scripts/verify_macos_tsan_profile.py "$KLOGG_BUILD_ROOT/compile_commands.json"
+
     - name: build
+      if: ${{ inputs.phase == 'full' }}
       shell: sh
       run: |
         case "$RUNNER_OS" in
@@ -38,7 +77,13 @@ runs:
           macOS) object_cache=measured ;;
           *) echo "::error::unreviewed native build metrics platform: $RUNNER_OS"; exit 1 ;;
         esac
-        python3 scripts/ci_build_observation.py run-build \
+        set --
+        if [ "$RUNNER_OS" = macOS ] && [ "${KLOGG_SANITIZER:-}" = thread ]; then
+          # Diagnostic progress only: preserve Ninja's existing worker policy.
+          export NINJA_STATUS='[%f/%t running=%r elapsed=%e] '
+          set -- --execution-diagnostics macos-tsan
+        fi
+        python3 scripts/ci_build_observation.py run-build "$@" \
           --repo-root "$KLOGG_WORKSPACE" \
           --build-root "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT" \
           --output "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/ci-build-metrics-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" \

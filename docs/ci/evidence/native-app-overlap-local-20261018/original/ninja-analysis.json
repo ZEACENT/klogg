@@ -1,0 +1,341 @@
+{
+  "boundary_note": "Second configure reordered old Ninja records; their full multiset is unchanged. Only the verified appended records are analyzed as final work.",
+  "finalize": {
+    "categories": {
+      "compile_edges": {
+        "edges": 209,
+        "max_ms": 1677,
+        "median_ms": 689,
+        "p95_ms": 1401,
+        "parallel_work_ms": 153994,
+        "union_active_ms": 38977
+      },
+      "executable_links": {
+        "edges": 13,
+        "max_ms": 109076,
+        "median_ms": 77599,
+        "p95_ms": 109076,
+        "parallel_work_ms": 852676,
+        "union_active_ms": 236879
+      },
+      "other_edges": {
+        "edges": 17,
+        "max_ms": 1300,
+        "median_ms": 234,
+        "p95_ms": 1300,
+        "parallel_work_ms": 5913,
+        "union_active_ms": 2340
+      },
+      "static_archives": {
+        "edges": 1,
+        "max_ms": 1534,
+        "median_ms": 1534,
+        "p95_ms": 1534,
+        "parallel_work_ms": 1534,
+        "union_active_ms": 1534
+      }
+    },
+    "executable_links": [
+      {
+        "duration_ms": 367,
+        "end_ms": 39278,
+        "outputs": [
+          "output/ios_ostrace_protocol_benchmark"
+        ],
+        "start_ms": 38911
+      },
+      {
+        "duration_ms": 77348,
+        "end_ms": 118349,
+        "outputs": [
+          "output/klogg_grep"
+        ],
+        "start_ms": 41001
+      },
+      {
+        "duration_ms": 77599,
+        "end_ms": 118365,
+        "outputs": [
+          "output/folder_search_benchmark"
+        ],
+        "start_ms": 40766
+      },
+      {
+        "duration_ms": 77666,
+        "end_ms": 118432,
+        "outputs": [
+          "output/regex_search_benchmark"
+        ],
+        "start_ms": 40766
+      },
+      {
+        "duration_ms": 80741,
+        "end_ms": 121779,
+        "outputs": [
+          "output/klogg.app/Contents/MacOS/klogg"
+        ],
+        "start_ms": 41038
+      },
+      {
+        "duration_ms": 4379,
+        "end_ms": 122728,
+        "outputs": [
+          "output/klogg_livelog_session_spec_tests"
+        ],
+        "start_ms": 118349
+      },
+      {
+        "duration_ms": 3740,
+        "end_ms": 126000,
+        "outputs": [
+          "output/klogg_livelog_controller_tests"
+        ],
+        "start_ms": 122260
+      },
+      {
+        "duration_ms": 109076,
+        "end_ms": 227441,
+        "outputs": [
+          "output/klogg_livelog_restore_arming_tests"
+        ],
+        "start_ms": 118365
+      },
+      {
+        "duration_ms": 109045,
+        "end_ms": 227477,
+        "outputs": [
+          "output/klogg_livelog_migration_notice_tests"
+        ],
+        "start_ms": 118432
+      },
+      {
+        "duration_ms": 107332,
+        "end_ms": 230060,
+        "outputs": [
+          "output/klogg_live_capture_benchmark_contract_tests"
+        ],
+        "start_ms": 122728
+      },
+      {
+        "duration_ms": 106212,
+        "end_ms": 232212,
+        "outputs": [
+          "output/klogg_tests"
+        ],
+        "start_ms": 126000
+      },
+      {
+        "duration_ms": 49335,
+        "end_ms": 276812,
+        "outputs": [
+          "output/klogg_vectorscan_tests"
+        ],
+        "start_ms": 227477
+      },
+      {
+        "duration_ms": 49836,
+        "end_ms": 277278,
+        "outputs": [
+          "output/klogg_itests"
+        ],
+        "start_ms": 227442
+      }
+    ],
+    "last_compile_end_ms": 39230,
+    "records": 244,
+    "relinked_prepared_executables": [
+      "output/klogg_itests",
+      "output/klogg_live_capture_benchmark_contract_tests",
+      "output/klogg_livelog_controller_tests",
+      "output/klogg_livelog_migration_notice_tests",
+      "output/klogg_livelog_restore_arming_tests",
+      "output/klogg_livelog_session_spec_tests",
+      "output/klogg_tests",
+      "output/klogg_vectorscan_tests"
+    ]
+  },
+  "prepare": {
+    "categories": {
+      "compile_edges": {
+        "edges": 722,
+        "max_ms": 44261,
+        "median_ms": 3626.0,
+        "p95_ms": 16608,
+        "parallel_work_ms": 3761672,
+        "union_active_ms": 961538
+      },
+      "executable_links": {
+        "edges": 18,
+        "max_ms": 111853,
+        "median_ms": 1340.5,
+        "p95_ms": 111853,
+        "parallel_work_ms": 549375,
+        "union_active_ms": 165147
+      },
+      "other_edges": {
+        "edges": 57,
+        "max_ms": 21463,
+        "median_ms": 285,
+        "p95_ms": 4184,
+        "parallel_work_ms": 91594,
+        "union_active_ms": 35622
+      },
+      "static_archives": {
+        "edges": 32,
+        "max_ms": 2340,
+        "median_ms": 214.5,
+        "p95_ms": 2016,
+        "parallel_work_ms": 11885,
+        "union_active_ms": 11169
+      }
+    },
+    "executable_links": [
+      {
+        "duration_ms": 122,
+        "end_ms": 484305,
+        "outputs": [
+          "output/maddy"
+        ],
+        "start_ms": 484183
+      },
+      {
+        "duration_ms": 975,
+        "end_ms": 486999,
+        "outputs": [
+          "output/file_write_helper"
+        ],
+        "start_ms": 486024
+      },
+      {
+        "duration_ms": 133,
+        "end_ms": 487132,
+        "outputs": [
+          "output/search_start_empty_env_launcher"
+        ],
+        "start_ms": 486999
+      },
+      {
+        "duration_ms": 115,
+        "end_ms": 487469,
+        "outputs": [
+          "output/adb_server_test_helper"
+        ],
+        "start_ms": 487354
+      },
+      {
+        "duration_ms": 100,
+        "end_ms": 488135,
+        "outputs": [
+          "output/live_capture_fixture_producer"
+        ],
+        "start_ms": 488035
+      },
+      {
+        "duration_ms": 144,
+        "end_ms": 951876,
+        "outputs": [
+          "output/klogg_ios_protocol_tests"
+        ],
+        "start_ms": 951732
+      },
+      {
+        "duration_ms": 122,
+        "end_ms": 951998,
+        "outputs": [
+          "output/klogg_crash_collector_protocol_tests"
+        ],
+        "start_ms": 951876
+      },
+      {
+        "duration_ms": 112,
+        "end_ms": 952110,
+        "outputs": [
+          "output/klogg_directory_io_lifetime_tests"
+        ],
+        "start_ms": 951998
+      },
+      {
+        "duration_ms": 160,
+        "end_ms": 952271,
+        "outputs": [
+          "output/klogg_ios_native_contract_tests"
+        ],
+        "start_ms": 952111
+      },
+      {
+        "duration_ms": 1706,
+        "end_ms": 953815,
+        "outputs": [
+          "output/klogg_configuration_preapplication_tests"
+        ],
+        "start_ms": 952109
+      },
+      {
+        "duration_ms": 3932,
+        "end_ms": 956203,
+        "outputs": [
+          "output/klogg_livelog_session_spec_tests"
+        ],
+        "start_ms": 952271
+      },
+      {
+        "duration_ms": 2998,
+        "end_ms": 959201,
+        "outputs": [
+          "output/klogg_livelog_controller_tests"
+        ],
+        "start_ms": 956203
+      },
+      {
+        "duration_ms": 111853,
+        "end_ms": 1065668,
+        "outputs": [
+          "output/klogg_livelog_restore_arming_tests"
+        ],
+        "start_ms": 953815
+      },
+      {
+        "duration_ms": 110735,
+        "end_ms": 1066208,
+        "outputs": [
+          "output/klogg_livelog_migration_notice_tests"
+        ],
+        "start_ms": 955473
+      },
+      {
+        "duration_ms": 109357,
+        "end_ms": 1068559,
+        "outputs": [
+          "output/klogg_live_capture_benchmark_contract_tests"
+        ],
+        "start_ms": 959202
+      },
+      {
+        "duration_ms": 108223,
+        "end_ms": 1070233,
+        "outputs": [
+          "output/klogg_tests"
+        ],
+        "start_ms": 962010
+      },
+      {
+        "duration_ms": 48824,
+        "end_ms": 1115032,
+        "outputs": [
+          "output/klogg_vectorscan_tests"
+        ],
+        "start_ms": 1066208
+      },
+      {
+        "duration_ms": 49764,
+        "end_ms": 1115434,
+        "outputs": [
+          "output/klogg_itests"
+        ],
+        "start_ms": 1065670
+      }
+    ],
+    "last_compile_end_ms": 962009,
+    "records": 857
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "blocked_child_pid": 20034,
+  "blocked_phase": "libimobiledevice-glue autogen.sh shell startup",
+  "evidence": "sample: only _dyld_start; 12KB footprint; no children; 0.00 CPU after >1h",
+  "files": [
+    {
+      "bytes": 2434467,
+      "file": "/tmp/klogg-ios-object-parity.DCs0HH/run-3-interrupted.log",
+      "sha256": "493e6d12607cd37130ddf23912843eff13054913bf4268cb444dccea524d5171"
+    },
+    {
+      "bytes": 8380,
+      "file": "/tmp/klogg-ios-object-parity.DCs0HH/interrupted-state-3.json",
+      "sha256": "47a0f3d86a55f89a67dd18137101c39b7bb7a98527607a5c239b822ef57613ee"
+    },
+    {
+      "bytes": 881,
+      "file": "/tmp/klogg-ios-object-parity.DCs0HH/stalled-sh.sample.txt",
+      "sha256": "5ca059351da65a5a2d92865e6e823cfcc116d2409154d8bb35ae63a3a1f98766"
+    },
+    {
+      "bytes": 8305,
+      "file": "/tmp/klogg-ios-object-parity.DCs0HH/stalled-ninja.sample.txt",
+      "sha256": "7b816d40f5b1eb467d91b797b1681c7a45ab13c525d4dd348fd15374b0d6fc91"
+    }
+  ],
+  "fresh_shell_probe": "/bin/sh -c printf succeeded before replacement",
+  "iteration": 3,
+  "log": "run-3-interrupted.log",
+  "outcome": "interrupted-confirmed-host-shell-launch-stall",
+  "sampled_frames": {
+    "ninja": "SubprocessSet::DoWork -> pselect -> __pselect",
+    "shell": "_dyld_start"
+  },
+  "samples": [
+    "stalled-sh.sample.txt",
+    "stalled-ninja.sample.txt"
+  ],
+  "started_epoch_estimate": 1792308643.206391,
+  "state": "interrupted-state-3.json",
+  "terminal_log_epoch": 1792312863.1986725,
+  "termination": "SIGTERM to owned stalled child only; driver and entire child tree exited; own lock released",
+  "wall_seconds_estimate": 4219.99228143692
+}

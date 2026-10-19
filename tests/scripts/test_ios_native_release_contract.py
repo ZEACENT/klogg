@@ -420,6 +420,99 @@ class IosStartupCiContractTest(unittest.TestCase):
                     self.assertTrue(ios_startup_ci_issues(narrowed))
 
 
+class IosCompilerLauncherTest(unittest.TestCase):
+    def test_launcher_recipe_remains_in_core_and_corresponding_source_identity(self):
+        from ci_dependency_identity import core_identity
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            recipe = root / "recipe"
+            files = ("packaging/ios-native/superbuild/CMakeLists.txt",
+                     "scripts/prefetch_ios_native_sources.py", "scripts/build_ios_native_stack.py",
+                     "scripts/verify_ios_native_stack.py", "scripts/build_ios_native_legal_assets.py",
+                     "scripts/source_publication_identity.py", "ci/dependencies/catalog.json")
+            for relative in files:
+                destination = recipe / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, destination)
+            fixture = {"sources": [], "patches": []}
+            fixture_lock = root / "fixture-lock.json"
+            fixture_lock.write_text(json.dumps(fixture))
+            archive = root / "source.tar.gz"
+            lock = json.loads(LOCK.read_text())
+            before = core_identity("ios-native", "x86_64", lock, recipe)
+            LEGAL_MODULE.write_deterministic_source_archive(archive, fixture_lock, fixture, root, recipe)
+            source_before = archive.read_bytes()
+            with tarfile.open(archive) as source:
+                for relative in ("scripts/build_ios_native_stack.py", "packaging/ios-native/superbuild/CMakeLists.txt"):
+                    self.assertEqual(source.extractfile(relative).read(), (recipe / relative).read_bytes())
+                self.assertNotIn("scripts/ci_native_object_cache.py", source.getnames())
+            builder = recipe / "scripts/build_ios_native_stack.py"
+            builder.write_bytes(builder.read_bytes() + b"\n# Reviewed launcher recipe revision.\n")
+            self.assertNotEqual(before, core_identity("ios-native", "x86_64", lock, recipe))
+            LEGAL_MODULE.write_deterministic_source_archive(archive, fixture_lock, fixture, root, recipe)
+            self.assertNotEqual(source_before, archive.read_bytes())
+
+    @unittest.skipIf(os.name == "nt", "requires POSIX executable paths")
+    def test_optional_launcher_resolves_actual_xcode_compilers(self):
+        self.assertEqual(BUILD_MODULE.compiler_launcher_options(None), [])
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "ccache"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            with mock.patch.object(BUILD_MODULE, "run", side_effect=[
+                    "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/default/bin/clang\n",
+                    "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/default/bin/clang++\n",
+                    "/Applications/Xcode_26.6.app/Contents/Developer/SDKs/MacOSX.sdk\n"]):
+                options = BUILD_MODULE.compiler_launcher_options(executable)
+            self.assertIn(f"-DKLOGG_IOS_COMPILER_LAUNCHER={executable}", options)
+            self.assertIn("-DKLOGG_IOS_SDK_ROOT=/Applications/Xcode_26.6.app/Contents/Developer/SDKs/MacOSX.sdk", options)
+            self.assertIn("-DKLOGG_IOS_C_COMPILER=/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/default/bin/clang", options)
+            self.assertIn("-DKLOGG_IOS_CXX_COMPILER=/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/default/bin/clang++", options)
+            for name in ("relative", "has space", "has;separator", "has$dollar", "has'quote"):
+                bad = pathlib.Path(name) if name == "relative" else pathlib.Path(directory) / name
+                if bad.is_absolute():
+                    bad.write_text("#!/bin/sh\nexit 0\n")
+                    bad.chmod(0o755)
+                with self.subTest(path=bad), self.assertRaises(BUILD_MODULE.BuildError):
+                    BUILD_MODULE.compiler_launcher_options(bad)
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("cmake") and shutil.which("ninja"),
+                         "macOS superbuild configure tools unavailable")
+    def test_real_superbuild_threads_executable_launcher_to_every_external_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            sources = root / "sources"
+            for name in ("openssl", "curl", "libplist", "libtatsu", "libimobiledevice-glue",
+                         "libusbmuxd", "libimobiledevice"):
+                (sources / name).mkdir(parents=True)
+                (sources / name / "source").write_text("fixture\n")
+            for enabled in (False, True):
+                build = root / ("cached" if enabled else "plain")
+                command = ["cmake", "-S", str(SUPERBUILD.parent), "-B", str(build), "-G", "Ninja",
+                           f"-DKLOGG_IOS_SOURCE_ROOT={sources}", f"-DKLOGG_IOS_INSTALL_PREFIX={root / 'install'}",
+                           "-DKLOGG_IOS_ARCHITECTURE=x86_64", "-DKLOGG_IOS_DEPLOYMENT_TARGET=15.0",
+                           "-DKLOGG_IOS_SOURCE_DATE_EPOCH=1700000000"]
+                if enabled:
+                    command.extend(["-DKLOGG_IOS_COMPILER_LAUNCHER=/usr/local/bin/ccache",
+                                    "-DKLOGG_IOS_C_COMPILER=/usr/bin/clang",
+                                    "-DKLOGG_IOS_CXX_COMPILER=/usr/bin/clang++",
+                                    "-DKLOGG_IOS_SDK_ROOT=/Applications/Xcode_26.6.app/SDKs/MacOSX.sdk"])
+                subprocess.run(command, check=True, capture_output=True, text=True)
+                generated = (build / "build.ninja").read_text()
+                if enabled:
+                    compiler_commands = [line for line in generated.splitlines() if " -E env " in line]
+                    self.assertEqual(len(compiler_commands), 21)  # configure, build, install for seven sources
+                    for line in compiler_commands:
+                        self.assertIn("SDKROOT=/Applications/Xcode_26.6.app/SDKs/MacOSX.sdk", line)
+                        self.assertIn("CC=/usr/local/bin/ccache /usr/bin/clang", line)
+                        self.assertIn("CXX=/usr/local/bin/ccache /usr/bin/clang++", line)
+                    self.assertNotIn("CC=clang ", generated)
+                else:
+                    self.assertIn("CC=clang", generated)
+                    self.assertNotIn("/usr/local/bin/ccache", generated)
+
+
 class IosNativeReleaseContractTest(unittest.TestCase):
     def lock(self) -> dict:
         return required_json(LOCK)
@@ -741,7 +834,7 @@ class IosNativeReleaseContractTest(unittest.TestCase):
         self.assertEqual(len(build), 1)
         run = build[0]["run"]
         commands = [shlex.split(line.strip()) for line in run.replace("\\\n", " ").splitlines()
-                    if line.strip().startswith("python3 ")]
+                    if line.strip().startswith(("python3 ", '"${build_prefix[@]}" '))]
         legal = [command for command in commands
                  if command[1] == "scripts/build_ios_native_legal_assets.py"]
         self.assertEqual(len(legal), 2, "ordinary builder must split immutable core and final assembly")
@@ -2393,8 +2486,10 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
             sorted(blocks),
         )
         needs = CI_MODULE.workflow_job_needs(workflow)
-        self.assertIn("BuildIosNativeX64", needs.get("MacPackages", set()))
-        self.assertIn("BuildIosNativeArm64", needs.get("MacArmPackages", set()))
+        # Native producers rendezvous by authenticated same-run artifact IDs,
+        # allowing preliminary application compilation before they finish.
+        self.assertNotIn("BuildIosNativeX64", needs.get("MacPackages", set()))
+        self.assertNotIn("BuildIosNativeArm64", needs.get("MacArmPackages", set()))
         for token in (
             "prefetch_ios_native_sources.py",
             "build_ios_native_stack.py",
@@ -2437,7 +2532,7 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
                     block, r"\$\{\{[^}]*\bmatrix\.artifact\b"
                 )
                 self.assertNotIn("matrix.architecture", block)
-        artifact_records = CI_MODULE.workflow_artifact_records(workflow)
+        consumer_steps = CI_MODULE.workflow_job_steps(workflow)
         for job, artifact in (
             ("MacPackages", "ios-native-x86_64"),
             ("MacArmPackages", "ios-native-arm64"),
@@ -2449,20 +2544,19 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
                     block,
                     r"matrix\.config\.(?:ios_native_artifact|arch)\b",
                 )
-                downloads = {
-                    (name, condition)
-                    for kind, name, condition in artifact_records.get(job, [])
-                    if kind == "downloads"
-                }
-                self.assertTrue(
-                    (artifact, None) in downloads
-                    or (
-                        "${{ env.KLOGG_IOS_NATIVE_ARTIFACT }}",
-                        "${{ env.klogg_package_enabled == 'true' }}",
-                    )
-                    in downloads,
-                    downloads,
-                )
+                steps = [CI_MODULE.workflow_step_fields(step) for step in consumer_steps[job]]
+                ready = next(index for index, (fields, _) in enumerate(steps)
+                             if fields.get("id") == "native-ready")
+                self.assertIn("scripts/ci_native_rendezvous.py", steps[ready][0]["run"])
+                downloads = [(index, fields, children["with"]) for index, (fields, children) in enumerate(steps)
+                             if children.get("with", {}).get("artifact-ids") ==
+                             "${{ steps.native-ready.outputs.ios-artifact-id }}"]
+                self.assertEqual(len(downloads), 1)
+                index, fields, options = downloads[0]
+                self.assertGreater(index, ready)
+                self.assertEqual(fields.get("if"), "${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}")
+                self.assertNotIn("name", options)
+                self.assertTrue(fields.get("uses", "").startswith("actions/download-artifact@"))
         self.assertIn("tar -czf", workflow)
         self.assertIn("python3 scripts/extract_verified_tar.py", workflow)
         self.assertNotIn('tar -xzf "$archive"', workflow)

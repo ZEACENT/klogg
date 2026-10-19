@@ -1,0 +1,19 @@
+{
+  "helper_sha256": "4f4579a2af9f58ddcecd00f3a98431a7da557f7eeb37e00f24ee195f28952973",
+  "layout": "artifact",
+  "package_sha256": null,
+  "package_target": null,
+  "packages": [],
+  "receipt_kind": "package-verification",
+  "release_qualified": false,
+  "required_receipts": [],
+  "schema_version": 1,
+  "source_helper_sha256": "4f4579a2af9f58ddcecd00f3a98431a7da557f7eeb37e00f24ee195f28952973",
+  "source_set_receipt_sha256": "2eb66f58d1dc623ebd2010903fce2d2d6f460793a7133a282ca9ea1d058e1f8c",
+  "target": "macos-x86_64",
+  "verified_receipts": [
+    "binary-build",
+    "binary-smoke",
+    "package-verification"
+  ]
+}

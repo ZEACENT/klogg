@@ -1,0 +1,93 @@
+name: Probe compiler cache persistence
+description: Bound visibility retries while refreshing both compatible-version lookup and REST evidence
+inputs:
+  path:
+    description: Compiler cache paths used by restore and save
+    required: true
+  key:
+    description: Primary cache generation key
+    required: true
+  github-token:
+    description: Token with actions read permission for cache metadata
+    required: false
+    default: ${{ github.token }}
+  require-persisted:
+    description: Fail if the generation is still absent after the bounded retry
+    required: false
+    default: "false"
+outputs:
+  persisted-key:
+    description: Exact positive-size key with compatible-version lookup proof
+    value: ${{ steps.inspect-retry.outputs.persisted-key || steps.inspect.outputs.persisted-key }}
+  state:
+    description: Persisted or confirmed missing; unconfirmed evidence fails the action
+    value: ${{ steps.inspect-retry.outputs.state || steps.inspect.outputs.state }}
+  recovery-key:
+    description: Single recovery key bound to the current run and attempt
+    value: ${{ steps.inspect.outputs.recovery-key }}
+runs:
+  using: composite
+  steps:
+    - name: Look up the current path and compression version without restoring files
+      id: lookup
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        restore-keys: ${{ inputs.key }}-recovery-
+        lookup-only: true
+
+    - name: Check exact-ref backend metadata against compatible lookup proof
+      id: inspect
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        CACHE_KEY: ${{ inputs.key }}
+        CACHE_MATCHED_KEY: ${{ steps.lookup.outputs.cache-matched-key }}
+        CACHE_HELPER: ${{ github.action_path }}/../../../scripts/ci_cache_persistence.py
+      run: python3 -I "$CACHE_HELPER" --key "$CACHE_KEY" --matched-key "$CACHE_MATCHED_KEY"
+
+    - name: Allow one bounded cache visibility retry
+      id: retry-delay
+      if: ${{ steps.inspect.outputs.state != 'persisted' }}
+      shell: bash
+      run: sleep 2
+
+    - name: Refresh the compatible-version lookup rather than reuse an earlier miss
+      id: lookup-retry
+      if: ${{ steps.inspect.outputs.state != 'persisted' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        restore-keys: ${{ inputs.key }}-recovery-
+        lookup-only: true
+
+    - name: Recheck backend metadata with the fresh lookup result
+      id: inspect-retry
+      if: ${{ steps.inspect.outputs.state != 'persisted' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        CACHE_KEY: ${{ inputs.key }}
+        CACHE_MATCHED_KEY: ${{ steps.lookup-retry.outputs.cache-matched-key }}
+        CACHE_HELPER: ${{ github.action_path }}/../../../scripts/ci_cache_persistence.py
+      run: python3 -I "$CACHE_HELPER" --key "$CACHE_KEY" --matched-key "$CACHE_MATCHED_KEY"
+
+    - name: Reject ambiguous evidence and enforce the final persistence requirement
+      id: require
+      shell: bash
+      env:
+        CACHE_STATE: ${{ steps.inspect-retry.outputs.state || steps.inspect.outputs.state }}
+        REQUIRE_PERSISTED: ${{ inputs.require-persisted }}
+      run: |
+        case "$CACHE_STATE:$REQUIRE_PERSISTED" in
+          persisted:*) ;;
+          missing:false) ;;
+          missing:true)
+            printf '%s\n' 'Compiler cache persistence unconfirmed after primary and recovery saves' >&2
+            exit 1 ;;
+          *)
+            printf '%s\n' 'Compiler cache lookup and backend evidence remain unconfirmed; refusing another save' >&2
+            exit 1 ;;
+        esac

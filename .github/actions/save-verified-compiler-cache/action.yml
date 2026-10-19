@@ -1,0 +1,86 @@
+name: Save verified compiler cache
+description: Confirm backend persistence and recover once from an unavailable primary reservation
+inputs:
+  path:
+    description: Validated and bounded compiler cache directory
+    required: true
+  key:
+    description: Primary cache generation key
+    required: true
+  descriptor:
+    description: Optional current compiler descriptor for a validated backend acquisition hint
+    required: false
+    default: ""
+  github-token:
+    description: Token with actions read permission for cache metadata
+    required: false
+    default: ${{ github.token }}
+outputs:
+  persisted-key:
+    description: Exact positive-size cache key confirmed in the current ref
+    value: ${{ steps.verify-recovery.outputs.persisted-key || steps.verify-primary.outputs.persisted-key || steps.inspect.outputs.persisted-key }}
+  state:
+    description: Backend-confirmed persistence state
+    value: ${{ steps.verify-recovery.outputs.state || steps.verify-primary.outputs.state || steps.inspect.outputs.state }}
+runs:
+  using: composite
+  steps:
+    - name: Mark validated backend compiler context
+      id: mark-backend
+      if: ${{ success() && inputs.descriptor != '' }}
+      shell: bash
+      env:
+        KLOGG_COMPILER_DESCRIPTOR: ${{ inputs.descriptor }}
+        KLOGG_COMPILER_CACHE: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        python3 -I scripts/ci_compiler_object_transport.py mark-backend \
+          --descriptor "$KLOGG_COMPILER_DESCRIPTOR" \
+          --cache "$KLOGG_COMPILER_CACHE"
+
+    - name: Reuse an existing compatible primary or recovery generation
+      id: inspect
+      uses: ./.github/actions/probe-compiler-cache
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: Save the primary generation
+      id: save-primary
+      if: ${{ steps.inspect.outputs.state == 'missing' }}
+      # The cache action can warn and exit zero without persisting anything.
+      # Its outcome is deliberately not evidence; the next probe is final.
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+
+    - name: Confirm primary persistence before considering recovery
+      id: verify-primary
+      if: ${{ steps.inspect.outputs.state == 'missing' }}
+      uses: ./.github/actions/probe-compiler-cache
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: Save one recovery generation after confirmed absence
+      id: save-recovery
+      if: ${{ steps.verify-primary.outputs.state == 'missing' }}
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ steps.inspect.outputs.recovery-key }}
+
+    - name: Require backend-confirmed persistence after recovery
+      id: verify-recovery
+      if: ${{ steps.verify-primary.outputs.state == 'missing' }}
+      uses: ./.github/actions/probe-compiler-cache
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        github-token: ${{ inputs.github-token }}
+        require-persisted: "true"

@@ -1,0 +1,50 @@
+{
+  "added_precompile_configure_ms": 12256,
+  "compiler_identities_equal": true,
+  "feature_preseeding_used": false,
+  "kind": "deterministic-build-work-comparison",
+  "matched_total_duration_comparison": false,
+  "original_final": {
+    "compile_edges": 209,
+    "executable_links": 13,
+    "libhs_rearchives": 1,
+    "prepared_test_relinks": 8,
+    "vectorscan_compile_edges": 207
+  },
+  "policy_bound_files_modified": false,
+  "prepare_cache_deltas": {
+    "original": {
+      "cache_miss": 717,
+      "direct_cache_hit": 1,
+      "preprocessed_cache_hit": 4
+    },
+    "stabilized": {
+      "cache_miss": 3,
+      "direct_cache_hit": 717,
+      "preprocessed_cache_hit": 2
+    }
+  },
+  "reason": "Original prepare had 717 cache misses; stabilized prepare had 3. Different cache state and configure strategy prohibit a causal total-wall comparison.",
+  "reported_cmake_options_equal_by_phase": {
+    "finalize": true,
+    "prepare": true
+  },
+  "root_cause": {
+    "effect": "The next configure changes an unused core header macro, replaying 207 cache-served compile edges and relinking 8 tests.",
+    "fix": "exactly one identical native-OFF configure before compilation; normal final native-ON configure remains mandatory",
+    "producer": "pinned vectorscan CMakeLists.txt configures config.h before util/CMakeLists.txt caches HAVE_MMAP"
+  },
+  "schema_version": 1,
+  "stabilized_final": {
+    "compile_edges": 2,
+    "executable_links": 5,
+    "libhs_rearchives": 0,
+    "prepared_test_relinks": 0,
+    "vectorscan_compile_edges": 0
+  },
+  "tests": {
+    "full_ctest_suite_run": false,
+    "selected_ctest": 4
+  },
+  "timestamp_rollback_used": false
+}

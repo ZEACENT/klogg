@@ -4,13 +4,26 @@
 
 Instrumentation and a reproducible **baseline** are available. Performance
 acceptance is **incomplete**: no post-change cold plus three comparable warm
-platform workflow runs have been executed. No speedup, p50 target, cache-hit
-threshold, or native-core reuse target is claimed achieved.
+platform workflow runs have been executed. No hosted whole-workflow speedup, p50
+target, cache-hit threshold, or native-core reuse target is claimed achieved.
+The separately retained local Intel ADB and iOS cold/three-warm measurements in
+[Master cache migration](MASTER_CACHE_MIGRATION.md#local-native-cache-measurement)
+are not a hosted matrix or end-to-end workflow acceptance cohort. The accepted
+iOS full native-stack samples show 420.933s cold versus 243.085s warm median
+(42.25% less wall time), with a separately disclosed 4,219.992s host-startup stall
+excluded and replaced. That result is distinct from ADB's timing and hit-rate
+measurements and does not establish hosted or ARM performance.
+
+The first merged-master run and its 60-minute TSan timeout are analyzed in
+[Master cache migration](MASTER_CACHE_MIGRATION.md), with retained PR/master
+comparison evidence. PR-local warmth did not establish trusted-master warmth;
+cache-action success did not prove that the backend retained a cache.
 
 The collector is read-only. It does not dispatch workflows, change cache state,
-publish artifacts, or alter quality gates. The implementation intentionally
-consists of a small observation wrapper and one collector/report script, not a
-benchmark scheduling framework.
+publish artifacts, or alter quality gates. The observation and collector/report
+scripts are not a benchmark scheduling framework. Compiler-artifact transport,
+native caching and phased build orchestration are separate workflow execution
+features; their presence does not create controlled performance samples.
 
 Two production policy inputs must remain byte-for-byte unchanged without a real
 qualified environment rebuild: `scripts/ci_build_metrics.py` and
@@ -140,12 +153,115 @@ Linux TSan's qualified image has no ccache. That lane remains explicitly disable
 unchanged-third-party recompilation exclusion is pending a real rebuilt and
 requalified environment, not silently asserted fixed.
 
+## Current acceleration and observation scope
+
+The current workflow combines three distinct mechanisms:
+
+- **Ref-scoped backend caches:** validated daily ccache/sccache generations use
+  fresh compatible-version lookup plus exact-ref REST persistence checks and a
+  bounded recovery path. GitHub's PR/master cache visibility rules still apply.
+- **Cross-ref compiler-object artifacts:** canonical same-repository PRs and
+  master pushes explicitly share trusted-code compiler data through authenticated
+  Actions artifacts. Compatibility binds actual tools, configuration, dependencies,
+  producer policy and existing budgets, not the application SHA. Admission still
+  requires a successful producing job and its required gates, even when unrelated
+  jobs made the aggregate fail or cancel. Forks/dispatches do not enter the bridge.
+  This transport is neither a compiler-environment replacement nor qualified
+  ADB/iOS binary-core reuse.
+- **Native overlap and object caching:** ordinary macOS ADB and iOS jobs retain
+  compiler objects but still build/link/verify fresh native outputs. Package-enabled
+  macOS application jobs prepare objects and test binaries while those producers
+  run, rendezvous with authenticated same-run artifacts, then finalize the same
+  Ninja tree with native gates enabled before tests/package qualification.
+  Package-free sanitizer jobs retain the single full-build path.
+
+Artifact IDs, backend restore keys, acquisition decisions and current-build counter
+deltas are separate evidence. An imported archive is not automatically warm; a
+recent snapshot can contain a different application's source working set. Verify
+that acquisition preserves a warmer own-PR backend, and measure refresh, transfer
+cost and occupancy rather than counting an artifact download as a compiler hit.
+A repository/context-bound backend hint is stamped only at the validated save
+boundary. Matching application-tree hints retain the backend instead of replacing
+it; native hints depend on the native/compiler identity, not application source.
+Without a matching hint, discovery prefers an authenticated current-tree
+application snapshot before the newest compatible snapshot. Current-tree
+matching guides acquisition/freshness, not compiler-artifact compatibility.
+A young snapshot suppresses export only if it covers that application tree, or
+matches the native dependency identity. The refresh threshold is one day.
+Hints are guidance, not attestations or warm-state evidence, and are never
+transported as shared object data. A retained backend has no imported artifact ID;
+metrics continue to identify the backend key even if discovery found a snapshot.
+
+Shared artifacts use existing per-label object caps, bounded candidate/download
+budgets and two-day retention. Their storage is distinct from the Actions-cache
+quota. Neither those bounds nor fewer duplicate uploads prove repository-wide
+storage or cost reduction; retained runs and concurrent lanes must be measured.
+Offset-page overlap from concurrent artifact uploads is deduplicated only for
+identical admission metadata. Same-page duplicates and identity contradictions
+remain fatal; three-page/twelve-candidate/one-download/300-second controls are
+unchanged. The deterministic overlap regression does not reconstruct a historical
+runner's unretained API payloads.
+
+The macOS TSan baseline covers first-party code plus mimalloc and TBB, not all
+source-built dependencies or prebuilt Qt. That scope, exact per-command debug
+flags and LTO-off are preserved. The Intel macOS TSan workflow row now explicitly
+enables the accepted pure-`-O1` profile through `KLOGG_CI_MACOS_TSAN_O1=ON`.
+A macOS/thread-only runner step checks the profile beneath `$KLOGG_WORKSPACE` and
+appends the absolute checkout path to `cmake/CiMacosTsanProfile.cmake` as
+`CMAKE_PROJECT_INCLUDE` before cache identity is described. The matrix does not
+supply a relative include, which would fail for nested dependency `project()`
+calls. Ordinary/module defaults remain off. A full/macOS/thread-only guard checks
+generated commands between configure and build. This optimization change is separate from compiler-object
+reuse and does not activate the earlier mixed optimization/debug experiment.
+
 ## New observation/report contract
 
-Native action invocation preserves the original build command and child exit
-status. It calls `ci_build_observation.py run-build` with the existing roots,
-output and object-cache mode, plus `--cache-tool ccache|sccache`. Windows activates
-sccache only after its helper confirms activation; absence remains disabled.
+Single-build native action invocations preserve the existing `ci_build` command
+and child exit status. They call `ci_build_observation.py run-build` with the
+existing roots, output and object-cache mode, plus `--cache-tool ccache|sccache`.
+Windows activates sccache only after its helper confirms activation; absence
+remains disabled.
+
+Only macOS TSan opts into separate execution diagnostics. Its sampler leaves the
+original build command/runner, parallelism and job timeout unchanged; other lanes'
+inherited Ninja status is preserved. Process names become fixed role labels only;
+raw names/paths, argv and full environments are not recorded. Periodic
+`KLOGG_BUILD_DIAGNOSTIC_JSON` log records and the bounded JSONL/raw-Ninja-tail files
+are **sampled partial evidence**,
+not success-only build metrics. The optional two-minute `always()` upload selects
+exactly those two files. The journal keeps at most 4 MiB current plus one 4 MiB
+predecessor locally, and the Ninja checkpoint at most 2 MiB; the predecessor is
+not among the two upload paths. Probe errors or missing diagnostics cannot turn a
+successful build into a failure.
+
+Use these records to investigate progress and resource pressure, not to infer
+complete CPU utilization or current-build hit rates from sampled processes and
+cumulative ccache totals. Job cancellation may prevent the final record/upload;
+flushed logs can outlive that failure, but no final evidence is guaranteed.
+A timed-out hosted run still has no successful whole-build sample, and the new
+sampler cannot reconstruct an earlier run's missing process history.
+
+Package-enabled macOS overlap instead records `measurement_scope: phase` for
+prepare and finalize. Prepare performs exactly one additional identical
+native-OFF configure before compilation to stabilize pinned dependency-generated
+headers; configuration passes, command hashes and their wall times are recorded
+separately from build wall time. The native-ON final configure still runs. Only
+successful finalization can publish
+`measurement_scope: phased-build`; its `build_wall_ms` sums the two build
+invocations and excludes configure, native-producer waiting, tests and packaging.
+Phase provenance must agree on source/run/toolchain identity and all recorded
+CMake options except the two intentional native gate changes. Cache deltas are
+summed only when both phases supply valid compatible counters. Raw Ninja history
+is retained: append-only suffixes describe phase-local work, while log compaction
+makes that phase's compilation analysis unknown rather than inventing work.
+
+The aggregate retains both phase reports, not a fabricated union of Ninja clock
+origins. Standalone partial phases cannot establish a whole-build performance
+sample. Single-build and phased-build measurements belong to separate comparison
+groups. Use a fresh explicit DAG for each overlap run and retain the rendezvous
+step interval; the historical native-producer-to-application dependency maps do
+not describe the new within-job wait. Never sum concurrent native/application
+intervals to claim workflow latency.
 
 For Linux, the workflow runs this on the **host**, immediately before upload:
 
@@ -175,7 +291,9 @@ sample. A documented cold run starts with no compiler objects, while warm runs
 reuse the corresponding saved compiler-object state, with a fresh build tree.
 
 Reports group by compiled SHA, compiler identity, architecture, configuration,
-immutable environment/runner identity, build type/options and cache backend.
+immutable environment/runner identity, build type/options, cache backend and
+measurement scope. Benchmark comparability still requires the same compiled
+source, even though compiler-artifact compatibility intentionally does not.
 Each group needs at least **one cold and three distinct warm run/attempts**.
 Missing identity, duplicate samples, unknown cache state, and insufficient samples
 are explicitly incomplete. Cold and warm compile-wall distributions are separate,
@@ -237,16 +355,77 @@ qualification gate was skipped. Green individual jobs or restored archive keys
 therefore cannot establish either the speed targets or acquisition-free core
 reuse.
 
+## Local Intel macOS TSan pure-O1 comparison
+
+[`evidence/macos-tsan-o1-local-20261018`](evidence/macos-tsan-o1-local-20261018)
+retains the accepted sequential baseline/pure-`-O1` pair. Whole `ci_build` wall
+was **1,061.966s -> 617.019s** (41.90% lower); full 40-entry CTest wall was
+**324.472s -> 290.867s**, with every test passing and zero skipped/disabled.
+Combined build/test wall was **1,386.438s -> 907.887s** (34.52% lower, 478.552s
+saved). This total excludes configure, acquisition and setup; `ci_build` includes
+code/resource generation, archiving and linking, not only compilation.
+
+Both used fresh separate build trees, no compiler-object cache, four compiler
+jobs and eight CTest jobs. OS filesystem/page cache was not flushed. This is one
+local sequential pair, not a repeated hosted distribution or a guaranteed
+whole-workflow improvement. The historical baseline records above are unchanged.
+
+All 835 compilation commands preserve effective debug flags: 819 `-g1` and
+16 `-g`. Optimization changes from 534 `-O2`, 285 `-O3` and 16 `-O1` to 835 `-O1`;
+other command inputs match after the documented generated-resource path
+normalization. The original sanitizer gate confirms 134/134 first-party plus
+54/54 mimalloc/TBB entries instrumented and 0/525 ordinary dependency entries
+instrumented. Source/tool identities and normalization proof are retained.
+The mixed `-O1`/light-debug exploratory result is separate and **not** activation
+evidence. Full CTest for this TSan configuration does not establish full-suite
+qualification of the separate package-enabled overlap build.
+
+## Local application-overlap evidence: retained work, not a matched speedup
+
+[`evidence/native-app-overlap-local-20261018`](evidence/native-app-overlap-local-20261018)
+records a real Intel application comparison and a small real-CMake ordering
+regression. The additional identical precompile configure eliminates the observed
+vectorscan header-state replay: final vectorscan compile edges **207 -> 0**,
+`libhs` rearchives **1 -> 0**, and prepared test relinks **8 -> 0**. Two generated
+Qt resource compile edges remain and hit cache. The extra configure cost 12.256s.
+Stabilized prepare/finalize build-only durations were 413.835s/173.059s, versus
+482.99s/186.66s for their action intervals including configuration and overhead.
+
+These durations are not a causal before/after speedup: the original prepare had
+717 cache misses and the stabilized prepare only 3. The comparison explicitly
+records unmatched cache state/strategy and source/tool/flag identities. The
+measured claim is avoided finalization work, not a cold-to-warm workflow gain.
+
+`original/` and `stabilized/` consumed authenticated historical same-run native
+artifacts. Four selected CTest entries passed; **full CTest was not run**. The
+separate `current-recipe-package/` receipt uses locally assembled/rebound accepted
+current iOS outputs and Cocoa-smokes the **original application binary**. It is
+not current-recipe application recompilation, has no GitHub artifact-ID claim,
+and is not physical-device capture acceptance. These evidence scopes remain
+separate from hosted, current-run native rendezvous and whole-workflow acceptance.
+
 ## Remaining acceptance
 
 - Execute authorized cold + three warm runs per comparable target/configuration;
   preserve raw receipts and report p50/max before claiming improvements.
-- Record restored key/hit, cache occupancy before/after cleanup/save, and delta
-  miss/cleanup reasons where supported. Revisit provisional budgets from data.
+- Record backend keys, authenticated artifact IDs/acquisition decisions, transfer
+  time, cache occupancy before/after cleanup/save, and current-build miss/cleanup
+  reasons where supported. Exercise PR-to-master transfer, warmer own-PR reuse,
+  partial reruns and daily refresh. Revisit provisional budgets from data.
+- Retain hosted macOS prepare/finalize and rendezvous intervals, full test/package
+  results and a current DAG. Local retained-work evidence and four selected tests
+  do not establish full-suite/current-run overlap acceptance. Hosted overlap
+  benefit and hosted/native ARM ADB/iOS cold/three-warm performance remain pending;
+  the local Intel native-cache cohorts cannot fill those evidence slots.
+- Validate the explicitly enabled Intel macOS TSan pure-`-O1` row on hosted
+  cold/three-warm cohorts, retaining the generated-command guard, exact debug
+  flags, original sanitizer scope and all tests. The accepted local pair supports
+  this narrow opt-in, not a guaranteed hosted percentage or broader activation.
 - Requalify Linux TSan with a real cache-capable compiler environment if that
   unchanged-build optimization is required.
 - Native-core consumer migration remains blocked on the real host dependency
-  chain plus the seven-target producer/publisher and lock receipts. Workflow
-  bookkeeping cannot substitute for those missing artifacts.
+  chain plus the seven-target producer/publisher and lock receipts. Ordinary
+  compiler-object reuse and workflow bookkeeping cannot substitute for those
+  missing artifacts or authorize publication.
 - Keep strict quality gates unchanged. The collector reports GitHub conclusions;
   it does not claim to audit warning annotations or prove sanitizer correctness.

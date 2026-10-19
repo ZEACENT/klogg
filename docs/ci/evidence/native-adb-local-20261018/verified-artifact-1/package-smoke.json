@@ -1,0 +1,35 @@
+{
+  "helper_path": "/private/tmp/klogg-native-cache-parity.r90J0o/verified-artifact-1/helpers/adb",
+  "helper_sha256": "d706a8b089eb914169d314c3c40cb52f901bd8101c8f4bb1febfe0e212cf1c81",
+  "host_version": "0029",
+  "passed_probes": [
+    "version",
+    "complete-client",
+    "loopback-private-server",
+    "smart-socket-host-version",
+    "no-lingering-process"
+  ],
+  "receipt_kind": "binary-smoke",
+  "required_probe": {
+    "arguments": [
+      "server",
+      "nodaemon"
+    ],
+    "environment": {
+      "ADB_SERVER_SOCKET": "tcp:65276"
+    },
+    "name": "production-server-invocation",
+    "scrubbed_environment": [
+      "ADB_VENDOR_KEYS",
+      "ADB_SERVER_PORT",
+      "ANDROID_ADB_SERVER_PORT",
+      "ANDROID_ADB_SERVER_ADDRESS"
+    ]
+  },
+  "schema_version": 1,
+  "server_endpoint": "tcp:127.0.0.1:65276",
+  "server_pid": 65618,
+  "stability_host_version": "0029",
+  "stability_window_seconds": 0.25,
+  "version_output": "Android Debug Bridge version 1.0.41\nVersion 37.0.0-android-tools\nInstalled as /private/tmp/klogg-native-cache-parity.r90J0o/verified-artifact-1/helpers/adb\nRunning on Darwin 25.6.0 (x86_64)"
+}

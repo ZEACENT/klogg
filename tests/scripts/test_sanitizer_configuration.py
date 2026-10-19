@@ -759,10 +759,12 @@ class SanitizerConfigurationTest(unittest.TestCase):
             with self.subTest(option=option):
                 self.assertEqual(docker_build_action.count(f"--env {option}"), 2)
 
-    def test_macos_tsan_scope_is_explicitly_first_party_only(self):
+    def test_macos_tsan_scope_documents_selected_dependencies_and_prebuilt_qt(self):
         workflow = CI_BUILD.read_text()
         project = PROJECT_CMAKE.read_text()
         self.assertIn("label: intel-qt6-first-party-tsan", workflow)
+        self.assertIn("macOS TSan covers first-party code plus mimalloc and TBB", workflow)
+        self.assertIn("other vendored dependencies are not instrumented", workflow)
         self.assertIn("prebuilt Qt 6 is not TSan-instrumented", workflow)
         self.assertIn("Linux source-built Qt TSan leg", workflow)
         self.assertIn(

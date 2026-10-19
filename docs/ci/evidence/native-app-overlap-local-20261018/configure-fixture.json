@@ -1,0 +1,42 @@
+{
+  "driver_sha256": "dbfb657beada3aa6134edb39972692d09ec79650959092a5f68b83cedcb8378f",
+  "green": {
+    "artifact_sha256": "85d93d5676f03d930ec8ef92a6a9ed47442072500079d34e0871cf35530d0937",
+    "configure_wall_ms": {
+      "final": 346.019734,
+      "first": 1439.46215,
+      "stabilization": 393.660396
+    },
+    "final_header": "#define HAVE_MMAP\n",
+    "first_header": "/* #undef HAVE_MMAP */\n",
+    "prepared_header": "#define HAVE_MMAP\n",
+    "retained": {
+      "core.c.o": true,
+      "core_tests": true,
+      "libcore.a": true
+    },
+    "stabilized_before_compile": true
+  },
+  "kind": "tiny-real-cmake-ordering-regression",
+  "not_a_full_application_performance_measurement": true,
+  "production_regression": "tests/scripts/test_ci_native_overlap.py",
+  "production_regression_sha256": "6692967f1554103ef880dcef1eea6ea5cc12c35f28171a3bb3c926c739d784fe",
+  "red": {
+    "artifact_sha256": "27376ca701578d42ee9e8e0b2059880a1eec4de45012cac9016487860c6dc2e6",
+    "configure_wall_ms": {
+      "final": 311.433072,
+      "first": 1242.040802,
+      "stabilization": null
+    },
+    "final_header": "#define HAVE_MMAP\n",
+    "first_header": "/* #undef HAVE_MMAP */\n",
+    "prepared_header": "/* #undef HAVE_MMAP */\n",
+    "retained": {
+      "core.c.o": false,
+      "core_tests": false,
+      "libcore.a": false
+    },
+    "stabilized_before_compile": false
+  },
+  "schema_version": 1
+}

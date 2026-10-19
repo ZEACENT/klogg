@@ -1,0 +1,111 @@
+{
+  "action_wall_seconds": {
+    "finalize_including_configure": 186.66,
+    "prepare_including_configure": 482.99,
+    "selected_ctest_process": 24.82
+  },
+  "build_only_ms": {
+    "finalize": 173059,
+    "prepare": 413835
+  },
+  "configure_ms": {
+    "finalize": {
+      "excluded_from_build_wall": true,
+      "passes": [
+        {
+          "command_sha256": "fd56295f737e7f78b6eaca91ed15aba0ae8902113d8e49f77eccff0a84f62091",
+          "purpose": "native-finalization",
+          "wall_ms": 13158
+        }
+      ],
+      "wall_ms": 13158
+    },
+    "prepare": {
+      "excluded_from_build_wall": true,
+      "passes": [
+        {
+          "command_sha256": "5ee1184ac07145a761a18809c9c112377c86e4b6393e98fc7879e40acbb43fa9",
+          "purpose": "initial",
+          "wall_ms": 54771
+        },
+        {
+          "command_sha256": "5ee1184ac07145a761a18809c9c112377c86e4b6393e98fc7879e40acbb43fa9",
+          "purpose": "precompile-stabilization",
+          "wall_ms": 12256
+        }
+      ],
+      "wall_ms": 67027
+    }
+  },
+  "current_recipe_proof": "Independent package proof in ../current-recipe-package used the original app binary. This stabilized run consumed the authenticated historical native artifacts.",
+  "frozen_package_directory": null,
+  "github_context_role": "Historical run identity binds downloaded native dependency fixtures; it is not a new CI execution.",
+  "historical_proof": "Authenticated same-run master39091756819 full ADB/iOS artifacts; checksum, receipt and GH attestation checks passed.",
+  "host": {
+    "architecture": "x86_64",
+    "boost": "1.86.0",
+    "cmake": "3.31.6",
+    "explicit_build_parallelism": 4,
+    "logical_cpus": 8,
+    "memory_bytes": 34359738368,
+    "ninja": "1.12.1",
+    "qt": "6.9.3",
+    "xcode": "26.6 (17F113)"
+  },
+  "hosted_ci_execution": false,
+  "kind": "local-native-overlap-stabilized-acceptance",
+  "limitations": [
+    "Cache-reuse local acceptance, not a matched cold/warm performance experiment or hosted CI execution.",
+    "Do not compare its total duration against the mostly-cold original as a causal speedup.",
+    "The deterministic result is no vectorscan replay, libhs rearchive, or prepared-test relinks after finalization; two generated resource cache hits remain.",
+    "No end-to-end hosted CI duration improvement is claimed."
+  ],
+  "local_configuration_differences": [
+    "Pinned Qt and Boost roots supplied explicitly; Boost_NO_SYSTEM_PATHS/Boost_NO_BOOST_CMAKE enabled to avoid host Boost1.90.",
+    "CMAKE_BUILD_PARALLEL_LEVEL=4; this is local functional acceptance, not hosted-runner performance qualification."
+  ],
+  "object_filesystem_observation": {
+    "changed_object_mtimes": 2,
+    "prepared_objects_including_configure_probes": 724,
+    "retained_object_mtimes": 722
+  },
+  "raw_ninja_logs": {
+    "finalize": {
+      "path": "/tmp/klogg-app-overlap-stabilized.FSpXkW/raw-ninja/finalize.ninja-log.txt",
+      "sha256": "9cb7369ce69fce23ea3f5d5ba658867d889b60d40616969109f38a1d7a254576",
+      "size": 107560
+    },
+    "prepare": {
+      "path": "/tmp/klogg-app-overlap-stabilized.FSpXkW/raw-ninja/prepare.ninja-log.txt",
+      "sha256": "3aa4fcc9576885af830bc7547f8b279438d93e24ddd7caa1452aae8cb7b1ea18",
+      "size": 104088
+    }
+  },
+  "schema_version": 1,
+  "selected_ctest": {
+    "ctest_reported_seconds": 24.41,
+    "failed": 0,
+    "full_suite_run": false,
+    "log_sha256": "3cae87b04c70c862d3e094fc4be77ec0617ca20adbf10260a095d01a2c22b742",
+    "names": [
+      "klogg_smoke",
+      "adb_helper_verifier_contract",
+      "ios_native_release_contract",
+      "klogg_ios_native_contract_tests"
+    ],
+    "passed": 4
+  },
+  "source_root": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt",
+  "source_script_sha256": {
+    ".github/actions/agent-build/action.yml": "eb5bccd701b0f288fb3676ba622f3215c7a39261c28901536cb365c121d007f6",
+    ".github/actions/agent-package-mac/action.yml": "83cc06fbfa2b1508804a7d00b3d2ab05dea345f7e5647e356c11e5cc064119d6",
+    "3rdparty/CMakeLists.txt": "b61571215c302fe40c9e487a0d9c7790aa9960e6e63823b96f25ec6a5dcce91a",
+    "CMakeLists.txt": "8ea9a4d299c016e43bc4a3be247b710c7b579dda2ab9ed0c3915ffe884743779",
+    "cmake/generate_version_h.cmake": "a39ead530f2a2375fd110b89f4f1a3c896fa39c0ec79e7f6b7c2262743abfe4c",
+    "scripts/ci_build_observation.py": "a2323b5eb71df62d1cb097dae4279dd952eb91304d68fc46d8e0cc247c809021",
+    "scripts/ci_native_overlap.py": "2f935546c1064ffb43f3438d7f0c19f833578704a3e07726cca6eb11743b1066",
+    "scripts/ci_native_rendezvous.py": "75acdf0459e0c37cbd7937a627708cf1f24be57203b78265ef0b99593c1bb1c7"
+  },
+  "source_sha": "f0ea6a09935c8c1a3407811446536482427fc931",
+  "source_state": "working tree with bounded precompile second-configure implementation; script hashes captured after acceptance"
+}

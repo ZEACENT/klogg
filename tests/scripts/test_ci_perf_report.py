@@ -104,6 +104,22 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(group["cold"]["samples"], 1)
         self.assertEqual(group["current_run_cache_hit_percent"], [80.0] * 4)
 
+    def test_phase_and_phased_build_samples_never_mix_with_single_build_cohorts(self):
+        samples = [metric("cold", 100, 1), metric("warm", 20, 2), metric("warm", 20, 3)]
+        samples[1]["measurement_scope"] = "phased-build"
+        samples[2]["measurement_scope"] = "phase"
+        groups = REPORT.compare_metrics(samples)
+        self.assertEqual(len(groups), 3)
+        self.assertEqual({group["identity"]["measurement_scope"] for group in groups},
+                         {"single-build", "phased-build", "phase"})
+
+    def test_different_native_configure_strategies_do_not_form_one_cohort(self):
+        old, stabilized = metric("cold", 100, 1), metric("warm", 20, 2)
+        for item in (old, stabilized):
+            item["measurement_scope"] = "phased-build"
+        stabilized["provenance"]["native_configure_strategy"] = "one-identical-precompile-stabilization-v1"
+        self.assertEqual(len(REPORT.compare_metrics([old, stabilized])), 2)
+
     def test_missing_identity_unknown_cache_and_duplicate_run_never_complete_evidence(self):
         missing = metric("warm", 5, 2)
         missing["provenance"]["compilers"] = {}
@@ -212,7 +228,16 @@ class ReportTest(unittest.TestCase):
                                  str(directory / "evidence.json"), "--dag", str(directory / "dag.json")],
                                 check=True, text=True, capture_output=True)
         report = json.loads(result.stdout)
-        self.assertEqual(report, json.loads((directory / "report.json").read_text(encoding="utf-8")))
+        expected = json.loads((directory / "report.json").read_text(encoding="utf-8"))
+        # Legacy payloads remain single-build evidence; the additive scope field
+        # must not change their samples, durations or incomplete-evidence status.
+        for group in expected["build_comparisons"]:
+            group["identity"]["measurement_scope"] = "single-build"
+            group["identity"]["native_configure_strategy"] = None
+        for run in expected["runs"]:
+            for item in run["build_metrics"]:
+                item["measurement_scope"] = "single-build"
+        self.assertEqual(report, expected)
         self.assertFalse(any(group["complete"] for group in report["build_comparisons"]))
 
     def test_failed_jobs_are_reported_not_silently_dropped(self):
@@ -241,6 +266,53 @@ class CollectionTest(unittest.TestCase):
             self.assertTrue((Path(directory) / "evidence" / "run.json").is_file())
             with self.assertRaisesRegex(ValueError, "SHA"):
                 REPORT.collect("owner/repo", 1, Path(directory) / "stale", "b" * 40, api=api)
+
+    def test_other_attempt_artifact_names_are_skipped_without_download_or_fake_samples(self):
+        artifacts = [{"id": 1, "name": "build-metrics-intel-attempt-1", "expired": True},
+                     {"id": 2, "name": "build-metrics-intel-attempt-2",
+                      "workflow_run": {"id": 1, "head_sha": "a" * 40}}]
+        run = dict(evidence()["run"], run_attempt=2)
+        current = metric("warm", 20, 1)
+        current["provenance"]["run_attempt"] = "2"
+        def api(endpoint):
+            if "/jobs?" in endpoint:
+                return {"total_count": 1, "jobs": [dict(job(1, 3, 13), run_attempt=2)]}
+            if "/artifacts?" in endpoint:
+                return {"total_count": len(artifacts), "artifacts": artifacts}
+            return run
+        def download(command, *, stdout, check):
+            self.assertTrue(command[-1].endswith("/2/zip"))
+            stdout.write(metrics_zip(current))
+            return subprocess.CompletedProcess(command, 0)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(REPORT.subprocess, "run", side_effect=download) as fetch:
+            result = REPORT.collect("owner/repo", 1, Path(directory) / "current", attempt=2, api=api)
+            self.assertEqual(result["errors"], [])
+            self.assertEqual(len(result["metrics"]), 1)
+            self.assertEqual(fetch.call_count, 1)
+            artifacts.pop()
+            fetch.reset_mock()
+            result = REPORT.collect("owner/repo", 1, Path(directory) / "missing", attempt=2, api=api)
+            self.assertEqual(result["metrics"], [])
+            self.assertEqual(result["errors"], [])
+            fetch.assert_not_called()
+
+    def test_current_attempt_name_still_requires_matching_payload_provenance(self):
+        artifact = {"id": 2, "name": "build-metrics-intel-attempt-2",
+                    "workflow_run": {"id": 1, "head_sha": "a" * 40}}
+        def api(endpoint):
+            if "/jobs?" in endpoint:
+                return {"total_count": 0, "jobs": []}
+            if "/artifacts?" in endpoint:
+                return {"total_count": 1, "artifacts": [artifact]}
+            return dict(evidence()["run"], run_attempt=2)
+        def download(command, *, stdout, check):
+            stdout.write(metrics_zip(metric("warm", 20, 1)))
+            return subprocess.CompletedProcess(command, 0)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(REPORT.subprocess, "run", side_effect=download):
+            result = REPORT.collect("owner/repo", 1, Path(directory) / "current", attempt=2, api=api)
+            self.assertEqual(result["metrics"], [])
+            self.assertEqual(len(result["errors"]), 1)
+            self.assertIn("another run/attempt", result["errors"][0])
 
     def test_api_failure_is_not_empty_success(self):
         def api(_):

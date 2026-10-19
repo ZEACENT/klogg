@@ -248,6 +248,7 @@ class ReleaseArtifactUploadTest(unittest.TestCase):
             self.assertEqual(len(test_indices), 1, "tests must run once, without retry")
             index = test_indices[0]
             self.assertEqual(rows[index][0], {
+                "name": "Verify macOS tests",
                 "uses": "./.github/actions/agent-run-tests", "id": "macos_tests"})
             diagnostics = [(offset, fields, children) for offset, (fields, children) in enumerate(rows)
                            if children.get("with", {}).get("name") == DIAGNOSTICS_NAME]

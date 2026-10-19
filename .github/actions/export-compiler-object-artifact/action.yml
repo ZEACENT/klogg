@@ -1,0 +1,49 @@
+name: Export shared compiler object artifact
+description: Export bounded ordinary compiler-cache data after caller validation, never native bundles
+inputs:
+  descriptor:
+    description: Current compiler, dependency, policy and producer-step descriptor JSON
+    required: true
+  path:
+    description: Validated, bounded and quiescent compiler cache data directory
+    required: true
+  export-needed:
+    description: Restore decision; a recent compatible snapshot suppresses redundant upload
+    required: false
+    default: "true"
+outputs:
+  artifact-id:
+    description: Immutable uploaded artifact identity
+    value: ${{ steps.upload.outputs.artifact-id }}
+  artifact-digest:
+    description: Uploaded Actions artifact SHA-256
+    value: ${{ steps.upload.outputs.artifact-digest }}
+runs:
+  using: composite
+  steps:
+    - name: Package bounded compiler object snapshot
+      id: pack
+      if: ${{ success() && inputs.export-needed == 'true' }}
+      shell: bash
+      env:
+        KLOGG_COMPILER_ARTIFACT_DESCRIPTOR: ${{ inputs.descriptor }}
+        KLOGG_COMPILER_ARTIFACT_CACHE: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        session="$(mktemp -d "$RUNNER_TEMP/compiler-object-export.XXXXXX")"
+        python3 scripts/ci_compiler_object_transport.py pack \
+          --descriptor "$KLOGG_COMPILER_ARTIFACT_DESCRIPTOR" \
+          --cache "$KLOGG_COMPILER_ARTIFACT_CACHE" \
+          --output "$session/bundle"
+
+    - name: Upload immutable compiler object snapshot
+      id: upload
+      if: ${{ success() && steps.pack.outputs.packed == 'true' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.pack.outputs.artifact-name }}
+        path: ${{ steps.pack.outputs.path }}
+        if-no-files-found: error
+        retention-days: 2
+        compression-level: 0
+        overwrite: false

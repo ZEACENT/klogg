@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "run": {
+    "GITHUB_RUN_ID": "39053583829",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_SHA": "ef79c643c55ae4128563a6ddfe83171713c9cf6f"
+  },
+  "validated": true,
+  "measurement_scope": "since successful pre-configure zero-stats",
+  "targets_measured": false,
+  "restore": {
+    "PRIMARY_CACHE_MATCH": "",
+    "MASTER_CACHE_MATCH": "",
+    "PRIMARY_CACHE_OUTCOME": "success",
+    "MASTER_CACHE_OUTCOME": "success"
+  },
+  "activation": {
+    "enabled": true,
+    "ready": true,
+    "run": {
+      "GITHUB_RUN_ID": "39053583829",
+      "GITHUB_RUN_ATTEMPT": "1",
+      "GITHUB_SHA": "ef79c643c55ae4128563a6ddfe83171713c9cf6f"
+    },
+    "executable": "D:\\a\\_temp\\sccache-tool-krb23a1c\\sccache.exe",
+    "identity": {
+      "KLOGG_CONFIG_ARCH": "x64",
+      "KLOGG_QT_VERSION": "6.9.3",
+      "KLOGG_QT_ARCH": "win64_msvc2022_64",
+      "KLOGG_LABEL": "x64-qt6-asan",
+      "VCToolsVersion": "14.44.35207",
+      "WindowsSDKVersion": "10.0.26100.0\\",
+      "VSCMD_ARG_TGT_ARCH": "x64",
+      "compiler_sha256": "fe251ef50a1545b1b0835ee17b1e785459712b38d79e45b5c1d3d28970a36619",
+      "config": "RelWithDebInfo",
+      "cmake_options": "-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_SENTRY=ON -DWARNINGS_AS_ERRORS=ON -DCMAKE_INSTALL_PREFIX=/usr -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+      "sanitizer": "address",
+      "sccache_sha256": "8965c74d5e8a225244f741e18ad2f3f504f48228dc1bac948fc22761a348363d",
+      "preload_sha256": "d3d9dc52837f25543cd2c8e6c39e2c2df14e878d0988bc00f1afafc08a497d5c"
+    },
+    "keys": {
+      "primary-prefix": "windows-sccache-v1-d79f89bb297fa25188edd40cc9f940bf-pr-80-",
+      "master-prefix": "windows-sccache-v1-d79f89bb297fa25188edd40cc9f940bf-master-",
+      "primary-key": "windows-sccache-v1-d79f89bb297fa25188edd40cc9f940bf-pr-80-20261017",
+      "master-key": "windows-sccache-v1-d79f89bb297fa25188edd40cc9f940bf-master-20261017",
+      "save-key": "windows-sccache-v1-d79f89bb297fa25188edd40cc9f940bf-pr-80-20261017"
+    },
+    "budget": 2147483648,
+    "reason": "active; statistics reset for this run",
+    "reset": true
+  },
+  "raw": {
+    "stats": {
+      "compile_requests": 730,
+      "requests_unsupported_compiler": 0,
+      "requests_not_compile": 0,
+      "requests_not_cacheable": 0,
+      "requests_executed": 730,
+      "cache_errors": {
+        "counts": {},
+        "adv_counts": {}
+      },
+      "cache_hits": {
+        "counts": {},
+        "adv_counts": {}
+      },
+      "cache_misses": {
+        "counts": {
+          "C/C++": 730
+        },
+        "adv_counts": {
+          "c [msvc]": 173,
+          "c++ [msvc]": 557
+        }
+      },
+      "cache_timeouts": 0,
+      "cache_read_errors": 0,
+      "non_cacheable_compilations": 0,
+      "forced_recaches": 0,
+      "cache_write_errors": 0,
+      "cache_writes": 730,
+      "cache_write_duration": {
+        "secs": 1,
+        "nanos": 152512100
+      },
+      "cache_read_hit_duration": {
+        "secs": 0,
+        "nanos": 0
+      },
+      "compilations": 730,
+      "compiler_write_duration": {
+        "secs": 2786,
+        "nanos": 927427400
+      },
+      "compile_fails": 0,
+      "not_cached": {},
+      "dist_compiles": {},
+      "dist_errors": 0,
+      "multi_level": null
+    },
+    "cache_location": "Local disk: \"D:\\\\a\\\\klogg\\\\klogg\\\\.sccache\"",
+    "cache_size": 325094502,
+    "max_cache_size": 2147483648,
+    "use_preprocessor_cache_mode": true,
+    "version": "0.18.0",
+    "basedirs": []
+  },
+  "stats": {
+    "requests": 730,
+    "hits": 0,
+    "misses": 730,
+    "hit_rate": 0.0,
+    "non_cacheable_reasons": {},
+    "errors": 0
+  },
+  "storage": {
+    "bytes": 325094502,
+    "budget_bytes": 2147483648,
+    "pruned_files": 0
+  },
+  "reason": "cache statistics, compiler flags and byte bound validated"
+}

@@ -14,6 +14,7 @@ import io
 import json
 import math
 from pathlib import Path, PurePosixPath
+import re
 import statistics
 import subprocess
 import tempfile
@@ -105,6 +106,11 @@ def collect(repository, run_id, output, expected_sha=None, *, attempt=None, api=
     metrics = []
     for artifact in artifacts:
         if not artifact["name"].startswith("build-metrics-"):
+            continue
+        named_attempt = re.search(r"-attempt-([1-9][0-9]*)$", artifact["name"])
+        if named_attempt and int(named_attempt.group(1)) != attempt:
+            # Explicit historical attempts are not missing/current evidence and
+            # must not be downloaded or misreported as current artifact errors.
             continue
         identifier = artifact["id"]
         try:
@@ -240,6 +246,7 @@ def summarize_run(evidence, dependencies=None):
             "critical_path": critical, "jobs": rows, "collection_errors": evidence.get("errors", []),
             "build_metrics": [{"artifact_id": item["artifact_id"], "artifact_name": item["artifact_name"],
                                "build_wall_ms": item["report"]["build_wall_ms"],
+                               "measurement_scope": item["report"].get("measurement_scope", "single-build"),
                                "object_cache": item["report"].get("object_cache"),
                                "provenance": item["report"].get("provenance"),
                                "current_run_cache_hit_percent": cache_hit_percent(item["report"])}
@@ -253,6 +260,8 @@ def compare_metrics(metrics):
     for metric in metrics:
         provenance = metric_provenance(metric)
         identity = {key: provenance.get(key) for key in keys}
+        identity["measurement_scope"] = metric.get("measurement_scope", "single-build")
+        identity["native_configure_strategy"] = provenance.get("native_configure_strategy")
         identity["object_cache"] = metric.get("object_cache")
         identity["cache_tool"] = metric.get("cache_tool", "ccache" if metric.get("object_cache") == "measured" else None)
         key = json.dumps(identity, sort_keys=True)
@@ -261,6 +270,8 @@ def compare_metrics(metrics):
     for key, members in sorted(groups.items()):
         identity = json.loads(key)
         issues = []
+        if identity["measurement_scope"] not in ("single-build", "phased-build"):
+            issues.append("partial or unknown measurement scope cannot establish whole-build evidence")
         options = identity["cmake_options"]
         if (any(not identity[field] for field in keys) or not isinstance(options, dict)
                 or any(not isinstance(value, str) for value in options.values())):

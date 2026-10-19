@@ -19,6 +19,10 @@ inputs:
   artifact-root:
     description: Output directory for the helper closure and receipt
     required: true
+  object-cache-enabled:
+    description: Opt in to ordinary macOS compiler objects, never native core qualification or bundle reuse
+    required: false
+    default: "false"
   container-image:
     description: Digest-bound Linux helper toolchain image; empty for native macOS and Windows builds
     required: false
@@ -33,6 +37,83 @@ runs:
         python3 scripts/verify_adb_helper_toolchain.py \
           --lock packaging/adb/adb-helper.lock.json \
           --target "${{ inputs.target }}"
+
+    - name: Select ordinary macOS ADB cache scope
+      id: native-cache-eligibility
+      if: ${{ inputs.object-cache-enabled == 'true' && startsWith(inputs.target, 'macos-') }}
+      shell: bash
+      env:
+        KLOGG_NATIVE_CACHE_TARGET: ${{ inputs.target }}
+      run: python3 scripts/ci_native_object_cache.py eligible --target "$KLOGG_NATIVE_CACHE_TARGET"
+
+    - name: Install ordinary macOS ADB compiler cache
+      if: ${{ steps.native-cache-eligibility.outputs.eligible == 'true' }}
+      shell: bash
+      env:
+        HOMEBREW_NO_ANALYTICS: "1"
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+        HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      run: brew install ccache
+
+    - name: Prepare ordinary macOS ADB compiler cache
+      id: native-cache
+      if: ${{ inputs.object-cache-enabled == 'true' && steps.native-cache-eligibility.outputs.eligible == 'true' }}
+      shell: bash
+      env:
+        KLOGG_NATIVE_CACHE_TARGET: ${{ inputs.target }}
+      run: python3 scripts/ci_native_object_cache.py prepare --target "$KLOGG_NATIVE_CACHE_TARGET"
+
+    - name: Restore scoped macOS ADB compiler objects
+      id: native-cache-primary
+      if: ${{ steps.native-cache.outputs.enabled == 'true' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ${{ steps.native-cache.outputs.path }}
+        key: ${{ steps.native-cache.outputs.primary-key }}
+        restore-keys: ${{ steps.native-cache.outputs.primary-prefix }}
+
+    - name: Restore master macOS ADB objects on own-PR miss
+      id: native-cache-master
+      if: ${{ steps.native-cache.outputs.own-pr == 'true' && steps.native-cache-primary.outputs.cache-matched-key == '' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ${{ steps.native-cache.outputs.path }}
+        key: ${{ steps.native-cache.outputs.master-key }}
+        restore-keys: ${{ steps.native-cache.outputs.master-prefix }}
+
+    - name: Describe shared native ADB compiler objects
+      id: native-cache-descriptor
+      if: ${{ steps.native-cache.outputs.enabled == 'true' }}
+      shell: bash
+      env:
+        KLOGG_NATIVE_CACHE_TARGET: ${{ inputs.target }}
+        KLOGG_NATIVE_CACHE_IDENTITY: ${{ steps.native-cache.outputs.identity-file }}
+      run: |
+        set -euo pipefail
+        python3 scripts/ci_compiler_object_descriptor.py \
+          --component native --label "native-adb-$KLOGG_NATIVE_CACHE_TARGET" \
+          --native-identity "$KLOGG_NATIVE_CACHE_IDENTITY" \
+          --producer-job "Source-built ADB helper $KLOGG_NATIVE_CACHE_TARGET" \
+          --required-step "Build and verify native ADB helper" \
+          --export-step "Build and verify native ADB helper" \
+          --output "$RUNNER_TEMP/native-adb-descriptor-$KLOGG_NATIVE_CACHE_TARGET.json"
+
+    - name: Restore shared native ADB compiler objects
+      id: native-cache-shared
+      if: ${{ steps.native-cache-descriptor.outputs.eligible == 'true' }}
+      uses: ./.github/actions/restore-compiler-object-artifact
+      with:
+        descriptor: ${{ steps.native-cache-descriptor.outputs.descriptor }}
+        path: ${{ steps.native-cache.outputs.path }}
+
+    - name: Start current-build native cache observation
+      if: ${{ steps.native-cache.outputs.enabled == 'true' }}
+      shell: bash
+      env:
+        KLOGG_NATIVE_CACHE_STATE: ${{ steps.native-cache.outputs.state }}
+        KLOGG_NATIVE_PRIMARY_MATCH: ${{ steps.native-cache-primary.outputs.cache-matched-key }}
+        KLOGG_NATIVE_MASTER_MATCH: ${{ steps.native-cache-master.outputs.cache-matched-key }}
+      run: python3 scripts/ci_native_object_cache.py start --state "$KLOGG_NATIVE_CACHE_STATE"
 
     - name: Build Linux helper in digest-bound disconnected toolchain
       if: ${{ startsWith(inputs.target, 'linux-') }}
@@ -82,6 +163,8 @@ runs:
       env:
         FETCHCONTENT_FULLY_DISCONNECTED: "ON"
         FETCHCONTENT_UPDATES_DISCONNECTED: "ON"
+        CMAKE_C_COMPILER_LAUNCHER: ${{ steps.native-cache.outputs.launcher }}
+        CMAKE_CXX_COMPILER_LAUNCHER: ${{ steps.native-cache.outputs.launcher }}
       run: |
         set -euo pipefail
         python3 scripts/build_adb_helper.py \
@@ -171,3 +254,38 @@ runs:
             lines.append(f"{digest}  {path.relative_to(root).as_posix()}")
         (root / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
         PY
+
+    - name: Measure and bound verified native compiler objects
+      id: native-cache-finish
+      if: ${{ success() && steps.native-cache.outputs.enabled == 'true' }}
+      shell: bash
+      env:
+        KLOGG_NATIVE_CACHE_STATE: ${{ steps.native-cache.outputs.state }}
+      run: python3 scripts/ci_native_object_cache.py finish --state "$KLOGG_NATIVE_CACHE_STATE"
+
+    - name: Save verified scoped native compiler objects
+      if: ${{ success() && steps.native-cache-finish.outputs.validated == 'true' && steps.native-cache.outputs.save-key != '' }}
+      uses: ./.github/actions/save-verified-compiler-cache
+      with:
+        path: ${{ steps.native-cache.outputs.path }}
+        key: ${{ steps.native-cache.outputs.save-key }}
+        descriptor: ${{ steps.native-cache-descriptor.outputs.descriptor }}
+
+    - name: Export shared native ADB compiler objects
+      if: ${{ success() && steps.native-cache-finish.outputs.validated == 'true' && steps.native-cache-descriptor.outputs.eligible == 'true' }}
+      uses: ./.github/actions/export-compiler-object-artifact
+      with:
+        descriptor: ${{ steps.native-cache-descriptor.outputs.descriptor }}
+        path: ${{ steps.native-cache.outputs.path }}
+        export-needed: ${{ steps.native-cache-shared.outputs.export-needed }}
+
+    - name: Retain native compiler cache measurement
+      if: ${{ always() && steps.native-cache-finish.outputs.validated == 'true' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: native-adb-object-cache-${{ inputs.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          ${{ steps.native-cache-finish.outputs.report }}
+          ${{ steps.native-cache-shared.outputs.report }}
+        retention-days: 7
+        if-no-files-found: error

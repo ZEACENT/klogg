@@ -2035,6 +2035,73 @@ def ci_build_adb_source_transport_issues(text: str) -> list[str]:
     return []
 
 
+def macos_overlap_workflow_issues(text: str, job: str) -> list[str]:
+    """Replace a scheduler dependency only with authenticated, gated finalization."""
+    message = f"{job}: early compilation requires same-run native IDs and mandatory finalization before publication"
+    rows = [workflow_step_fields(step) for step in workflow_job_steps(text).get(job, [])]
+    package_if = "${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}"
+    try:
+        builds = [(i, fields, children.get("with", {})) for i, (fields, children) in enumerate(rows)
+                  if fields.get("uses") == "./.github/actions/agent-build"]
+        ready = [(i, fields, children) for i, (fields, children) in enumerate(rows)
+                 if fields.get("id") == "native-ready"]
+        if len(builds) != 2 or len(ready) != 1:
+            return [message]
+        (prepare, first, first_options), (finalize, final, final_options) = builds
+        wait, rendezvous, settings = ready[0]
+        if (not prepare < wait < finalize or first.get("if") != package_if
+                or first_options != {"phase": "prepare"}
+                or rendezvous.get("if") != package_if or rendezvous.get("shell") != "bash"
+                or settings.get("env") != {"GH_TOKEN": "${{ github.token }}"}
+                or " ".join(active_script_content(rendezvous.get("run", "")).split()) !=
+                   'python3 scripts/ci_native_rendezvous.py --architecture "$KLOGG_IOS_ARCHITECTURE" --receipt "$RUNNER_TEMP/native-ready.json"'
+                or final_options != {"phase": "${{ env.KLOGG_PACKAGE_ENABLED == 'true' && 'finalize' || 'full' }}",
+                                     "native-receipt": "${{ runner.temp }}/native-ready.json"}
+                or final.get("if") is not None
+                or any("continue-on-error" in fields for fields in (first, rendezvous, final))):
+            return [message]
+        expected_ids = {"adb-artifact-id", "support-artifact-id", "ios-artifact-id"}
+        downloads = []
+        for i, (fields, children) in enumerate(rows):
+            options = children.get("with", {})
+            for name in expected_ids:
+                if options.get("artifact-ids") == "${{ steps.native-ready.outputs." + name + " }}":
+                    if (not wait < i < finalize or fields.get("if") != package_if
+                            or fields.get("uses") != "actions/download-artifact@" + REVIEWED_ACTION_REVISIONS["actions/download-artifact"]
+                            or options.get("merge-multiple") != "true" or "name" in options
+                            or "continue-on-error" in fields):
+                        return [message]
+                    downloads.append(name)
+        if len(downloads) != 3 or set(downloads) != expected_ids:
+            return [message]
+        for name, verifier in (
+            ("Verify target-bound iOS native checksum envelope and Mach-O closure", "scripts/verify_ios_native_stack.py"),
+            ("Verify target-bound ADB helper checksum envelope and provenance", "scripts/verify_adb_helper_envelope.py"),
+        ):
+            checks = [(i, fields) for i, (fields, _) in enumerate(rows) if fields.get("name") == name]
+            if (len(checks) != 1 or not wait < checks[0][0] < finalize
+                    or checks[0][1].get("if") != package_if or "continue-on-error" in checks[0][1]
+                    or verifier not in active_script_content(checks[0][1].get("run", ""))):
+                return [message]
+        tests = [i for i, (fields, _) in enumerate(rows) if fields.get("uses") == "./.github/actions/agent-run-tests"]
+        package = [i for i, (fields, _) in enumerate(rows) if fields.get("uses") == "./.github/actions/agent-package-mac"]
+        if (len(tests) != 1 or len(package) != 1 or not finalize < tests[0] < package[0]
+                or rows[tests[0]][0].get("if") is not None
+                or rows[package[0]][0].get("if") != package_if
+                or any("continue-on-error" in rows[i][0] for i in (tests[0], package[0]))):
+            return [message]
+        for i, (fields, children) in enumerate(rows):
+            uses = fields.get("uses", "")
+            if (uses in {"./.github/actions/save-verified-compiler-cache", "./.github/actions/export-compiler-object-artifact",
+                         "./.github/actions/upload-release-artifact"} and i <= package[0]):
+                return [message]
+            if prepare < i < finalize and uses.startswith("actions/upload-artifact@"):
+                return [message]
+    except (KeyError, TypeError, ValueError):
+        return [message]
+    return []
+
+
 def ci_build_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
     active = active_script_content(text)
@@ -2087,8 +2154,21 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             issues.append(
                 f"CI job {job} must explicitly set KLOGG_PACKAGE_ENABLED to {expected}"
             )
+    try:
+        job_steps = workflow_job_steps(text)
+    except ValueError as error:
+        issues.append(str(error))
+        return issues
+    runtime_native_jobs = set()
+    for job in ("MacPackages", "MacArmPackages"):
+        rows = [workflow_step_fields(step)[0] for step in job_steps.get(job, [])]
+        if any(fields.get("id") == "native-ready" for fields in rows):
+            overlap_issues = macos_overlap_workflow_issues(text, job)
+            issues.extend(overlap_issues)
+            if not overlap_issues:
+                runtime_native_jobs.add(job)
     for consumer, producers in CI_BUILD_REQUIRED_MOBILE_ANCESTORS.items():
-        if consumer not in needs:
+        if consumer not in needs or consumer in runtime_native_jobs:
             continue
         missing_producers = producers - ancestors[consumer]
         for producer in sorted(missing_producers):
@@ -2156,6 +2236,13 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     except ValueError as error:
         issues.append(str(error))
         return issues
+    # The reviewed rendezvous binds this logical artifact to an immutable ID.
+    # Its exact ID expression, condition and verification order were checked above.
+    for job in runtime_native_jobs:
+        artifact = "adb-helper-package-support"
+        artifacts[job]["downloads"].add(artifact)
+        artifact_records.setdefault(job, []).append((
+            "downloads", artifact, CI_BUILD_ARTIFACT_CONDITIONS[(job, "downloads", artifact)]))
     for artifact, producer in CI_BUILD_ARTIFACT_PRODUCERS.items():
         owners = {
             job
@@ -2172,7 +2259,8 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             producer = CI_BUILD_ARTIFACT_PRODUCERS.get(artifact)
             if producer is None or producer not in needs or consumer not in needs:
                 continue
-            if producer not in workflow_job_ancestors(needs, consumer):
+            if (producer not in workflow_job_ancestors(needs, consumer)
+                    and not (consumer in runtime_native_jobs and artifact == "adb-helper-package-support")):
                 issues.append(
                     f"CI artifact {artifact} producer {producer} must be an ancestor of {consumer}"
                 )
@@ -2502,7 +2590,7 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     ):
         issues.append("ccache keys must be bounded and must not use github.run_id")
 
-    if ".ccache" in active_text and "actions/cache/save@" in active_text:
+    if ".ccache" in active_text:
         issues.extend(ccache_workflow_issues(text))
 
     return issues
@@ -2527,9 +2615,10 @@ def ccache_workflow_issues(text: str) -> list[str]:
         uploads = [index for index, (_, children) in enumerate(rows)
                    if children.get("with", {}).get("name", "").startswith(("packages-", "symbols-"))]
         saves = [(index, fields) for index, (fields, children) in enumerate(rows)
-                 if fields.get("uses", "").startswith("actions/cache/save@")
+                 if (fields.get("uses", "").startswith("actions/cache/save@")
+                     or fields.get("uses") == "./.github/actions/save-verified-compiler-cache")
                  and children.get("with", {}).get("path", "").endswith("/.ccache")]
-        message = f"{job}: ccache requires effective budgets and success-only saves between qualification and upload"
+        message = f"{job}: ccache requires effective budgets and verified success-only saves between qualification and upload"
         if any(value is None for value in (prepare, trim, tests, package, build)) or not uploads or not saves:
             issues.append(message)
             continue
@@ -2548,6 +2637,7 @@ def ccache_workflow_issues(text: str) -> list[str]:
                 or not prepare < build < tests < package < trim
                 or "always()" in rows[trim][0].get("if", "")
                 or any(not trim < index < min(uploads)
+                       or fields.get("uses") != "./.github/actions/save-verified-compiler-cache"
                        or fields.get("if") not in allowed_save_conditions[platform]
                        or "continue-on-error" in fields for index, fields in saves)):
             issues.append(message)

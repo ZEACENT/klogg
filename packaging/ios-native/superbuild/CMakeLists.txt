@@ -9,6 +9,10 @@ set(KLOGG_IOS_ARCHITECTURE "" CACHE STRING "Thin macOS architecture")
 set(KLOGG_IOS_DEPLOYMENT_TARGET "" CACHE STRING "Locked macOS deployment target")
 set(KLOGG_IOS_PARALLEL 2 CACHE STRING "Parallel build jobs")
 set(KLOGG_IOS_SOURCE_DATE_EPOCH "" CACHE STRING "Locked reproducible-build timestamp")
+set(KLOGG_IOS_COMPILER_LAUNCHER "" CACHE FILEPATH "Optional executable-only native compiler launcher")
+set(KLOGG_IOS_C_COMPILER "clang" CACHE STRING "Selected native C compiler")
+set(KLOGG_IOS_CXX_COMPILER "clang++" CACHE STRING "Selected native C++ compiler")
+set(KLOGG_IOS_SDK_ROOT "" CACHE PATH "Selected SDK for direct native compiler invocation")
 
 if(NOT APPLE)
   message(FATAL_ERROR "The iOS native superbuild is macOS-only")
@@ -22,13 +26,29 @@ if(NOT KLOGG_IOS_ARCHITECTURE MATCHES "^(x86_64|arm64)$")
   message(FATAL_ERROR "Unsupported thin iOS native architecture: ${KLOGG_IOS_ARCHITECTURE}")
 endif()
 
+set(_cc "${KLOGG_IOS_C_COMPILER}")
+set(_cxx "${KLOGG_IOS_CXX_COMPILER}")
+if(KLOGG_IOS_COMPILER_LAUNCHER)
+  foreach(_executable KLOGG_IOS_COMPILER_LAUNCHER KLOGG_IOS_C_COMPILER KLOGG_IOS_CXX_COMPILER KLOGG_IOS_SDK_ROOT)
+    if(NOT IS_ABSOLUTE "${${_executable}}" OR NOT "${${_executable}}" MATCHES "^/[A-Za-z0-9_./+-]+$")
+      message(FATAL_ERROR "Native compiler launcher requires absolute shell-safe executable paths")
+    endif()
+  endforeach()
+  # Autotools/libtool and OpenSSL use CC/CXX command strings, not CMake launchers.
+  # Cache settings remain in the process environment, never an env prefix in CC.
+  set(_cc "${KLOGG_IOS_COMPILER_LAUNCHER} ${KLOGG_IOS_C_COMPILER}")
+  set(_cxx "${KLOGG_IOS_COMPILER_LAUNCHER} ${KLOGG_IOS_CXX_COMPILER}")
+  set(_compiler_env "SDKROOT=${KLOGG_IOS_SDK_ROOT}")
+endif()
+
 set(_env
     ${CMAKE_COMMAND} -E env
+    ${_compiler_env}
     MACOSX_DEPLOYMENT_TARGET=${KLOGG_IOS_DEPLOYMENT_TARGET}
     SOURCE_DATE_EPOCH=${KLOGG_IOS_SOURCE_DATE_EPOCH}
     ZERO_AR_DATE=1
-    CC=clang
-    CXX=clang++
+    "CC=${_cc}"
+    "CXX=${_cxx}"
     "CFLAGS=-arch ${KLOGG_IOS_ARCHITECTURE} -mmacosx-version-min=${KLOGG_IOS_DEPLOYMENT_TARGET} -O2"
     "CXXFLAGS=-arch ${KLOGG_IOS_ARCHITECTURE} -mmacosx-version-min=${KLOGG_IOS_DEPLOYMENT_TARGET} -O2"
     CPPFLAGS=-I${KLOGG_IOS_INSTALL_PREFIX}/include

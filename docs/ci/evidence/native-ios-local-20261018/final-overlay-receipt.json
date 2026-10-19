@@ -1,0 +1,24 @@
+{
+  "assets": [
+    {
+      "file_name": "ios-native-source-offer.txt",
+      "kind": "source-offer",
+      "sha256": "ed256309e39a76d2a2a8c9ce5ee478cce757d5da99a9f847345154ef2f33420d"
+    },
+    {
+      "file_name": "ios-native-lgpl-replacement.txt",
+      "kind": "replacement-guide",
+      "sha256": "67a61746b862da355659222bc70daea23d0187ddac94d76a8555fae633a89e46"
+    }
+  ],
+  "base_url": "https://github.com/ZEACENT/klogg",
+  "component": "ios-native",
+  "distribution": {
+    "package_required": true,
+    "release_required": true
+  },
+  "receipt_kind": "component-source-overlay",
+  "schema_version": 1,
+  "source_set_receipt_sha256": "c2dbd56e23f28c1b8b7ab91073060c53bb8a83c3e074a23db824d893386078a9",
+  "version": "26.10.18.0"
+}

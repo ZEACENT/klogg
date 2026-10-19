@@ -1,0 +1,166 @@
+[
+  {
+    "source": "master-logs/12_macOS intel-qt6-first-party-tsan [tsan].txt",
+    "sha256": "b220a72eb8034f98875998392b831b341361cfe58d4839461f189a254d425930",
+    "lines": [
+      {
+        "line": 385,
+        "text": "2026-10-18T02:57:03.9458960Z Cache restored from key: intel-qt6-first-party-tsan-ccache-v2-2026-10-17"
+      },
+      {
+        "line": 3436,
+        "text": "2026-10-18T03:49:19.8445620Z Cacheable calls:   1444 / 1444 (100.0%)"
+      },
+      {
+        "line": 3437,
+        "text": "2026-10-18T03:49:19.8451230Z   Hits:               2 / 1444 ( 0.14%)"
+      },
+      {
+        "line": 3439,
+        "text": "2026-10-18T03:49:19.8453910Z     Preprocessed:     2 /    2 (100.0%)"
+      },
+      {
+        "line": 3440,
+        "text": "2026-10-18T03:49:19.8457130Z   Misses:          1442 / 1444 (99.86%)"
+      },
+      {
+        "line": 3443,
+        "text": "2026-10-18T03:49:19.8465040Z   Hits:               2 / 1444 ( 0.14%)"
+      },
+      {
+        "line": 3444,
+        "text": "2026-10-18T03:49:19.8466190Z   Misses:          1442 / 1444 (99.86%)"
+      },
+      {
+        "line": 7357,
+        "text": "2026-10-18T03:56:21.2042930Z 37/40 Test #29: klogg_livelog_restore_arming_tests ............   Passed    5.57 sec"
+      },
+      {
+        "line": 7367,
+        "text": "2026-10-18T03:56:21.9773960Z ##[error]The operation was canceled."
+      }
+    ]
+  },
+  {
+    "source": "master-logs/2_macOS intel-qt6 [vs-gen].txt",
+    "sha256": "c69edfadde19444d05121992b536101814382b74914af00d173ef65e9af22413",
+    "lines": [
+      {
+        "line": 689,
+        "text": "2026-10-18T03:10:42.0576200Z Cache restored from key: intel-qt6-ccache-v2-2026-10-17"
+      },
+      {
+        "line": 3738,
+        "text": "2026-10-18T03:51:01.0035810Z ##[error]Failed to CreateArtifact: Unable to make request: ETIMEDOUT"
+      },
+      {
+        "line": 3791,
+        "text": "2026-10-18T03:51:01.1336290Z Cacheable calls:   1444 / 1444 (100.0%)"
+      },
+      {
+        "line": 3792,
+        "text": "2026-10-18T03:51:01.1337340Z   Hits:               6 / 1444 ( 0.42%)"
+      },
+      {
+        "line": 3794,
+        "text": "2026-10-18T03:51:01.1338840Z     Preprocessed:     6 /    6 (100.0%)"
+      },
+      {
+        "line": 3795,
+        "text": "2026-10-18T03:51:01.1339490Z   Misses:          1438 / 1444 (99.58%)"
+      },
+      {
+        "line": 3799,
+        "text": "2026-10-18T03:51:01.1342160Z   Hits:               6 / 1444 ( 0.42%)"
+      },
+      {
+        "line": 3800,
+        "text": "2026-10-18T03:51:01.1342770Z   Misses:          1438 / 1444 (99.58%)"
+      },
+      {
+        "line": 7731,
+        "text": "2026-10-18T03:54:29.3503510Z 37/40 Test #29: klogg_livelog_restore_arming_tests ............   Passed    0.40 sec"
+      },
+      {
+        "line": 9882,
+        "text": "2026-10-18T03:56:54.6253040Z Failed to save: Unable to reserve cache with key intel-qt6-ccache-v2-2026-10-18, another job may be creating this cache."
+      }
+    ]
+  },
+  {
+    "source": "seed-39031248659/intel-tsan.log",
+    "sha256": "e5c154bea1b82edceb69635d8e8dc82d6e0b17ba9a1f8dce139a6db321352c2f",
+    "lines": [
+      {
+        "line": 3355,
+        "text": "2026-10-17T12:49:04.8947430Z Cacheable calls:    722 / 722 (100.0%)"
+      },
+      {
+        "line": 3356,
+        "text": "2026-10-17T12:49:04.8948560Z   Hits:               1 / 722 ( 0.14%)"
+      },
+      {
+        "line": 3358,
+        "text": "2026-10-17T12:49:04.8959110Z     Preprocessed:     1 /   1 (100.0%)"
+      },
+      {
+        "line": 3359,
+        "text": "2026-10-17T12:49:04.8960210Z   Misses:           721 / 722 (99.86%)"
+      },
+      {
+        "line": 3362,
+        "text": "2026-10-17T12:49:04.8966400Z   Hits:               1 / 722 ( 0.14%)"
+      },
+      {
+        "line": 3363,
+        "text": "2026-10-17T12:49:04.8967460Z   Misses:           721 / 722 (99.86%)"
+      },
+      {
+        "line": 7283,
+        "text": "2026-10-17T12:56:53.6950400Z 37/40 Test #29: klogg_livelog_restore_arming_tests ............   Passed    5.47 sec"
+      },
+      {
+        "line": 7491,
+        "text": "2026-10-17T12:57:36.2647640Z Cache saved with key: intel-qt6-first-party-tsan-ccache-v2-2026-10-17"
+      }
+    ]
+  },
+  {
+    "source": "seed-39031248659/intel-package.log",
+    "sha256": "83cb42b6a66170da07e92ef9ae689acac24ecbb148fb489e50e5d9ef126c26e0",
+    "lines": [
+      {
+        "line": 3717,
+        "text": "2026-10-17T13:00:49.5018270Z Cacheable calls:    722 / 722 (100.0%)"
+      },
+      {
+        "line": 3718,
+        "text": "2026-10-17T13:00:49.5020120Z   Hits:               3 / 722 ( 0.42%)"
+      },
+      {
+        "line": 3720,
+        "text": "2026-10-17T13:00:49.5021500Z     Preprocessed:     3 /   3 (100.0%)"
+      },
+      {
+        "line": 3721,
+        "text": "2026-10-17T13:00:49.5022130Z   Misses:           719 / 722 (99.58%)"
+      },
+      {
+        "line": 3724,
+        "text": "2026-10-17T13:00:49.5024230Z   Hits:               3 / 722 ( 0.42%)"
+      },
+      {
+        "line": 3725,
+        "text": "2026-10-17T13:00:49.5024990Z   Misses:           719 / 722 (99.58%)"
+      },
+      {
+        "line": 7625,
+        "text": "2026-10-17T13:04:38.0283520Z 37/40 Test #29: klogg_livelog_restore_arming_tests ............   Passed    0.43 sec"
+      },
+      {
+        "line": 9997,
+        "text": "2026-10-17T13:06:11.4763850Z Cache saved with key: intel-qt6-ccache-v2-2026-10-17"
+      }
+    ]
+  }
+]

@@ -1,0 +1,180 @@
+{
+  "checkout_head_at_capture": "f0ea6a09935c8c1a3407811446536482427fc931",
+  "command_parity": {
+    "allowed_changes": [
+      "optimization flags",
+      "proven generated documentation Qt qrc directory hash"
+    ],
+    "baseline": {
+      "commands": 835,
+      "debug": {
+        "-g": 16,
+        "-g1": 819
+      },
+      "optimization": {
+        "-O1": 16,
+        "-O2": 534,
+        "-O3": 285
+      }
+    },
+    "candidate": {
+      "commands": 835,
+      "debug": {
+        "-g": 16,
+        "-g1": 819
+      },
+      "optimization": {
+        "-O1": 835
+      }
+    },
+    "equal_after_only_allowed_changes": true
+  },
+  "controls": {
+    "CCACHE_DISABLE": "1",
+    "KLOGG_VERSION": "26.10.18",
+    "QT_QPA_PLATFORM": "offscreen",
+    "SDKROOT": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    "TSAN_OPTIONS": "halt_on_error=1",
+    "cold_definition": "Fresh separate build directories and no compiler-object cache; OS filesystem/page cache was not flushed.",
+    "compile_jobs": 4,
+    "compiler_launchers": {
+      "C": "",
+      "CXX": ""
+    },
+    "ctest_jobs": 8,
+    "lock": "Atomic worktree .build-test-lock, owner-token checked; released after each run. No competing heavy validation.",
+    "memory_metric": "Peak summed RSS of descendants of the timed build/test process, sampled every 2 seconds; KiB. Not peak whole-host RAM."
+  },
+  "host": {
+    "logical_cpus": 8,
+    "physical_memory_bytes": 34359738368,
+    "uname": "Darwin ZEACENTs-MacBook-Pro.local 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_X86_64 x86_64"
+  },
+  "identities": {
+    "accepted_guard": {
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/scripts/verify_macos_tsan_profile.py",
+      "sha256": "215b878f73bcd2d79a0bd58cd6c1a8951d52420a3fa299501dfc9381f1585f5c"
+    },
+    "accepted_profile": {
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/cmake/CiMacosTsanProfile.cmake",
+      "sha256": "2028edbfcdee0edfbc7781524c487f4134df0da93c91b389d50c3ecf89e1107b"
+    },
+    "accepted_profile_tests": {
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/tests/scripts/test_macos_tsan_profile.py",
+      "sha256": "c1b6fb858b1e167c230925ce7d7b6c1bd176571a58973bae03850fcb6c7fb97f"
+    },
+    "baseline_normalized_commands": {
+      "path": "/tmp/klogg-tsan-o1-experiment.7mkGzv/pure-o1/baseline-normalized-commands.json",
+      "sha256": "e7e4e47b63620283816ef1f31c3dcd66b3632e041d3c51c83fe0cdc213e2881f"
+    },
+    "boost_version_header": {
+      "path": "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/boost/boost/version.hpp",
+      "sha256": "65cc1b27e846afe00c2a8aeccd4fdc849d298a7d2fe0609a4afca489f91129f5"
+    },
+    "clang": {
+      "path": "/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang",
+      "sha256": "d2e4bf622758eee1bf7267c060497fb2c41e098d37b0fca8be73898dc7e14eda"
+    },
+    "cpm_source_archive": {
+      "path": "/tmp/klogg-app-overlap-inputs.h8crye/cpm-cache.tar.gz",
+      "sha256": "7566301e1fa87a79296fddaa4aaf4ca9ca43ef46c1f3cb49507ab2d7e2441852"
+    },
+    "dependency_cmake": {
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/3rdparty/CMakeLists.txt",
+      "sha256": "b61571215c302fe40c9e487a0d9c7790aa9960e6e63823b96f25ec6a5dcce91a"
+    },
+    "documentation_markdown": {
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/DOCUMENTATION.md",
+      "sha256": "862d835a29089b6b02f6840702988c08182aafa872d08e81b1b3bc6d1c8b4331"
+    },
+    "exploratory_profile": {
+      "path": "/tmp/klogg-tsan-o1-experiment.7mkGzv/exploratory-profile/CiMacosTsanProfile.cmake",
+      "sha256": "908b8d5b152e7f92fd2aa07cca4fbf02709935a512a05b69851b19dfc9117bfd"
+    },
+    "ninja": {
+      "path": "/tmp/klogg-native-cache-parity.r90J0o/ninja-bin/ninja",
+      "sha256": "a46eca0aae6e8b7792dde0580b766f948fba5fb58fca8127078f7374573af6d5"
+    },
+    "original_baseline_qrc_path_mismatch": {
+      "path": "/tmp/klogg-tsan-o1-experiment.7mkGzv/baseline-commands.json",
+      "sha256": "0c879c466b8e806c6d36bf91e3e225e1c86277c9ff1f2eaabd317fe5144015b3"
+    },
+    "original_candidate_qrc_path_mismatch": {
+      "path": "/tmp/klogg-tsan-o1-experiment.7mkGzv/candidate-commands.json",
+      "sha256": "c69864dbb43a6baaaa95594af9456367f4c648c3b7398a69cec24179a625e970"
+    },
+    "original_scope_gate": {
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/scripts/verify_sanitizer_scope.sh",
+      "sha256": "060ef039a67cdfb769e20ecf1baa587b4d8469626361564daf64c732ac4b4dc0"
+    },
+    "pure_o1_normalized_commands": {
+      "path": "/tmp/klogg-tsan-o1-experiment.7mkGzv/pure-o1/candidate-normalized-commands.json",
+      "sha256": "e7e4e47b63620283816ef1f31c3dcd66b3632e041d3c51c83fe0cdc213e2881f"
+    },
+    "root_cmake": {
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/CMakeLists.txt",
+      "sha256": "8ea9a4d299c016e43bc4a3be247b710c7b579dda2ab9ed0c3915ffe884743779"
+    },
+    "sanitizer_policy": {
+      "path": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/cmake/Sanitizers.cmake",
+      "sha256": "7fb2fc948f5b1ee7b6550dfac9c61997a5f68814d4816ca9bedeef08dbe38e65"
+    }
+  },
+  "measurement_limits": [
+    "One local sequential baseline/pure-O1 pair; percentage is not a guaranteed hosted-runner improvement.",
+    "ci_build wall includes compilation, code/resource generation, archiving, and linking; it is not isolated compilation time.",
+    "Configure, acquisition, and environment setup are excluded from build-plus-test totals and configure is reported separately.",
+    "The intermediate mixed optimization/debug experiment is retained separately and was not the activation proof."
+  ],
+  "raw_evidence_local_only": "/tmp/klogg-tsan-o1-experiment.7mkGzv",
+  "result": {
+    "baseline_ci_build_plus_ctest_wall_seconds": 1386.4380319179036,
+    "baseline_ci_build_wall_seconds": 1061.9660493051633,
+    "ci_build_wall_reduction_percent": 41.8984036315438,
+    "net_wall_reduction_percent": 34.51661860001075,
+    "net_wall_seconds_saved": 478.55152760259807,
+    "pure_o1_ci_build_plus_ctest_wall_seconds": 907.8865043153055,
+    "pure_o1_ci_build_wall_seconds": 617.0192275373265,
+    "test_scope": "Identical 40 CTest entries, all passed; no skipped/disabled tests in any run."
+  },
+  "retained_records": {
+    "baseline.json": "25ce0e5b3001d87e28f69ea265b7c39f88db62d4a1aeadc6edb99ef434ab997a",
+    "exploratory-o1-light-debug.json": "e4efb53a5de622587de001ec86d6c6ae228da6aff8bc545a77dd5bdfca3ffa88",
+    "pure-o1.json": "a7e9d29dbe8e0d4bea0bfba71e0ff0c95b7324e205f394cb32b1204db80b062e",
+    "resource-proof.json": "42bde3e5ee1d2a44abf0cdeb620ad30c3392f9454ab06de691e22c920276c71a"
+  },
+  "sanitizer_scope": {
+    "first_party_instrumented": 134,
+    "first_party_total": 134,
+    "gate": "Unmodified scripts/verify_sanitizer_scope.sh, passed for baseline and both candidates.",
+    "ordinary_dependencies_instrumented": 0,
+    "ordinary_dependencies_total": 525,
+    "required_mimalloc_tbb_instrumented": 54,
+    "required_mimalloc_tbb_total": 54
+  },
+  "schema_version": 1,
+  "scope": "Native Intel macOS TSan only. Ordinary developer default remains off. No job timeout, test scope, sanitizer scope, CPU flags, LTO setting, or compiler/test concurrency changes.",
+  "source_identity": {
+    "after_exploratory": "b4aee27cd2ec5dd5de0ab15751859cb0f88b4172f0e2b6cbf27ad76669d3f188",
+    "after_pure_o1": "b4aee27cd2ec5dd5de0ab15751859cb0f88b4172f0e2b6cbf27ad76669d3f188",
+    "algorithm": "SHA256 of sorted JSON mapping git-tracked .c/.cpp/.h/.hpp/.cmake and CMakeLists.txt paths to SHA256 content hashes. Profile is separately hashed because it was new/untracked during measurement.",
+    "before": "b4aee27cd2ec5dd5de0ab15751859cb0f88b4172f0e2b6cbf27ad76669d3f188"
+  },
+  "status": "accepted-local-pure-o1",
+  "swap": {
+    "baseline_before": "vm.swapusage: total = 14336.00M  used = 13168.75M  free = 1167.25M  (encrypted)",
+    "exploratory_after": "vm.swapusage: total = 13312.00M  used = 11936.50M  free = 1375.50M  (encrypted)",
+    "pure_o1_after": "vm.swapusage: total = 13312.00M  used = 11936.50M  free = 1375.50M  (encrypted)",
+    "pure_o1_before": "vm.swapusage: total = 13312.00M  used = 11936.50M  free = 1375.50M  (encrypted)"
+  },
+  "tools": {
+    "DEVELOPER_DIR": "/Applications/Xcode_26.6.app/Contents/Developer",
+    "boost": "1.86.0",
+    "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+    "cmake": "cmake version 3.31.6",
+    "ninja": "1.12.1",
+    "qt": "6.9.3",
+    "sdk_version": "26.5",
+    "xcode": "Xcode 26.6\nBuild version 17F113"
+  }
+}

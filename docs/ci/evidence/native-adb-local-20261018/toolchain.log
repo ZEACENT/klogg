@@ -1,0 +1,11 @@
+local inspection build: skipping hosted runner identity check for macos-x86_64
+cmake version 3.31.6
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+1.12.1
+Apple clang version 21.0.0 (clang-2100.1.1.101)
+Target: x86_64-apple-darwin25.6.0
+Thread model: posix
+InstalledDir: /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
+Xcode 26.6
+Build version 17F113

@@ -74,6 +74,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # Release qualification must not share a queue with ordinary master pushes.
@@ -741,6 +742,7 @@ jobs:
     needs: [BuildAdbHelperLegalAssets]
     permissions: &artifact_attestation_permissions
       contents: read
+      actions: read
       id-token: write
       attestations: write
     if: ${{ ((github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) || (github.event_name == 'workflow_dispatch' && (inputs.dependency-mode == 'qualify' || inputs.dependency-mode == 'publish'))) && !contains(github.event.head_commit.message, '[skip ci]') }}
@@ -868,7 +870,8 @@ jobs:
                   )
           PY
 
-      - uses: ./.github/actions/build-adb-helper
+      - name: Build and verify native ADB helper
+        uses: ./.github/actions/build-adb-helper
         with:
           target: ${{ env.KLOGG_ADB_HELPER_TARGET }}
           source-root: ${{ runner.temp }}/adb-helper-sources
@@ -877,6 +880,7 @@ jobs:
           version: ${{ needs.BuildAdbHelperLegalAssets.outputs.klogg_version }}
           artifact-root: ${{ runner.temp }}/adb-helper-artifact
           container-image: ${{ env.KLOGG_ADB_CONTAINER_IMAGE }}
+          object-cache-enabled: ${{ startsWith(env.KLOGG_ADB_HELPER_TARGET, 'macos-') && (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) }}
 
       - name: Package ADB helper without losing file modes
         shell: bash
@@ -1014,6 +1018,7 @@ jobs:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, BuildAdbLinuxX64, ReleaseQualificationPreflight]
     permissions: &artifact_verification_permissions
       contents: read
+      actions: read
       attestations: read
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
@@ -1236,15 +1241,46 @@ jobs:
         shell: bash
         run: python3 scripts/ci_ccache.py prepare --label "$KLOGG_LABEL" --github-env "$GITHUB_ENV"
 
+      - name: Describe shared application compiler objects
+        id: shared-cache-descriptor
+        if: ${{ env.KLOGG_SANITIZER != 'thread' }}
+        shell: bash
+        env:
+          KLOGG_CI_ENVIRONMENT_IDENTITY: ${{ steps.linux-environment.outputs.image }}
+        run: |
+          set -euo pipefail
+          args=(--required-step "Build Linux application" --required-step "Verify Linux tests" --required-step "Bound Linux ccache before save")
+          if [ "$KLOGG_PACKAGE_ENABLED" = "true" ]; then
+            args+=(--required-step "Qualify Linux package")
+          fi
+          python3 -I scripts/ci_compiler_object_descriptor.py \
+            --component application --label "$KLOGG_LABEL" \
+            --producer-job "Linux $KLOGG_LABEL [$KLOGG_CONFIG_PACKAGE_TAG]" \
+            --export-step "Export shared application compiler objects" \
+            --output "$RUNNER_TEMP/shared-compiler-descriptor.json" --image "$KLOGG_CI_ENVIRONMENT_IDENTITY" "${args[@]}"
+
+      - name: Restore compatible cross-run compiler objects
+        id: restore-shared-compiler-cache
+        if: ${{ steps.shared-cache-descriptor.outputs.eligible == 'true' }}
+        uses: ./.github/actions/restore-compiler-object-artifact
+        with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
+          path: ${{ github.workspace }}/.ccache
+
       - name: Enable ccache compiler launcher
         if: ${{ env.KLOGG_SANITIZER != 'thread' }}
         shell: sh
+        env:
+          KLOGG_CCACHE_CONTAINER_CONFIG: ${{ steps.shared-cache-descriptor.outputs.container-config-path }}
         run: |
           # The existing Docker action is qualification-policy-bound. Carry
           # the effective environment through its existing CMake launcher seam,
           # overriding old image defaults without rebuilding those images.
           # Preserve the quotes for that action's inner bash -lc parse.
           launcher="env;CCACHE_MAXSIZE=$CCACHE_MAXSIZE;CCACHE_COMPILERCHECK=$CCACHE_COMPILERCHECK;CCACHE_COMPRESS=$CCACHE_COMPRESS;CCACHE_COMPRESSLEVEL=$CCACHE_COMPRESSLEVEL;ccache"
+          if [ -n "${KLOGG_CCACHE_CONTAINER_CONFIG:-}" ]; then
+            launcher="env;CCACHE_CONFIGPATH=$KLOGG_CCACHE_CONTAINER_CONFIG;CCACHE_SLOPPINESS=;CCACHE_PREFIX=;CCACHE_PREFIX_CPP=;CCACHE_REMOTE_STORAGE=;${launcher#env;}"
+          fi
           echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_C_COMPILER_LAUNCHER='$launcher' -DCMAKE_CXX_COMPILER_LAUNCHER='$launcher'" >> $GITHUB_ENV
 
       - name: Set sanitizer env (forwarded into the container by docker-run-tests)
@@ -1275,13 +1311,16 @@ jobs:
             echo "TSAN_OPTIONS=halt_on_error=1:external_symbolizer_path=/usr/bin/llvm-symbolizer-14" >> $GITHUB_ENV
           fi
 
-      - uses: ./.github/actions/docker-build
+      - name: Build Linux application
+        uses: ./.github/actions/docker-build
         with:
           container-suffix: ${{ env.KLOGG_CONTAINER_SUFFIX }}
 
       - name: Bind build metrics to verified Linux environment
         env:
           KLOGG_CI_ENVIRONMENT_IDENTITY: ${{ steps.linux-environment.outputs.image }}
+          KLOGG_CI_CACHE_ARTIFACT_ID: ${{ steps.restore-shared-compiler-cache.outputs.artifact-id }}
+          KLOGG_CI_CACHE_RESTORE_KEY: ${{ steps.restore-ccache.outputs.cache-matched-key }}
         shell: bash
         run: >-
           python3 scripts/ci_build_observation.py bind-environment
@@ -1293,7 +1332,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
+          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
           path: ${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json
           if-no-files-found: warn
           retention-days: 7
@@ -1369,10 +1408,12 @@ jobs:
             "/usr/local/$KLOGG_BUILD_ROOT/output/klogg_itests" \
             /opt/qt5-tsan
 
-      - uses: ./.github/actions/docker-run-tests
+      - name: Verify Linux tests
+        uses: ./.github/actions/docker-run-tests
         with:
           container-suffix: ${{ env.KLOGG_CONTAINER_SUFFIX }}
-      - uses: ./.github/actions/docker-package
+      - name: Qualify Linux package
+        uses: ./.github/actions/docker-package
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
         with:
           os: ${{ env.KLOGG_CONFIG_OS }}
@@ -1385,21 +1426,45 @@ jobs:
           check-command: ${{ env.KLOGG_CHECK_COMMAND }}
 
       - name: Bound Linux ccache before save
-        if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}
+        if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && (github.event_name == 'push' || steps.shared-cache-descriptor.outputs.eligible == 'true') }}
         shell: bash
+        env:
+          KLOGG_CCACHE_CONTAINER_CONFIG: ${{ steps.shared-cache-descriptor.outputs.container-config-path }}
         run: |
-          docker run --pull=never --rm -v "$KLOGG_WORKSPACE":/usr/local \
+          docker run --pull=never --rm --env CCACHE_CONFIGPATH="$KLOGG_CCACHE_CONTAINER_CONFIG" \
+            -v "$KLOGG_WORKSPACE":/usr/local \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
             python3 /usr/local/scripts/ci_ccache.py trim --label "$KLOGG_LABEL"
 
       - name: Save ccache for the Linux build
         if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && github.event_name == 'push' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: ./.github/actions/save-verified-compiler-cache
         with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
           path: ${{ github.workspace }}/.ccache
           # Only validated master builds seed bounded daily generations.
           # Transport failures after this point must not discard their cache.
           key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+
+      - name: Export shared application compiler objects
+        id: export-shared-compiler-cache
+        if: ${{ success() && steps.shared-cache-descriptor.outputs.eligible == 'true' }}
+        uses: ./.github/actions/export-compiler-object-artifact
+        with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
+          path: ${{ github.workspace }}/.ccache
+          export-needed: ${{ steps.restore-shared-compiler-cache.outputs.export-needed }}
+
+      - name: Upload shared compiler cache evidence
+        if: ${{ always() && steps.restore-shared-compiler-cache.outputs.report != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compiler-object-acquisition-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.restore-shared-compiler-cache.outputs.report }}
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
 # Successful pull requests already validate package contents in place. Upload
 # only trusted master outputs and explicit release qualifications; Continuous
@@ -1626,21 +1691,103 @@ jobs:
           set -euo pipefail
           python3 "${{ github.workspace }}/tests/scripts/test_libimobiledevice_ostrace_startup.py"
 
-      - name: Build disconnected thin iOS native stack
+      - name: Select ordinary iOS compiler cache scope
+        id: ios-cache-eligibility
+        if: ${{ github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off') }}
         shell: bash
+        run: python3 scripts/ci_native_object_cache.py eligible --component ios-native --target "$KLOGG_IOS_ARCHITECTURE"
+
+      - name: Install ordinary iOS compiler cache
+        if: ${{ steps.ios-cache-eligibility.outputs.eligible == 'true' }}
+        shell: bash
+        env:
+          HOMEBREW_NO_ANALYTICS: "1"
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install ccache
+
+      - name: Prepare ordinary iOS compiler objects
+        id: ios-cache
+        if: ${{ steps.ios-cache-eligibility.outputs.eligible == 'true' }}
+        shell: bash
+        run: python3 scripts/ci_native_object_cache.py prepare --component ios-native --target "$KLOGG_IOS_ARCHITECTURE"
+
+      - name: Restore scoped iOS compiler objects
+        id: ios-cache-primary
+        if: ${{ steps.ios-cache.outputs.enabled == 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.ios-cache.outputs.path }}
+          key: ${{ steps.ios-cache.outputs.primary-key }}
+          restore-keys: ${{ steps.ios-cache.outputs.primary-prefix }}
+
+      - name: Restore master iOS objects on own-PR miss
+        id: ios-cache-master
+        if: ${{ steps.ios-cache.outputs.own-pr == 'true' && steps.ios-cache-primary.outputs.cache-matched-key == '' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.ios-cache.outputs.path }}
+          key: ${{ steps.ios-cache.outputs.master-key }}
+          restore-keys: ${{ steps.ios-cache.outputs.master-prefix }}
+
+      - name: Describe shared iOS compiler objects
+        id: ios-cache-descriptor
+        if: ${{ steps.ios-cache.outputs.enabled == 'true' }}
+        shell: bash
+        env:
+          KLOGG_IOS_CACHE_IDENTITY: ${{ steps.ios-cache.outputs.identity-file }}
         run: |
           set -euo pipefail
+          python3 scripts/ci_compiler_object_descriptor.py \
+            --component native --label "native-ios-$KLOGG_IOS_ARCHITECTURE" \
+            --native-identity "$KLOGG_IOS_CACHE_IDENTITY" \
+            --producer-job "iOS native stack $KLOGG_IOS_ARCHITECTURE" \
+            --required-step "Build disconnected thin iOS native stack" \
+            --required-step "Bind iOS native artifact with SHA256SUMS" \
+            --export-step "Export shared iOS compiler objects" \
+            --output "$RUNNER_TEMP/native-ios-descriptor-$KLOGG_IOS_ARCHITECTURE.json"
+
+      - name: Restore shared iOS compiler objects
+        id: ios-cache-shared
+        if: ${{ steps.ios-cache-descriptor.outputs.eligible == 'true' }}
+        uses: ./.github/actions/restore-compiler-object-artifact
+        with:
+          descriptor: ${{ steps.ios-cache-descriptor.outputs.descriptor }}
+          path: ${{ steps.ios-cache.outputs.path }}
+
+      - name: Start current-build iOS cache observation
+        if: ${{ steps.ios-cache.outputs.enabled == 'true' }}
+        shell: bash
+        env:
+          KLOGG_NATIVE_CACHE_STATE: ${{ steps.ios-cache.outputs.state }}
+          KLOGG_NATIVE_PRIMARY_MATCH: ${{ steps.ios-cache-primary.outputs.cache-matched-key }}
+          KLOGG_NATIVE_MASTER_MATCH: ${{ steps.ios-cache-master.outputs.cache-matched-key }}
+        run: python3 scripts/ci_native_object_cache.py start --state "$KLOGG_NATIVE_CACHE_STATE"
+
+      - name: Build disconnected thin iOS native stack
+        shell: bash
+        env:
+          KLOGG_IOS_CACHE_STATE: ${{ steps.ios-cache.outputs.state }}
+          KLOGG_IOS_COMPILER_LAUNCHER: ${{ steps.ios-cache.outputs.compiler-launcher }}
+        run: |
+          set -euo pipefail
+          build_prefix=(python3)
+          launcher_args=(--parallel "$(sysctl -n hw.ncpu)")
+          if [[ -n "$KLOGG_IOS_CACHE_STATE" ]]; then
+            build_prefix=(python3 scripts/ci_native_object_cache.py exec --state "$KLOGG_IOS_CACHE_STATE" -- python3)
+            launcher_args+=(--compiler-launcher "$KLOGG_IOS_COMPILER_LAUNCHER")
+          fi
           original_root="${{ runner.temp }}/ios-native-original"
           core_root="${{ runner.temp }}/ios-native-legal-core"
           stack_root="${{ runner.temp }}/ios-native-stack"
-          python3 scripts/build_ios_native_stack.py \
+          "${build_prefix[@]}" scripts/build_ios_native_stack.py \
             --repository-root "${{ github.workspace }}" \
             --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
             --archive-root "${{ github.workspace }}/ios-native-sources" \
             --work-root "${{ runner.temp }}/ios-native-work" \
             --artifact-root "$original_root" \
             --architecture "${{ env.KLOGG_IOS_ARCHITECTURE }}" \
-            --parallel "$(sysctl -n hw.ncpu)"
+            "${launcher_args[@]}"
           python3 scripts/verify_ios_native_stack.py \
             --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
             --stack-root "$original_root" \
@@ -1697,6 +1844,41 @@ jobs:
           PY
           tar -czf "${{ runner.temp }}/${{ env.KLOGG_IOS_ARTIFACT }}.tar.gz" \
             -C "${{ runner.temp }}/ios-native-stack" .
+
+      - name: Measure and bound verified iOS compiler objects
+        id: ios-cache-finish
+        if: ${{ success() && steps.ios-cache.outputs.enabled == 'true' }}
+        shell: bash
+        env:
+          KLOGG_NATIVE_CACHE_STATE: ${{ steps.ios-cache.outputs.state }}
+        run: python3 scripts/ci_native_object_cache.py finish --state "$KLOGG_NATIVE_CACHE_STATE"
+
+      - name: Save verified scoped iOS compiler objects
+        if: ${{ success() && steps.ios-cache-finish.outputs.validated == 'true' && steps.ios-cache.outputs.save-key != '' }}
+        uses: ./.github/actions/save-verified-compiler-cache
+        with:
+          path: ${{ steps.ios-cache.outputs.path }}
+          key: ${{ steps.ios-cache.outputs.save-key }}
+          descriptor: ${{ steps.ios-cache-descriptor.outputs.descriptor }}
+
+      - name: Export shared iOS compiler objects
+        if: ${{ success() && steps.ios-cache-finish.outputs.validated == 'true' && steps.ios-cache-descriptor.outputs.eligible == 'true' }}
+        uses: ./.github/actions/export-compiler-object-artifact
+        with:
+          descriptor: ${{ steps.ios-cache-descriptor.outputs.descriptor }}
+          path: ${{ steps.ios-cache.outputs.path }}
+          export-needed: ${{ steps.ios-cache-shared.outputs.export-needed }}
+
+      - name: Retain iOS compiler cache measurement
+        if: ${{ always() && steps.ios-cache-finish.outputs.validated == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-ios-object-cache-${{ env.KLOGG_IOS_ARCHITECTURE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.ios-cache-finish.outputs.report }}
+            ${{ steps.ios-cache-shared.outputs.report }}
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Upload iOS native stack
         id: upload_ios_stack
@@ -1825,7 +2007,7 @@ jobs:
     steps: *ios_native_steps
 
   MacPackages:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacX64, BuildIosNativeX64, ReleaseQualificationPreflight]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}macOS intel-qt6 [vs-gen]"
@@ -1866,10 +2048,188 @@ jobs:
           fi
           printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
 
+#Install build deps
+      - name: Set brew env
+        shell: sh
+        run: |
+          echo "HOMEBREW_NO_ANALYTICS=1" >> $GITHUB_ENV
+          echo "HOMEBREW_NO_AUTO_UPDATE=1" >> $GITHUB_ENV
+          echo "HOMEBREW_NO_INSTALL_CLEANUP=1" >> $GITHUB_ENV
+
+      - name: Brew deps
+        run: |
+          # ccache is a build dep on macOS too: the sanitizer legs rebuild
+          # vectorscan + tbb + kf5archive from source (all pinned third-party
+          # deps) on every run, which the run-31240298189 timeline shows is
+          # the critical path (~11 min of a 27-30 min build). A warm ccache
+          # collapses that to near zero. brew install is idempotent and fast
+          # (~1s) when the formula is already present.
+          if brew list --formula aws-sam-cli >/dev/null 2>&1; then
+            brew uninstall --ignore-dependencies aws-sam-cli || true
+          fi
+          if brew tap | grep -Fx aws/tap >/dev/null; then
+            brew untap aws/tap
+          fi
+          brew install ragel ccache
+
+      - name: Compute bounded ccache generation
+        id: ccache-generation
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import datetime
+          today = datetime.datetime.now(datetime.timezone.utc).date()
+          print(f"current={today.isoformat()}")
+          PY
+
+      - name: Restore own-PR ccache for the macOS build
+        id: restore-pr-ccache
+        if: ${{ github.event_name == 'pull_request' && github.repository == 'ZEACENT/klogg' && github.event.pull_request.head.repo.full_name == github.repository && toJSON(github.event.pull_request.head.repo.id) == github.repository_id && github.event.pull_request.number > 0 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          # GitHub scopes PR caches to refs/pull/N/merge; this explicit namespace
+          # also keeps PR writes out of the trusted push keys and other PR keys.
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ env.KLOGG_LABEL }}-ccache-content-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}
+          restore-keys: |
+            ${{ env.KLOGG_LABEL }}-ccache-content-pr-v1-${{ github.event.pull_request.number }}-
+            ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-
+
+      - name: Restore ccache for the macOS build
+        id: restore-ccache
+        if: ${{ steps.restore-pr-ccache.outputs.cache-matched-key == '' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          # New saves identify the content-check policy. Legacy fallback remains
+          # read-only: it may contain useful objects, but does not prove warmth.
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ env.KLOGG_LABEL }}-ccache-content-v1-${{ steps.ccache-generation.outputs.current }}
+          restore-keys: |
+            ${{ env.KLOGG_LABEL }}-ccache-content-v1-
+            ${{ env.KLOGG_LABEL }}-ccache-v2-
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: boost-root
+          path: ${{ github.workspace }}/prefetch_artifacts
+
+      - name: Require prefetched dependency artifacts
+        shell: sh
+        run: |
+          echo "KLOGG_REQUIRE_PREFETCHED_BOOST=ON" >> $GITHUB_ENV
+          echo "KLOGG_REQUIRE_PREFETCHED_CPM=ON" >> $GITHUB_ENV
+
+      - uses: ./.github/actions/agent-setup
+        with:
+          qt-version: ${{ env.KLOGG_QT_VERSION }}
+          qt-arch: ${{ env.KLOGG_QT_ARCH }}
+          qt-modules: ${{ env.KLOGG_QT_MODULES }}
+          qt-archives: ${{ env.KLOGG_QT_ARCHIVES }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cpm-cache
+          path: ${{ github.workspace }}
+      - uses: ./.github/actions/restore-cpm-cache
+      - uses: ./.github/actions/prepare-workspace-env
+        with:
+          arch: ${{ env.KLOGG_CONFIG_ARCH }}
+          package-tag: ${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
+          cmake-options: ${{ env.KLOGG_CONFIG_CMAKE_OPTS }}
+          qt-version: ${{ env.KLOGG_QT_VERSION }}
+
+      - name: Disable Sentry on macOS
+        shell: sh
+        run: |
+          # Disable Sentry on macOS due to Crashpad incompatibility with newer Xcode SDKs
+          # macOS 15+ requires at least 2018 Macs (Kaby Lake / Apple Silicon),
+          # all of which support AVX2 / NEON.  Use GENERIC_CPU=OFF to enable
+          # hardware-specific optimizations (AVX2 for Intel, NEON for ARM64).
+          PACKAGE_CMAKE_OPTS=""
+          if [ "${{ env.KLOGG_PACKAGE_ENABLED }}" == "true" ]; then
+            PACKAGE_CMAKE_OPTS="-DKLOGG_ADB_HELPER_REQUIRED=ON -DKLOGG_ADB_HELPER_TARGET=${{ env.KLOGG_ADB_HELPER_TARGET }} -DKLOGG_ADB_HELPER_ARTIFACT_ROOT=${{ github.workspace }}/prefetch_artifacts/adb-helper -DKLOGG_ENABLE_IOS_NATIVE_STACK=ON -DKLOGG_IOS_NATIVE_STACK_ROOT=${{ github.workspace }}/prefetch_artifacts/ios-native"
+          fi
+          echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON $PACKAGE_CMAKE_OPTS ${{ env.KLOGG_CONFIG_CMAKE_OPTS }}" >> $GITHUB_ENV
+
+      - name: Select Intel macOS TSan optimization profile
+        if: ${{ runner.os == 'macOS' && env.KLOGG_SANITIZER == 'thread' }}
+        shell: sh
+        run: |
+          # Nested dependency project() calls resolve relative includes anew.
+          # Match the measured absolute hook before deriving cache identity.
+          test -f "$KLOGG_WORKSPACE/cmake/CiMacosTsanProfile.cmake"
+          printf '%s\n' "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_PROJECT_INCLUDE=$KLOGG_WORKSPACE/cmake/CiMacosTsanProfile.cmake" >> "$GITHUB_ENV"
+
+      - name: Configure effective ccache budget
+        shell: bash
+        run: python3 scripts/ci_ccache.py prepare --label "$KLOGG_LABEL" --github-env "$GITHUB_ENV"
+
+      - name: Describe shared application compiler objects
+        id: shared-cache-descriptor
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--required-step "Finalize verified macOS build" --required-step "Verify macOS tests" --required-step "Bound macOS ccache before save")
+          if [ "$KLOGG_PACKAGE_ENABLED" = "true" ]; then
+            args+=(--required-step "Qualify macOS package")
+          fi
+          python3 -I scripts/ci_compiler_object_descriptor.py \
+            --component application --label "$KLOGG_LABEL" \
+            --producer-job "macOS $KLOGG_LABEL [$KLOGG_CONFIG_PACKAGE_TAG]" \
+            --export-step "Export shared application compiler objects" \
+            --output "$RUNNER_TEMP/shared-compiler-descriptor.json" "${args[@]}"
+
+      - name: Restore compatible cross-run compiler objects
+        id: restore-shared-compiler-cache
+        if: ${{ steps.shared-cache-descriptor.outputs.eligible == 'true' }}
+        uses: ./.github/actions/restore-compiler-object-artifact
+        with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
+          path: ${{ github.workspace }}/.ccache
+
+      - name: Enable ccache compiler launcher
+        shell: sh
+        run: |
+          # Normalize workspace-relative paths; compiler content (not runner
+          # mtimes) is checked by the shared effective-cache policy.
+          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=${{ github.workspace }}" >> $GITHUB_ENV
+      
+      - name: Set sanitizer env
+        if: ${{ env.KLOGG_SANITIZER }}
+        shell: sh
+        run: |
+          # Apple ASan does not support LeakSanitizer; detect_leaks=1 aborts
+          # before main(). Linux remains the required LSan platform.
+          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
+          echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
+          echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
+
+      - name: Compile macOS objects while native producers run
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+        uses: ./.github/actions/agent-build
+        with:
+          phase: prepare
+        env:
+          KLOGG_CI_CACHE_ARTIFACT_ID: ${{ steps.restore-shared-compiler-cache.outputs.artifact-id }}
+          KLOGG_CI_CACHE_RESTORE_KEY: ${{ steps.restore-pr-ccache.outputs.cache-matched-key || steps.restore-ccache.outputs.cache-matched-key }}
+
+      - name: Require successful same-run native producers
+        id: native-ready
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ci_native_rendezvous.py
+          --architecture "$KLOGG_IOS_ARCHITECTURE"
+          --receipt "$RUNNER_TEMP/native-ready.json"
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
         with:
-          name: adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}
+          artifact-ids: ${{ steps.native-ready.outputs.adb-artifact-id }}
+          merge-multiple: true
           path: ${{ github.workspace }}/prefetch_artifacts/adb-helper-archive
 
       - name: Extract mode-preserving ADB helper artifact
@@ -1888,13 +2248,15 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
         with:
-          name: adb-helper-package-support
+          artifact-ids: ${{ steps.native-ready.outputs.support-artifact-id }}
+          merge-multiple: true
           path: ${{ github.workspace }}/prefetch_artifacts/adb-helper/release
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
         with:
-          name: ${{ env.KLOGG_IOS_NATIVE_ARTIFACT }}
+          artifact-ids: ${{ steps.native-ready.outputs.ios-artifact-id }}
+          merge-multiple: true
           path: ${{ github.workspace }}/prefetch_artifacts/ios-native-archive
 
       - name: Extract symlink-preserving iOS native stack
@@ -1963,137 +2325,51 @@ jobs:
               --repo "$GITHUB_REPOSITORY"
           fi
 
-#Install build deps
-      - name: Set brew env
-        shell: sh
-        run: |
-          echo "HOMEBREW_NO_ANALYTICS=1" >> $GITHUB_ENV
-          echo "HOMEBREW_NO_AUTO_UPDATE=1" >> $GITHUB_ENV
-          echo "HOMEBREW_NO_INSTALL_CLEANUP=1" >> $GITHUB_ENV
-
-      - name: Brew deps
-        run: |
-          # ccache is a build dep on macOS too: the sanitizer legs rebuild
-          # vectorscan + tbb + kf5archive from source (all pinned third-party
-          # deps) on every run, which the run-31240298189 timeline shows is
-          # the critical path (~11 min of a 27-30 min build). A warm ccache
-          # collapses that to near zero. brew install is idempotent and fast
-          # (~1s) when the formula is already present.
-          if brew list --formula aws-sam-cli >/dev/null 2>&1; then
-            brew uninstall --ignore-dependencies aws-sam-cli || true
-          fi
-          if brew tap | grep -Fx aws/tap >/dev/null; then
-            brew untap aws/tap
-          fi
-          brew install ragel ccache
-
-      - name: Compute bounded ccache generation
-        id: ccache-generation
-        shell: bash
-        run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import datetime
-          today = datetime.datetime.now(datetime.timezone.utc).date()
-          print(f"current={today.isoformat()}")
-          PY
-
-      - name: Restore own-PR ccache for the macOS build
-        id: restore-pr-ccache
-        if: ${{ github.event_name == 'pull_request' && github.repository == 'ZEACENT/klogg' && github.event.pull_request.head.repo.full_name == github.repository && toJSON(github.event.pull_request.head.repo.id) == github.repository_id && github.event.pull_request.number > 0 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - name: Finalize verified macOS build
+        uses: ./.github/actions/agent-build
         with:
-          # GitHub scopes PR caches to refs/pull/N/merge; this explicit namespace
-          # also keeps PR writes out of the trusted push keys and other PR keys.
-          path: ${{ github.workspace }}/.ccache
-          key: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}
-          restore-keys: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-
-
-      - name: Restore ccache for the macOS build
-        id: restore-ccache
-        if: ${{ steps.restore-pr-ccache.outputs.cache-matched-key == '' }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          # Preserve the trusted push daily key and label-only fallback on a PR
-          # miss, for forks, and for ordinary push/dispatch runs.
-          path: ${{ github.workspace }}/.ccache
-          key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
-          restore-keys: |
-            ${{ env.KLOGG_LABEL }}-ccache-v2-
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: boost-root
-          path: ${{ github.workspace }}/prefetch_artifacts
-
-      - name: Require prefetched dependency artifacts
-        shell: sh
-        run: |
-          echo "KLOGG_REQUIRE_PREFETCHED_BOOST=ON" >> $GITHUB_ENV
-          echo "KLOGG_REQUIRE_PREFETCHED_CPM=ON" >> $GITHUB_ENV
-
-      - uses: ./.github/actions/agent-setup
-        with:
-          qt-version: ${{ env.KLOGG_QT_VERSION }}
-          qt-arch: ${{ env.KLOGG_QT_ARCH }}
-          qt-modules: ${{ env.KLOGG_QT_MODULES }}
-          qt-archives: ${{ env.KLOGG_QT_ARCHIVES }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: cpm-cache
-          path: ${{ github.workspace }}
-      - uses: ./.github/actions/restore-cpm-cache
-      - uses: ./.github/actions/prepare-workspace-env
-        with:
-          arch: ${{ env.KLOGG_CONFIG_ARCH }}
-          package-tag: ${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
-          cmake-options: ${{ env.KLOGG_CONFIG_CMAKE_OPTS }}
-          qt-version: ${{ env.KLOGG_QT_VERSION }}
-
-      - name: Disable Sentry on macOS
-        shell: sh
-        run: |
-          # Disable Sentry on macOS due to Crashpad incompatibility with newer Xcode SDKs
-          # macOS 15+ requires at least 2018 Macs (Kaby Lake / Apple Silicon),
-          # all of which support AVX2 / NEON.  Use GENERIC_CPU=OFF to enable
-          # hardware-specific optimizations (AVX2 for Intel, NEON for ARM64).
-          PACKAGE_CMAKE_OPTS=""
-          if [ "${{ env.KLOGG_PACKAGE_ENABLED }}" == "true" ]; then
-            PACKAGE_CMAKE_OPTS="-DKLOGG_ADB_HELPER_REQUIRED=ON -DKLOGG_ADB_HELPER_TARGET=${{ env.KLOGG_ADB_HELPER_TARGET }} -DKLOGG_ADB_HELPER_ARTIFACT_ROOT=${{ github.workspace }}/prefetch_artifacts/adb-helper -DKLOGG_ENABLE_IOS_NATIVE_STACK=ON -DKLOGG_IOS_NATIVE_STACK_ROOT=${{ github.workspace }}/prefetch_artifacts/ios-native"
-          fi
-          echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON $PACKAGE_CMAKE_OPTS ${{ env.KLOGG_CONFIG_CMAKE_OPTS }}" >> $GITHUB_ENV
-
-      - name: Configure effective ccache budget
-        shell: bash
-        run: python3 scripts/ci_ccache.py prepare --label "$KLOGG_LABEL" --github-env "$GITHUB_ENV"
-
-      - name: Enable ccache compiler launcher
-        shell: sh
-        run: |
-          # Normalize workspace-relative paths; compiler content (not runner
-          # mtimes) is checked by the shared effective-cache policy.
-          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
-          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
-          echo "CCACHE_BASEDIR=${{ github.workspace }}" >> $GITHUB_ENV
-      
-      - name: Set sanitizer env
-        if: ${{ env.KLOGG_SANITIZER }}
-        shell: sh
-        run: |
-          # Apple ASan does not support LeakSanitizer; detect_leaks=1 aborts
-          # before main(). Linux remains the required LSan platform.
-          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
-          echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
-          echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
-
-      - uses: ./.github/actions/agent-build
+          phase: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' && 'finalize' || 'full' }}
+          native-receipt: ${{ runner.temp }}/native-ready.json
+        env:
+          KLOGG_CI_CACHE_ARTIFACT_ID: ${{ steps.restore-shared-compiler-cache.outputs.artifact-id }}
+          KLOGG_CI_CACHE_RESTORE_KEY: ${{ steps.restore-pr-ccache.outputs.cache-matched-key || steps.restore-ccache.outputs.cache-matched-key }}
 
       - name: Upload current-run build metrics
         if: ${{ hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
+          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
           path: ${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload macOS phased-build evidence
+        if: ${{ always() && env.KLOGG_PACKAGE_ENABLED == 'true' && hashFiles(format('{0}/ci-build-phase-{1}-{2}-*.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-phase-evidence-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ env.KLOGG_BUILD_ROOT }}/ci-build-phase-${{ github.run_id }}-${{ github.run_attempt }}-*.json
+            ${{ env.KLOGG_BUILD_ROOT }}/ci-build-phase-${{ github.run_id }}-${{ github.run_attempt }}-*.ninja-log.txt
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+      # Best-effort partial evidence only; never a qualified cache or build report.
+      # Periodic log records survive even if job cancellation prevents this upload.
+      - name: Upload macOS TSan execution diagnostics
+        if: ${{ always() && env.KLOGG_SANITIZER == 'thread' && hashFiles(format('{0}/ci-build-diagnostics.jsonl', env.KLOGG_BUILD_ROOT)) != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-diagnostics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ env.KLOGG_BUILD_ROOT }}/ci-build-diagnostics.jsonl
+            ${{ env.KLOGG_BUILD_ROOT }}/ci-build-diagnostics.ninja-log.txt
           if-no-files-found: warn
           retention-days: 7
           compression-level: 0
@@ -2121,7 +2397,8 @@ jobs:
           done
           echo "ASan+UBSan instrumentation verified in klogg_tests and klogg_itests"
 
-      - uses: ./.github/actions/agent-run-tests
+      - name: Verify macOS tests
+        uses: ./.github/actions/agent-run-tests
         id: macos_tests
 
       - name: Upload macOS test diagnostics
@@ -2135,7 +2412,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - uses: ./.github/actions/agent-package-mac
+      - name: Qualify macOS package
+        uses: ./.github/actions/agent-package-mac
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
         with:
           adb-target: ${{ env.KLOGG_ADB_HELPER_TARGET }}
@@ -2155,20 +2433,42 @@ jobs:
 
       - name: Save ccache for the macOS build
         if: ${{ success() && github.event_name == 'push' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: ./.github/actions/save-verified-compiler-cache
         with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
           path: ${{ github.workspace }}/.ccache
           # Validate and bound before saving; publication transport runs later.
-          key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+          key: ${{ env.KLOGG_LABEL }}-ccache-content-v1-${{ steps.ccache-generation.outputs.current }}
 
       - name: Save own-PR ccache for the macOS build
         # A successful guarded restore (including a miss) authorizes only this
         # PR's namespace. Skipped fork/missing-metadata restores cannot save.
         if: ${{ success() && github.event_name == 'pull_request' && steps.restore-pr-ccache.outcome == 'success' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: ./.github/actions/save-verified-compiler-cache
         with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
           path: ${{ github.workspace }}/.ccache
-          key: ${{ env.KLOGG_LABEL }}-ccache-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}
+          key: ${{ env.KLOGG_LABEL }}-ccache-content-pr-v1-${{ github.event.pull_request.number }}-${{ steps.ccache-generation.outputs.current }}
+
+      - name: Export shared application compiler objects
+        id: export-shared-compiler-cache
+        if: ${{ success() && steps.shared-cache-descriptor.outputs.eligible == 'true' }}
+        uses: ./.github/actions/export-compiler-object-artifact
+        with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
+          path: ${{ github.workspace }}/.ccache
+          export-needed: ${{ steps.restore-shared-compiler-cache.outputs.export-needed }}
+
+      - name: Upload shared compiler cache evidence
+        if: ${{ always() && steps.restore-shared-compiler-cache.outputs.report != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compiler-object-acquisition-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.restore-shared-compiler-cache.outputs.report }}
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
       - uses: ./.github/actions/upload-release-artifact
         if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release')) }}
@@ -2187,7 +2487,7 @@ jobs:
           compression-level: 0
 
   MacArmPackages:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacArm64, BuildIosNativeArm64, ReleaseQualificationPreflight]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}macOS arm64-qt6 [vs-arm64]"
@@ -2234,7 +2534,8 @@ jobs:
       matrix:
         config:
           # Package-free sanitizer legs start without ADB or iOS native producers.
-          # macOS TSan covers first-party and source-built dependencies;
+          # macOS TSan covers first-party code plus mimalloc and TBB;
+          # other vendored dependencies are not instrumented.
           # prebuilt Qt 6 is not TSan-instrumented.
           # The Linux source-built Qt TSan leg is authoritative for Qt-internal races.
           # Run on the Intel runner so TSan's
@@ -2261,7 +2562,9 @@ jobs:
             # asan-ubsan leg and the Linux tsan leg. Line tables suffice to
             # symbolize TSan reports, and the smaller DWARF shrinks both compile
             # time (vectorscan dominates) and the ccache entry footprint.
-            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON -DKLOGG_CI_LIGHT_DEBUG=ON
+            # The measured O1 profile preserves existing debug and sanitizer flags.
+            # agent-build verifies generated commands before compiling.
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON -DKLOGG_CI_LIGHT_DEBUG=ON -DKLOGG_CI_MACOS_TSAN_O1=ON
             sanitizer: thread
 
     runs-on: ${{ matrix.config.os }}
@@ -2286,6 +2589,7 @@ jobs:
       KLOGG_CONFIG_PACKAGE_TAG: vs-avx2
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_VECTORSCAN=ON
       KLOGG_LABEL: x64-qt6
+      KLOGG_CACHE_PRODUCER_JOB: Windows x64-qt6 [vs-avx2]
       KLOGG_ARTIFACTS_ID: windows-x64-qt6
       KLOGG_ADB_HELPER_TARGET: windows-x86_64
       KLOGG_PACKAGE_ENABLED: true
@@ -2445,6 +2749,30 @@ jobs:
           key: ${{ steps.windows-cache.outputs.master-key }}
           restore-keys: ${{ steps.windows-cache.outputs.master-prefix }}
 
+      - name: Describe shared application compiler objects
+        id: shared-cache-descriptor
+        if: ${{ steps.windows-cache.outputs.ready == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--required-step "Build Windows application" --required-step "Verify Windows tests" --required-step "Report and validate Windows object cache")
+          if [ "$KLOGG_PACKAGE_ENABLED" = "true" ]; then
+            args+=(--required-step "Qualify Windows package")
+          fi
+          python3 -I scripts/ci_compiler_object_descriptor.py \
+            --component application --label "$KLOGG_LABEL" \
+            --producer-job "$KLOGG_CACHE_PRODUCER_JOB" \
+            --export-step "Export shared application compiler objects" \
+            --output "$RUNNER_TEMP/shared-compiler-descriptor.json" --windows-state "$GITHUB_WORKSPACE/windows-object-cache-state.json" "${args[@]}"
+
+      - name: Restore compatible cross-run compiler objects
+        id: restore-shared-compiler-cache
+        if: ${{ steps.shared-cache-descriptor.outputs.eligible == 'true' }}
+        uses: ./.github/actions/restore-compiler-object-artifact
+        with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
+          path: ${{ github.workspace }}/.sccache
+
       - name: Activate Windows object cache or use the native compiler
         id: activate-windows-cache
         if: ${{ steps.windows-cache.outputs.ready == 'true' }}
@@ -2492,7 +2820,11 @@ jobs:
             echo "KLOGG_VECTORSCAN_CHILD_CONCURRENCY=8" >> $GITHUB_ENV
           fi
 
-      - uses: ./.github/actions/agent-build
+      - name: Build Windows application
+        uses: ./.github/actions/agent-build
+        env:
+          KLOGG_CI_CACHE_ARTIFACT_ID: ${{ steps.restore-shared-compiler-cache.outputs.artifact-id }}
+          KLOGG_CI_CACHE_RESTORE_KEY: ${{ steps.restore-windows-cache.outputs.cache-matched-key || steps.restore-windows-master-cache.outputs.cache-matched-key }}
 
       - name: Verify vectorscan config in CMake cache (x64)
         if: ${{ env.KLOGG_CONFIG_ARCH == 'x64' }}
@@ -2587,7 +2919,8 @@ jobs:
             Write-Warning "No MSVC ASan DLL found under $asanDir; relying on PATH (msvc-dev-cmd) to provide it at runtime."
           }
 
-      - uses: ./.github/actions/agent-run-tests
+      - name: Verify Windows tests
+        uses: ./.github/actions/agent-run-tests
         id: run-tests
         # Keep the job alive only long enough to collect diagnostics; the final
         # outcome gate below still fails the job when this step fails.
@@ -2933,7 +3266,8 @@ jobs:
         shell: bash
         run: exit 1
 
-      - uses: ./.github/actions/agent-package-win
+      - name: Qualify Windows package
+        uses: ./.github/actions/agent-package-win
         if: ${{ steps.run-tests.outcome == 'success' && env.KLOGG_PACKAGE_ENABLED == 'true' }}
         with:
           collect-symbols: "true"
@@ -2961,19 +3295,39 @@ jobs:
         id: save-windows-cache
         # Helper issues write keys only for master pushes and this PR's namespace.
         # Dispatch is read-only. Never save build_root, PDB bundles or executables.
-        if: ${{ success() && steps.run-tests.outcome == 'success' && steps.windows-cache-report.outputs.validated == 'true' && steps.windows-cache.outputs.save-key != '' && steps.restore-windows-cache.outputs.cache-matched-key != steps.windows-cache.outputs.save-key }}
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.4
+        if: ${{ success() && steps.run-tests.outcome == 'success' && steps.windows-cache-report.outputs.validated == 'true' && steps.windows-cache.outputs.save-key != '' }}
+        uses: ./.github/actions/save-verified-compiler-cache
         with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
           path: ${{ github.workspace }}/.sccache
           key: ${{ steps.windows-cache.outputs.save-key }}
+
+      - name: Export shared application compiler objects
+        id: export-shared-compiler-cache
+        if: ${{ success() && steps.shared-cache-descriptor.outputs.eligible == 'true' && steps.windows-cache-report.outputs.validated == 'true' && steps.run-tests.outcome == 'success' }}
+        uses: ./.github/actions/export-compiler-object-artifact
+        with:
+          descriptor: ${{ steps.shared-cache-descriptor.outputs.descriptor }}
+          path: ${{ github.workspace }}/.sccache
+          export-needed: ${{ steps.restore-shared-compiler-cache.outputs.export-needed }}
+
+      - name: Upload shared compiler cache evidence
+        if: ${{ always() && steps.restore-shared-compiler-cache.outputs.report != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compiler-object-acquisition-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.restore-shared-compiler-cache.outputs.report }}
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
       - name: Upload current-run build metrics
         if: ${{ always() && hashFiles(format('{0}/ci-build-metrics-{1}-{2}.json', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}
+          name: build-metrics-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
           path: ${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json
           if-no-files-found: warn
           retention-days: 7
@@ -3025,6 +3379,7 @@ jobs:
       KLOGG_CONFIG_PACKAGE_TAG: QTRegex
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_USE_SENTRY=OFF -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_VECTORSCAN=OFF
       KLOGG_LABEL: x86-qt5
+      KLOGG_CACHE_PRODUCER_JOB: Windows x86-qt5 [QTRegex]
       KLOGG_PACKAGE_ENABLED: false
       KLOGG_SANITIZER: ""
     runs-on: windows-2022
@@ -3048,6 +3403,7 @@ jobs:
       KLOGG_CONFIG_PACKAGE_TAG: asan
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON
       KLOGG_LABEL: x64-qt6-asan
+      KLOGG_CACHE_PRODUCER_JOB: Windows x64-qt6 ASan [asan]
       KLOGG_PACKAGE_ENABLED: false
       KLOGG_SANITIZER: address
     runs-on: windows-2022
@@ -3057,7 +3413,7 @@ jobs:
   ci-gate:
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}ci-gate"
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) }}
-    needs: [BuildAdbLinuxArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsX86, WindowsAsan]
+    needs: [BuildAdbLinuxArm64, BuildAdbMacX64, BuildAdbMacArm64, BuildIosNativeX64, BuildIosNativeArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsX86, WindowsAsan]
     runs-on: ubuntu-22.04
     steps:
       - name: Check CI results

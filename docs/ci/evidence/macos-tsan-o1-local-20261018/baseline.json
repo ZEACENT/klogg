@@ -1,0 +1,158 @@
+{
+  "build_root": "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o2_profile_experiment",
+  "ctest": {
+    "disabled": 0,
+    "failures": 0,
+    "junit_sha256": "f032cdb6b5885a5a0013594fb945b040831918962f9670f13e2690d053dc187c",
+    "names": [
+      "adb_compiler_portability_contract",
+      "adb_helper_cycle8_release_contract",
+      "adb_helper_hardening_contract",
+      "adb_helper_release_contract",
+      "adb_helper_verifier_contract",
+      "adb_libusb_fallback_contract",
+      "adb_manifest_fallback_contract",
+      "adb_source_closure_contract",
+      "adb_source_context_contract",
+      "application_identity_contract",
+      "external_source_asset_package_contract",
+      "ios_compiler_portability_contract",
+      "ios_native_release_contract",
+      "klogg_configuration_preapplication_tests",
+      "klogg_crash_collector_protocol_tests",
+      "klogg_directory_io_lifetime_tests",
+      "klogg_ios_native_contract_tests",
+      "klogg_ios_protocol_tests",
+      "klogg_itests",
+      "klogg_itests_filewatcher_low_fd",
+      "klogg_itests_filewatcher_teardown_timeout",
+      "klogg_live_capture_benchmark_contract_tests",
+      "klogg_livelog_controller_tests",
+      "klogg_livelog_migration_notice_tests",
+      "klogg_livelog_restore_arming_tests",
+      "klogg_livelog_session_spec_tests",
+      "klogg_search_start_trace_absent",
+      "klogg_search_start_trace_empty",
+      "klogg_search_start_trace_enabled",
+      "klogg_smoke",
+      "klogg_tests",
+      "klogg_vectorscan_tests",
+      "libimobiledevice_ostrace_patch_contract",
+      "live_capture_benchmark_contract",
+      "live_capture_results_contract",
+      "live_session_ui_retirement_contract",
+      "livelog_controller_retirement_contract",
+      "prepare_efsw_git_contract",
+      "static_link_policy_contract",
+      "windows_runtime_verifier_contract"
+    ],
+    "skipped": 0,
+    "tests": 40
+  },
+  "effective_compile_flags": {
+    "commands": 835,
+    "debug": {
+      "-g": 16,
+      "-g1": 819
+    },
+    "optimization": {
+      "-O1": 16,
+      "-O2": 534,
+      "-O3": 285
+    }
+  },
+  "profile": "o2",
+  "role": "retained successful original baseline",
+  "stages": {
+    "build": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/cmake",
+        "--build",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o2_profile_experiment",
+        "--target",
+        "ci_build",
+        "--parallel",
+        "4"
+      ],
+      "log_sha256": "0a8c2a9990ab0d2963f7006bbb44d67839108fba2f7dbe2fcebeadf75fb17477",
+      "memory_sample_count": 500,
+      "memory_samples_sha256": "ed4d906ed0a5e56352f018c3028d6ce1f7bfbd34f04a16363616f76bcd372dbc",
+      "peak_process_tree_rss_kib": 1891468,
+      "returncode": 0,
+      "time_report_sha256": "0fadd4975324d54a5afc92bd4a90f0586794cbaa0ca938e3888852a41c241c30",
+      "wall_seconds": 1061.9660493051633
+    },
+    "configure": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/cmake",
+        "-S",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt",
+        "-B",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o2_profile_experiment",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        "-DKLOGG_GENERIC_CPU=OFF",
+        "-DKLOGG_USE_LTO=OFF",
+        "-DKLOGG_USE_SENTRY=OFF",
+        "-DENABLE_SANITIZER_THREAD=ON",
+        "-DKLOGG_CI_LIGHT_DEBUG=ON",
+        "-DKLOGG_OSX_DEPLOYMENT_TARGET=15.0",
+        "-DKLOGG_BUILD_TESTS=ON",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_INSTALL_PREFIX=/usr",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+        "-DCMAKE_C_COMPILER_LAUNCHER=",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER=",
+        "-DCMAKE_PREFIX_PATH=/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/qt/6.9.3/macos",
+        "-DBOOST_ROOT=/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/boost",
+        "-DBoost_NO_SYSTEM_PATHS=ON",
+        "-DBoost_NO_BOOST_CMAKE=ON",
+        "-DCPM_SOURCE_CACHE=/tmp/klogg-tsan-o1-experiment.7mkGzv/inputs/cpm_cache"
+      ],
+      "log_sha256": "1ce8d4e68ab6c91e166e2ef2bc0d419b0d87ab1eb586baf7df0201f47ff38910",
+      "memory_sample_count": 31,
+      "memory_samples_sha256": "bee40071e3bf34681cf32302781da710c39489298750dbf373f79efa2c4758ef",
+      "peak_process_tree_rss_kib": 80640,
+      "returncode": 0,
+      "time_report_sha256": "ac5911985f6f1ac55e658653f728d6921daaa93daef6e5b4bb191220a463f712",
+      "wall_seconds": 63.08236278779805
+    },
+    "ctest": {
+      "command": [
+        "/Users/johnsonv/Downloads/.klogg-pr77-native-inputs/tools-venv/bin/ctest",
+        "--test-dir",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o2_profile_experiment",
+        "--verbose",
+        "--output-on-failure",
+        "--parallel",
+        "8",
+        "--output-junit",
+        "/tmp/klogg-tsan-o1-experiment.7mkGzv/o2-ctest.xml"
+      ],
+      "log_sha256": "4bd22d11f097f5000d62d85a464c384a3d61e208115a76f5d88b9ee9982526dc",
+      "memory_sample_count": 152,
+      "memory_samples_sha256": "9fb6be3f4663bae9d684d6c30b7c547be6efa9244073b069ff25aabcbd0fb413",
+      "peak_process_tree_rss_kib": 1067296,
+      "returncode": 0,
+      "time_report_sha256": "858d266f54071c981c2b7aef687f1e2efd9ed8f80055a25250be0f4dff08a98a",
+      "wall_seconds": 324.47198261274025
+    },
+    "scope": {
+      "command": [
+        "bash",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/scripts/verify_sanitizer_scope.sh",
+        "/Users/johnsonv/ws/klogg/.claude/worktrees/ci-speed-opt/build_root_tsan_o2_profile_experiment"
+      ],
+      "log_sha256": "501741d3798c920fb11a193d49b8ab6039dad537145a60013e57eaadd98bbbb5",
+      "memory_sample_count": 1,
+      "memory_samples_sha256": "ace5c425550006b81e635735e47d3e4fdf45891d038d13a1e525cf5944e9a373",
+      "peak_process_tree_rss_kib": 1788,
+      "returncode": 0,
+      "time_report_sha256": "27ba5f7773799739876cb709c5d8a58d89054403ff8fd4683f5851f41bb7a106",
+      "wall_seconds": 0.36861677607521415
+    }
+  },
+  "total_ci_build_and_ctest_wall_seconds": 1386.4380319179036
+}
