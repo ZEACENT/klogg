@@ -3039,6 +3039,66 @@ jobs:
                       raise ValueError("metadata command failed: " + result[0].decode("utf-8", "replace")[:1024])
                   return result[0].decode("utf-8", "replace")
 
+          def retained_context_facts(text):
+              # No new process/context reads: these are facts about existing,
+              # bounded diagnostic JSON, never proof of XSTATE or dump validity.
+              unavailable = {"status": "unavailable"}
+              prefix = "Test minidump diagnostic "
+              records = []
+              try:
+                  for line in text.splitlines():
+                      if line.startswith(prefix):
+                          record = json.loads(line[len(prefix):])
+                          if isinstance(record, dict):
+                              records.append(record)
+                          if len(records) > 64:
+                              return unavailable
+              except (ValueError, RecursionError):
+                  return unavailable
+              inputs = [record for record in records if record.get("kind") == "input"]
+              summaries = [record for record in records if record.get("kind") == "summary"]
+              reads = [record for record in records
+                       if record.get("kind") == "read" and record.get("object") == 3]
+              if len(inputs) != 1 or len(summaries) != 1 or len(reads) > 16:
+                  return unavailable
+              original, observed = inputs[0], summaries[0]
+              def uint(value, bits):
+                  return type(value) is int and 0 <= value < (1 << bits)
+              bits = original.get("pointerBits")
+              flags, post_flags = original.get("contextFlags"), observed.get("contextFlags")
+              address = original.get("contextRecord")
+              if (type(bits) is not int or bits not in (32, 64)
+                      or not uint(flags, 32) or not uint(post_flags, 32)
+                      or not uint(address, bits)):
+                  return unavailable
+              statuses = {"complete", "partial", "error", "skipped", "budget",
+                          "invalid_range", "unavailable"}
+              if any(not uint(record.get("requested"), 32)
+                     or not uint(record.get("transferred"), 32)
+                     or not 0 <= record["transferred"] <= record["requested"] <= 4096
+                     or not uint(record.get("error"), 32)
+                     or not isinstance(record.get("status"), str)
+                     or record["status"] not in statuses for record in reads):
+                  return unavailable
+              requested = sum(record["requested"] for record in reads)
+              if requested > 4096:
+                  return unavailable
+              return {"status": "observed-retained-data", "pointer_bits": bits,
+                      "input_context_flags": flags, "input_context_flags_hex": f"0x{flags:08x}",
+                      "input_xstate_flag_set": bool(flags & 0x40),
+                      "postfailure_context_flags": post_flags,
+                      "postfailure_context_flags_hex": f"0x{post_flags:08x}",
+                      "context_address_hex": f"0x{address:x}",
+                      "context_address_modulo_64": address % 64,
+                      "context_read_phase": "postfailure",
+                      "context_read_requested_bytes": requested,
+                      "context_read_transferred_bytes": sum(record["transferred"] for record in reads),
+                      "context_read_statuses": [record["status"] for record in reads],
+                      "context_read_errors": [record["error"] for record in reads],
+                      "xstate_extent": "not-observed", "xstate_validity": "unknown",
+                      "thread_inventory": "not-observed",
+                      "dump_api_owner": "unavailable-basename-observations-only"}
+
           env_names = ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB",
                        "GITHUB_WORKFLOW_REF", "GITHUB_WORKFLOW_SHA", "RUNNER_OS", "RUNNER_ARCH",
                        "ImageOS", "ImageVersion", "KLOGG_LABEL", "KLOGG_CONFIG_ARCH",
@@ -3052,7 +3112,7 @@ jobs:
                             if hasattr(sys, "getwindowsversion") else None,
               "source_revision": None, "sources": [], "project_files": [],
               "build_commands": {"status": "unavailable"}, "compiler": {"status": "unavailable"},
-              "modules": [], "errors": errors}
+              "modules": [], "retained_context_facts": [], "errors": errors}
           try:
               revision = read_only_command(["git", "rev-parse", "HEAD"], workspace, 1024).strip()
               if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -3096,7 +3156,7 @@ jobs:
                       selected[match[1]] = match[2]
               evidence["cmake"] = selected
               rules_text = bounded_bytes(build / "CMakeFiles" / "rules.ninja", 2 * 1024 * 1024).decode("utf-8", "replace")
-              rules = re.findall(r"^rule (CXX_(?:COMPILER|EXECUTABLE_LINKER|STATIC_LIBRARY_LINKER)__(?:crash_trace_test_helper|crash_trace_collector|test_crash_trace)_[A-Za-z0-9_]+)$", rules_text, re.MULTILINE)
+              rules = re.findall(r"^rule (CXX_(?:COMPILER|EXECUTABLE_LINKER|STATIC_LIBRARY_LINKER)__(?:crash_trace_test_helper|crash_trace_collector|test_crash_trace)_[A-Za-z0-9_]+)$", rules_text.replace("\r\n", "\n"), re.MULTILINE)
               required_rules = ("CXX_COMPILER__crash_trace_test_helper_",
                                 "CXX_EXECUTABLE_LINKER__crash_trace_test_helper_",
                                 "CXX_COMPILER__crash_trace_collector_",
@@ -3137,6 +3197,9 @@ jobs:
           for stderr in stderr_files:
               try:
                   text = bounded_bytes(stderr, MAX_TEXT_BYTES).decode("utf-8", "replace")
+                  evidence["retained_context_facts"].append({
+                      "reported_by": str(stderr.relative_to(build)),
+                      **retained_context_facts(text)})
                   for line in text.splitlines():
                       prefix = "Test minidump diagnostic "
                       if not line.startswith(prefix):

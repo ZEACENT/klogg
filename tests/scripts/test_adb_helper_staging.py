@@ -30,7 +30,7 @@ class AdbHelperStagingTest(unittest.TestCase):
         return result
 
     def configure(self, name, *, windows=True, multi=False, available=True, apple=False,
-                  producer_fails=False, cmake_options=(), after_targets=""):
+                  producer_fails=False, cmake_options=(), after_targets="", trace_staging=False):
         source = self.root / name
         source.mkdir()
         (source / "cmake").mkdir()
@@ -52,6 +52,10 @@ class AdbHelperStagingTest(unittest.TestCase):
         block = app.split("add_dependencies(klogg klogg_adb_helper)", 1)[1]
         block = "add_dependencies(klogg klogg_adb_helper)" + block.split(
             "set_target_properties(klogg PROPERTIES AUTORCC ON)", 1)[0]
+        if trace_staging:
+            invocation = '-P "${CMAKE_SOURCE_DIR}/cmake/StageAdbHelpers.cmake"'
+            block = block.replace(invocation, '--trace-expand '
+                                  '"--trace-source=${CMAKE_SOURCE_DIR}/cmake/StageAdbHelpers.cmake" ' + invocation)
         producer = "add_custom_target(klogg_adb_helper)\n"
         if producer_fails:
             (source / "reject.cmake").write_text(
@@ -97,14 +101,15 @@ class AdbHelperStagingTest(unittest.TestCase):
     def test_shared_directory_has_one_writer_for_parallel_applications(self):
         for windows in (True, False):
             with self.subTest(windows=windows):
-                build, _ = self.configure("windows" if windows else "linux", windows=windows)
+                build, _ = self.configure("windows" if windows else "linux", windows=windows,
+                                          trace_staging=True)
                 graph = self.run_command([NINJA, "-C", str(build), "-t", "commands",
                                           "klogg", "klogg_portable", "klogg_stage_adb_helpers"]).stdout
-                # Assert graph ownership, not whether a filesystem race happens
-                # to reproduce on this host. Each old POST_BUILD was a writer.
-                self.assertEqual(graph.count("/cmake/StageAdbHelpers.cmake"), 1, graph)
+                # Role nodes may be no-ops. Count actual executed copies rather
+                # than helper invocations or a timing-dependent filesystem race.
                 self.assertNotIn(" -E copy_directory ", graph)
-                self.build(build, "all")
+                result = self.build(build, "all")
+                self.assertEqual((result.stdout + result.stderr).count(" -E copy_directory "), 1)
                 self.assertTrue(self.executable(build, "klogg").is_file())
                 self.assertTrue(self.executable(build, "klogg_portable").is_file())
                 self.assertEqual((build / "output/helpers/adb.exe").read_bytes(),
@@ -188,6 +193,150 @@ class AdbHelperStagingTest(unittest.TestCase):
             self.assertTrue((build / directory / "helpers/adb.exe").is_file())
         self.assertFalse((build / "output/helpers").exists())
 
+    def test_nested_output_destinations_reject_before_deleting_existing_applications(self):
+        cases = (("klogg", "klogg_portable", True, "klogg"),
+                 ("klogg_portable", "klogg", True, "klogg_portable"),
+                 ("klogg", "klogg_portable", False, "ci_build"))
+        for index, (outer_target, inner_target, windows, requested) in enumerate(cases):
+            with self.subTest(outer=outer_target, requested=requested):
+                properties = (
+                    'set_target_properties(' + outer_target + ' PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/outer")\n'
+                    'set_target_properties(' + inner_target + ' PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/outer/helpers/inner")\n')
+                build, stage = self.configure("nested outputs " + str(index), windows=windows,
+                                              available=False, after_targets=properties)
+                self.build(build, inner_target)
+                executable = build / "outer/helpers/inner" / (inner_target + (".exe" if os.name == "nt" else ""))
+                original_executable = executable.read_bytes()
+                sentinels = (build / "outer/helpers/keep-outer", build / "outer/helpers/inner/helpers/keep-inner")
+                for sentinel in sentinels:
+                    sentinel.parent.mkdir(parents=True, exist_ok=True)
+                    sentinel.write_bytes(b"preexisting output")
+                root_cmake = build.parent / "CMakeLists.txt"
+                root_cmake.write_text(root_cmake.read_text().replace(
+                    "set(KLOGG_ADB_HELPER_AVAILABLE FALSE)", "set(KLOGG_ADB_HELPER_AVAILABLE TRUE)"))
+                self.run_command([CMAKE, "-S", str(build.parent), "-B", str(build)])
+                result = self.build(build, requested, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("destination paths overlap", result.stdout + result.stderr)
+                self.assertEqual(executable.read_bytes(), original_executable)
+                for sentinel in sentinels:
+                    self.assertEqual(sentinel.read_bytes(), b"preexisting output")
+                self.assertEqual((stage / "adb.exe").read_bytes(), b"verified helper v1")
+
+    def test_nested_parent_output_alias_rejects_before_deleting_existing_executable(self):
+        properties = (
+            'set_target_properties(klogg PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/outer")\n'
+            'set_target_properties(klogg_portable PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/portable-alias")\n')
+        build, _ = self.configure("nested output via parent alias", available=False, after_targets=properties)
+        inner = build / "outer/helpers/inner"
+        inner.mkdir(parents=True)
+        alias = build / "portable-alias"
+        if alias.exists():
+            shutil.rmtree(alias)
+        try:
+            alias.symlink_to(inner, target_is_directory=True)
+        except OSError:
+            if os.name == "nt":
+                self.skipTest("directory symlinks are unavailable")
+            raise
+        self.build(build, "klogg_portable")
+        executable = inner / ("klogg_portable.exe" if os.name == "nt" else "klogg_portable")
+        original_executable = executable.read_bytes()
+        root_cmake = build.parent / "CMakeLists.txt"
+        root_cmake.write_text(root_cmake.read_text().replace(
+            "set(KLOGG_ADB_HELPER_AVAILABLE FALSE)", "set(KLOGG_ADB_HELPER_AVAILABLE TRUE)"))
+        self.run_command([CMAKE, "-S", str(build.parent), "-B", str(build)])
+        result = self.build(build, "klogg", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("destination paths overlap", result.stdout + result.stderr)
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(executable.read_bytes(), original_executable)
+
+    def test_direct_app_ignores_unrequested_app_with_blocked_output_parent(self):
+        properties = (
+            'set_target_properties(klogg PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/regular/bin")\n'
+            'set_target_properties(klogg_portable PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/portable/bin")\n')
+        for target, own, unused in (("klogg", "regular", "portable"),
+                                    ("klogg_portable", "portable", "regular")):
+            with self.subTest(target=target):
+                build, stage = self.configure("blocked " + target, after_targets=properties, trace_staging=True)
+                blocker = build / unused
+                if blocker.exists():
+                    shutil.rmtree(blocker)
+                blocker.write_bytes(b"unrequested output parent must remain untouched")
+                result = self.build(build, target)
+                self.assertEqual((result.stdout + result.stderr).count(" -E copy_directory "), 1)
+                self.assertEqual((build / own / "bin/helpers/adb.exe").read_bytes(), b"verified helper v1")
+                self.assertEqual(blocker.read_bytes(), b"unrequested output parent must remain untouched")
+                executable = build / own / "bin" / (target + (".exe" if os.name == "nt" else ""))
+                original_mtime = executable.stat().st_mtime_ns
+                destination = build / own / "bin/helpers"
+                (destination / "stale.dll").write_bytes(b"old private runtime")
+                (stage / "adb.exe").write_bytes(b"verified helper v2")
+                refreshed = self.build(build, target)
+                self.assertEqual((refreshed.stdout + refreshed.stderr).count(" -E copy_directory "), 1)
+                self.assertEqual((destination / "adb.exe").read_bytes(), b"verified helper v2")
+                self.assertFalse((destination / "stale.dll").exists())
+                self.assertEqual(executable.stat().st_mtime_ns, original_mtime)
+                self.assertEqual(blocker.read_bytes(), b"unrequested output parent must remain untouched")
+
+    def test_linux_ci_build_does_not_stage_unrequested_portable_output(self):
+        properties = (
+            'set_target_properties(klogg PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/regular/bin")\n'
+            'set_target_properties(klogg_portable PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/portable/bin")\n')
+        build, _ = self.configure("linux requested apps", windows=False, after_targets=properties,
+                                  trace_staging=True)
+        blocker = build / "portable"
+        if blocker.exists():
+            shutil.rmtree(blocker)
+        blocker.write_bytes(b"unused portable parent")
+        result = self.build(build, "ci_build")
+        self.assertEqual((result.stdout + result.stderr).count(" -E copy_directory "), 1)
+        self.assertTrue((build / "regular/bin/helpers/adb.exe").is_file())
+        self.assertEqual(blocker.read_bytes(), b"unused portable parent")
+
+    def test_shared_parent_alias_has_one_actual_copy_for_parallel_apps(self):
+        properties = (
+            'set_target_properties(klogg PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/regular")\n'
+            'set_target_properties(klogg_portable PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/portable")\n')
+        build, _ = self.configure("aliased runtime", after_targets=properties, trace_staging=True)
+        regular, portable = build / "regular", build / "portable"
+        regular.mkdir(exist_ok=True)
+        if portable.exists():
+            shutil.rmtree(portable)
+        try:
+            portable.symlink_to(regular, target_is_directory=True)
+        except OSError:
+            if os.name == "nt":
+                self.skipTest("directory symlinks are unavailable")
+            raise
+        result = self.build(build, "all")
+        self.assertEqual((result.stdout + result.stderr).count(" -E copy_directory "), 1)
+        self.assertEqual((portable / "helpers/adb.exe").read_bytes(), b"verified helper v1")
+        self.assertTrue(portable.is_symlink())
+
+    def test_leaf_helpers_alias_does_not_change_shared_private_routing(self):
+        properties = (
+            'set_target_properties(klogg PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/regular")\n'
+            'set_target_properties(klogg_portable PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/portable")\n')
+        build, _ = self.configure("leaf runtime alias", after_targets=properties, trace_staging=True)
+        regular, portable = build / "regular/helpers", build / "portable/helpers"
+        regular.mkdir(parents=True, exist_ok=True)
+        portable.parent.mkdir(parents=True, exist_ok=True)
+        (regular / "stale.dll").write_bytes(b"old runtime")
+        try:
+            portable.symlink_to(regular, target_is_directory=True)
+        except OSError:
+            if os.name == "nt":
+                self.skipTest("directory symlinks are unavailable")
+            raise
+        result = self.build(build, "all")
+        self.assertEqual((result.stdout + result.stderr).count(" -E copy_directory "), 2)
+        self.assertFalse(portable.is_symlink())
+        for destination in (regular, portable):
+            self.assertEqual((destination / "adb.exe").read_bytes(), b"verified helper v1")
+            self.assertFalse((destination / "stale.dll").exists())
+
     def test_missing_verified_helper_fails_before_publishing_applications(self):
         build, stage = self.configure("missing helper")
         shutil.rmtree(stage)
@@ -260,6 +409,35 @@ class AdbHelperStagingScriptTest(unittest.TestCase):
         self.assertEqual((self.destination / "adb.exe").read_bytes(), b"verified runtime")
         self.assertFalse((self.destination / "stale.dll").exists())
 
+    def test_destination_access_path_overlap_is_rejected_before_mutation(self):
+        for order in ("forward", "reverse"):
+            with self.subTest(order=order):
+                first = self.root / order / "runtime/helpers"
+                outside = self.root / order / "outside"
+                second = first / "output-link/helpers"
+                first.mkdir(parents=True)
+                (outside / "helpers").mkdir(parents=True)
+                sentinel = outside / "portable-executable"
+                sentinel.write_bytes(b"preexisting executable")
+                (first / "keep-first").write_bytes(b"first output")
+                (outside / "helpers/keep-second").write_bytes(b"second output")
+                self.alias(first / "output-link", outside)
+                destinations = (first, second) if order == "forward" else (second, first)
+                result = self.stage("".join(str(path) + "\n" for path in destinations))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("destination paths overlap", result.stdout + result.stderr)
+                self.assertTrue((first / "output-link").is_symlink())
+                self.assertEqual(sentinel.read_bytes(), b"preexisting executable")
+                self.assertEqual((first / "keep-first").read_bytes(), b"first output")
+                self.assertEqual((outside / "helpers/keep-second").read_bytes(), b"second output")
+
+    def test_destination_prefix_siblings_remain_independent(self):
+        second = self.destination.parent / "helpers-sibling/app/helpers"
+        result = self.stage(str(self.destination) + "\n" + str(second) + "\n", trace=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.count(" -E copy_directory "), 2)
+        self.assertEqual((second / "adb.exe").read_bytes(), b"verified runtime")
+
     def test_invalid_data_is_rejected_before_any_destination_is_removed(self):
         marker = self.root / "must-not-execute"
         invalid = ("", "relative/helpers", str(self.root / "not-helpers"), str(self.source),
@@ -272,6 +450,124 @@ class AdbHelperStagingScriptTest(unittest.TestCase):
                 self.assertTrue((self.destination / "stale.dll").is_file())
                 self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
                 self.assertFalse(marker.exists())
+
+    def alias(self, link, target):
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError:
+            if os.name == "nt":
+                self.skipTest("directory symlinks are unavailable")
+            raise
+
+    def test_destination_ancestor_of_source_is_rejected_before_any_removal(self):
+        ancestor = self.root / "protected/helpers"
+        self.source = ancestor / "input/helpers"
+        self.source.mkdir(parents=True)
+        (self.source / "adb.exe").write_bytes(b"verified runtime")
+        sentinel = ancestor / "keep-input"
+        sentinel.write_bytes(b"protected input")
+        result = self.stage(str(self.destination) + "\n" + str(ancestor) + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
+        self.assertEqual(sentinel.read_bytes(), b"protected input")
+        self.assertTrue((self.destination / "stale.dll").exists())
+
+    def test_destination_descendant_of_source_is_rejected_before_any_removal(self):
+        # A file blocker prevents recursive copying on the old implementation,
+        # while still exercising a selected path canonically inside the source.
+        blocker = self.source / "blocked"
+        blocker.write_bytes(b"protected input")
+        result = self.stage(str(self.destination) + "\n" + str(blocker / "helpers") + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
+        self.assertEqual(blocker.read_bytes(), b"protected input")
+        self.assertTrue((self.destination / "stale.dll").exists())
+
+    def test_nonexistent_descendant_through_parent_alias_is_rejected(self):
+        blocker = self.source / "blocked"
+        blocker.write_bytes(b"protected input")
+        alias = self.root / "source-alias"
+        self.alias(alias, self.source)
+        result = self.stage(str(self.destination) + "\n" + str(alias / "blocked/helpers") + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
+        self.assertTrue((self.destination / "stale.dll").exists())
+
+    def test_source_alias_inside_destination_is_rejected(self):
+        ancestor = self.root / "protected/helpers"
+        actual_source = ancestor / "input/helpers"
+        actual_source.mkdir(parents=True)
+        (actual_source / "adb.exe").write_bytes(b"verified runtime")
+        alias = self.root / "verified-input-alias"
+        self.alias(alias, actual_source)
+        self.source = alias
+        result = self.stage(str(ancestor) + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual((actual_source / "adb.exe").read_bytes(), b"verified runtime")
+
+    def test_dot_segment_source_alias_is_rejected_without_deleting_input(self):
+        intermediate = self.source.parent / "intermediate"
+        intermediate.mkdir()
+        result = self.stage(str(intermediate / "../helpers") + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
+
+    def test_source_leaf_alias_is_rejected_before_removing_the_link(self):
+        shutil.rmtree(self.destination)
+        self.alias(self.destination, self.source)
+        result = self.stage(str(self.destination) + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertTrue(self.destination.is_symlink())
+        self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
+
+    def test_broken_leaf_alias_into_source_descendant_is_rejected(self):
+        shutil.rmtree(self.destination)
+        self.alias(self.destination, self.source / "missing/helpers")
+        result = self.stage(str(self.destination) + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertTrue(self.destination.is_symlink())
+        self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
+
+    def test_destination_cannot_delete_an_alias_used_to_access_the_source(self):
+        alias = self.destination / "input-alias"
+        self.alias(alias, self.source)
+        actual_source = self.source
+        self.source = alias
+        result = self.stage(str(self.destination) + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual((actual_source / "adb.exe").read_bytes(), b"verified runtime")
+        self.assertTrue((self.destination / "stale.dll").exists())
+
+    def test_deletion_uses_original_leaf_entry_not_resolved_alias_target(self):
+        external = self.root / "external/helpers"
+        external.mkdir(parents=True)
+        sentinel = external / "must-remain"
+        sentinel.write_bytes(b"unrelated external data")
+        shutil.rmtree(self.destination)
+        self.alias(self.destination, external)
+        result = self.stage(str(self.destination) + "\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sentinel.read_bytes(), b"unrelated external data")
+        self.assertFalse(self.destination.is_symlink())
+        self.assertEqual((self.destination / "adb.exe").read_bytes(), b"verified runtime")
+
+    @unittest.skipUnless(os.name == "nt", "Windows filesystem path comparison")
+    def test_windows_case_alias_of_source_is_rejected(self):
+        destination = str(self.source.parent).upper() + "/helpers"
+        result = self.stage(destination + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlap", (result.stdout + result.stderr).lower())
+        self.assertEqual((self.source / "adb.exe").read_bytes(), b"verified runtime")
 
     def test_filesystem_staging_failure_is_not_ignored(self):
         blocker = self.root / "not a directory"
