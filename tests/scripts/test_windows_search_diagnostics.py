@@ -1396,7 +1396,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             with self.subTest(mutation=index), self.assertRaises(AssertionError):
                 self.assert_workflow_identity_contract(mutation)
 
-    def test_windows_helper_staging_contract_runs_natively_before_ctest(self):
+    def test_windows_helper_staging_contract_runs_natively_before_build(self):
         source = (ROOT / ".github/workflows/ci-build.yml").read_text()
         windows = source.split("  WindowsPackages:", 1)[1].split("  WindowsX86:", 1)[0]
         marker = "      - name: Verify Windows helper staging\n"
@@ -1410,6 +1410,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             "python -I tests/scripts/test_adb_helper_staging.py AdbHelperStagingScriptTest",
             "exit $LASTEXITCODE",
         ])
+        self.assertLess(windows.index(marker), windows.index("      - name: Build Windows application"))
         self.assertLess(windows.index(marker), windows.index("      - name: Verify Windows tests"))
         for job in ("WindowsX86", "WindowsAsan"):
             inherited = re.split(r"\n  \S", source.split("  " + job + ":", 1)[1], maxsplit=1)[0]

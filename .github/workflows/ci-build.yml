@@ -2820,6 +2820,12 @@ jobs:
             echo "KLOGG_VECTORSCAN_CHILD_CONCURRENCY=8" >> $GITHUB_ENV
           fi
 
+      - name: Verify Windows helper staging
+        shell: pwsh
+        run: |
+          python -I tests/scripts/test_adb_helper_staging.py AdbHelperStagingScriptTest
+          exit $LASTEXITCODE
+
       - name: Build Windows application
         uses: ./.github/actions/agent-build
         env:
@@ -2918,12 +2924,6 @@ jobs:
           if (-not $staged) {
             Write-Warning "No MSVC ASan DLL found under $asanDir; relying on PATH (msvc-dev-cmd) to provide it at runtime."
           }
-
-      - name: Verify Windows helper staging
-        shell: pwsh
-        run: |
-          python -I tests/scripts/test_adb_helper_staging.py AdbHelperStagingScriptTest
-          exit $LASTEXITCODE
 
       - name: Verify Windows tests
         uses: ./.github/actions/agent-run-tests

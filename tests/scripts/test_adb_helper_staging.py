@@ -391,7 +391,8 @@ class AdbHelperStagingScriptTest(unittest.TestCase):
         self.destination.mkdir(parents=True)
         (self.destination / "stale.dll").write_bytes(b"old runtime")
 
-    def stage(self, manifest, *, trace=False, windows_host=None):
+    def stage(self, manifest, *, trace=False, windows_host=None,
+              lexical_realpath=False, after_stage=""):
         paths = self.root / "destinations.txt"
         paths.write_text(manifest, encoding="utf-8")
         script = ROOT / "cmake/StageAdbHelpers.cmake"
@@ -400,8 +401,24 @@ class AdbHelperStagingScriptTest(unittest.TestCase):
             command += ["-DCMAKE_HOST_WIN32=" + ("TRUE" if windows_host else "FALSE")]
         if trace:
             command += ["--trace-expand", "--trace-source=" + str(script)]
+        entry = script
+        if lexical_realpath or after_stage:
+            entry = self.root / "staging-wrapper.cmake"
+            wrapper = ""
+            if lexical_realpath:
+                # KWSys uses GetFullPathNameW on Windows: REALPATH is lexical.
+                wrapper = (
+                    "function(get_filename_component output path mode)\n"
+                    "  if(mode STREQUAL REALPATH)\n"
+                    "    set(mode ABSOLUTE)\n"
+                    "  endif()\n"
+                    '  _get_filename_component(value "${path}" "${mode}" ${ARGN})\n'
+                    '  set(${output} "${value}" PARENT_SCOPE)\n'
+                    "endfunction()\n")
+            entry.write_text(wrapper + "include([==[" + script.as_posix() + "]==])\n"
+                             + after_stage, encoding="utf-8")
         command += ["-DSOURCE_HELPERS=" + str(self.source),
-                    "-DDESTINATIONS_FILE=" + str(paths), "-P", str(script)]
+                    "-DDESTINATIONS_FILE=" + str(paths), "-P", str(entry)]
         return subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=20)
 
     def test_duplicate_destinations_are_copied_once(self):
@@ -410,6 +427,44 @@ class AdbHelperStagingScriptTest(unittest.TestCase):
         self.assertEqual(result.stderr.count(" -E copy_directory "), 1)
         self.assertEqual((self.destination / "adb.exe").read_bytes(), b"verified runtime")
         self.assertFalse((self.destination / "stale.dll").exists())
+
+    def test_source_alias_guards_do_not_depend_on_realpath_following_links(self):
+        names = ("test_source_leaf_alias_is_rejected_before_removing_the_link",
+                 "test_source_alias_inside_destination_is_rejected",
+                 "test_nonexistent_descendant_through_parent_alias_is_rejected")
+        for name in names:
+            with self.subTest(scenario=name):
+                case = type(self)(name)
+                case.setUp()
+                stage = case.stage
+                case.stage = lambda manifest, **kwargs: stage(
+                    manifest, lexical_realpath=True, windows_host=True, **kwargs)
+                try:
+                    getattr(case, name)()
+                finally:
+                    case.doCleanups()
+
+    def test_windows_native_link_target_prefixes_and_roots_are_normalized(self):
+        source = self.source.as_posix()
+        checks = 'adb_canonical_path("${SOURCE_HELPERS}" expected 0)\n'
+        for prefix in ("/??/", "//?/", "\\??\\"):
+            checks += (
+                "adb_canonical_path([==[" + prefix + source + "]==] observed 0)\n"
+                'if(NOT observed STREQUAL expected)\n'
+                '  message(FATAL_ERROR "Native link target mismatch: ${observed} != ${expected}")\n'
+                "endif()\n")
+        for path, expected in (("C:/", "C:/"), ("//server/share", "//server/share"),
+                               ("/??/C:/", "C:/"), ("//?/C:/", "C:/"),
+                               ("/??/UNC/server/share", "//server/share"),
+                               ("//?/UNC/server/share", "//server/share")):
+            checks += (
+                "adb_canonical_path([==[" + path + "]==] observed 0)\n"
+                "if(NOT observed STREQUAL [==[" + expected + "]==])\n"
+                '  message(FATAL_ERROR "Native root mismatch: ${observed}")\n'
+                "endif()\n")
+        result = self.stage(str(self.destination) + "\n", windows_host=True,
+                            lexical_realpath=True, after_stage=checks)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_removal_command_is_available_in_cmake314(self):
         result = self.stage(str(self.destination) + "\n", trace=True)
