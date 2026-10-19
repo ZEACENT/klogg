@@ -93,15 +93,15 @@ add_executable(
 add_dependencies(klogg klogg_adb_helper)
 add_dependencies(klogg_portable klogg_adb_helper)
 if(KLOGG_ADB_HELPER_AVAILABLE)
-  function(klogg_stage_adb_helper target_name)
-    add_custom_command(
-      TARGET ${target_name}
-      POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${target_name}>/helpers"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:${target_name}>/helpers"
-      VERBATIM
-    )
-    if(APPLE)
+  if(APPLE)
+    function(klogg_stage_adb_helper target_name)
+      add_custom_command(
+        TARGET ${target_name}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${target_name}>/helpers"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:${target_name}>/helpers"
+        VERBATIM
+      )
       add_custom_command(
         TARGET ${target_name}
         POST_BUILD
@@ -110,18 +110,16 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_PACKAGE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
         VERBATIM
       )
-    endif()
-  endfunction()
-  klogg_stage_adb_helper(klogg)
-  klogg_stage_adb_helper(klogg_portable)
+    endfunction()
+    klogg_stage_adb_helper(klogg)
+    klogg_stage_adb_helper(klogg_portable)
 
-  add_custom_target(klogg_stage_adb_helpers ALL
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg>/helpers"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg>/helpers"
-    DEPENDS klogg klogg_adb_helper
-    VERBATIM
-  )
-  if(APPLE)
+    add_custom_target(klogg_stage_adb_helpers ALL
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg>/helpers"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg>/helpers"
+      DEPENDS klogg klogg_adb_helper
+      VERBATIM
+    )
     add_custom_command(
       TARGET klogg_stage_adb_helpers
       POST_BUILD
@@ -130,15 +128,24 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_PACKAGE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
       VERBATIM
     )
-  elseif(WIN32)
-    add_dependencies(klogg_stage_adb_helpers klogg_portable)
-    add_custom_command(
-      TARGET klogg_stage_adb_helpers
-      POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg_portable>/helpers"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg_portable>/helpers"
+  else()
+    # Both executables share this directory. Give it one writer before either
+    # consumer, including direct target builds that do not relink the executable.
+    # TARGET_FILE_DIR would add reverse dependencies on older CMake versions.
+    get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(is_multi_config)
+      set(adb_helpers_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/helpers")
+    else()
+      set(adb_helpers_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/helpers")
+    endif()
+    add_custom_target(klogg_stage_adb_helpers ALL
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "${adb_helpers_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "${adb_helpers_dir}"
+      DEPENDS klogg_adb_helper
       VERBATIM
     )
+    add_dependencies(klogg klogg_stage_adb_helpers)
+    add_dependencies(klogg_portable klogg_stage_adb_helpers)
   endif()
 endif()
 
