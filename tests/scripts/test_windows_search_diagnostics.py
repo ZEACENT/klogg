@@ -1169,6 +1169,130 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         self.assertIsNotNone(match, "bounded identity collector must stay in the failure-only step")
         return step, textwrap.dedent(match[1])
 
+    def identity_ninja_rules(self, text):
+        # Execute only the checked-out workflow's bounded, pure rule selection;
+        # fixture metadata is data, never Python or a build command.
+        _, script = self.windows_identity_script()
+        tree = ast.parse(script)
+        selection = next(node for node in ast.walk(tree) if isinstance(node, ast.Try)
+                         and any(isinstance(item, ast.Assign)
+                                 and any(isinstance(target, ast.Name) and target.id == "rules"
+                                         for target in item.targets) for item in node.body))
+        start = next(index for index, node in enumerate(selection.body)
+                     if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "rules_text"
+                             for target in node.targets))
+        end = next(index for index, node in enumerate(selection.body)
+                   if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == "commands"
+                           for target in node.targets))
+        statements = selection.body[start + 1:end]
+        namespace = {"re": re, "rules_text": text}
+        exec(compile(ast.Module(body=statements, type_ignores=[]), "workflow-rule-selection", "exec"),
+             namespace)
+        return namespace["rules"]
+
+    def test_identity_rules_accept_real_cmake_ninja_windows_text_mode(self):
+        with tempfile.TemporaryDirectory(prefix="crash-rule-provenance-") as directory:
+            root = pathlib.Path(directory)
+            (root / "main.cpp").write_text("int main() { return 0; }\n")
+            (root / "trace.cpp").write_text("int trace() { return 0; }\n")
+            (root / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.14)\n"
+                "project(crash_rule_fixture LANGUAGES CXX)\n"
+                "add_library(test_crash_trace STATIC trace.cpp)\n"
+                "add_executable(crash_trace_test_helper main.cpp)\n"
+                "add_executable(crash_trace_collector main.cpp)\n"
+                "target_link_libraries(crash_trace_test_helper PRIVATE test_crash_trace)\n"
+            )
+            configured = subprocess.run(
+                ["cmake", "-S", str(root), "-B", str(root / "build"), "-G", "Ninja",
+                 "-DCMAKE_BUILD_TYPE=RelWithDebInfo"],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+            # CMake's Ninja generator uses cmGeneratedFileStream text mode.
+            # Model its Windows CRLF bytes without pretending this is a native
+            # Windows compiler/minidump execution on a non-Windows host.
+            generated = (root / "build/CMakeFiles/rules.ninja").read_bytes()
+            lf = generated.replace(b"\r\n", b"\n")
+            expected = self.identity_ninja_rules(lf.decode("utf-8"))
+            self.assertEqual(len(expected), 6)
+            windows_rules = lf.replace(b"\n", b"\r\n")
+            self.assertEqual(self.identity_ninja_rules(windows_rules.decode("utf-8")), expected)
+            (root / "build/CMakeFiles/rules.ninja").write_bytes(windows_rules)
+            generated_commands = subprocess.run(
+                ["ninja", "-t", "compdb", "-x", *expected], cwd=root / "build",
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(generated_commands.returncode, 0,
+                             generated_commands.stdout + generated_commands.stderr)
+            commands = json.loads(generated_commands.stdout)
+            self.assertEqual(len(commands), 6)
+            self.assertTrue(all(all(entry.get(key) for key in ("directory", "command", "file", "output"))
+                                for entry in commands))
+            for mutation in ("# " + lf.decode("utf-8").replace("\n", "\n# "),
+                             lf.decode("utf-8").replace("CXX_COMPILER__crash_trace_collector_",
+                                                        "CXX_COMPILER__unrelated_")):
+                with self.subTest(mutation=mutation[:80]), self.assertRaises(ValueError):
+                    self.identity_ninja_rules(mutation)
+
+    def retained_context_facts(self, records):
+        _, script = self.windows_identity_script()
+        functions = [node for node in ast.parse(script).body
+                     if isinstance(node, ast.FunctionDef) and node.name == "retained_context_facts"]
+        self.assertEqual(len(functions), 1, "context facts must derive only from retained diagnostics")
+        namespace = {"json": json}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "retained-context-facts", "exec"),
+             namespace)
+        text = "\n".join(crash_smoke.DIAGNOSTIC_PREFIX + json.dumps(record) for record in records)
+        return namespace["retained_context_facts"](text)
+
+    def test_retained_context_facts_report_raw_flags_without_claiming_xstate_validity(self):
+        records = [
+            {"kind": "input", "pointerBits": 64, "contextFlags": 0x10004f,
+             "contextRecord": 0x49f1cfed00},
+            {"kind": "read", "object": 3, "requested": 1232,
+             "transferred": 1232, "status": "complete", "error": 0},
+            {"kind": "summary", "contextFlags": 0x10004f},
+        ]
+        facts = self.retained_context_facts(records)
+        self.assertEqual(facts["status"], "observed-retained-data")
+        self.assertEqual(facts["input_context_flags"], 0x10004f)
+        self.assertEqual(facts["input_context_flags_hex"], "0x0010004f")
+        self.assertTrue(facts["input_xstate_flag_set"])
+        self.assertEqual(facts["postfailure_context_flags"], 0x10004f)
+        self.assertEqual(facts["context_address_modulo_64"], 0)
+        self.assertEqual(facts["context_read_phase"], "postfailure")
+        self.assertEqual(facts["context_read_requested_bytes"], 1232)
+        self.assertEqual(facts["context_read_transferred_bytes"], 1232)
+        self.assertEqual(facts["xstate_extent"], "not-observed")
+        self.assertEqual(facts["xstate_validity"], "unknown")
+        self.assertEqual(facts["thread_inventory"], "not-observed")
+        self.assertEqual(facts["dump_api_owner"], "unavailable-basename-observations-only")
+        for mutation in (records + [dict(records[0])],
+                         [dict(records[0], contextFlags="0x10004f"), *records[1:]],
+                         [dict(records[0], contextRecord=1 << 65), *records[1:]],
+                         [records[0], dict(records[1], requested=8192, transferred=8192), records[2]]):
+            with self.subTest(mutation=mutation):
+                self.assertEqual(self.retained_context_facts(mutation)["status"], "unavailable")
+
+    def test_retained_context_facts_keep_partial_reads_and_flag_differences_visible(self):
+        facts = self.retained_context_facts([
+            {"kind": "input", "pointerBits": 32, "contextFlags": 0x10007,
+             "contextRecord": 0x1000},
+            {"kind": "read", "object": 3, "requested": 716,
+             "transferred": 128, "status": "partial", "error": 299},
+            {"kind": "summary", "contextFlags": 0},
+        ])
+        self.assertEqual(facts["status"], "observed-retained-data")
+        self.assertFalse(facts["input_xstate_flag_set"])
+        self.assertEqual(facts["postfailure_context_flags"], 0)
+        self.assertEqual(facts["context_read_transferred_bytes"], 128)
+        self.assertEqual(facts["context_read_statuses"], ["partial"])
+        self.assertEqual(facts["context_read_errors"], [299])
+        self.assertEqual(facts["xstate_validity"], "unknown")
+
     def assert_workflow_identity_contract(self, script):
         try:
             tree = ast.parse(script)
@@ -1215,6 +1339,13 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                           '[selected["CMAKE_MAKE_PROGRAM"], "-t", "compdb", "-x", *rules]'):
             self.assertTrue(any(same_ast(node.args[0], arguments) for node in metadata_calls),
                             "only fixed Git/Ninja metadata commands may execute")
+        context_calls = [node for node in calls if same_ast(node.func, "retained_context_facts")]
+        self.assertEqual(len(context_calls), 1)
+        self.assertTrue(same_ast(context_calls[0], "retained_context_facts(text)"))
+        context_appends = [node for node in calls
+                           if same_ast(node.func, 'evidence["retained_context_facts"].append')]
+        self.assertEqual(len(context_appends), 1)
+        self.assertIn(context_calls[0], list(ast.walk(context_appends[0])))
         copies = [node for node in calls if same_ast(node.func, "shutil.copyfile")]
         self.assertEqual(len(copies), 1, "loaded runtime DLLs must never be copied")
         self.assertTrue(same_ast(copies[0].args[0], "path"))
@@ -1252,6 +1383,8 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             script + '\nsubprocess.run(module["path"])\n',
             script + '\nos.system(module["path"])\n',
             script + '\nshutil.copyfile(module["path"], destination / "runtime.dll")\n',
+            script.replace("**retained_context_facts(text)", '**{"status": "unavailable"}')
+            + "\n# retained_context_facts(text)\n",
             script.replace(">= MAX_MODULE_RECORDS", ">= 600"),
             script.replace("> MAX_MODULE_PATH_UNITS", "> 65536"),
             script.replace("MAX_MODULE_RECORDS = 6", "MAX_MODULE_RECORDS = 600")
@@ -1262,6 +1395,26 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             self.assertNotEqual(mutation, script)
             with self.subTest(mutation=index), self.assertRaises(AssertionError):
                 self.assert_workflow_identity_contract(mutation)
+
+    def test_windows_helper_staging_contract_runs_natively_before_build(self):
+        source = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        windows = source.split("  WindowsPackages:", 1)[1].split("  WindowsX86:", 1)[0]
+        marker = "      - name: Verify Windows helper staging\n"
+        self.assertEqual(windows.count(marker), 1)
+        step = windows.split(marker, 1)[1].split("      - ", 1)[0]
+        lines = [line.strip() for line in step.splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(lines, [
+            "shell: pwsh",
+            "run: |",
+            "python -I tests/scripts/test_adb_helper_staging.py AdbHelperStagingScriptTest",
+            "exit $LASTEXITCODE",
+        ])
+        self.assertLess(windows.index(marker), windows.index("      - name: Build Windows application"))
+        self.assertLess(windows.index(marker), windows.index("      - name: Verify Windows tests"))
+        for job in ("WindowsX86", "WindowsAsan"):
+            inherited = re.split(r"\n  \S", source.split("  " + job + ":", 1)[1], maxsplit=1)[0]
+            self.assertIn("steps: *windows_steps", inherited)
 
     def test_ci_exports_explicit_dump_and_collects_both_exe_symbol_pairs(self):
         source = (ROOT / ".github/workflows/ci-build.yml").read_text()

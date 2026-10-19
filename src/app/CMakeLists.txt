@@ -93,15 +93,15 @@ add_executable(
 add_dependencies(klogg klogg_adb_helper)
 add_dependencies(klogg_portable klogg_adb_helper)
 if(KLOGG_ADB_HELPER_AVAILABLE)
-  function(klogg_stage_adb_helper target_name)
-    add_custom_command(
-      TARGET ${target_name}
-      POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${target_name}>/helpers"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:${target_name}>/helpers"
-      VERBATIM
-    )
-    if(APPLE)
+  if(APPLE)
+    function(klogg_stage_adb_helper target_name)
+      add_custom_command(
+        TARGET ${target_name}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${target_name}>/helpers"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:${target_name}>/helpers"
+        VERBATIM
+      )
       add_custom_command(
         TARGET ${target_name}
         POST_BUILD
@@ -110,18 +110,16 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_PACKAGE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
         VERBATIM
       )
-    endif()
-  endfunction()
-  klogg_stage_adb_helper(klogg)
-  klogg_stage_adb_helper(klogg_portable)
+    endfunction()
+    klogg_stage_adb_helper(klogg)
+    klogg_stage_adb_helper(klogg_portable)
 
-  add_custom_target(klogg_stage_adb_helpers ALL
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg>/helpers"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg>/helpers"
-    DEPENDS klogg klogg_adb_helper
-    VERBATIM
-  )
-  if(APPLE)
+    add_custom_target(klogg_stage_adb_helpers ALL
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg>/helpers"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg>/helpers"
+      DEPENDS klogg klogg_adb_helper
+      VERBATIM
+    )
     add_custom_command(
       TARGET klogg_stage_adb_helpers
       POST_BUILD
@@ -130,20 +128,39 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_PACKAGE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
       VERBATIM
     )
-  elseif(WIN32)
-    add_dependencies(klogg_stage_adb_helpers klogg_portable)
-    add_custom_command(
-      TARGET klogg_stage_adb_helpers
-      POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg_portable>/helpers"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg_portable>/helpers"
-      VERBATIM
+  else()
+    # Resolve final target paths at generation time, outside the build command:
+    # TARGET_FILE_DIR there would add reverse edges on older CMake versions.
+    # The shared role owns coincident destinations; otherwise each app reaches
+    # only its private destination, even when the other output is unavailable.
+    set(adb_helper_destinations "${CMAKE_CURRENT_BINARY_DIR}/adb-helper-destinations-$<CONFIG>.txt")
+    file(GENERATE OUTPUT "${adb_helper_destinations}"
+      CONTENT "$<TARGET_FILE_DIR:klogg>/helpers\n$<TARGET_FILE_DIR:klogg_portable>/helpers\n"
     )
+    function(klogg_add_adb_stage stage_target role)
+      add_custom_target(${stage_target}
+        COMMAND "${CMAKE_COMMAND}"
+          "-DSOURCE_HELPERS=${KLOGG_ADB_HELPER_STAGE}/helpers"
+          "-DDESTINATIONS_FILE=${adb_helper_destinations}"
+          "-DSTAGE_ROLE=${role}"
+          -P "${CMAKE_SOURCE_DIR}/cmake/StageAdbHelpers.cmake"
+        VERBATIM
+      )
+    endfunction()
+    klogg_add_adb_stage(klogg_adb_helpers_shared_stage shared)
+    add_dependencies(klogg_adb_helpers_shared_stage klogg_adb_helper)
+    foreach(target IN ITEMS klogg klogg_portable)
+      klogg_add_adb_stage(${target}_adb_helpers_stage ${target})
+      add_dependencies(${target}_adb_helpers_stage klogg_adb_helpers_shared_stage)
+      add_dependencies(${target} ${target}_adb_helpers_stage)
+    endforeach()
+    add_custom_target(klogg_stage_adb_helpers ALL)
+    add_dependencies(klogg_stage_adb_helpers klogg_adb_helpers_stage klogg_portable_adb_helpers_stage)
   endif()
 endif()
 
 add_dependencies(ci_build klogg klogg_grep)
-if(TARGET klogg_stage_adb_helpers)
+if(APPLE AND TARGET klogg_stage_adb_helpers)
   add_dependencies(ci_build klogg_stage_adb_helpers)
 endif()
 
