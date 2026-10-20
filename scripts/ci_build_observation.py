@@ -284,7 +284,9 @@ def run_phase(command, *, repo_root, build_root, output, phase, object_cache="me
         raise ValueError("unknown native phase cache observation")
     runner = subprocess.run if runner is None else runner
     counter_runner = sccache_adapter(runner) if cache_tool == "sccache" else runner
-    clock = time.monotonic if clock is None else clock
+    # Windows Python before 3.13 uses coarse GetTickCount64 for monotonic;
+    # duration measurement needs perf_counter's high-resolution clock instead.
+    clock = time.perf_counter if clock is None else clock
     build, path = Path(build_root), Path(output)
     if path.exists() or path.is_symlink():
         raise MetricsError("phase observation already exists")
@@ -320,10 +322,17 @@ def run_phase(command, *, repo_root, build_root, output, phase, object_cache="me
             report["configure"] = configure
         delta = phase_log_delta(before, after)
         if delta:
-            database = json.loads((build / "compile_commands.json").read_text(encoding="utf-8"))
-            measured = legacy.measure(delta, database, str(repo_root), str(build), wall, object_cache)
-            report.update(measured)
-            report["compilation_state"] = "measured"
+            try:
+                database = json.loads((build / "compile_commands.json").read_text(encoding="utf-8"))
+                measured = legacy.measure(delta, database, str(repo_root), str(build), wall, object_cache)
+                report.update(measured)
+                report["compilation_state"] = "measured"
+            except Exception as error:
+                # Ninja uses an independent clock and log lifecycle. Invalid
+                # analysis must not erase the successful invocation's evidence
+                # or inflate its authoritative wall time to match Ninja.
+                report["compilation_unknown_reason"] = str(error)
+                print(f"notice: optional phase Ninja analysis unavailable: {error}", file=sys.stderr)
         else:
             report["compilation_unknown_reason"] = "Ninja log unavailable or compacted across phase boundary"
         if counters is not None:

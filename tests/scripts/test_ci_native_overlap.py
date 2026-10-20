@@ -11,11 +11,47 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
+
+
+def assert_cache_directory(case, cache, key, expected):
+    prefix = key + ":PATH="
+    values = [line[len(prefix):] for line in cache.splitlines() if line.startswith(prefix)]
+    case.assertEqual(len(values), 1, "expected one exact cache directory entry: " + key)
+    # CMake expands Windows short paths; spelling is not filesystem identity.
+    case.assertTrue(Path(values[0]).samefile(expected), key + " names a different directory")
+
+
+class CachePathIdentityTests(unittest.TestCase):
+    def test_cache_directory_compares_identity_not_path_spelling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expected = root / "verified helper"
+            expected.mkdir()
+            (root / "intermediate").mkdir()
+            alias = root / "intermediate" / ".." / expected.name
+            cache = "KLOGG_ADB_HELPER_ARTIFACT_ROOT:PATH=" + expected.as_posix() + "\n"
+            for path in (expected, alias):
+                with self.subTest(path=path):
+                    assert_cache_directory(self, cache, "KLOGG_ADB_HELPER_ARTIFACT_ROOT", path)
+            other = root / "different" / expected.name
+            other.mkdir(parents=True)
+            with self.assertRaises(AssertionError):
+                assert_cache_directory(self, cache, "KLOGG_ADB_HELPER_ARTIFACT_ROOT", other)
+
+    def test_cache_directory_requires_one_existing_exact_entry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = "HELPER:PATH=" + root.as_posix() + "\n"
+            for invalid in ("", "//" + entry, "OTHER_" + entry, entry + entry,
+                            "HELPER:PATH=" + str(root / "missing") + "\n"):
+                with self.subTest(cache=invalid), self.assertRaises((AssertionError, OSError)):
+                    assert_cache_directory(self, invalid, "HELPER", root)
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("ninja") and shutil.which("cmake"),
@@ -185,6 +221,16 @@ class NativeOverlapTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("RUNNER_OS") == "Windows" or (shutil.which("ninja") and shutil.which("cmake")),
                      "requires native Ninja/CMake on local hosts")
 class WindowsNativeOverlapTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        clocks = {}
+        for name in ("monotonic", "perf_counter"):
+            info = time.get_clock_info(name)
+            clocks[name] = {"implementation": info.implementation, "resolution": info.resolution,
+                            "monotonic": info.monotonic}
+        print("Native overlap runtime clocks: " + json.dumps(clocks, sort_keys=True), flush=True)
+
     def setUp(self):
         if os.environ.get("RUNNER_OS") == "Windows":
             for tool in ("cmake", "ninja", "cl"):
@@ -339,7 +385,7 @@ class WindowsNativeOverlapTests(unittest.TestCase):
             self.module.execute("finalize", self.root, build, options, receipt)
             final_cache = (build / "CMakeCache.txt").read_text()
             self.assertIn("KLOGG_ADB_HELPER_TARGET:STRING=windows-x86_64", final_cache)
-            self.assertIn("KLOGG_ADB_HELPER_ARTIFACT_ROOT:PATH=" + artifact.as_posix(), final_cache)
+            assert_cache_directory(self, final_cache, "KLOGG_ADB_HELPER_ARTIFACT_ROOT", artifact)
             self.assertEqual([path.stat().st_mtime_ns for path in paths[:2]], retained)
             self.assertTrue(all(path.is_file() for path in paths))
             rows = [line.split("\t") for line in (build / ".ninja_log").read_text().splitlines()[1:]]
@@ -356,6 +402,19 @@ class WindowsNativeOverlapTests(unittest.TestCase):
 
 
 class NativeHostedGuardTests(unittest.TestCase):
+    def test_native_guard_reports_actual_runtime_clocks_once_per_class(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            WindowsNativeOverlapTests.setUpClass()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        prefix = "Native overlap runtime clocks: "
+        self.assertTrue(lines[0].startswith(prefix))
+        clocks = json.loads(lines[0][len(prefix):])
+        for name in ("monotonic", "perf_counter"):
+            actual = time.get_clock_info(name)
+            self.assertEqual(clocks[name], {"implementation": actual.implementation,
+                "resolution": actual.resolution, "monotonic": actual.monotonic})
+
     def test_hosted_windows_missing_tools_fails_instead_of_skipping_native_proof(self):
         with mock.patch.dict(os.environ, {"RUNNER_OS": "Windows"}), \
                 mock.patch("shutil.which", return_value=None), mock.patch.object(sys, "path", sys.path[:]):
@@ -500,6 +559,80 @@ class PhaseObservationTests(unittest.TestCase):
         prepare, finalize = self.reports()
         finalize["object_cache"] = "unmeasured"
         self.assertIsNone(observation.aggregate_phases(prepare, finalize)["cache_deltas"])
+
+    def test_optional_ninja_analysis_failure_preserves_authoritative_phase_evidence(self):
+        import ci_build_observation as observation
+        raw = "# ninja log v5\n0\t552\t0\ta.obj\t123\n"
+        for scenario in ("clock-mismatch", "malformed-log", "malformed-database", "compacted-log"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output = root / "prepare.json"
+                database = [{"directory": str(root), "file": str(root / "src/a.cpp"), "output": "a.obj"}]
+                (root / "compile_commands.json").write_text(
+                    "invalid json" if scenario == "malformed-database" else json.dumps(database))
+                if scenario == "compacted-log":
+                    (root / ".ninja_log").write_text(raw + "0\t553\t0\ta.obj\t123\n")
+                after = "# ninja log v5\ninvalid record\n" if scenario == "malformed-log" else raw
+                def run(command, **kwargs):
+                    self.assertEqual(command, ["fixture-build"])
+                    (root / ".ninja_log").write_text(after)
+                    return subprocess.CompletedProcess(command, 0)
+                provenance = self.reports()[0]["provenance"]
+                configure = {"passes": [{"purpose": "initial", "wall_ms": 7}], "wall_ms": 7}
+                before = {"stats_zeroed_timestamp": 0, "direct_cache_hit": 2,
+                          "preprocessed_cache_hit": 0, "cache_miss": 1}
+                last = dict(before, direct_cache_hit=3, cache_miss=2)
+                ticks = iter([1.0, 1.547 if scenario == "clock-mismatch" else 1.6])
+                with mock.patch.object(observation, "build_provenance", return_value=copy.deepcopy(provenance)), \
+                        mock.patch.object(observation.legacy, "ccache_counters", side_effect=[before, last]), \
+                        contextlib.redirect_stderr(io.StringIO()) as diagnostic:
+                    report = observation.run_phase(["fixture-build"], repo_root=root, build_root=root,
+                        output=output, phase="prepare", runner=run, clock=lambda: next(ticks),
+                        provenance={"native_platform": "Windows"}, configure=configure)
+                self.assertIsNotNone(report, "optional Ninja analysis must not discard the successful phase")
+                self.assertEqual(json.loads(output.read_text()), report)
+                self.assertEqual(report["build_wall_ms"], 547 if scenario == "clock-mismatch" else 600)
+                self.assertEqual(report["compilation_state"], "unknown")
+                self.assertNotIn("compilation", report)
+                self.assertNotIn("categories", report)
+                self.assertTrue(report["compilation_unknown_reason"])
+                self.assertEqual(report["provenance"], dict(provenance, native_platform="Windows"))
+                self.assertEqual(report["configure"], configure)
+                self.assertEqual(report["cache_deltas"], {"direct_cache_hit": 1,
+                    "preprocessed_cache_hit": 0, "cache_miss": 1})
+                self.assertEqual(report["object_cache"], "measured")
+                self.assertEqual(report["cache_tool"], "ccache")
+                finalize = self.reports()[1]
+                finalize["provenance"] = copy.deepcopy(report["provenance"])
+                finalize["provenance"]["cmake_options"]["KLOGG_ADB_HELPER_REQUIRED"] = "ON"
+                combined = observation.aggregate_phases(report, finalize)
+                self.assertEqual(combined["build_wall_ms"], report["build_wall_ms"] + finalize["build_wall_ms"])
+                self.assertEqual(combined["phases"]["prepare"], report)
+                self.assertEqual(output.with_suffix(".ninja-log.txt").read_text(), after)
+                self.assertEqual((root / ".ninja_log").read_text(), after)
+                if scenario == "clock-mismatch":
+                    self.assertIn("build_wall_ms=547, ninja_last_end_ms=552", report["compilation_unknown_reason"])
+                    self.assertIn("build_wall_ms=547, ninja_last_end_ms=552", diagnostic.getvalue())
+
+    def test_default_phase_duration_uses_high_resolution_clock(self):
+        import ci_build_observation as observation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(root), "file": str(root / "src/a.cpp"), "output": "a.obj"}]))
+            def run(command, **kwargs):
+                (root / ".ninja_log").write_text("# ninja log v5\n0\t552\t0\ta.obj\t123\n")
+                return subprocess.CompletedProcess(command, 0)
+            with mock.patch.object(observation.time, "monotonic", side_effect=[1.0, 1.547]) as coarse, \
+                    mock.patch.object(observation.time, "perf_counter", side_effect=[1.0, 1.56]) as precise:
+                report = observation.run_phase(["fixture-build"], repo_root=root, build_root=root,
+                    output=root / "prepare.json", phase="prepare", object_cache="disabled", runner=run)
+            self.assertIsNotNone(report)
+            self.assertEqual(report["build_wall_ms"], 560)
+            self.assertEqual(report["compilation_state"], "measured")
+            self.assertEqual(report["compilation"]["edges"], 1)
+            self.assertEqual(precise.call_count, 2)
+            coarse.assert_not_called()
 
     def test_phase_delta_keeps_original_command_log_and_never_claims_whole_build(self):
         import ci_build_observation as observation
