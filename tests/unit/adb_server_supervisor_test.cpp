@@ -13,6 +13,7 @@
 
 #include <QByteArray>
 #include <QDateTime>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDevice>
@@ -20,6 +21,8 @@
 #include <QHostAddress>
 #include <QLockFile>
 #include <QObject>
+#include <QPointer>
+#include <QProcess>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -29,6 +32,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -66,11 +70,8 @@ bool waitForQtCondition( Predicate predicate )
 {
     QElapsedTimer timer;
     timer.start();
-    // Single evaluation per iteration: predicates that read volatile state
-    // (e.g. a heartbeat file the helper rewrites every 20 ms) can flip
-    // true -> false between the loop condition and a separate trailing
-    // `return predicate()` re-read (observed as a sub-second false failure
-    // on the macOS arm64 CI leg, PR #76).
+    // Return the observed success directly: a second read of asynchronous
+    // state can otherwise turn an already satisfied condition into a failure.
     while ( timer.elapsed() < AsyncWaitTimeoutMs ) {
         if ( predicate() ) {
             return true;
@@ -116,12 +117,11 @@ AdbServerSupervisorConfig supervisorConfig()
 
 LiveSourceError missingPackagedServerError()
 {
-    return LiveSourceError{ klogg::livecapture::ErrorCategory::Configuration,
-                            "adb-packaged-helper-missing",
-                            klogg::livecapture::ErrorScope::Infrastructure,
-                            klogg::livecapture::RetryPolicy::Never,
-                            "The packaged ADB helper is unavailable.",
-                            "The packaged ADB helper is missing." };
+    return LiveSourceError{
+        klogg::livecapture::ErrorCategory::Configuration, "adb-packaged-helper-missing",
+        klogg::livecapture::ErrorScope::Infrastructure,   klogg::livecapture::RetryPolicy::Never,
+        "The packaged ADB helper is unavailable.",        "The packaged ADB helper is missing."
+    };
 }
 
 class ManualProbe final : public AdbServerProbe {
@@ -674,15 +674,109 @@ private:
     QString stopPath_;
 };
 
-std::uint64_t readHeartbeat( const QString& path )
-{
-    QFile heartbeatFile( path );
-    if ( !heartbeatFile.open( QIODevice::ReadOnly ) ) {
-        return 0u;
+struct HelperFileObservation {
+    QByteArray records;
+    std::string state{ "missing" };
+    std::string error;
+
+    bool failed() const
+    {
+        return state != "missing" && state != "complete" && state != "partial";
     }
-    bool parsed = false;
-    const auto heartbeat = heartbeatFile.readAll().trimmed().toULongLong( &parsed );
-    return parsed ? heartbeat : 0u;
+};
+
+HelperFileObservation readHelperRecords( const QString& path, qint64 maximum )
+{
+    HelperFileObservation observed;
+    QFile file( path );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        observed.state = QFileInfo::exists( path ) ? "open-error" : "missing";
+        observed.error = file.errorString().toStdString();
+        return observed;
+    }
+    observed.records = file.read( maximum + 1 );
+    if ( file.error() != QFileDevice::NoError ) {
+        observed.state = "read-error";
+        observed.error = file.errorString().toStdString();
+        observed.records.clear();
+        return observed;
+    }
+    if ( observed.records.size() > maximum ) {
+        observed.state = "over-budget";
+        observed.records.clear();
+        return observed;
+    }
+    observed.state = observed.records.endsWith( '\n' ) ? "complete" : "partial";
+    // Only newline-committed records are observations. An in-flight append
+    // cannot retract an earlier record or supply a new progress/acknowledgement.
+    observed.records.truncate( observed.records.lastIndexOf( '\n' ) + 1 );
+    return observed;
+}
+
+struct AdbHelperObservation {
+    HelperFileObservation progressFile;
+    HelperFileObservation statusFile;
+    std::uint64_t progress{ 0u };
+    std::string phase{ "unobserved" };
+    std::string terminal{ "unobserved" };
+    bool acknowledged{ false };
+
+    bool failed() const
+    {
+        return progressFile.failed() || statusFile.failed() || terminal.rfind( "error ", 0u ) == 0u;
+    }
+
+    std::string describe() const
+    {
+        return "progress-read=" + progressFile.state + " progress=" + std::to_string( progress )
+               + " progress-error=" + progressFile.error + " status-read=" + statusFile.state
+               + " status-error=" + statusFile.error + " phase=" + phase + " terminal=" + terminal
+               + " acknowledged=" + ( acknowledged ? "yes" : "no" );
+    }
+};
+
+AdbHelperObservation readHelperObservation( const QString& progressPath, const QString& statusPath )
+{
+    AdbHelperObservation observed;
+    observed.progressFile = readHelperRecords( progressPath, 64 * 1024 );
+    observed.statusFile = readHelperRecords( statusPath, 4096 );
+    for ( const auto& record : observed.progressFile.records.split( '\n' ) ) {
+        if ( record.isEmpty() ) {
+            continue;
+        }
+        bool parsed = false;
+        const auto progress = record.toULongLong( &parsed );
+        if ( !parsed || progress != observed.progress + 1u
+             || !std::all_of( record.cbegin(), record.cend(),
+                              []( char value ) { return value >= '0' && value <= '9'; } ) ) {
+            observed.progressFile.state = "invalid-record";
+            break;
+        }
+        observed.progress = progress;
+    }
+    for ( const auto& record : observed.statusFile.records.split( '\n' ) ) {
+        if ( record.isEmpty() ) {
+            continue;
+        }
+        if ( record.contains( '\r' ) ) {
+            observed.statusFile.state = "invalid-record";
+            break;
+        }
+        if ( record.startsWith( "phase " ) ) {
+            observed.phase = record.mid( 6 ).toStdString();
+        }
+        else if ( record == "ack after-destruction" ) {
+            observed.acknowledged = true;
+        }
+        else if ( record.startsWith( "terminal " ) ) {
+            observed.terminal = record.mid( 9 ).toStdString();
+        }
+        else {
+            observed.statusFile.state = "invalid-record";
+            break;
+        }
+    }
+    return observed;
 }
 
 AdbServerLaunchRequest testHelperLaunchRequest()
@@ -694,6 +788,148 @@ AdbServerLaunchRequest testHelperLaunchRequest()
         AdbServerEndpoint{ QHostAddress::LocalHost, 5037 },
     };
 }
+
+struct HelperProcessObservation {
+    qint64 pid{ 0 };
+    bool finished{ false };
+    int exitCode{ 0 };
+    QProcess::ExitStatus exitStatus{ QProcess::NormalExit };
+};
+
+class AdbProgressFixture final {
+public:
+    explicit AdbProgressFixture( const QByteArray& mode = QByteArrayLiteral( "progress" ) )
+        : progressPath( directory.filePath( QStringLiteral( "heartbeat" ) ) )
+        , stopPath( directory.filePath( QStringLiteral( "stop" ) ) )
+        , statusPath( directory.filePath( QStringLiteral( "status" ) ) )
+        , heartbeatEnvironment_( QByteArrayLiteral( "KLOGG_ADB_HELPER_HEARTBEAT" ),
+                                 progressPath.toUtf8() )
+        , stopEnvironment_( QByteArrayLiteral( "KLOGG_ADB_HELPER_STOP" ), stopPath.toUtf8() )
+        , statusEnvironment_( QByteArrayLiteral( "KLOGG_ADB_HELPER_STOPPED" ), statusPath.toUtf8() )
+        , modeEnvironment_( QByteArrayLiteral( "KLOGG_ADB_HELPER_MODE" ), mode )
+        , stopGuard_( stopPath )
+    {
+        REQUIRE( directory.isValid() );
+    }
+
+    ~AdbProgressFixture()
+    {
+        // Assertion unwinding can occur while the released child is blocked in
+        // a barrier or a full pipe. Reap only the QProcess this fixture created.
+        if ( process_ != nullptr && process_->state() != QProcess::NotRunning ) {
+            process_->kill();
+            process_->waitForFinished( AsyncWaitTimeoutMs );
+        }
+    }
+
+    AdbProgressFixture( const AdbProgressFixture& ) = delete;
+    AdbProgressFixture& operator=( const AdbProgressFixture& ) = delete;
+
+    AdbServerToken start( QtAdbServerLauncher& launcher )
+    {
+        const auto token
+            = launcher.launch( testHelperLaunchRequest(), [ this ]( AdbServerLaunchResult event ) {
+                  result = std::move( event );
+              } );
+        auto* const process = launcher.findChild<QProcess*>();
+        REQUIRE( process != nullptr );
+        process_ = process;
+        const auto observation = processObservation;
+        observation->pid = process->processId();
+        QObject::connect( process, &QProcess::started, process,
+                          [ process, observation ] { observation->pid = process->processId(); } );
+        // Observe the actual child terminal signal even after release disconnects
+        // the launcher's callbacks; never retain a reference to this fixture.
+        QObject::connect( process, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+                          process, [ observation ]( int code, QProcess::ExitStatus status ) {
+                              observation->finished = true;
+                              observation->exitCode = code;
+                              observation->exitStatus = status;
+                          } );
+        if ( process->state() == QProcess::NotRunning ) {
+            observation->finished = true;
+            observation->exitCode = process->exitCode();
+            observation->exitStatus = process->exitStatus();
+        }
+        return token;
+    }
+
+    AdbHelperObservation observe() const
+    {
+        return readHelperObservation( progressPath, statusPath );
+    }
+
+    std::string describe() const
+    {
+        const auto diagnostic = result ? result->diagnostic : std::string{};
+        return "pid=" + std::to_string( processObservation->pid )
+               + " finished=" + ( processObservation->finished ? "yes" : "no" )
+               + " exit-code=" + std::to_string( processObservation->exitCode ) + " exit-status="
+               + std::to_string( static_cast<int>( processObservation->exitStatus ) ) + " callback="
+               + ( result ? std::to_string( static_cast<int>( result->state ) ) : "absent" )
+               + " diagnostic-tail="
+               + diagnostic.substr( diagnostic.size() > 512u ? diagnostic.size() - 512u : 0u );
+    }
+
+    template <typename Predicate>
+    void requireObservation( Predicate predicate )
+    {
+        AdbHelperObservation observed;
+        bool matched = false;
+        const auto completed = waitForQtCondition( [ & ] {
+            observed = observe();
+            matched = predicate( observed );
+            return matched || observed.failed() || processObservation->finished;
+        } );
+        INFO( observed.describe() );
+        INFO( describe() );
+        REQUIRE( completed );
+        REQUIRE_FALSE( observed.failed() );
+        REQUIRE( matched );
+    }
+
+    void request( const QString& suffix,
+                  const QByteArray& contents = QByteArrayLiteral( "continue\n" ) ) const
+    {
+        QFile file( progressPath + suffix );
+        INFO( file.errorString().toStdString() );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( contents ) == contents.size() );
+        REQUIRE( file.flush() );
+        file.close();
+    }
+
+    void requestStop()
+    {
+        stopGuard_.requestStop();
+    }
+
+    void stopAndWait()
+    {
+        requestStop();
+        requireObservation( [ & ]( const auto& observed ) {
+            return observed.terminal == "stopped" && processObservation->finished;
+        } );
+        CHECK( processObservation->exitCode == 0 );
+        CHECK( processObservation->exitStatus == QProcess::NormalExit );
+    }
+
+    QTemporaryDir directory;
+    QString progressPath;
+    QString stopPath;
+    QString statusPath;
+    std::optional<AdbServerLaunchResult> result;
+    std::shared_ptr<HelperProcessObservation> processObservation
+        = std::make_shared<HelperProcessObservation>();
+
+private:
+    QPointer<QProcess> process_;
+    ScopedEnvironmentVariable heartbeatEnvironment_;
+    ScopedEnvironmentVariable stopEnvironment_;
+    ScopedEnvironmentVariable statusEnvironment_;
+    ScopedEnvironmentVariable modeEnvironment_;
+    AdbHelperStopGuard stopGuard_;
+};
 
 AdbServerLaunchResult
 waitForTerminalLaunchResult( const std::vector<AdbServerLaunchResult>& results )
@@ -891,8 +1127,9 @@ TEST_CASE( "reentrant startup capability check cannot overwrite a replacement ru
     CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Ready );
 }
 
-TEST_CASE( "capability failure notification may destroy the supervisor without scheduling stale work",
-           "[livecapture][adb][supervisor][startup-capability][lifetime]" )
+TEST_CASE(
+    "capability failure notification may destroy the supervisor without scheduling stale work",
+    "[livecapture][adb][supervisor][startup-capability][lifetime]" )
 {
     ManualProbe probe;
     ManualLauncher launcher;
@@ -901,12 +1138,11 @@ TEST_CASE( "capability failure notification may destroy the supervisor without s
     ManualScheduler scheduler;
     auto config = supervisorConfig();
     config.startupCapabilityCheck = [] { return missingPackagedServerError(); };
-    auto supervisor = std::make_unique<AdbServerSupervisor>(
-        config, probe, launcher, startupLock, keyStore, scheduler );
+    auto supervisor = std::make_unique<AdbServerSupervisor>( config, probe, launcher, startupLock,
+                                                             keyStore, scheduler );
     QObject::connect(
         supervisor.get(), &AdbServerSupervisor::stateChanged,
-        [ &supervisor ]( Generation, std::uint64_t,
-                        const AdbServerSupervisorSnapshot& snapshot ) {
+        [ &supervisor ]( Generation, std::uint64_t, const AdbServerSupervisorSnapshot& snapshot ) {
             if ( snapshot.status == AdbServerSupervisorStatus::RetryWait ) {
                 supervisor.reset();
             }
@@ -1580,45 +1816,184 @@ TEST_CASE( "Qt launcher continuously drains verbose stderr and retains a bounded
 TEST_CASE( "published Qt launcher process survives launcher destruction and drains output",
            "[livecapture][adb][supervisor][ownership][shutdown][adapter]" )
 {
-    QTemporaryDir temporaryDirectory;
-    REQUIRE( temporaryDirectory.isValid() );
-    const auto heartbeatPath
-        = temporaryDirectory.filePath( QStringLiteral( "adb-helper-heartbeat" ) );
-    const auto stopPath = temporaryDirectory.filePath( QStringLiteral( "adb-helper-stop" ) );
-    const auto stoppedPath
-        = temporaryDirectory.filePath( QStringLiteral( "adb-helper-stopped" ) );
-    ScopedEnvironmentVariable heartbeatEnvironment(
-        QByteArrayLiteral( "KLOGG_ADB_HELPER_HEARTBEAT" ), heartbeatPath.toUtf8() );
-    ScopedEnvironmentVariable stopEnvironment( QByteArrayLiteral( "KLOGG_ADB_HELPER_STOP" ),
-                                               stopPath.toUtf8() );
-    ScopedEnvironmentVariable stoppedEnvironment( QByteArrayLiteral( "KLOGG_ADB_HELPER_STOPPED" ),
-                                                  stoppedPath.toUtf8() );
-    AdbHelperStopGuard stopGuard( stopPath );
-    std::optional<AdbServerLaunchResult> result;
-
+    AdbProgressFixture helper;
     {
         QtAdbServerLauncher launcher;
-        const AdbServerLaunchRequest request{
-            QString::fromUtf8( KLOGG_ADB_SERVER_TEST_HELPER_PATH ),
-            { QStringLiteral( "server" ), QStringLiteral( "nodaemon" ) },
-            false,
-            AdbServerEndpoint{ QHostAddress::LocalHost, 5037 },
-        };
-        const auto token = launcher.launch(
-            request, [ &result ]( AdbServerLaunchResult event ) { result = std::move( event ); } );
-        REQUIRE( waitForQtCondition( [ &result ] { return result.has_value(); } ) );
-        REQUIRE( result->state == AdbServerLaunchState::Started );
-        REQUIRE( waitForQtCondition(
-            [ &heartbeatPath ] { return readHeartbeat( heartbeatPath ) > 0u; } ) );
+        const auto token = helper.start( launcher );
+        helper.requireObservation( [ & ]( const auto& ) {
+            return helper.result && helper.result->state == AdbServerLaunchState::Started;
+        } );
+        helper.requireObservation( []( const auto& observed ) { return observed.progress > 0u; } );
+        CHECK_FALSE( helper.observe().acknowledged );
         launcher.release( token );
     }
 
-    const auto heartbeatAfterLauncherDestruction = readHeartbeat( heartbeatPath );
-    REQUIRE( waitForQtCondition( [ & ] {
-        return readHeartbeat( heartbeatPath ) > heartbeatAfterLauncherDestruction;
-    } ) );
-    stopGuard.requestStop();
-    REQUIRE( waitForQtCondition( [ &stoppedPath ] { return QFileInfo::exists( stoppedPath ); } ) );
+    // This request does not exist until AFTER destruction. The acknowledgement
+    // follows fresh flooding, so pre-destruction progress cannot satisfy it.
+    helper.request( QStringLiteral( ".after-destruction" ),
+                    QByteArrayLiteral( "after-destruction\n" ) );
+    helper.requireObservation( []( const auto& observed ) { return observed.acknowledged; } );
+    helper.stopAndWait();
+}
+
+TEST_CASE( "Qt helper keeps committed progress while a partial publication is held",
+           "[livecapture][adb][supervisor][progress][adapter]" )
+{
+    AdbProgressFixture helper( QByteArrayLiteral( "partial-progress" ) );
+    QtAdbServerLauncher launcher;
+    helper.start( launcher );
+    helper.requireObservation( []( const auto& observed ) { return observed.progress == 1u; } );
+    helper.request( QStringLiteral( ".begin-partial" ) );
+    helper.requireObservation( [ & ]( const auto& ) {
+        return readHelperRecords( helper.progressPath + QStringLiteral( ".partial-ready" ), 64 )
+                   .records
+               == QByteArrayLiteral( "ready\n" );
+    } );
+    // The child is held after flushing an unterminated record, not by a sleep.
+    const auto partial = helper.observe();
+    INFO( partial.describe() );
+    INFO( helper.describe() );
+    CHECK( partial.progress == 1u );
+    CHECK( partial.progressFile.state == "partial" );
+    CHECK( partial.progressFile.records == QByteArrayLiteral( "1\n" ) );
+    CHECK( partial.statusFile.records
+           == QByteArrayLiteral( "phase main-entered\nphase streaming\nphase partial-held\n" ) );
+    CHECK_FALSE( partial.acknowledged );
+    helper.request( QStringLiteral( ".complete-partial" ) );
+    helper.requireObservation( []( const auto& observed ) { return observed.progress >= 2u; } );
+    helper.stopAndWait();
+}
+
+TEST_CASE( "Qt helper observations distinguish missing partial invalid and failed publication",
+           "[livecapture][adb][supervisor][progress]" )
+{
+    AdbProgressFixture helper;
+    const auto write = []( const QString& path, const QByteArray& bytes ) {
+        QFile file( path );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( bytes ) == bytes.size() );
+        file.close();
+    };
+    CHECK( helper.observe().progressFile.state == "missing" );
+    CHECK( helper.observe().statusFile.state == "missing" );
+    CHECK( helper.observe().phase == "unobserved" );
+    write( helper.progressPath, QByteArrayLiteral( "1\n2" ) );
+    write( helper.statusPath, QByteArrayLiteral( "phase main-entered\nack after-destruction" ) );
+    CHECK( helper.observe().progress == 1u );
+    CHECK_FALSE( helper.observe().acknowledged );
+    CHECK( helper.observe().statusFile.state == "partial" );
+    write( helper.progressPath, QByteArrayLiteral( "1\n2\n" ) );
+    write( helper.statusPath, QByteArrayLiteral( "phase main-entered\nack after-destruction\n" ) );
+    CHECK( helper.observe().progress == 2u );
+    CHECK( helper.observe().acknowledged );
+    // The helper and Qt control writers use binary LF framing on every OS.
+    // Reject CRLF consistently in phase, acknowledgement and numeric records.
+    for ( const auto& record : { QByteArrayLiteral( "phase main-entered\r\n" ),
+                                 QByteArrayLiteral( "ack after-destruction\r\n" ) } ) {
+        write( helper.statusPath, record );
+        CHECK( helper.observe().statusFile.state == "invalid-record" );
+    }
+    write( helper.progressPath, QByteArrayLiteral( "1\r\n" ) );
+    CHECK( helper.observe().progressFile.state == "invalid-record" );
+    write( helper.progressPath, QByteArrayLiteral( "1\n1\n" ) );
+    CHECK( helper.observe().progressFile.state == "invalid-record" );
+    CHECK( helper.observe().failed() );
+    write( helper.progressPath, QByteArray( 64 * 1024 + 1, '1' ) );
+    CHECK( helper.observe().progressFile.state == "over-budget" );
+    write( helper.progressPath, QByteArrayLiteral( "1\n" ) );
+    write( helper.statusPath, QByteArrayLiteral( "terminal error progress-write errno=5\n" ) );
+    CHECK( helper.observe().failed() );
+    CHECK( helper.observe().terminal == "error progress-write errno=5" );
+    REQUIRE( QFile::remove( helper.progressPath ) );
+    REQUIRE( QDir{}.mkdir( helper.progressPath ) );
+    CHECK( helper.observe().progressFile.failed() );
+}
+
+TEST_CASE( "Qt helper reports publication and terminal IO failures explicitly",
+           "[livecapture][adb][supervisor][progress][adapter]" )
+{
+    QByteArray mode = QByteArrayLiteral( "progress" );
+    std::string expected;
+    bool progressDirectory = false;
+    bool statusDirectory = false;
+    bool stopAfterProgress = false;
+    bool invalidRequest = false;
+    SECTION( "control framing" )
+    {
+        mode = "partial-progress";
+        invalidRequest = true;
+        expected = "control-invalid";
+    }
+    SECTION( "progress open" )
+    {
+        progressDirectory = true;
+        expected = "progress-open";
+    }
+    SECTION( "progress write" )
+    {
+        mode = "fail-progress-write";
+        expected = "progress-write";
+    }
+    SECTION( "status open" )
+    {
+        statusDirectory = true;
+        expected = "status-open";
+    }
+    SECTION( "terminal write" )
+    {
+        mode = "fail-terminal-write";
+        stopAfterProgress = true;
+        expected = "status-write";
+    }
+    AdbProgressFixture helper( mode );
+    if ( progressDirectory ) {
+        REQUIRE( QDir{}.mkdir( helper.progressPath ) );
+    }
+    if ( statusDirectory ) {
+        REQUIRE( QDir{}.mkdir( helper.statusPath ) );
+    }
+    QtAdbServerLauncher launcher;
+    helper.start( launcher );
+    if ( invalidRequest ) {
+        helper.requireObservation( []( const auto& observed ) { return observed.progress == 1u; } );
+        helper.request( QStringLiteral( ".begin-partial" ), QByteArrayLiteral( "continue\r\n" ) );
+    }
+    if ( stopAfterProgress ) {
+        helper.requireObservation( []( const auto& observed ) { return observed.progress > 0u; } );
+        helper.requestStop();
+    }
+    const auto finished
+        = waitForQtCondition( [ & ] { return helper.processObservation->finished; } );
+    INFO( helper.observe().describe() );
+    INFO( helper.describe() );
+    REQUIRE( finished );
+    REQUIRE( helper.result.has_value() );
+    CHECK( helper.result->state == AdbServerLaunchState::Exited );
+    CHECK( helper.processObservation->exitCode == 4 );
+    CHECK( helper.result->diagnostic.find( expected ) != std::string::npos );
+    CHECK( helper.observe().failed() );
+}
+
+TEST_CASE( "Qt helper fixture reaps a released child held at a publication barrier",
+           "[livecapture][adb][supervisor][progress][adapter]" )
+{
+    std::shared_ptr<HelperProcessObservation> terminal;
+    QPointer<QProcess> child;
+    {
+        AdbProgressFixture helper( QByteArrayLiteral( "partial-progress" ) );
+        QtAdbServerLauncher launcher;
+        const auto token = helper.start( launcher );
+        helper.requireObservation( []( const auto& observed ) { return observed.progress == 1u; } );
+        terminal = helper.processObservation;
+        child = launcher.findChild<QProcess*>();
+        launcher.release( token );
+    }
+    CHECK( terminal->finished );
+    // Rescue only this fixture's own child if the cleanup contract regresses.
+    if ( child != nullptr && child->state() != QProcess::NotRunning ) {
+        child->kill();
+        REQUIRE( child->waitForFinished( AsyncWaitTimeoutMs ) );
+    }
 }
 
 TEST_CASE( "server disappearance and replacement advance epoch and use bounded injected backoff",
@@ -1982,8 +2357,7 @@ TEST_CASE( "startup lock never steals an old lease from a live process",
     QTemporaryDir temporaryDirectory;
     REQUIRE( temporaryDirectory.isValid() );
     const auto lockPath = temporaryDirectory.filePath( QStringLiteral( "adb-server.lock" ) );
-    const auto templatePath
-        = temporaryDirectory.filePath( QStringLiteral( "template.lock" ) );
+    const auto templatePath = temporaryDirectory.filePath( QStringLiteral( "template.lock" ) );
     QLockFile templateLock( templatePath );
     templateLock.setStaleLockTime( 0 );
     REQUIRE( templateLock.tryLock( 0 ) );

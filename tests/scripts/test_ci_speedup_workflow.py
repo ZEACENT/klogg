@@ -1,4 +1,6 @@
 """Latency changes must preserve final native-artifact and publication gates."""
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 
 from test_ci_environment_workflow import QUALITY
 
@@ -91,6 +94,177 @@ class EarlyMacCompilationTest(unittest.TestCase):
         for job in ('MacPackages', 'MacArmPackages'):
             with self.subTest(job=job):
                 self.assert_overlap(WORKFLOW.read_text(), job)
+
+
+class EarlyWindowsCompilationTest(unittest.TestCase):
+    def test_windows_release_overlaps_and_requires_authenticated_finalization(self):
+        text = WORKFLOW.read_text()
+        needs = QUALITY.workflow_job_needs(text)
+        self.assertNotIn('BuildAdbWindowsX64', needs['WindowsPackages'])
+        self.assertEqual(QUALITY.native_overlap_workflow_issues(text, 'WindowsPackages', platform='Windows'), [])
+        self.assertEqual(QUALITY.ci_build_workflow_issues(text), [])
+        rows = steps(text, 'WindowsPackages')
+        names = [fields.get('name') for fields, _ in rows]
+        guard = names.index('Verify Windows native overlap')
+        prepare = names.index('Compile Windows objects while native producer runs')
+        self.assertLess(guard, prepare)
+        self.assertLess(names.index('Prepare dev cmd'), guard)
+        for cache_step in ('Prepare verified Windows object cache', 'Activate Windows object cache or use the native compiler'):
+            self.assertLess(guard, names.index(cache_step), 'fixture builds must precede the real cache session')
+        self.assertEqual(rows[guard][0]['shell'], 'pwsh')
+        self.assertNotIn('if', rows[guard][0])
+        self.assertNotIn('continue-on-error', rows[guard][0])
+        self.assertEqual(rows[guard][0]['run'].strip(),
+                         'python -I tests/scripts/test_ci_native_overlap.py WindowsNativeOverlapTests\nexit $LASTEXITCODE')
+        descriptor = next(fields['run'] for fields, _ in rows if fields.get('id') == 'shared-cache-descriptor')
+        self.assertIn('--required-step "Compile Windows objects while native producer runs"', descriptor)
+        metrics = next(children['with']['path'] for fields, children in rows
+                       if fields.get('name') == 'Upload current-run build metrics')
+        self.assertEqual(metrics, '${{ env.KLOGG_BUILD_ROOT }}/ci-build-metrics-${{ github.run_id }}-${{ github.run_attempt }}.json')
+        evidence = next(children['with']['path'] for fields, children in rows
+                        if fields.get('name') == 'Upload Windows phased-build evidence')
+        self.assertIn('ci-build-phase-${{ github.run_id }}-${{ github.run_attempt }}-*.ninja-log.txt', evidence)
+
+    @staticmethod
+    def selected_upload_files(root, specification):
+        replacements = {'${{ env.KLOGG_BUILD_ROOT }}': 'build', '${{ github.run_id }}': '17',
+                        '${{ github.run_attempt }}': '2'}
+        selected = set()
+        for pattern in specification['path'].splitlines():
+            for key, value in replacements.items():
+                pattern = pattern.replace(key, value)
+            if '${{' in pattern:
+                raise AssertionError('unmodeled upload path: ' + pattern)
+            selected.update(path for path in root.glob(pattern.strip()) if path.is_file())
+        return sorted(selected)
+
+    def test_metrics_upload_payload_remains_readable_by_existing_collector(self):
+        spec = importlib.util.spec_from_file_location('metrics_consumer', ROOT / 'scripts/ci_perf_report.py')
+        consumer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(consumer)
+        value = {'build_wall_ms': 123, 'provenance': {'run_id': '17', 'run_attempt': '2'}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build = root / 'build'
+            build.mkdir()
+            aggregate = build / 'ci-build-metrics-17-2.json'
+            aggregate.write_text(json.dumps(value))
+            for phase in ('prepare', 'finalize'):
+                (build / ('ci-build-phase-17-2-' + phase + '.json')).write_text(json.dumps({'phase': phase}))
+                (build / ('ci-build-phase-17-2-' + phase + '.ninja-log.txt')).write_text('# ninja log v5\n')
+            for job in ('WindowsPackages', 'WindowsX86', 'WindowsAsan', 'MacPackages', 'MacArmPackages'):
+                with self.subTest(job=job):
+                    upload = next(children['with'] for fields, children in steps(WORKFLOW.read_text(), job)
+                                  if fields.get('name') == 'Upload current-run build metrics')
+                    payload = io.BytesIO()
+                    with zipfile.ZipFile(payload, 'w') as archive:
+                        for path in self.selected_upload_files(root, upload):
+                            archive.writestr(path.name, path.read_bytes())
+                    self.assertEqual(consumer.read_metrics_zip(payload.getvalue(), 17, 2), value)
+                    self.assertEqual(self.selected_upload_files(root, upload), [aggregate])
+
+    def test_raw_only_failed_phase_uploads_separate_evidence_not_metrics(self):
+        rows = steps(WORKFLOW.read_text(), 'WindowsPackages')
+        phase_steps = [(fields, children['with']) for fields, children in rows
+                       if fields.get('name') == 'Upload Windows phased-build evidence']
+        self.assertEqual(len(phase_steps), 1)
+        fields, evidence = phase_steps[0]
+        self.assertTrue(evidence['name'].startswith('build-phase-evidence-'))
+        self.assertEqual(fields['if'], "${{ always() && env.KLOGG_PACKAGE_ENABLED == 'true' && hashFiles(format('{0}/ci-build-phase-{1}-{2}-*', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}")
+        metrics = next(children['with'] for item, children in rows
+                       if item.get('name') == 'Upload current-run build metrics')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'build').mkdir()
+            raw = root / 'build/ci-build-phase-17-2-prepare.ninja-log.txt'
+            raw.write_text('# ninja log v5\n0\t1\t0\tpartial.obj\t123\n')
+            self.assertEqual(self.selected_upload_files(root, evidence), [raw])
+            self.assertEqual(self.selected_upload_files(root, metrics), [])
+            pattern = re.search(r"hashFiles\(format\('([^']+)'", fields['if']).group(1).format('build', 17, 2)
+            self.assertEqual(sorted(root.glob(pattern)), [raw], 'raw-only failure evidence must trigger the upload')
+
+    def test_native_verifier_custom_nonexecuting_shell_is_rejected(self):
+        text = WORKFLOW.read_text()
+        verifier = next(step for step in QUALITY.workflow_job_steps(text)['WindowsPackages']
+                        if QUALITY.workflow_step_fields(step)[0].get('name') ==
+                        'Verify target-bound ADB helper checksum envelope and provenance')
+        original = '\n'.join(verifier)
+        self.assertIn('shell: bash', original)
+        block = '\n'.join(QUALITY.workflow_job_blocks(text)['WindowsPackages'])
+        self.assertIn(original, block)
+        mutated = text.replace(block, block.replace(original, original.replace('shell: bash', 'shell: echo {0}', 1), 1), 1)
+        changed = next(fields for fields, _ in steps(mutated, 'WindowsPackages')
+                       if fields.get('name') == 'Verify target-bound ADB helper checksum envelope and provenance')
+        self.assertEqual(changed['shell'], 'echo {0}')
+        for checker in (lambda value: QUALITY.native_overlap_workflow_issues(value, 'WindowsPackages', platform='Windows'),
+                        QUALITY.ci_build_workflow_issues):
+            with self.subTest(checker=checker.__name__):
+                self.assertTrue(checker(mutated))
+
+    def test_missing_scheduling_dependency_is_not_a_blanket_exception(self):
+        text = WORKFLOW.read_text()
+        block = '\n'.join(QUALITY.workflow_job_blocks(text)['WindowsPackages'])
+        broken = block.replace('id: native-ready', 'id: unrelated-ready')
+        issues = QUALITY.ci_build_workflow_issues(text.replace(block, broken, 1))
+        self.assertTrue(any('BuildAdbWindowsX64 must be an ancestor of WindowsPackages' in issue for issue in issues), issues)
+
+    def test_windows_overlap_rule_rejects_near_misses_spoofs_and_malformed_bindings(self):
+        text = WORKFLOW.read_text()
+        block = '\n'.join(QUALITY.workflow_job_blocks(text)['WindowsPackages'])
+        changes = (
+            ('--platform Windows', '--platform macOS'),
+            ('--architecture x86_64', '--architecture arm64'),
+            ('phase: prepare', 'phase: full'),
+            ('native-receipt: ${{ runner.temp }}/native-ready.json', 'native-receipt: stale.json'),
+            ('artifact-ids: ${{ steps.native-ready.outputs.adb-artifact-id }}', 'artifact-ids: 123'),
+            ('artifact-ids: ${{ steps.native-ready.outputs.support-artifact-id }}',
+             'artifact-ids: ${{ steps.native-ready.outputs.support-artifact-id }}\n          name: adb-helper-package-support'),
+            ('id: native-ready', 'id: native-ready\n        continue-on-error: true'),
+            ('id: native-ready', 'id: native-ready\n        id: spoofed'),
+            ('python3 scripts/ci_native_rendezvous.py', 'echo python3 scripts/ci_native_rendezvous.py'),
+            ('python3 scripts/ci_native_rendezvous.py', '# python3 scripts/ci_native_rendezvous.py'),
+            ('python3 scripts/verify_adb_helper_envelope.py', 'echo python3 scripts/verify_adb_helper_envelope.py'),
+            ('python3 scripts/verify_adb_helper_envelope.py', 'python3 "unterminated scripts/verify_adb_helper_envelope.py'),
+            ('gh attestation verify', 'echo gh attestation verify'),
+            ('if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then',
+             'if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then'),
+            ('name: Fail when tests fail', 'name: Ignore test failure'),
+            ('name: Verify Windows native overlap', 'name: Skip native phase proof'),
+            ('python -I tests/scripts/test_ci_native_overlap.py WindowsNativeOverlapTests',
+             'echo python -I tests/scripts/test_ci_native_overlap.py WindowsNativeOverlapTests'),
+        )
+        for before, after in changes:
+            with self.subTest(change=after):
+                self.assertIn(before, block)
+                mutated = text.replace(block, block.replace(before, after, 1), 1)
+                self.assertTrue(QUALITY.native_overlap_workflow_issues(mutated, 'WindowsPackages', platform='Windows'))
+        spoof = text.replace(block, block.replace('id: native-ready', '# id: native-ready', 1), 1)
+        self.assertTrue(QUALITY.native_overlap_workflow_issues(spoof, 'WindowsPackages', platform='Windows'))
+        self.assertTrue(QUALITY.native_overlap_workflow_issues('jobs:\n  WindowsPackages:\n    steps: invalid\n',
+                                                              'WindowsPackages', platform='Windows'))
+
+    def test_pr_push_dispatch_keep_package_gates_and_nonpackage_full_builds(self):
+        text = WORKFLOW.read_text()
+        triggers = QUALITY.workflow_trigger_mapping(text)
+        blocks = QUALITY.workflow_job_blocks(text)
+        for event in ('pull_request', 'push', 'workflow_dispatch'):
+            for job, package in (('WindowsPackages', True), ('WindowsX86', False), ('WindowsAsan', False)):
+                with self.subTest(event=event, job=job):
+                    self.assertIn(event, triggers)
+                    values = QUALITY.workflow_job_condition_values(blocks[job])
+                    self.assertEqual(values['klogg_package_enabled'], {'true' if package else 'false'})
+                    rows = steps(text, job)
+                    prepare = next(fields for fields, children in rows
+                                   if children.get('with', {}).get('phase') == 'prepare')
+                    ready = next(fields for fields, _ in rows if fields.get('id') == 'native-ready')
+                    for fields in (prepare, ready):
+                        self.assertEqual(fields['if'], "${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}")
+                        self.assertEqual(QUALITY.artifact_condition_is_statically_false(fields['if'], values), not package)
+                    final = next(children['with'] for fields, children in rows if fields.get('name') == 'Build Windows application')
+                    self.assertEqual(final['phase'], "${{ env.KLOGG_PACKAGE_ENABLED == 'true' && 'finalize' || 'full' }}")
+                    verify = next(fields for fields, _ in rows if fields.get('name') == 'Verify target-bound ADB helper checksum envelope and provenance')
+                    self.assertIn('gh attestation verify "$artifact_root/SHA256SUMS"', verify['run'])
+                    self.assertIn('if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then', verify['run'])
 
 
 class SharedApplicationObjectsTest(unittest.TestCase):

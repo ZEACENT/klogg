@@ -2,6 +2,8 @@
 """Deterministic contracts for native package overlap and its artifact rendezvous."""
 import importlib.util
 import copy
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -180,6 +182,193 @@ class NativeOverlapTests(unittest.TestCase):
             self.module.validate_options(common + native + [native[0]], "finalize")
 
 
+@unittest.skipUnless(os.environ.get("RUNNER_OS") == "Windows" or (shutil.which("ninja") and shutil.which("cmake")),
+                     "requires native Ninja/CMake on local hosts")
+class WindowsNativeOverlapTests(unittest.TestCase):
+    def setUp(self):
+        if os.environ.get("RUNNER_OS") == "Windows":
+            for tool in ("cmake", "ninja", "cl"):
+                self.assertIsNotNone(shutil.which(tool), "the hosted native guard requires " + tool)
+            self.assertEqual(os.name, "nt", "the hosted guard requires native Windows Python")
+        import ci_native_overlap
+        self.module = ci_native_overlap
+        temporary = tempfile.TemporaryDirectory(prefix="native overlap ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def test_windows_cmake_options_preserve_backslashes_and_quoted_values(self):
+        options = r'-G Ninja -DROOT=D:\a\klogg\prefetch -DSDK="C:\Program Files\sdk" -DCMAKE_INSTALL_PREFIX=/usr'
+        self.assertEqual(self.module.parse_options(options, windows=True), [
+            "-G", "Ninja", r"-DROOT=D:\a\klogg\prefetch", r"-DSDK=C:\Program Files\sdk",
+            "-DCMAKE_INSTALL_PREFIX=/usr"])
+        with self.assertRaises(ValueError):
+            self.module.parse_options('-DSDK="unterminated', windows=True)
+        self.assertEqual(self.module.parse_options("-G Ninja '-DNAME=two words'"),
+                         ["-G", "Ninja", "-DNAME=two words"])
+
+    def test_windows_profile_requires_only_adb_and_current_legal_support(self):
+        profile = self.module.rendezvous.profile("Windows", "x86_64")
+        self.assertEqual(profile["gates"], ["KLOGG_ADB_HELPER_REQUIRED"])
+        self.assertEqual(profile["artifacts"], {
+            "adb-helper-windows-x86_64": "Source-built ADB helper windows-x86_64",
+            "adb-helper-package-support": "Build ADB helper legal assets"})
+        for platform, architecture in (("Windows", "arm64"), ("Windows", "x86"), ("Linux", "x86_64")):
+            with self.subTest(platform=platform, architecture=architecture), self.assertRaises(ValueError):
+                self.module.rendezvous.profile(platform, architecture)
+        native = ["-DKLOGG_ADB_HELPER_REQUIRED=ON", "-DKLOGG_ADB_HELPER_ARTIFACT_ROOT=/verified",
+                  "-DKLOGG_ADB_HELPER_TARGET=windows-x86_64"]
+        self.module.validate_options(native, "finalize", platform="Windows")
+        for options in (native + ["-DKLOGG_ENABLE_IOS_NATIVE_STACK=ON"], native[:-1],
+                        [item.replace("windows-x86_64", "macos-x86_64") for item in native]):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.module.validate_options(options, "finalize", platform="Windows")
+
+    def test_windows_ninja_prepares_msvc_objects_but_never_package_executables(self):
+        build = self.root / "space build"
+        build.mkdir()
+        (build / "CMakeFiles/app.dir").mkdir(parents=True)
+        cmake = Path(shutil.which("cmake")).as_posix()
+        (build / "build.ninja").write_text(
+            'rule touch\n  command = "' + cmake + '" -E touch $out\n'
+            "build CMakeFiles/app.dir/a$ b.obj: touch\n"
+            "build klogg.exe: touch CMakeFiles/app.dir/a$ b.obj\n"
+            "build ci_build: phony klogg.exe\n")
+        (build / "compile_commands.json").write_text(json.dumps([{
+            "directory": str(build), "file": "a.cpp",
+            "command": 'cl.exe /Fo"CMakeFiles\\app.dir\\a b.obj" /c a.cpp'}]))
+        command = self.module.object_command(build, windows=True)
+        subprocess.run(command, check=True, capture_output=True)
+        self.assertTrue((build / "CMakeFiles/app.dir/a b.obj").is_file())
+        self.assertFalse((build / "klogg.exe").exists())
+        with (build / "build.ninja").open("a") as stream:
+            stream.write("build klogg_test_build: phony klogg.exe\n")
+        with self.assertRaisesRegex(ValueError, "package app link"):
+            self.module.object_command(build, windows=True)
+        (build / "compile_commands.json").write_text(json.dumps([{
+            "directory": str(build), "file": "a.cpp", "command": r"cl.exe /Fo..\outside.obj /c a.cpp"}]))
+        with self.assertRaisesRegex(ValueError, "outside build root"):
+            self.module.object_targets(build, {"../outside.obj"}, windows=True)
+
+    def test_native_windows_two_phase_keeps_test_links_and_defers_app_resources(self):
+        (self.root / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\nproject(Overlap C CXX)\n"
+            'option(KLOGG_ADB_HELPER_REQUIRED "ADB gate" OFF)\n'
+            'option(KLOGG_ENABLE_IOS_NATIVE_STACK "iOS gate" OFF)\n'
+            'set(KLOGG_ADB_HELPER_ARTIFACT_ROOT "" CACHE PATH "Verified artifact")\n'
+            'set(KLOGG_ADB_HELPER_TARGET "" CACHE STRING "Native target")\n'
+            'if(KLOGG_ADB_HELPER_REQUIRED AND NOT EXISTS "${KLOGG_ADB_HELPER_ARTIFACT_ROOT}/verified")\n'
+            '  message(FATAL_ERROR "verified helper missing")\nendif()\n'
+            "add_library(core STATIC core.c)\n"
+            "add_library(resources OBJECT qrc_app_translations.cpp)\n"
+            "add_executable(klogg main.cpp $<TARGET_OBJECTS:resources>)\n"
+            "add_executable(klogg_portable main.cpp $<TARGET_OBJECTS:resources>)\n"
+            "add_executable(stable_tests main.cpp)\n"
+            "foreach(target klogg klogg_portable stable_tests)\n"
+            '  set_target_properties(${target} PROPERTIES SUFFIX ".exe")\n'
+            "  target_link_libraries(${target} PRIVATE core)\nendforeach()\n"
+            "add_custom_target(klogg_test_build DEPENDS stable_tests)\n"
+            "add_custom_target(ci_build DEPENDS klogg klogg_portable klogg_test_build)\n"
+            'file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fixture-paths.txt" CONTENT '
+            '"$<TARGET_FILE:core>\\n$<TARGET_FILE:stable_tests>\\n$<TARGET_FILE:klogg>\\n$<TARGET_FILE:klogg_portable>\\n")\n')
+        (self.root / "core.c").write_text("int core(void) { return 7; }\n")
+        (self.root / "main.cpp").write_text('extern "C" int core(void);\nint main() { return core() == 7 ? 0 : 1; }\n')
+        (self.root / "qrc_app_translations.cpp").write_text("int resource(void) { return 1; }\n")
+        build, artifact = self.root / "build", self.root / "verified helper"
+        env = {"RUNNER_OS": "Windows", "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "17",
+               "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40, "GITHUB_EVENT_NAME": "push",
+               "KLOGG_ADB_HELPER_TARGET": "windows-x86_64", "KLOGG_CONFIG_ARCH": "x64",
+               "KLOGG_LABEL": "fixture", "KLOGG_CONFIG_PACKAGE_TAG": "native",
+               "KLOGG_CI_ENVIRONMENT_IDENTITY": "fixture-toolchain",
+               "KLOGG_WINDOWS_OBJECT_CACHE": "disabled", "KLOGG_OBJECT_CACHE_TOOL": "sccache",
+               # try_compile can reinitialize launchers from the environment
+               # even when the parent cache has explicit empty launcher flags.
+               "CMAKE_C_COMPILER_LAUNCHER": "", "CMAKE_CXX_COMPILER_LAUNCHER": "",
+               "CMAKE_C_LINKER_LAUNCHER": "", "CMAKE_CXX_LINKER_LAUNCHER": "",
+               "CC": "", "CXX": ""}
+        options = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                   "-DCMAKE_C_COMPILER_LAUNCHER=", "-DCMAKE_CXX_COMPILER_LAUNCHER=",
+                   "-DCMAKE_INSTALL_PREFIX=/usr",
+                   "-DKLOGG_ADB_HELPER_REQUIRED=ON", "-DKLOGG_ADB_HELPER_TARGET=windows-x86_64",
+                   "-DKLOGG_ADB_HELPER_ARTIFACT_ROOT=" + str(artifact)]
+        encoded = subprocess.list2cmdline(options)
+        self.assertEqual(self.module.parse_options(encoded, windows=True), options)
+        options = self.module.parse_options(encoded, windows=True)
+        probe = self.root / "prefix-probe.cmake"
+        prefix = self.root / "prefix.txt"
+        probe.write_text('get_filename_component(value "${VALUE}" ABSOLUTE)\n'
+                         'file(WRITE "${OUTPUT}" "${value}")\n')
+        subprocess.run(["sh", "-c", 'exec "$@"', "prefix-probe", "cmake", "-DVALUE=/usr",
+                        "-DOUTPUT=" + str(prefix), "-P", str(probe)], check=True, capture_output=True)
+        inherited = {"CMAKE_C_COMPILER_LAUNCHER": "must-not-run-fixture-cache",
+                     "CMAKE_CXX_COMPILER_LAUNCHER": "must-not-run-fixture-cache"}
+        # Do not emit fixture run IDs as application metrics in the hosted job log.
+        with mock.patch.dict(os.environ, inherited), mock.patch.dict(os.environ, env), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(self.module.subprocess, "run", wraps=subprocess.run) as commands:
+                self.module.execute("prepare", self.root, build, options)
+            configure = [call.args[0] for call in commands.call_args_list if call.args[0][0] == "sh"]
+            self.assertEqual(len(configure), 2)
+            self.assertEqual(configure[0][:4], ["sh", "-c", 'exec "$@"', "klogg-native-configure"])
+            self.assertEqual(configure[0], configure[1])
+            self.assertFalse(any(call.args[0][0] in ("sccache", "ccache") for call in commands.call_args_list))
+            cache = (build / "CMakeCache.txt").read_text()
+            self.assertIn("CMAKE_INSTALL_PREFIX:PATH=" + prefix.read_text(), cache)
+            for language in ("C", "CXX"):
+                self.assertRegex(cache, "(?m)^CMAKE_" + language + "_COMPILER_LAUNCHER:[^=]+=\\s*$")
+            paths = [Path(path) for path in (build / "fixture-paths.txt").read_text().splitlines()]
+            retained = [path.stat().st_mtime_ns for path in paths[:2]]
+            self.assertFalse(any(path.exists() for path in paths[2:]))
+            database = json.loads((build / "compile_commands.json").read_text())
+            resource = next(entry for entry in database if "qrc_app_translations.cpp" in entry["file"])
+            resource_object = build / self.module.metrics.command_output(resource, os.name == "nt")
+            self.assertFalse(resource_object.exists())
+            with self.assertRaisesRegex(ValueError, "receipt"):
+                self.module.execute("finalize", self.root, build, options)
+            artifact.mkdir()
+            (artifact / "verified").write_bytes(b"fresh artifact verification")
+            profile = self.module.rendezvous.profile("Windows", "x86_64")
+            receipt = self.root / "receipt.json"
+            receipt.write_text(json.dumps({"schema_version": 1, "identity": self.module.rendezvous.identity(),
+                "artifacts": {name: {"producer_name": producer, "producer_attempt": 1,
+                                     "producer_id": index + 1, "artifact_id": index + 10}
+                              for index, (name, producer) in enumerate(profile["artifacts"].items())}}))
+            with self.assertRaisesRegex(ValueError, "prepared build"):
+                self.module.execute("finalize", self.root, build, options + ["-DCMAKE_CXX_FLAGS=-DCHANGED"], receipt)
+            with mock.patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "3"}), self.assertRaisesRegex(ValueError, "prepared build"):
+                self.module.execute("finalize", self.root, build, options, receipt)
+            self.module.execute("finalize", self.root, build, options, receipt)
+            final_cache = (build / "CMakeCache.txt").read_text()
+            self.assertIn("KLOGG_ADB_HELPER_TARGET:STRING=windows-x86_64", final_cache)
+            self.assertIn("KLOGG_ADB_HELPER_ARTIFACT_ROOT:PATH=" + artifact.as_posix(), final_cache)
+            self.assertEqual([path.stat().st_mtime_ns for path in paths[:2]], retained)
+            self.assertTrue(all(path.is_file() for path in paths))
+            rows = [line.split("\t") for line in (build / ".ninja_log").read_text().splitlines()[1:]]
+            for path in paths:
+                relative = path.relative_to(build.resolve()).as_posix()
+                self.assertEqual(sum(row[3].replace("\\", "/") == relative for row in rows), 1, relative)
+            report = json.loads((build / "ci-build-metrics-17-2.json").read_text())
+            self.assertEqual(report["object_cache"], "disabled")
+            self.assertIsNone(report["cache_tool"])
+            self.assertEqual(report["provenance"]["native_platform"], "Windows")
+            self.assertEqual(report["provenance"]["cmake_options"]["KLOGG_ENABLE_IOS_NATIVE_STACK"], "OFF")
+            with self.assertRaisesRegex(ValueError, "prepared build"):
+                self.module.execute("finalize", self.root, build, options, receipt)
+
+
+class NativeHostedGuardTests(unittest.TestCase):
+    def test_hosted_windows_missing_tools_fails_instead_of_skipping_native_proof(self):
+        with mock.patch.dict(os.environ, {"RUNNER_OS": "Windows"}), \
+                mock.patch("shutil.which", return_value=None), mock.patch.object(sys, "path", sys.path[:]):
+            spec = importlib.util.spec_from_file_location("native_missing_tools", Path(__file__))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            case_type = module.WindowsNativeOverlapTests
+            self.assertFalse(getattr(case_type, "__unittest_skip__", False))
+            case = case_type("test_windows_profile_requires_only_adb_and_current_legal_support")
+            with self.assertRaisesRegex(AssertionError, "cmake"):
+                case.setUp()
+
+
 class PhaseObservationTests(unittest.TestCase):
     def reports(self):
         provenance = {"sha": "a" * 40, "run_id": "17", "run_attempt": "2", "arch": "x64",
@@ -239,6 +428,68 @@ class PhaseObservationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             observation.aggregate_phases(self.reports()[0], None)
 
+    def test_windows_phase_aggregation_preserves_sccache_and_disabled_modes(self):
+        import ci_build_observation as observation
+        prepare, finalize = self.reports()
+        for report in (prepare, finalize):
+            report["cache_tool"] = "sccache"
+            report["provenance"]["native_platform"] = "Windows"
+            report["provenance"]["cmake_options"]["KLOGG_ENABLE_IOS_NATIVE_STACK"] = "OFF"
+        combined = observation.aggregate_phases(prepare, finalize)
+        self.assertEqual(combined["cache_tool"], "sccache")
+        self.assertEqual(combined["cache_deltas"]["direct_cache_hit"], 6)
+        finalize["provenance"]["cmake_options"]["KLOGG_ENABLE_IOS_NATIVE_STACK"] = "ON"
+        with self.assertRaises(ValueError):
+            observation.aggregate_phases(prepare, finalize)
+        finalize["provenance"]["cmake_options"]["KLOGG_ENABLE_IOS_NATIVE_STACK"] = "OFF"
+        for report in (prepare, finalize):
+            report.update(object_cache="disabled", cache_tool=None, cache_deltas=None)
+        combined = observation.aggregate_phases(prepare, finalize)
+        self.assertEqual(combined["object_cache"], "disabled")
+        self.assertIsNone(combined["cache_tool"])
+        self.assertIsNone(combined["cache_deltas"])
+
+    def test_windows_phase_reads_actual_sccache_counters_and_fails_measurement_closed(self):
+        import ci_build_observation as observation
+        for unavailable in (False, True, "after-invalid"):
+            with self.subTest(unavailable=unavailable), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                build = root / "build"
+                build.mkdir()
+                (build / "compile_commands.json").write_text(json.dumps([
+                    {"directory": str(build), "file": str(root / "src/a.cpp"), "output": "a.obj"}]))
+                counts = iter([(10, 7, 3), (14, 10, 4)])
+                calls = []
+                def run(command, **kwargs):
+                    calls.append(command)
+                    if command[0] == "sccache":
+                        if unavailable is True:
+                            raise OSError("cache statistics unavailable")
+                        if unavailable == "after-invalid" and len(calls) > 1:
+                            return subprocess.CompletedProcess(command, 0, stdout="invalid post-build cache response")
+                        requests, hits, misses = next(counts)
+                        payload = {"stats": {"compile_requests": requests, "cache_hits": {"counts": {"C/C++": hits}},
+                                             "cache_misses": {"counts": {"C/C++": misses}}}}
+                        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload))
+                    self.assertEqual(command, ["fixture-build"])
+                    (build / ".ninja_log").write_text("# ninja log v5\n0\t10\t0\ta.obj\t123\n")
+                    return subprocess.CompletedProcess(command, 0)
+                ticks = iter([1.0, 1.01])
+                report = observation.run_phase(["fixture-build"], repo_root=root, build_root=build,
+                    output=build / "phase.json", phase="prepare", cache_tool="sccache",
+                    runner=run, clock=lambda: next(ticks))
+                self.assertIsNotNone(report, "post-build counter failures must retain phase evidence")
+                self.assertEqual(report["build_wall_ms"], 10)
+                self.assertEqual(report["compilation"]["edges"], 1)
+                self.assertIn("provenance", report)
+                self.assertTrue((build / "phase.ninja-log.txt").is_file())
+                self.assertIn(["sccache", "--show-stats", "--stats-format=json"], calls)
+                self.assertNotIn(["ccache", "--print-stats"], calls)
+                self.assertEqual(report["object_cache"], "unmeasured" if unavailable else "measured")
+                self.assertEqual(report["cache_tool"], None if unavailable else "sccache")
+                self.assertEqual(report["cache_deltas"], None if unavailable else {
+                    "direct_cache_hit": 3, "preprocessed_cache_hit": 0, "cache_miss": 1})
+
     def test_aggregate_never_sums_partial_or_invalid_cache_counters(self):
         import ci_build_observation as observation
         self.assertTrue(hasattr(observation, "aggregate_phases"), "whole phased-build observation is missing")
@@ -276,6 +527,21 @@ class PhaseObservationTests(unittest.TestCase):
             self.assertEqual(report["phase"], "finalize")
             self.assertEqual((build / ".ninja_log").read_text(), after)
             self.assertEqual((build / "final.ninja-log.txt").read_text(), after)
+
+    def test_failed_phase_retains_raw_log_but_never_claims_success(self):
+        import ci_build_observation as observation
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "failed.json"
+            raw = "# ninja log v5\n0\t10\t0\tpartial.obj\t123\n"
+            def run(command, **kwargs):
+                (root / ".ninja_log").write_text(raw)
+                raise subprocess.CalledProcessError(1, command)
+            with self.assertRaises(subprocess.CalledProcessError):
+                observation.run_phase(["failed-build"], repo_root=root, build_root=root, output=output,
+                                      phase="prepare", object_cache="disabled", runner=run)
+            self.assertEqual(output.with_suffix(".ninja-log.txt").read_text(), raw)
+            self.assertFalse(output.exists())
 
     def test_compacted_log_reports_unknown_instead_of_old_work_as_current_work(self):
         import ci_build_observation as observation
@@ -334,6 +600,44 @@ class RendezvousTests(unittest.TestCase):
         response.stdout = json.dumps(pages[:1])
         with mock.patch.object(self.module.subprocess, "run", return_value=response), self.assertRaisesRegex(ValueError, "incomplete"):
             self.module.github_api("jobs")
+
+    def test_windows_receipt_rejects_other_targets_missing_legal_and_wrong_identity(self):
+        profile = self.module.profile("Windows", "x86_64")
+        receipt = {"schema_version": 1, "identity": self.identity,
+                   "artifacts": {name: {"producer_name": producer, "producer_attempt": 1,
+                                        "producer_id": index + 20, "artifact_id": index + 30}
+                                 for index, (name, producer) in enumerate(profile["artifacts"].items())}}
+        self.module.validate_receipt(receipt, self.identity, "x86_64", platform="Windows")
+        for mutation in ("missing-support", "mac-target", "wrong-producer", "wrong-attempt", "wrong-sha"):
+            broken = copy.deepcopy(receipt)
+            if mutation == "missing-support":
+                broken["artifacts"].pop("adb-helper-package-support")
+            elif mutation == "mac-target":
+                broken["artifacts"]["adb-helper-macos-x86_64"] = broken["artifacts"].pop("adb-helper-windows-x86_64")
+            elif mutation == "wrong-producer":
+                broken["artifacts"]["adb-helper-windows-x86_64"]["producer_name"] = "unrelated"
+            elif mutation == "wrong-attempt":
+                broken["identity"]["run_attempt"] += 1
+            else:
+                broken["identity"]["sha"] = "c" * 40
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.module.validate_receipt(broken, self.identity, "x86_64", platform="Windows")
+        with self.assertRaises(ValueError):
+            self.module.validate_receipt(receipt, self.identity, "x86_64")
+
+    def test_partial_rerun_carry_forward_metadata_keeps_original_artifact_interval(self):
+        # GitHub can clone a successful job into attempt 2 with a new API job ID
+        # while retaining its original execution interval. This is not a rebuild.
+        carried = dict(self.job, id=21, run_attempt=2)
+        ready = self.evaluate([self.job, carried])
+        self.assertEqual(ready["native"], {"artifact_id": 30, "producer_id": 21,
+                                           "producer_attempt": 2, "producer_name": "Producer"})
+        replacement = dict(carried, started_at="2026-10-18T02:00:00Z", completed_at="2026-10-18T02:05:00Z")
+        with self.assertRaisesRegex(ValueError, "producer interval"):
+            self.evaluate([self.job, replacement])
+        with self.assertRaisesRegex(ValueError, "failure"):
+            self.evaluate([self.job, dict(replacement, conclusion="failure")])
+        self.assertIsNone(self.evaluate([self.job, dict(replacement, status="in_progress", conclusion=None)]))
 
     def test_partial_rerun_reuses_latest_successful_producer(self):
         result = self.evaluate()

@@ -210,15 +210,22 @@ def aggregate_phases(prepare, finalize):
     if ({key: value for key, value in before.items() if key != "cmake_options"}
             != {key: value for key, value in after.items() if key != "cmake_options"}):
         raise ValueError("native phase provenance mismatch")
-    gates = ("KLOGG_ADB_HELPER_REQUIRED", "KLOGG_ENABLE_IOS_NATIVE_STACK")
+    from ci_native_rendezvous import profile
+    platform = before.get("native_platform", "macOS")
+    # This selects platform-wide gates only; the orchestrator/rendezvous bind
+    # the actual architecture. Aggregation checks its provenance for equality.
+    gates = profile(platform, "x86_64")["gates"]
     options_before, options_after = before.get("cmake_options"), after.get("cmake_options")
     if (not isinstance(options_before, dict) or not isinstance(options_after, dict)
             or any(options_before.get(key) != "OFF" or options_after.get(key) != "ON" for key in gates)
+            or (platform == "Windows" and options_before.get("KLOGG_ENABLE_IOS_NATIVE_STACK") != "OFF")
             or {key: value for key, value in options_before.items() if key not in gates}
             != {key: value for key, value in options_after.items() if key not in gates}):
         raise ValueError("unexpected native phase CMake option difference")
+    cache_tool = prepare.get("cache_tool")
     measured = (prepare.get("object_cache") == finalize.get("object_cache") == "measured"
-                and prepare.get("cache_tool") == finalize.get("cache_tool") == "ccache")
+                and cache_tool == finalize.get("cache_tool") and cache_tool in ("ccache", "sccache"))
+    disabled = prepare.get("object_cache") == finalize.get("object_cache") == "disabled"
     counters = (prepare.get("cache_deltas"), finalize.get("cache_deltas"))
     valid_counters = measured and all(
         isinstance(counter, dict) and all(type(counter.get(key)) is int and counter[key] >= 0
@@ -227,8 +234,8 @@ def aggregate_phases(prepare, finalize):
     return {"schema_version": 1, "measurement_scope": "phased-build",
             "build_wall_ms": prepare["build_wall_ms"] + finalize["build_wall_ms"],
             "build_wall_definition": "sum of prepare/finalize build invocations; excludes configure, native wait, tests and packaging",
-            "object_cache": "measured" if measured else "unmeasured",
-            "cache_tool": "ccache" if measured else None,
+            "object_cache": "measured" if valid_counters else "disabled" if disabled else "unmeasured",
+            "cache_tool": cache_tool if valid_counters else None,
             "cache_deltas": {key: sum(counter[key] for counter in counters) for key in legacy.CACHE_COUNTERS}
                             if valid_counters else None,
             "provenance": after, "phases": {"prepare": prepare, "finalize": finalize}}
@@ -270,10 +277,13 @@ def phase_log_delta(before, after):
 
 
 def run_phase(command, *, repo_root, build_root, output, phase, object_cache="measured",
-              runner=None, clock=None, provenance=None, configure=None):
+              runner=None, clock=None, provenance=None, configure=None, cache_tool="ccache"):
     if phase not in ("prepare", "finalize"):
         raise ValueError("unknown native build phase")
+    if cache_tool not in ("ccache", "sccache") or object_cache not in ("measured", "disabled", "unmeasured"):
+        raise ValueError("unknown native phase cache observation")
     runner = subprocess.run if runner is None else runner
+    counter_runner = sccache_adapter(runner) if cache_tool == "sccache" else runner
     clock = time.monotonic if clock is None else clock
     build, path = Path(build_root), Path(output)
     if path.exists() or path.is_symlink():
@@ -283,7 +293,7 @@ def run_phase(command, *, repo_root, build_root, output, phase, object_cache="me
     counters = None
     if object_cache == "measured":
         try:
-            counters = legacy.ccache_counters(runner)
+            counters = legacy.ccache_counters(counter_runner)
         except Exception as error:
             print(f"notice: phase cache counters unavailable: {error}", file=sys.stderr)
     started = clock()
@@ -301,7 +311,7 @@ def run_phase(command, *, repo_root, build_root, output, phase, object_cache="me
     try:
         report = {"schema_version": 1, "measurement_scope": "phase", "phase": phase,
                   "build_wall_ms": wall, "object_cache": object_cache,
-                  "cache_tool": "ccache" if object_cache == "measured" else None,
+                  "cache_tool": cache_tool if object_cache == "measured" else None,
                   "provenance": build_provenance(build), "cache_deltas": None,
                   "ninja_log": path.with_suffix(".ninja-log.txt").name,
                   "compilation_state": "unknown"}
@@ -317,7 +327,14 @@ def run_phase(command, *, repo_root, build_root, output, phase, object_cache="me
         else:
             report["compilation_unknown_reason"] = "Ninja log unavailable or compacted across phase boundary"
         if counters is not None:
-            report["cache_deltas"] = legacy.cache_deltas(counters, legacy.ccache_counters(runner))
+            try:
+                report["cache_deltas"] = legacy.cache_deltas(counters, legacy.ccache_counters(counter_runner))
+            except Exception as error:
+                print(f"notice: final phase cache counters unavailable: {error}", file=sys.stderr)
+        if object_cache == "measured" and report["cache_deltas"] is None:
+            report.update(object_cache="unmeasured", cache_tool=None)
+        if report["cache_tool"] == "sccache":
+            report["cache_counter_scope"] = "exclusive server; no reset/restart during phase"
         replace_report(path, report)
         return report
     except Exception as error:

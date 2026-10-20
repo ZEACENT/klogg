@@ -2572,7 +2572,7 @@ jobs:
     steps: *mac_steps
 
   WindowsPackages:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, BuildAdbWindowsX64, ReleaseQualificationPreflight]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Windows x64-qt6 [vs-avx2]"
@@ -2600,48 +2600,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
-        with:
-          name: adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}
-          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper-archive
-
-      - name: Extract mode-preserving ADB helper artifact
-        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          archive_root="${{ github.workspace }}/prefetch_artifacts/adb-helper-archive"
-          artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
-          archive="$archive_root/adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}.tar.gz"
-          rm -rf "$artifact_root"
-          python3 scripts/extract_verified_tar.py \
-            --archive "$archive" \
-            --destination "$artifact_root"
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
-        with:
-          name: adb-helper-package-support
-          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper/release
-
-      - name: Verify target-bound ADB helper checksum envelope and provenance
-        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
-          python3 scripts/verify_adb_helper_envelope.py \
-            --lock packaging/adb/adb-helper.lock.json \
-            --artifact-root "$artifact_root" \
-            --expected-target "${{ env.KLOGG_ADB_HELPER_TARGET }}"
-          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-            gh attestation verify "$artifact_root/SHA256SUMS" \
-              --repo "$GITHUB_REPOSITORY"
-          fi
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
@@ -2724,6 +2682,12 @@ jobs:
         with:
           arch: ${{ env.KLOGG_CONFIG_ARCH }}
 
+      - name: Verify Windows native overlap
+        shell: pwsh
+        run: |
+          python -I tests/scripts/test_ci_native_overlap.py WindowsNativeOverlapTests
+          exit $LASTEXITCODE
+
       - name: Prepare verified Windows object cache
         id: windows-cache
         shell: pwsh
@@ -2757,7 +2721,7 @@ jobs:
           set -euo pipefail
           args=(--required-step "Build Windows application" --required-step "Verify Windows tests" --required-step "Report and validate Windows object cache")
           if [ "$KLOGG_PACKAGE_ENABLED" = "true" ]; then
-            args+=(--required-step "Qualify Windows package")
+            args+=(--required-step "Compile Windows objects while native producer runs" --required-step "Qualify Windows package")
           fi
           python3 -I scripts/ci_compiler_object_descriptor.py \
             --component application --label "$KLOGG_LABEL" \
@@ -2826,8 +2790,75 @@ jobs:
           python -I tests/scripts/test_adb_helper_staging.py AdbHelperStagingScriptTest
           exit $LASTEXITCODE
 
+      - name: Compile Windows objects while native producer runs
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+        uses: ./.github/actions/agent-build
+        with:
+          phase: prepare
+        env:
+          KLOGG_CI_CACHE_ARTIFACT_ID: ${{ steps.restore-shared-compiler-cache.outputs.artifact-id }}
+          KLOGG_CI_CACHE_RESTORE_KEY: ${{ steps.restore-windows-cache.outputs.cache-matched-key || steps.restore-windows-master-cache.outputs.cache-matched-key }}
+
+      - name: Require successful same-run Windows native producer
+        id: native-ready
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ci_native_rendezvous.py
+          --platform Windows --architecture x86_64
+          --receipt "$RUNNER_TEMP/native-ready.json"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+        with:
+          artifact-ids: ${{ steps.native-ready.outputs.adb-artifact-id }}
+          merge-multiple: true
+          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper-archive
+
+      - name: Extract mode-preserving ADB helper artifact
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_root="${{ github.workspace }}/prefetch_artifacts/adb-helper-archive"
+          artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
+          archive="$archive_root/adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}.tar.gz"
+          rm -rf "$artifact_root"
+          python3 scripts/extract_verified_tar.py \
+            --archive "$archive" \
+            --destination "$artifact_root"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+        with:
+          artifact-ids: ${{ steps.native-ready.outputs.support-artifact-id }}
+          merge-multiple: true
+          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper/release
+
+      - name: Verify target-bound ADB helper checksum envelope and provenance
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
+          python3 scripts/verify_adb_helper_envelope.py \
+            --lock packaging/adb/adb-helper.lock.json \
+            --artifact-root "$artifact_root" \
+            --expected-target "${{ env.KLOGG_ADB_HELPER_TARGET }}"
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            gh attestation verify "$artifact_root/SHA256SUMS" \
+              --repo "$GITHUB_REPOSITORY"
+          fi
+
       - name: Build Windows application
         uses: ./.github/actions/agent-build
+        with:
+          phase: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' && 'finalize' || 'full' }}
+          native-receipt: ${{ runner.temp }}/native-ready.json
         env:
           KLOGG_CI_CACHE_ARTIFACT_ID: ${{ steps.restore-shared-compiler-cache.outputs.artifact-id }}
           KLOGG_CI_CACHE_RESTORE_KEY: ${{ steps.restore-windows-cache.outputs.cache-matched-key || steps.restore-windows-master-cache.outputs.cache-matched-key }}
@@ -3402,6 +3433,19 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+      - name: Upload Windows phased-build evidence
+        if: ${{ always() && env.KLOGG_PACKAGE_ENABLED == 'true' && hashFiles(format('{0}/ci-build-phase-{1}-{2}-*', env.KLOGG_BUILD_ROOT, github.run_id, github.run_attempt)) != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-phase-evidence-${{ env.KLOGG_LABEL }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ env.KLOGG_BUILD_ROOT }}/ci-build-phase-${{ github.run_id }}-${{ github.run_attempt }}-*.json
+            ${{ env.KLOGG_BUILD_ROOT }}/ci-build-phase-${{ github.run_id }}-${{ github.run_attempt }}-*.ninja-log.txt
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
       - name: Upload Windows object cache evidence
         if: ${{ always() && steps.windows-cache-report.outcome == 'success' }}
         continue-on-error: true
@@ -3482,7 +3526,7 @@ jobs:
   ci-gate:
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}ci-gate"
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) }}
-    needs: [BuildAdbLinuxArm64, BuildAdbMacX64, BuildAdbMacArm64, BuildIosNativeX64, BuildIosNativeArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsX86, WindowsAsan]
+    needs: [BuildAdbLinuxArm64, BuildAdbWindowsX64, BuildAdbMacX64, BuildAdbMacArm64, BuildIosNativeX64, BuildIosNativeArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsX86, WindowsAsan]
     runs-on: ubuntu-22.04
     steps:
       - name: Check CI results

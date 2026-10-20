@@ -1132,10 +1132,10 @@ jobs:
             "MacPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "ReleaseQualificationPreflight"},
             "MacArmPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "ReleaseQualificationPreflight"},
             "MacSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "ReleaseQualificationPreflight"},
-            "WindowsPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "BuildAdbWindowsX64", "ReleaseQualificationPreflight"},
+            "WindowsPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "ReleaseQualificationPreflight"},
             "WindowsX86": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchOpenSsl", "PrefetchWindowsTools", "ReleaseQualificationPreflight"},
             "WindowsAsan": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "ReleaseQualificationPreflight"},
-            "ci-gate": {"BuildAdbLinuxArm64", "BuildAdbMacX64", "BuildAdbMacArm64", "BuildIosNativeX64", "BuildIosNativeArm64", "LinuxPackages", "LinuxSanitizers", "LinuxTsan", "MacPackages", "MacArmPackages", "MacSanitizers", "WindowsPackages", "WindowsX86", "WindowsAsan"},
+            "ci-gate": {"BuildAdbLinuxArm64", "BuildAdbWindowsX64", "BuildAdbMacX64", "BuildAdbMacArm64", "BuildIosNativeX64", "BuildIosNativeArm64", "LinuxPackages", "LinuxSanitizers", "LinuxTsan", "MacPackages", "MacArmPackages", "MacSanitizers", "WindowsPackages", "WindowsX86", "WindowsAsan"},
             "DispatchContinuous": {"ci-gate"},
         }
         self.assertEqual(needs, expected_needs)
@@ -2470,7 +2470,6 @@ jobs:
                 "PrefetchCpmCache",
                 "PrefetchBoost",
                 "PrefetchWindowsTools",
-                "BuildAdbWindowsX64",
                 "ReleaseQualificationPreflight",
             },
         }
@@ -2486,6 +2485,7 @@ jobs:
             needs.get("ci-gate"),
             {
                 "BuildAdbLinuxArm64",
+                "BuildAdbWindowsX64",
                 "BuildAdbMacX64",
                 "BuildAdbMacArm64",
                 "BuildIosNativeX64",
