@@ -653,23 +653,8 @@ def download_artifact_windows(identifier, archive, *, limit, timeout):
             process.stdout.close()
 
 
-def restore(ctx, destination, *, repository_id, current_run, metadata=None, download=None, now=None,
-            current_tree=None, backend_cache=None):
-    destination = Path(destination)
-    require(not destination.exists() and not destination.is_symlink(), "restore destination already exists")
-    require(type(repository_id) is int and repository_id > 0 and type(current_run) is int and current_run > 0,
-            "invalid consumer Actions identity")
-    require(current_tree is None or (isinstance(current_tree, str) and SHA.fullmatch(current_tree)),
-            "invalid current source tree")
-    retained = backend_matches(backend_cache, ctx, repository_id, current_tree)
-    get_raw, download = metadata or actions.metadata, download or download_artifact
-    now = now or datetime.datetime.now(datetime.timezone.utc)
-    started = time.monotonic()
-    def get(endpoint):
-        require(time.monotonic() - started < MAX_SECONDS, "compiler artifact discovery exceeded deadline")
-        result = get_raw(endpoint)
-        require(isinstance(result, dict), "invalid Actions metadata")
-        return result
+def _discover(ctx, *, repository_id, current_run, current_tree, get, now):
+    """Read and authenticate candidates without downloading or mutating a cache."""
     prefix = f"repos/{REPOSITORY}/actions/"
     name_prefix = artifact_name(ctx, 1).rsplit("-", 1)[0] + "-"
     candidates, seen, exhausted = [], {}, True
@@ -717,10 +702,6 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
         if len(artifacts) < 100 or page * 100 >= listing["total_count"]:
             exhausted = False
             break
-    result = {"restored": False, "export_needed": True, "discovery_exhausted": exhausted,
-              "compatibility_key": ctx["key"], "backend_retained": retained,
-              "transport": "actions-cache" if retained else "actions-artifact",
-              "acquisition": "compatible-backend-retained" if retained else "artifact-miss"}
     selected = None
     for _, identifier, attempt_number, listed in sorted(candidates, key=lambda item: item[:2], reverse=True)[:MAX_CANDIDATES]:
         artifact = get(prefix + f"artifacts/{identifier}")
@@ -740,6 +721,47 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
             selected = artifact, origin, terminal
         if covered:
             break
+    return selected, exhausted
+
+
+def restore(ctx, destination, *, repository_id, current_run, metadata=None, download=None, now=None,
+            current_tree=None, backend_cache=None):
+    destination = Path(destination)
+    require(not destination.exists() and not destination.is_symlink(), "restore destination already exists")
+    require(type(repository_id) is int and repository_id > 0 and type(current_run) is int and current_run > 0,
+            "invalid consumer Actions identity")
+    require(current_tree is None or (isinstance(current_tree, str) and SHA.fullmatch(current_tree)),
+            "invalid current source tree")
+    retained = backend_matches(backend_cache, ctx, repository_id, current_tree)
+    get_raw, download = metadata or actions.metadata, download or download_artifact
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    started = time.monotonic()
+    def get(endpoint):
+        require(time.monotonic() - started < MAX_SECONDS, "compiler artifact discovery exceeded deadline")
+        result = get_raw(endpoint)
+        require(isinstance(result, dict), "invalid Actions metadata")
+        return result
+    result = {"restored": False, "export_needed": True, "discovery_exhausted": False,
+              "compatibility_key": ctx["key"], "backend_retained": retained,
+              "transport": "actions-cache" if retained else "actions-artifact",
+              "acquisition": "compatible-backend-retained" if retained else "artifact-miss"}
+    try:
+        selected, result["discovery_exhausted"] = _discover(ctx, repository_id=repository_id,
+            current_run=current_run, current_tree=current_tree, get=get, now=now)
+    except actions.TransportError as error:
+        # The shared transport is qualification-locked. Its direct exception
+        # cause identifies request timeouts without changing authenticated bytes
+        # or confusing similarly worded admission/transport failures with a miss.
+        if not isinstance(error.__cause__, subprocess.TimeoutExpired):
+            raise
+        # Ordinary compiler objects are optional. A bounded metadata timeout is
+        # no permission to import an artifact or suppress a fresh verified export.
+        # Keep integrity/admission failures fatal, and leave download/install
+        # outside this availability boundary so partial transfers cannot be used.
+        result.update(discovery_status="unavailable", discovery_error=str(error),
+                      acquisition="metadata-unavailable")
+        print(f"notice: optional compiler artifact metadata unavailable: {error}", file=sys.stderr)
+        return result
     if selected is None:
         return result
     artifact, origin, terminal = selected

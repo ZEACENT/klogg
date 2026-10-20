@@ -126,6 +126,150 @@ class CompilerObjectTransportTests(unittest.TestCase):
                              size_in_bytes=self.zipped.stat().st_size,
                              digest="sha256:" + hashlib.sha256(self.zipped.read_bytes()).hexdigest())
 
+    def cache_bytes(self):
+        return {path.relative_to(self.cache).as_posix(): path.read_bytes()
+                for path in self.cache.rglob("*") if path.is_file()}
+
+    def test_metadata_timeouts_are_observable_misses_without_import_or_cache_mutation(self):
+        stages = ("/artifacts?", "/runs/201", "/git/commits/", "/contents/")
+        for retained in (False, True):
+            if retained:
+                transport.mark_backend(self.cache, self.context, self.origin)
+            for stage in stages:
+                with self.subTest(backend_retained=retained, stage=stage):
+                    before = self.cache_bytes()
+                    def metadata(endpoint):
+                        if stage in endpoint:
+                            return transport.actions.metadata(endpoint)
+                        return self.api(endpoint)
+                    error = subprocess.TimeoutExpired("VERY_SECRET_COMMAND", 30,
+                        output=b"VERY_SECRET_BODY", stderr=b"VERY_SECRET_STDERR")
+                    with mock.patch.object(transport.actions.subprocess, "run", side_effect=error) as request, \
+                            mock.patch.object(transport, "install") as install:
+                        result = self.restore(metadata=metadata, backend_cache=self.cache, current_tree="e" * 40)
+                    self.assertFalse(result["restored"])
+                    self.assertFalse(result["discovery_exhausted"])
+                    self.assertTrue(result["export_needed"])
+                    self.assertEqual(result["discovery_status"], "unavailable")
+                    self.assertEqual(result["acquisition"], "metadata-unavailable")
+                    self.assertIn("failure=timeout", result["discovery_error"])
+                    self.assertNotIn("VERY_SECRET", json.dumps(result))
+                    self.assertEqual(result["compatibility_key"], self.context["key"])
+                    self.assertEqual(result["backend_retained"], retained)
+                    self.assertEqual(result["transport"], "actions-cache" if retained else "actions-artifact")
+                    for name in ("artifact_id", "available_artifact_id", "producer"):
+                        self.assertNotIn(name, result)
+                    self.assertEqual(self.cache_bytes(), before)
+                    self.assertFalse((self.root / "restored").exists())
+                    self.assertEqual(self.downloads, [])
+                    install.assert_not_called()
+                    request.assert_called_once()
+                    self.assertEqual(request.call_args.kwargs["timeout"], 30)
+
+    def test_locked_metadata_api_preserves_timeout_cause_and_fatal_source_cache_contract(self):
+        import ci_environment_source_cache as source_cache
+        timeout = subprocess.TimeoutExpired("VERY_SECRET_COMMAND", 30,
+            output=b"VERY_SECRET_BODY", stderr=b"VERY_SECRET_STDERR")
+        with mock.patch.object(transport.actions.subprocess, "run", side_effect=timeout) as request:
+            with self.assertRaises(transport.actions.TransportError) as caught:
+                transport.actions.metadata("repos/ZEACENT/klogg/actions/runs/201")
+            self.assertIs(type(caught.exception), transport.actions.TransportError)
+            self.assertIs(caught.exception.__cause__, timeout)
+            self.assertNotIn("VERY_SECRET", str(caught.exception))
+            with self.assertRaises(source_cache.SourceCacheError) as source:
+                source_cache._metadata("repos/ZEACENT/klogg/actions/runs/201")
+            self.assertIs(type(source.exception.__cause__), transport.actions.TransportError)
+            self.assertIs(source.exception.__cause__.__cause__, timeout)
+            self.assertEqual(request.call_count, 2)
+
+    def test_non_timeout_and_indirect_timeout_causes_remain_fatal(self):
+        indirect = ValueError("nested cause is not a metadata request timeout")
+        indirect.__cause__ = subprocess.TimeoutExpired("gh", 30)
+        for cause in (OSError("missing gh"), subprocess.CalledProcessError(1, ["gh"]),
+                      subprocess.SubprocessError("timeout"), indirect):
+            with self.subTest(cause=type(cause).__name__):
+                error = transport.actions.TransportError("failure=timeout")
+                error.__cause__ = cause
+                before = self.cache_bytes()
+                with self.assertRaises(transport.actions.TransportError) as caught:
+                    self.restore(metadata=mock.Mock(side_effect=error), backend_cache=self.cache)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(self.cache_bytes(), before)
+                self.assertEqual(self.downloads, [])
+                self.assertFalse((self.root / "restored").exists())
+
+    def test_timeout_text_without_timeout_cause_remains_fatal(self):
+        error = transport.actions.TransportError(
+            "authenticated Actions metadata request failed [endpoint=other failure=timeout http=unknown]")
+        before = self.cache_bytes()
+        with self.assertRaises(transport.actions.TransportError) as caught:
+            self.restore(metadata=mock.Mock(side_effect=error), backend_cache=self.cache)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(self.cache_bytes(), before)
+        self.assertEqual(self.downloads, [])
+        self.assertFalse((self.root / "restored").exists())
+
+    def test_discovery_deadline_remains_fatal_before_metadata_or_download(self):
+        metadata = mock.Mock()
+        before = self.cache_bytes()
+        with mock.patch.object(transport.time, "monotonic", side_effect=[0, transport.MAX_SECONDS + 1]), \
+                self.assertRaisesRegex(ValueError, "discovery exceeded deadline"):
+            self.restore(metadata=metadata, backend_cache=self.cache)
+        metadata.assert_not_called()
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(self.cache_bytes(), before)
+
+    def test_timeout_cli_retains_backend_and_emits_unavailable_report_without_install(self):
+        transport.mark_backend(self.cache, self.context, self.origin)
+        descriptor = self.root / "descriptor.json"
+        descriptor.write_text(json.dumps(self.descriptor))
+        report, output = self.root / "report.json", self.root / "output"
+        before = self.cache_bytes()
+        with mock.patch.object(transport, "identity", return_value=self.origin), \
+                mock.patch.object(transport.actions.subprocess, "run",
+                                  side_effect=subprocess.TimeoutExpired("gh", 30)), \
+                mock.patch.object(transport, "install") as install, \
+                mock.patch.object(transport, "download_artifact") as download, \
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+            self.assertEqual(transport.main(["restore", "--descriptor", str(descriptor),
+                "--repo-root", str(self.repo), "--cache", str(self.cache), "--output", str(report)]), 0)
+        result = json.loads(report.read_text())
+        self.assertEqual(result["discovery_status"], "unavailable")
+        self.assertTrue(result["backend_retained"])
+        self.assertEqual(self.cache_bytes(), before)
+        self.assertIn("restored=false", output.read_text().splitlines())
+        self.assertIn("export-needed=true", output.read_text().splitlines())
+        self.assertIn("artifact-id=", output.read_text().splitlines())
+        self.assertIn("report=" + str(report), output.read_text().splitlines())
+        install.assert_not_called()
+        download.assert_not_called()
+
+    def test_timeout_cause_outside_metadata_discovery_remains_fatal(self):
+        with mock.patch.object(transport.actions.subprocess, "run", side_effect=subprocess.TimeoutExpired("gh", 30)):
+            with self.assertRaises(transport.actions.TransportError) as caught:
+                transport.actions.metadata("repos/ZEACENT/klogg/actions/runs/201")
+        timeout = caught.exception
+        before = self.cache_bytes()
+        with mock.patch.object(self, "download", side_effect=timeout), \
+                self.assertRaises(type(timeout)) as failed_download:
+            self.restore()
+        self.assertIs(failed_download.exception, timeout)
+        self.assertEqual(self.cache_bytes(), before)
+        self.assertFalse((self.root / "restored").exists())
+        descriptor = self.root / "descriptor.json"
+        descriptor.write_text(json.dumps(self.descriptor))
+        report = self.root / "report.json"
+        with mock.patch.object(transport, "identity", return_value=self.origin), \
+                mock.patch.object(transport, "restore", return_value={"restored": True}), \
+                mock.patch.object(transport, "install", side_effect=timeout) as install, \
+                self.assertRaises(SystemExit) as failed_install:
+            transport.main(["restore", "--descriptor", str(descriptor), "--repo-root", str(self.repo),
+                            "--cache", str(self.cache), "--output", str(report)])
+        self.assertEqual(failed_install.exception.code, 1)
+        install.assert_called_once()
+        self.assertFalse(report.exists())
+        self.assertEqual(self.cache_bytes(), before)
+
     def test_backend_hint_requires_current_profile_and_application_tree(self):
         self.application_artifact()
         transport.mark_backend(self.cache, self.context, self.origin)
