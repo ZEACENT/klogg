@@ -180,13 +180,19 @@ class BuildMetricsUploadWorkflowTest(unittest.TestCase):
                 metrics = [(index, fields, children.get("with")) for index, (fields, children)
                            in enumerate(parsed) if fields.get("name") == "Upload current-run build metrics"]
                 observed_builds = list(builds)
-                self.assertEqual(len(builds), 2 if job.startswith('Mac') else 1)
-                if job.startswith('Mac'):
+                native = job.startswith(('Mac', 'Windows'))
+                self.assertEqual(len(builds), 2 if native else 1)
+                if native:
                     early, early_options = parsed[builds[0]]
                     self.assertEqual(early.get('if'), "${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}")
                     self.assertEqual(early_options.get('with'), {'phase': 'prepare'})
-                    self.assertEqual(parsed[builds[-1]][1]['with']['phase'],
+                    final_phase = parsed[builds[-1]][1]['with']['phase']
+                    self.assertEqual(final_phase,
                                      "${{ env.KLOGG_PACKAGE_ENABLED == 'true' && 'finalize' || 'full' }}")
+                    context = {'success': True, 'env.KLOGG_PACKAGE_ENABLED': QUALITY.CI_BUILD_PACKAGE_ENABLEMENT[job]}
+                    package = context['env.KLOGG_PACKAGE_ENABLED'] == 'true'
+                    self.assertEqual(cache_expression(early['if'], context), package)
+                    self.assertEqual(cache_expression(final_phase, context), 'finalize' if package else 'full')
                 builds = builds[-1:]
                 self.assertEqual(len(metrics), 1)
                 index, fields, options = metrics[0]

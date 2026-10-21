@@ -2035,12 +2035,23 @@ def ci_build_adb_source_transport_issues(text: str) -> list[str]:
     return []
 
 
-def macos_overlap_workflow_issues(text: str, job: str) -> list[str]:
+def native_overlap_workflow_issues(text: str, job: str, *, platform: str = "macOS") -> list[str]:
     """Replace a scheduler dependency only with authenticated, gated finalization."""
     message = f"{job}: early compilation requires same-run native IDs and mandatory finalization before publication"
-    rows = [workflow_step_fields(step) for step in workflow_job_steps(text).get(job, [])]
+    profiles = {"macOS": {"MacPackages", "MacArmPackages"}, "Windows": {"WindowsPackages"}}
+    if job not in profiles.get(platform, set()):
+        return [message]
+    windows = platform == "Windows"
     package_if = "${{ env.KLOGG_PACKAGE_ENABLED == 'true' }}"
+    ready_command = ('python3 scripts/ci_native_rendezvous.py --platform Windows --architecture x86_64 '
+                     '--receipt "$RUNNER_TEMP/native-ready.json"' if windows else
+                     'python3 scripts/ci_native_rendezvous.py --architecture "$KLOGG_IOS_ARCHITECTURE" '
+                     '--receipt "$RUNNER_TEMP/native-ready.json"')
     try:
+        raw_steps = workflow_job_steps(text).get(job, [])
+        if any(not workflow_step_direct_fields_are_unique(step) for step in raw_steps):
+            return [message]
+        rows = [workflow_step_fields(step) for step in raw_steps]
         builds = [(i, fields, children.get("with", {})) for i, (fields, children) in enumerate(rows)
                   if fields.get("uses") == "./.github/actions/agent-build"]
         ready = [(i, fields, children) for i, (fields, children) in enumerate(rows)
@@ -2053,14 +2064,15 @@ def macos_overlap_workflow_issues(text: str, job: str) -> list[str]:
                 or first_options != {"phase": "prepare"}
                 or rendezvous.get("if") != package_if or rendezvous.get("shell") != "bash"
                 or settings.get("env") != {"GH_TOKEN": "${{ github.token }}"}
-                or " ".join(active_script_content(rendezvous.get("run", "")).split()) !=
-                   'python3 scripts/ci_native_rendezvous.py --architecture "$KLOGG_IOS_ARCHITECTURE" --receipt "$RUNNER_TEMP/native-ready.json"'
+                or " ".join(active_script_content(rendezvous.get("run", "")).split()) != ready_command
                 or final_options != {"phase": "${{ env.KLOGG_PACKAGE_ENABLED == 'true' && 'finalize' || 'full' }}",
                                      "native-receipt": "${{ runner.temp }}/native-ready.json"}
                 or final.get("if") is not None
                 or any("continue-on-error" in fields for fields in (first, rendezvous, final))):
             return [message]
-        expected_ids = {"adb-artifact-id", "support-artifact-id", "ios-artifact-id"}
+        expected_ids = {"adb-artifact-id", "support-artifact-id"}
+        if not windows:
+            expected_ids.add("ios-artifact-id")
         downloads = []
         for i, (fields, children) in enumerate(rows):
             options = children.get("with", {})
@@ -2072,23 +2084,61 @@ def macos_overlap_workflow_issues(text: str, job: str) -> list[str]:
                             or "continue-on-error" in fields):
                         return [message]
                     downloads.append(name)
-        if len(downloads) != 3 or set(downloads) != expected_ids:
+        if len(downloads) != len(expected_ids) or set(downloads) != expected_ids:
             return [message]
-        for name, verifier in (
-            ("Verify target-bound iOS native checksum envelope and Mach-O closure", "scripts/verify_ios_native_stack.py"),
-            ("Verify target-bound ADB helper checksum envelope and provenance", "scripts/verify_adb_helper_envelope.py"),
-        ):
+        verifiers = [("Verify target-bound ADB helper checksum envelope and provenance", "scripts/verify_adb_helper_envelope.py")]
+        if not windows:
+            verifiers.append(("Verify target-bound iOS native checksum envelope and Mach-O closure", "scripts/verify_ios_native_stack.py"))
+        for name, verifier in verifiers:
             checks = [(i, fields) for i, (fields, _) in enumerate(rows) if fields.get("name") == name]
             if (len(checks) != 1 or not wait < checks[0][0] < finalize
                     or checks[0][1].get("if") != package_if or "continue-on-error" in checks[0][1]
+                    or (windows and checks[0][1].get("shell") != "bash")
                     or verifier not in active_script_content(checks[0][1].get("run", ""))):
                 return [message]
+            if windows:
+                expected = (
+                    'set -euo pipefail\n'
+                    'artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"\n'
+                    'python3 scripts/verify_adb_helper_envelope.py \\\n'
+                    '--lock packaging/adb/adb-helper.lock.json \\\n'
+                    '--artifact-root "$artifact_root" \\\n'
+                    '--expected-target "${{ env.KLOGG_ADB_HELPER_TARGET }}"\n'
+                    'if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then\n'
+                    'gh attestation verify "$artifact_root/SHA256SUMS" \\\n'
+                    '--repo "$GITHUB_REPOSITORY"\nfi')
+                if " ".join(active_script_content(checks[0][1].get("run", "")).split()) != " ".join(expected.split()):
+                    return [message]
         tests = [i for i, (fields, _) in enumerate(rows) if fields.get("uses") == "./.github/actions/agent-run-tests"]
-        package = [i for i, (fields, _) in enumerate(rows) if fields.get("uses") == "./.github/actions/agent-package-mac"]
+        package_action = "./.github/actions/agent-package-win" if windows else "./.github/actions/agent-package-mac"
+        package = [i for i, (fields, _) in enumerate(rows) if fields.get("uses") == package_action]
+        expected_package_if = "${{ steps.run-tests.outcome == 'success' && env.KLOGG_PACKAGE_ENABLED == 'true' }}" if windows else package_if
         if (len(tests) != 1 or len(package) != 1 or not finalize < tests[0] < package[0]
                 or rows[tests[0]][0].get("if") is not None
-                or rows[package[0]][0].get("if") != package_if
-                or any("continue-on-error" in rows[i][0] for i in (tests[0], package[0]))):
+                or rows[package[0]][0].get("if") != expected_package_if
+                or "continue-on-error" in rows[package[0]][0]):
+            return [message]
+        if windows:
+            guards = [(i, fields) for i, (fields, _) in enumerate(rows) if fields.get("name") == "Verify Windows native overlap"]
+            setups = [i for i, (fields, _) in enumerate(rows) if fields.get("uses") == "./.github/actions/setup-msvc"]
+            caches = [i for i, (fields, _) in enumerate(rows) if fields.get("id") == "windows-cache"]
+            activations = [i for i, (fields, _) in enumerate(rows) if fields.get("id") == "activate-windows-cache"]
+            if (len(guards) != 1 or len(setups) != 1 or len(caches) != 1 or len(activations) != 1
+                    or not setups[0] < guards[0][0] < caches[0] < activations[0] < prepare
+                    or guards[0][1].get("shell") != "pwsh" or "if" in guards[0][1]
+                    or "continue-on-error" in guards[0][1]
+                    or guards[0][1].get("run", "").strip() !=
+                       "python -I tests/scripts/test_ci_native_overlap.py WindowsNativeOverlapTests\nexit $LASTEXITCODE"):
+                return [message]
+            failure = [(i, fields) for i, (fields, _) in enumerate(rows) if fields.get("name") == "Fail when tests fail"]
+            if (rows[tests[0]][0].get("id") != "run-tests"
+                    or rows[tests[0]][0].get("continue-on-error") != "true"
+                    or len(failure) != 1 or not tests[0] < failure[0][0] < package[0]
+                    or failure[0][1].get("if") != "${{ always() && steps.run-tests.outcome == 'failure' }}"
+                    or failure[0][1].get("run", "").strip() != "exit 1"
+                    or "continue-on-error" in failure[0][1]):
+                return [message]
+        elif "continue-on-error" in rows[tests[0]][0]:
             return [message]
         for i, (fields, children) in enumerate(rows):
             uses = fields.get("uses", "")
@@ -2160,10 +2210,10 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         issues.append(str(error))
         return issues
     runtime_native_jobs = set()
-    for job in ("MacPackages", "MacArmPackages"):
+    for job, platform in (("MacPackages", "macOS"), ("MacArmPackages", "macOS"), ("WindowsPackages", "Windows")):
         rows = [workflow_step_fields(step)[0] for step in job_steps.get(job, [])]
         if any(fields.get("id") == "native-ready" for fields in rows):
-            overlap_issues = macos_overlap_workflow_issues(text, job)
+            overlap_issues = native_overlap_workflow_issues(text, job, platform=platform)
             issues.extend(overlap_issues)
             if not overlap_issues:
                 runtime_native_jobs.add(job)

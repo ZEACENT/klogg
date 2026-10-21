@@ -741,10 +741,10 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         ready_index, ready, ready_children = ready_steps[0]
         self.assertEqual(ready.get("if"), guard)
         self.assertEqual(ready_children.get("env", {}).get("GH_TOKEN"), "${{ github.token }}")
+        profile = '--platform Windows --architecture x86_64' if job == "WindowsPackages" else '--architecture "$KLOGG_IOS_ARCHITECTURE"'
         self.assertEqual(
             " ".join(CI_MODULE.active_script_content(ready.get("run", "")).split()),
-            'python3 scripts/ci_native_rendezvous.py --architecture "$KLOGG_IOS_ARCHITECTURE" '
-            '--receipt "$RUNNER_TEMP/native-ready.json"',
+            'python3 scripts/ci_native_rendezvous.py ' + profile + ' --receipt "$RUNNER_TEMP/native-ready.json"',
         )
         downloads = [(index, fields, children["with"]) for index, (fields, children) in enumerate(steps)
                      if fields.get("uses", "").startswith("actions/download-artifact@")
@@ -773,7 +773,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                              "artifact-ids: ${{ steps.native-ready.outputs.support-artifact-id }}\n          name: adb-helper-release-assets"),
             workflow.replace("native-receipt: ${{ runner.temp }}/native-ready.json", "native-receipt: unbound.json"),
         )
-        for job in ("MacPackages", "MacArmPackages"):
+        for job in ("MacPackages", "MacArmPackages", "WindowsPackages"):
             self.assert_authenticated_package_support_download(workflow, job)
             for changed in mutations:
                 with self.subTest(job=job, mutation=changed[:40]), self.assertRaises(AssertionError):
@@ -883,7 +883,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     for kind, artifact, condition in records.get(job, [])
                     if kind == "downloads"
                 }
-                if job in {"MacPackages", "MacArmPackages"}:
+                if job in {"MacPackages", "MacArmPackages", "WindowsPackages"}:
                     self.assert_authenticated_package_support_download(workflow, job)
                     self.assertNotIn(package_support, {artifact for artifact, _ in downloads})
                 else:

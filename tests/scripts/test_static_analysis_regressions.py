@@ -24,6 +24,7 @@ UNIT_TEST_MAIN = ROOT / "tests" / "unit" / "tests_main.cpp"
 UI_TEST_MAIN = ROOT / "tests" / "ui" / "qtests_main.cpp"
 ADB_TRACKER_MANAGER_TEST = ROOT / "tests" / "unit" / "adb_device_tracker_manager_test.cpp"
 PLATFORM_FILES_SOURCE = ROOT / "src" / "utils" / "src" / "platform_files.cpp"
+PLATFORM_FILES_HEADER = ROOT / "src" / "utils" / "include" / "platform" / "platform_files.h"
 UI_CMAKE = ROOT / "src" / "ui" / "CMakeLists.txt"
 ANALYSIS_PROFILES = ROOT / "ci" / "environments" / "profiles.json"
 
@@ -112,6 +113,41 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
                 with self.subTest(family=family, role=role):
                     self.assertEqual("-DKLOGG_UI_AUTOGEN_ORIGIN_DEPENDS=OFF" in options,
                                      family == "noble-qt693-analysis" and role == "static")
+
+    def test_readonly_open_status_uses_explicit_small_enum_storage(self):
+        # Compiler -Werror does not run clang-tidy's performance-enum-size check.
+        self.assertRegex(
+            PLATFORM_FILES_HEADER.read_text(),
+            r"(?m)^enum class ReadOnlyFileOpenStatus\s*:\s*std::uint8_t\s*\{",
+        )
+
+    def test_readonly_open_retries_only_interruption_without_do_while(self):
+        body = function_body(PLATFORM_FILES_SOURCE.read_text(),
+                             "ReadOnlyFileOpenResult openFileReadOnly")
+        posix = body.split("#else", 1)[1].split("#endif", 1)[0]
+        self.assertNotRegex(posix, r"\bdo\s*\{")
+        self.assertIn("while ( true )", posix)
+        self.assertRegex(posix, r"::open\([^;]+\);\s*openError = errno;")
+        self.assertRegex(
+            posix,
+            r"if \( descriptor != -1 \|\| openError != EINTR \)\s*\{\s*break;",
+        )
+
+    def test_readonly_open_has_only_a_narrow_documented_vararg_boundary(self):
+        body = function_body(PLATFORM_FILES_SOURCE.read_text(),
+                             "ReadOnlyFileOpenResult openFileReadOnly")
+        posix = body.split("#else", 1)[1].split("#endif", 1)[0]
+        lines = posix.splitlines()
+        calls = [index for index, line in enumerate(lines) if "::open(" in line]
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(lines[call - 1].strip(),
+                         "// NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)")
+        self.assertIn("never create files", lines[call - 2])
+        self.assertEqual(lines[call].strip(),
+                         "descriptor = ::open( nativePath.constData(), O_RDONLY | O_CLOEXEC );")
+        self.assertNotIn("NOLINTBEGIN", body)
+        self.assertNotIn("NOLINTEND", body)
 
     def test_windows_file_identity_rejects_unrepresentable_qt_handles_before_narrowing(self):
         source = PLATFORM_FILES_SOURCE.read_text()

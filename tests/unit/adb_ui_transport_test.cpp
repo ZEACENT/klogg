@@ -50,7 +50,9 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <optional>
+#include <sstream>
 
 #include "adbdevicelistprovider.h"
 #include "adblogcatdialog.h"
@@ -64,6 +66,7 @@
 #include "ioslogprocesstransport.h"
 #include "livesourcetransport.h"
 #include "optionsdialog.h"
+#include "process_observation.h"
 #include "recentfiles.h"
 #include "savedsearches.h"
 #include "shortcuts.h"
@@ -155,6 +158,49 @@ private:
     QString snapshotPath_;
 };
 
+QString boundedStartupText( const QString& text )
+{
+    return text.size() > 512 ? text.left( 500 ) + QStringLiteral( "<truncated>" ) : text;
+}
+
+struct TransportStartupObservation {
+    LiveSourceTransport::Generation generation{ 0 };
+    bool completed{ false };
+    bool connected{ false };
+    bool connectedSeen{ false };
+    int transportState{ -1 };
+    QString terminalError;
+    QString program;
+    QElapsedTimer elapsed;
+    std::optional<klogg::testing::ProcessSnapshot> process;
+    bool started{ false };
+    qint64 startedPid{ 0 };
+    std::optional<int> errorSignal;
+    std::optional<int> exitCode;
+    std::optional<int> exitStatus;
+
+    std::string diagnostic() const
+    {
+        const auto observedNumber = []( const std::optional<int>& value ) {
+            return value ? std::to_string( *value ) : std::string{ "unobserved" };
+        };
+        std::ostringstream message;
+        message << "Transport startup diagnostic: generation=" << generation
+                << " completed=" << completed << " connected=" << connected
+                << " connected_seen=" << connectedSeen << " transport_state=" << transportState
+                << " elapsed_ms=" << elapsed.elapsed()
+                << " last_error=" << terminalError.toStdString()
+                << " program=" << program.toStdString()
+                << " started_seen=" << started << " started_reported_pid="
+                << ( started ? std::to_string( startedPid ) : "unobserved" )
+                << " error_signal=" << observedNumber( errorSignal )
+                << " exit_code=" << observedNumber( exitCode )
+                << " exit_status=" << observedNumber( exitStatus ) << " "
+                << ( process ? process->diagnostic().toStdString() : "process=unobserved" );
+        return message.str();
+    }
+};
+
 template <typename Base>
 class GenerationDrivenProcessTransport : public Base {
 public:
@@ -165,35 +211,56 @@ public:
     {
         const auto generation = nextGeneration();
         currentGeneration_ = generation;
-        bool completed = false;
-        bool connected = false;
+        const auto observation = std::make_shared<TransportStartupObservation>();
+        observation->generation = generation;
+        observation->elapsed.start();
+        startupObservation_ = observation;
         const auto stateConnection = QObject::connect(
-            this, &LiveSourceTransport::stateChanged,
-            [ & ]( Generation reportedGeneration, LiveSourceTransport::State state ) {
-                if ( reportedGeneration != generation ) {
+            this, &LiveSourceTransport::stateChanged, this,
+            [ this, observation ]( Generation reportedGeneration, LiveSourceTransport::State state ) {
+                if ( reportedGeneration != observation->generation ) {
                     return;
                 }
+                observation->transportState = static_cast<int>( state );
                 if ( state == LiveSourceTransport::State::Connected
                      || state == LiveSourceTransport::State::Error ) {
-                    completed = true;
-                    connected = state == LiveSourceTransport::State::Connected;
+                    observation->completed = true;
+                    observation->connected = state == LiveSourceTransport::State::Connected;
+                    observation->connectedSeen |= observation->connected;
+                    if ( state == LiveSourceTransport::State::Error ) {
+                        observation->terminalError = boundedStartupText( this->lastError() );
+                    }
+                }
+            } );
+        const auto errorConnection = QObject::connect(
+            this, &LiveSourceTransport::errorOccurred, this,
+            [ observation ]( Generation reportedGeneration, const QString& error ) {
+                if ( reportedGeneration == observation->generation ) {
+                    // A reentrant reconnect can already have cleared lastError().
+                    observation->terminalError = boundedStartupText( error );
                 }
             } );
 
         this->start( generation );
         QElapsedTimer deadline;
         deadline.start();
-        while ( !completed && deadline.elapsed() < 6000 ) {
+        while ( !observation->completed && deadline.elapsed() < 6000 ) {
             QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
         }
         QObject::disconnect( stateConnection );
-        INFO( "Transport startup diagnostic: " << this->lastError().toStdString() );
-        REQUIRE( completed );
-        return connected;
+        QObject::disconnect( errorConnection );
+        const auto diagnostic = observation->diagnostic();
+        INFO( diagnostic );
+        REQUIRE( observation->completed );
+        // Scoped INFO ends before the caller evaluates REQUIRE(startAndWait()).
+        // Emit after the internal assertion, which consumes unscoped messages.
+        UNSCOPED_INFO( diagnostic );
+        return observation->connected;
     }
 
     void startAsync()
     {
+        startupObservation_.reset();
         const auto generation = nextGeneration();
         currentGeneration_ = generation;
         this->start( generation );
@@ -208,6 +275,45 @@ public:
         }
     }
 
+protected:
+    void startProcessAsync( QProcess& process ) override
+    {
+        const auto observation = startupObservation_;
+        if ( observation && currentGeneration_ == observation->generation ) {
+            observation->program = boundedStartupText( process.program() );
+            auto* const observedProcess = &process;
+            const auto record = [ observation, observedProcess ] {
+                observation->process = klogg::testing::ProcessSnapshot::take( *observedProcess );
+                observation->process->errorText
+                    = boundedStartupText( observation->process->errorText );
+            };
+            record();
+            // The process owns these connections; copied facts survive retirement.
+            // No callback refers to the helper stack or the transport's lifetime.
+            QObject::connect( &process, &QProcess::stateChanged, &process,
+                              [ record ]( QProcess::ProcessState ) { record(); } );
+            QObject::connect( &process, &QProcess::started, &process,
+                              [ observation, record, observedProcess ] {
+                                  observation->started = true;
+                                  observation->startedPid = observedProcess->processId();
+                                  record();
+                              } );
+            QObject::connect( &process, &QProcess::errorOccurred, &process,
+                              [ observation, record ]( QProcess::ProcessError error ) {
+                                  observation->errorSignal = static_cast<int>( error );
+                                  record();
+                              } );
+            QObject::connect( &process,
+                              qOverload<int, QProcess::ExitStatus>( &QProcess::finished ), &process,
+                              [ observation, record ]( int code, QProcess::ExitStatus status ) {
+                                  observation->exitCode = code;
+                                  observation->exitStatus = static_cast<int>( status );
+                                  record();
+                              } );
+        }
+        Base::startProcessAsync( process );
+    }
+
 private:
     Generation nextGeneration()
     {
@@ -216,6 +322,7 @@ private:
 
     Generation generationCounter_{ 0 };
     std::optional<Generation> currentGeneration_;
+    std::shared_ptr<TransportStartupObservation> startupObservation_;
 };
 
 class TestAdbProcessTransport : public GenerationDrivenProcessTransport<AdbProcessTransport> {
@@ -1691,6 +1798,121 @@ private:
     int startRequestCount_ = 0;
 };
 } // namespace
+
+namespace {
+// Exercise terminal observation and Catch diagnostics without an OS child-start race.
+class DiagnosticTerminalTransport : public ProcessLiveSourceTransport {
+public:
+    explicit DiagnosticTerminalTransport( bool failedToStart )
+        : failedToStart_( failedToStart )
+    {
+    }
+
+protected:
+    Command streamingCommand() const override
+    {
+        return { QStringLiteral( "startup-diagnostic-fixture" ), {} };
+    }
+
+    Command clearCommand() const override
+    {
+        return {};
+    }
+
+    void startProcessAsync( QProcess& process ) override
+    {
+        if ( failedToStart_ ) {
+            QFile capture( stderrFilePath() );
+            REQUIRE( capture.open( QIODevice::WriteOnly ) );
+            const auto error = QByteArrayLiteral( "synthetic-startup-error\n" );
+            REQUIRE( capture.write( error ) == error.size() );
+        }
+        const QPointer<QProcess> guard( &process );
+        const QPointer<DiagnosticTerminalTransport> transport( this );
+        REQUIRE( QMetaObject::invokeMethod(
+            &process,
+            [ guard, transport, failedToStart = failedToStart_ ] {
+                REQUIRE( guard );
+                if ( failedToStart ) {
+                    REQUIRE( QMetaObject::invokeMethod(
+                        guard.data(), "errorOccurred", Qt::DirectConnection,
+                        Q_ARG( QProcess::ProcessError, QProcess::FailedToStart ) ) );
+                }
+                else {
+                    REQUIRE( QMetaObject::invokeMethod(
+                        guard.data(), "finished", Qt::DirectConnection, Q_ARG( int, 17 ),
+                        Q_ARG( QProcess::ExitStatus, QProcess::NormalExit ) ) );
+                }
+                REQUIRE( transport );
+                // Foreign notifications must not overwrite this attempt's result or cause.
+                Q_EMIT transport->stateChanged( Generation{ 99 }, State::Connected );
+                Q_EMIT transport->errorOccurred( Generation{ 99 },
+                                                 QStringLiteral( "foreign-generation-error" ) );
+            },
+            Qt::QueuedConnection ) );
+    }
+
+private:
+    bool failedToStart_;
+};
+} // namespace
+
+TEST_CASE( "Transport startup diagnostic intentional failure fixture",
+           "[.transport-startup-diagnostic]" )
+{
+    const auto failedToStart = GENERATE( false, true );
+    GenerationDrivenProcessTransport<DiagnosticTerminalTransport> transport( failedToStart );
+    // Intentionally fails at the caller, after startAndWait's local INFO scope ends.
+    REQUIRE( transport.startAndWait() );
+}
+
+TEST_CASE( "Transport startup diagnostic text is bounded" )
+{
+    const auto shortText = QStringLiteral( "known startup error" );
+    CHECK( boundedStartupText( shortText ) == shortText );
+    const auto bounded = boundedStartupText( QString( 4096, QLatin1Char( 'x' ) ) );
+    CHECK( bounded.size() <= 512 );
+    CHECK( bounded.endsWith( QStringLiteral( "<truncated>" ) ) );
+}
+
+TEST_CASE( "Transport startup terminal diagnostics survive the helper return" )
+{
+    QTemporaryDir isolated;
+    REQUIRE( isolated.isValid() );
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert( QStringLiteral( "KLOGG_PORTABLE_CONFIG_DIR" ),
+                        isolated.filePath( QStringLiteral( "config" ) ) );
+    environment.insert( QStringLiteral( "KLOGG_CAPTURE_COORDINATION_ROOT" ),
+                        isolated.filePath( QStringLiteral( "coordination" ) ) );
+    QProcess child;
+    child.setProcessEnvironment( environment );
+    child.setWorkingDirectory( isolated.path() );
+    child.setProcessChannelMode( QProcess::SeparateChannels );
+    SafeQSignalSpy finished( &child, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ) );
+    child.start( QCoreApplication::applicationFilePath(),
+                 { QStringLiteral( "-platform" ), QStringLiteral( "offscreen" ),
+                   QStringLiteral( "[.transport-startup-diagnostic]" ),
+                   QStringLiteral( "--reporter" ), QStringLiteral( "xml" ) } );
+    const auto completed = finished.safeWait( kAsyncCompletionTimeoutMs );
+    // XML preserves diagnostic tokens rather than wrapping at hyphens. Separate
+    // stderr prevents an unrelated log line from satisfying a diagnostic check.
+    const auto output = child.readAllStandardOutput();
+    INFO( "Diagnostic child output: " << output.left( 12000 ).toStdString() );
+    INFO( "Diagnostic child stderr: " << child.readAllStandardError().left( 4000 ).toStdString() );
+    CAPTURE( child.errorString().toStdString(), child.exitCode() );
+    REQUIRE( completed );
+    REQUIRE( child.exitStatus() == QProcess::NormalExit );
+    REQUIRE( child.exitCode() == 2 );
+    CHECK( output.count( "Transport startup diagnostic:" ) == 2 );
+    CHECK( output.simplified().contains( "last_error=Live source exited unexpectedly (17)" ) );
+    CHECK( output.contains( "last_error=synthetic-startup-error" ) );
+    CHECK( output.simplified().count( "generation=1 completed=1 connected=0" ) == 2 );
+    CHECK( output.count( "program=startup-diagnostic-fixture" ) == 2 );
+    CHECK( output.count( "started_reported_pid=unobserved" ) == 2 );
+    CHECK( output.contains( "error_signal=0" ) );
+    CHECK( output.contains( "exit_code=17" ) );
+    CHECK( output.contains( "exit_status=0" ) );
+}
 
 TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intentional disconnect" )
 {

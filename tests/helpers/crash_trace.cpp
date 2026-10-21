@@ -257,6 +257,17 @@ void reportCollectorDiagnostics() noexcept
         static_cast<unsigned long long>( input.sp ), static_cast<unsigned long long>( input.fp ),
         static_cast<unsigned long>( input.flags & stackLimitsAvailable ),
         static_cast<unsigned long long>( input.stackLow ), static_cast<unsigned long long>( input.stackHigh ) );
+    const auto stack = summarizeDiagnosticStack( data );
+    std::fprintf(
+        stderr,
+        "Test minidump diagnostic {\"kind\":\"stack-span\",\"boundsKnown\":%u,"
+        "\"address\":%llu,\"desiredBytes\":%llu,\"requestedBytes\":%lu,\"transferredBytes\":%lu,"
+        "\"recordsValid\":%u,\"complete\":%u,\"diagnosticTruncated\":%u,\"extendedXstate\":\"unknown\"}\n",
+        stack.boundsKnown ? 1U : 0U, static_cast<unsigned long long>( stack.address ),
+        static_cast<unsigned long long>( stack.desiredBytes ),
+        static_cast<unsigned long>( stack.requestedBytes ), static_cast<unsigned long>( stack.transferredBytes ),
+        stack.recordsValid ? 1U : 0U, stack.complete ? 1U : 0U,
+        ( data.result.flags & diagnosticTruncated ) != 0 ? 1U : 0U );
     for ( std::size_t index = 0; index < data.result.recordCount; ++index ) {
         const auto& record = data.records[ index ];
         std::fprintf(

@@ -1,4 +1,5 @@
 import io
+import os
 import pathlib
 import runpy
 import subprocess
@@ -7,6 +8,7 @@ import unittest
 from unittest import mock
 
 from contract_cli_observation import ContractCliObserver
+import test_adb_helper_hardening_contract as hardening
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -134,6 +136,99 @@ class HardeningCliObservationContractTest(unittest.TestCase):
         self.assertIs(caught.exception, failure)
         self.assertIn("adb-hardening-cli[1] timeout", stream.getvalue())
         self.assertNotIn("private-command", stream.getvalue())
+
+
+class HardeningFixtureConstructionContractTest(unittest.TestCase):
+    def setUp(self):
+        self.case = hardening.AdbHelperSourceHardeningContractTest()
+        self.case.setUp()
+        self.addCleanup(self.case.tearDown)
+
+    def test_overlay_setup_uses_fresh_real_fixtures_without_process_startup(self):
+        original_loader = hardening.load_legal_module
+        modules = []
+
+        def load_fresh():
+            module = original_loader()
+            modules.append(module)
+            return module
+
+        argv, path = sys.argv, sys.path
+        argv_contents, path_contents = list(argv), list(path)
+        environment, cwd = dict(os.environ), pathlib.Path.cwd()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(hardening, "load_legal_module", side_effect=load_fresh), \
+                mock.patch.object(subprocess, "run", side_effect=AssertionError("fixture spawned a process")), \
+                mock.patch.object(sys, "stdout", stdout), mock.patch.object(sys, "stderr", stderr):
+            first, _ = self.case.make_overlay_fixture(name="first")
+            second, _ = self.case.make_overlay_fixture(name="second")
+            self.assertIs(sys.stdout, stdout)
+            self.assertIs(sys.stderr, stderr)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertIs(sys.argv, argv)
+        self.assertEqual(sys.argv, argv_contents)
+        self.assertIs(sys.path, path)
+        self.assertEqual(sys.path, path_contents)
+        self.assertEqual(dict(os.environ), environment)
+        self.assertEqual(pathlib.Path.cwd(), cwd)
+        self.assertEqual(len(modules), 2)
+        self.assertIsNot(modules[0], modules[1])
+        modules[0].fixture_local_marker = object()
+        self.assertFalse(hasattr(modules[1], "fixture_local_marker"))
+        self.assertNotEqual(first.core_root, second.core_root)
+        receipt = "adb-helper-source-set-receipt.json"
+        second_bytes = (second.core_root / receipt).read_bytes()
+        (first.core_root / receipt).write_bytes(b"mutated first fixture")
+        self.assertEqual((second.core_root / receipt).read_bytes(), second_bytes)
+
+    def test_overlay_setup_core_and_sidecars_match_real_cli_bytes(self):
+        args, _ = self.case.make_overlay_fixture(name="in-process")
+        root = args.core_root.parent
+        output = root / "cli-core"
+        result = hardening.run_contract_cli(
+            [sys.executable, str(hardening.LEGAL_SCRIPT), "--core-only",
+             "--lock", str(args.lock), "--archive-root", str(root / "archives"),
+             "--repository-root", str(root / "repository"), "--output", str(output)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        expected = {path.name: path.read_bytes() for path in output.iterdir()}
+        self.assertTrue(any(name.endswith(".sha256") for name in expected))
+        self.assertIn("adb-helper-source-set-receipt.json", expected)
+        self.assertIn("adb-helper-source-archive.tar.gz", expected)
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in args.core_root.iterdir()}, expected,
+        )
+
+    def test_overlay_setup_preserves_real_source_admission_failure_and_restores_argv(self):
+        original_fixture = self.case.make_legal_fixture
+
+        def corrupt_archive(root):
+            fixture = original_fixture(root)
+            _, archives, _, lock = fixture
+            (archives / lock["sources"][0]["archive_file"]).write_bytes(b"changed source")
+            return fixture
+
+        argv, path = sys.argv, sys.path
+        environment, cwd = dict(os.environ), pathlib.Path.cwd()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(self.case, "make_legal_fixture", side_effect=corrupt_archive), \
+                mock.patch.object(subprocess, "run", side_effect=AssertionError("fixture spawned a process")), \
+                mock.patch.object(sys, "stdout", stdout), mock.patch.object(sys, "stderr", stderr):
+            with self.assertRaisesRegex(RuntimeError, "missing or mismatched locked source archive"):
+                self.case.make_overlay_fixture(name="rejected")
+            self.assertIs(sys.stdout, stdout)
+            self.assertIs(sys.stderr, stderr)
+        self.assertIs(sys.argv, argv)
+        self.assertIs(sys.path, path)
+        self.assertEqual(dict(os.environ), environment)
+        self.assertEqual(pathlib.Path.cwd(), cwd)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("fixture spawned a process")):
+            valid, _ = self.case.make_overlay_fixture(name="valid-after-failure")
+        self.assertTrue((valid.core_root / "adb-helper-source-set-receipt.json").is_file())
 
 
 if __name__ == "__main__":

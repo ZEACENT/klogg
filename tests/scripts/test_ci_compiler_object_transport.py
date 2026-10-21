@@ -126,6 +126,150 @@ class CompilerObjectTransportTests(unittest.TestCase):
                              size_in_bytes=self.zipped.stat().st_size,
                              digest="sha256:" + hashlib.sha256(self.zipped.read_bytes()).hexdigest())
 
+    def cache_bytes(self):
+        return {path.relative_to(self.cache).as_posix(): path.read_bytes()
+                for path in self.cache.rglob("*") if path.is_file()}
+
+    def test_metadata_timeouts_are_observable_misses_without_import_or_cache_mutation(self):
+        stages = ("/artifacts?", "/runs/201", "/git/commits/", "/contents/")
+        for retained in (False, True):
+            if retained:
+                transport.mark_backend(self.cache, self.context, self.origin)
+            for stage in stages:
+                with self.subTest(backend_retained=retained, stage=stage):
+                    before = self.cache_bytes()
+                    def metadata(endpoint):
+                        if stage in endpoint:
+                            return transport.actions.metadata(endpoint)
+                        return self.api(endpoint)
+                    error = subprocess.TimeoutExpired("VERY_SECRET_COMMAND", 30,
+                        output=b"VERY_SECRET_BODY", stderr=b"VERY_SECRET_STDERR")
+                    with mock.patch.object(transport.actions.subprocess, "run", side_effect=error) as request, \
+                            mock.patch.object(transport, "install") as install:
+                        result = self.restore(metadata=metadata, backend_cache=self.cache, current_tree="e" * 40)
+                    self.assertFalse(result["restored"])
+                    self.assertFalse(result["discovery_exhausted"])
+                    self.assertTrue(result["export_needed"])
+                    self.assertEqual(result["discovery_status"], "unavailable")
+                    self.assertEqual(result["acquisition"], "metadata-unavailable")
+                    self.assertIn("failure=timeout", result["discovery_error"])
+                    self.assertNotIn("VERY_SECRET", json.dumps(result))
+                    self.assertEqual(result["compatibility_key"], self.context["key"])
+                    self.assertEqual(result["backend_retained"], retained)
+                    self.assertEqual(result["transport"], "actions-cache" if retained else "actions-artifact")
+                    for name in ("artifact_id", "available_artifact_id", "producer"):
+                        self.assertNotIn(name, result)
+                    self.assertEqual(self.cache_bytes(), before)
+                    self.assertFalse((self.root / "restored").exists())
+                    self.assertEqual(self.downloads, [])
+                    install.assert_not_called()
+                    request.assert_called_once()
+                    self.assertEqual(request.call_args.kwargs["timeout"], 30)
+
+    def test_locked_metadata_api_preserves_timeout_cause_and_fatal_source_cache_contract(self):
+        import ci_environment_source_cache as source_cache
+        timeout = subprocess.TimeoutExpired("VERY_SECRET_COMMAND", 30,
+            output=b"VERY_SECRET_BODY", stderr=b"VERY_SECRET_STDERR")
+        with mock.patch.object(transport.actions.subprocess, "run", side_effect=timeout) as request:
+            with self.assertRaises(transport.actions.TransportError) as caught:
+                transport.actions.metadata("repos/ZEACENT/klogg/actions/runs/201")
+            self.assertIs(type(caught.exception), transport.actions.TransportError)
+            self.assertIs(caught.exception.__cause__, timeout)
+            self.assertNotIn("VERY_SECRET", str(caught.exception))
+            with self.assertRaises(source_cache.SourceCacheError) as source:
+                source_cache._metadata("repos/ZEACENT/klogg/actions/runs/201")
+            self.assertIs(type(source.exception.__cause__), transport.actions.TransportError)
+            self.assertIs(source.exception.__cause__.__cause__, timeout)
+            self.assertEqual(request.call_count, 2)
+
+    def test_non_timeout_and_indirect_timeout_causes_remain_fatal(self):
+        indirect = ValueError("nested cause is not a metadata request timeout")
+        indirect.__cause__ = subprocess.TimeoutExpired("gh", 30)
+        for cause in (OSError("missing gh"), subprocess.CalledProcessError(1, ["gh"]),
+                      subprocess.SubprocessError("timeout"), indirect):
+            with self.subTest(cause=type(cause).__name__):
+                error = transport.actions.TransportError("failure=timeout")
+                error.__cause__ = cause
+                before = self.cache_bytes()
+                with self.assertRaises(transport.actions.TransportError) as caught:
+                    self.restore(metadata=mock.Mock(side_effect=error), backend_cache=self.cache)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(self.cache_bytes(), before)
+                self.assertEqual(self.downloads, [])
+                self.assertFalse((self.root / "restored").exists())
+
+    def test_timeout_text_without_timeout_cause_remains_fatal(self):
+        error = transport.actions.TransportError(
+            "authenticated Actions metadata request failed [endpoint=other failure=timeout http=unknown]")
+        before = self.cache_bytes()
+        with self.assertRaises(transport.actions.TransportError) as caught:
+            self.restore(metadata=mock.Mock(side_effect=error), backend_cache=self.cache)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(self.cache_bytes(), before)
+        self.assertEqual(self.downloads, [])
+        self.assertFalse((self.root / "restored").exists())
+
+    def test_discovery_deadline_remains_fatal_before_metadata_or_download(self):
+        metadata = mock.Mock()
+        before = self.cache_bytes()
+        with mock.patch.object(transport.time, "monotonic", side_effect=[0, transport.MAX_SECONDS + 1]), \
+                self.assertRaisesRegex(ValueError, "discovery exceeded deadline"):
+            self.restore(metadata=metadata, backend_cache=self.cache)
+        metadata.assert_not_called()
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(self.cache_bytes(), before)
+
+    def test_timeout_cli_retains_backend_and_emits_unavailable_report_without_install(self):
+        transport.mark_backend(self.cache, self.context, self.origin)
+        descriptor = self.root / "descriptor.json"
+        descriptor.write_text(json.dumps(self.descriptor))
+        report, output = self.root / "report.json", self.root / "output"
+        before = self.cache_bytes()
+        with mock.patch.object(transport, "identity", return_value=self.origin), \
+                mock.patch.object(transport.actions.subprocess, "run",
+                                  side_effect=subprocess.TimeoutExpired("gh", 30)), \
+                mock.patch.object(transport, "install") as install, \
+                mock.patch.object(transport, "download_artifact") as download, \
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+            self.assertEqual(transport.main(["restore", "--descriptor", str(descriptor),
+                "--repo-root", str(self.repo), "--cache", str(self.cache), "--output", str(report)]), 0)
+        result = json.loads(report.read_text())
+        self.assertEqual(result["discovery_status"], "unavailable")
+        self.assertTrue(result["backend_retained"])
+        self.assertEqual(self.cache_bytes(), before)
+        self.assertIn("restored=false", output.read_text().splitlines())
+        self.assertIn("export-needed=true", output.read_text().splitlines())
+        self.assertIn("artifact-id=", output.read_text().splitlines())
+        self.assertIn("report=" + str(report), output.read_text().splitlines())
+        install.assert_not_called()
+        download.assert_not_called()
+
+    def test_timeout_cause_outside_metadata_discovery_remains_fatal(self):
+        with mock.patch.object(transport.actions.subprocess, "run", side_effect=subprocess.TimeoutExpired("gh", 30)):
+            with self.assertRaises(transport.actions.TransportError) as caught:
+                transport.actions.metadata("repos/ZEACENT/klogg/actions/runs/201")
+        timeout = caught.exception
+        before = self.cache_bytes()
+        with mock.patch.object(self, "download", side_effect=timeout), \
+                self.assertRaises(type(timeout)) as failed_download:
+            self.restore()
+        self.assertIs(failed_download.exception, timeout)
+        self.assertEqual(self.cache_bytes(), before)
+        self.assertFalse((self.root / "restored").exists())
+        descriptor = self.root / "descriptor.json"
+        descriptor.write_text(json.dumps(self.descriptor))
+        report = self.root / "report.json"
+        with mock.patch.object(transport, "identity", return_value=self.origin), \
+                mock.patch.object(transport, "restore", return_value={"restored": True}), \
+                mock.patch.object(transport, "install", side_effect=timeout) as install, \
+                self.assertRaises(SystemExit) as failed_install:
+            transport.main(["restore", "--descriptor", str(descriptor), "--repo-root", str(self.repo),
+                            "--cache", str(self.cache), "--output", str(report)])
+        self.assertEqual(failed_install.exception.code, 1)
+        install.assert_called_once()
+        self.assertFalse(report.exists())
+        self.assertEqual(self.cache_bytes(), before)
+
     def test_backend_hint_requires_current_profile_and_application_tree(self):
         self.application_artifact()
         transport.mark_backend(self.cache, self.context, self.origin)
@@ -499,6 +643,262 @@ class CompilerObjectTransportTests(unittest.TestCase):
             self.restore()
         self.assertFalse((self.root / "restored").exists())
 
+    def test_ccache_exports_persistent_data_not_root_temporary_inode_acceleration(self):
+        temporary = self.cache / "tmp"
+        temporary.mkdir()
+        inode = temporary / "inode-cache-64.v2"
+        inode.write_bytes(b"x" * (2 * self.context["budget_bytes"]))
+        suffixless = self.cache / "c/d/0123456789abcdef"
+        suffixless.parent.mkdir(parents=True)
+        suffixless.write_bytes(b"new-format result")
+        nested = self.cache / "a/tmp/resultR"
+        nested.parent.mkdir()
+        nested.write_bytes(b"not the reserved root namespace")
+        before = (inode.read_bytes(), inode.stat().st_mtime_ns)
+        report = {}
+        with mock.patch.object(transport, "cleanup_ccache_snapshot") as cleanup:
+            manifest = transport.pack(self.cache, self.root / "persistent", self.context,
+                                      self.origin, report=report)
+        cleanup.assert_not_called()
+        self.assertEqual(manifest["object_count"], 3)
+        with tarfile.open(self.root / "persistent/objects.tar") as archive:
+            self.assertEqual(set(archive.getnames()), {"a/b/entryR", "c/d/0123456789abcdef", "a/tmp/resultR"})
+        self.assertEqual(report["excluded_transient_bytes"], inode.stat().st_size)
+        self.assertEqual((inode.read_bytes(), inode.stat().st_mtime_ns), before)
+
+    def test_temporary_data_is_fully_validated_before_exclusion(self):
+        temporary = self.cache / "tmp"
+        temporary.mkdir()
+        link = temporary / "link"
+        link.symlink_to(self.cache / "a/b/entryR")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            transport.pack(self.cache, self.root / "bad-tmp", self.context, self.origin)
+        link.unlink()
+        (temporary / "bad name").write_bytes(b"temporary but unsafe")
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            transport.pack(self.cache, self.root / "bad-name", self.context, self.origin)
+        self.assertFalse((self.root / "bad-tmp").exists())
+
+    def test_tmp_only_zero_bytes_and_inventory_file_limit_never_publish(self):
+        only = self.root / "only-tmp"
+        (only / "tmp").mkdir(parents=True)
+        (only / "tmp/inode-cache-64.v2").write_bytes(b"runtime-only")
+        with self.assertRaisesRegex(ValueError, "no object data"):
+            transport.pack(only, self.root / "empty-export", self.context, self.origin)
+        (self.cache / "a/b/entryR").write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "no object data"):
+            transport.pack(self.cache, self.root / "zero-export", self.context, self.origin)
+        (self.cache / "a/b/entryR").write_bytes(b"result")
+        (self.cache / "tmp").mkdir()
+        (self.cache / "tmp/one").write_bytes(b"one")
+        with mock.patch.object(transport, "MAX_MEMBERS", 1), self.assertRaisesRegex(ValueError, "member"):
+            transport.pack(self.cache, self.root / "many-export", self.context, self.origin)
+
+    def test_sccache_tmp_namespace_is_not_filtered(self):
+        (self.cache / "tmp").mkdir()
+        (self.cache / "tmp/result").write_bytes(b"sccache data")
+        ctx = {**self.context, "kind": "sccache"}
+        manifest = transport.pack(self.cache, self.root / "sccache-export", ctx, self.origin)
+        self.assertEqual(manifest["object_count"], 2)
+
+    def test_sccache_preserves_packing_when_windows_lstat_and_fstat_ctime_differ(self):
+        # CPython 3.12 Windows lstat exposes CreationTime as legacy ctime,
+        # while fstat exposes FileBasicInfo.ChangeTime. They need not match.
+        entry = self.cache / "a/b/entryR"
+        expected = entry.stat()
+        real_fstat = os.fstat
+        def windows_fstat(descriptor):
+            actual = real_fstat(descriptor)
+            if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                return actual
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_mode")
+            changed = mock.Mock(**{key: getattr(actual, key) for key in fields})
+            changed.st_ctime_ns += 1
+            return changed
+        ctx = {**self.context, "kind": "sccache"}
+        with mock.patch.object(transport.os, "fstat", side_effect=windows_fstat), \
+                mock.patch.object(transport, "same_inventory_file", wraps=transport.same_inventory_file) as check:
+            manifest = transport.pack(self.cache, self.root / "windows-stat", ctx, self.origin)
+        check.assert_not_called()
+        self.assertEqual(manifest["object_bytes"], expected.st_size)
+        with tarfile.open(self.root / "windows-stat/objects.tar") as archive:
+            self.assertEqual(archive.extractfile("a/b/entryR").read(), entry.read_bytes())
+        entry.write_bytes(b"x" * (ctx["budget_bytes"] + 1))
+        with mock.patch.object(transport, "same_inventory_file") as check, \
+                self.assertRaisesRegex(ValueError, "exceeds export budget"):
+            transport.pack(self.cache, self.root / "windows-oversized", ctx, self.origin)
+        check.assert_not_called()
+        self.assertFalse((self.root / "windows-oversized").exists())
+
+    def test_exact_limit_packs_without_cleanup_and_overflow_cleans_only_private_copy(self):
+        entry = self.cache / "a/b/entryR"
+        entry.write_bytes(b"x" * self.context["budget_bytes"])
+        with mock.patch.object(transport, "cleanup_ccache_snapshot") as cleanup:
+            transport.pack(self.cache, self.root / "exact", self.context, self.origin)
+        cleanup.assert_not_called()
+        entry.write_bytes(entry.read_bytes() + b"!")
+        before = (entry.read_bytes(), entry.stat().st_mtime_ns)
+        def compact(snapshot, target, ctx):
+            copied = snapshot / "a/b/entryR"
+            self.assertNotEqual(snapshot, self.cache)
+            self.assertEqual(copied.read_bytes(), before[0])
+            self.assertEqual(copied.stat().st_mtime_ns, before[1])
+            if os.name != "nt":
+                self.assertNotEqual(copied.stat().st_ino, entry.stat().st_ino)
+            self.assertGreater(target, 0)
+            self.assertLess(target, ctx["budget_bytes"])
+            copied.write_bytes(b"retained result")
+        report = {}
+        with mock.patch.object(transport, "cleanup_ccache_snapshot", side_effect=compact) as cleanup:
+            manifest = transport.pack(self.cache, self.root / "compact", self.context,
+                                      self.origin, report=report)
+        cleanup.assert_called_once()
+        self.assertEqual(manifest["object_bytes"], len(b"retained result"))
+        self.assertEqual((entry.read_bytes(), entry.stat().st_mtime_ns), before)
+        self.assertEqual(report["status"], "compacted")
+
+    def test_unresolved_capacity_is_typed_but_cleanup_and_integrity_errors_remain_fatal(self):
+        entry = self.cache / "a/b/entryR"
+        entry.write_bytes(b"x" * (self.context["budget_bytes"] + 1))
+        with mock.patch.object(transport, "cleanup_ccache_snapshot"), self.assertRaises(transport.ExportCapacityExhausted):
+            transport.pack(self.cache, self.root / "no-capacity", self.context, self.origin)
+        self.assertFalse((self.root / "no-capacity").exists())
+        for error in (ValueError("unsafe snapshot"), subprocess.CalledProcessError(1, ["ccache"])):
+            with mock.patch.object(transport, "cleanup_ccache_snapshot", side_effect=error):
+                with self.assertRaises(type(error)) as raised:
+                    transport.pack(self.cache, self.root / "bad-cleanup", self.context, self.origin)
+                self.assertNotIsInstance(raised.exception, transport.ExportCapacityExhausted)
+
+    def test_snapshot_rejects_changed_inode_size_mtime_or_ctime_before_publication(self):
+        entry = self.cache / "a/b/entryR"
+        expected = entry.stat()
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_mode")
+        real_fstat = os.fstat
+        for field in fields[:-1]:
+            changed = mock.Mock(**{key: getattr(expected, key) for key in fields})
+            setattr(changed, field, getattr(expected, field) + 1)
+            def changed_source(descriptor):
+                actual = real_fstat(descriptor)
+                return changed if (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino) else actual
+            with self.subTest(field=field), mock.patch.object(transport.os, "fstat", side_effect=changed_source), \
+                    self.assertRaisesRegex(ValueError, "changed during packing"):
+                transport.pack(self.cache, self.root / "changed", self.context, self.origin)
+            self.assertFalse((self.root / "changed").exists())
+        files, _ = transport.cache_inventory(self.cache, "ccache")
+        entry.write_bytes(b"new cached data")
+        with self.assertRaisesRegex(ValueError, "changed during snapshot copy"):
+            transport.copy_cache_inventory(files, self.root / "stale-copy")
+
+    def test_capacity_cli_skips_only_typed_exhaustion_without_artifact_claim(self):
+        descriptor = self.root / "descriptor.json"
+        descriptor.write_text(json.dumps(self.descriptor))
+        (self.cache / "a/b/entryR").write_bytes(b"x" * (self.context["budget_bytes"] + 1))
+        output = self.root / "outputs"
+        before = self.cache_bytes()
+        with mock.patch.object(transport, "identity", return_value=self.origin), \
+                mock.patch.object(transport, "cleanup_ccache_snapshot"), \
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+            result = transport.main(["pack", "--descriptor", str(descriptor), "--repo-root", str(self.repo),
+                                     "--cache", str(self.cache), "--output", str(self.root / "capacity")])
+        self.assertEqual(result, 0)
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertEqual(values["packed"], "false")
+        self.assertEqual(values["export-status"], "capacity-exhausted")
+        self.assertNotIn("artifact-name", values)
+        self.assertNotIn("artifact-id", values)
+        self.assertNotIn("path", values)
+        self.assertEqual(self.cache_bytes(), before)
+        self.assertFalse((self.root / "capacity").exists())
+        with mock.patch.object(transport, "identity", return_value=self.origin), \
+                mock.patch.object(transport, "cleanup_ccache_snapshot", side_effect=ValueError("exceeds export budget")), \
+                self.assertRaises(SystemExit) as failed:
+            transport.main(["pack", "--descriptor", str(descriptor), "--repo-root", str(self.repo),
+                            "--cache", str(self.cache), "--output", str(self.root / "invalid")])
+        self.assertEqual(failed.exception.code, 1)
+
+    def test_private_cleanup_rescans_unsafe_entries_and_empty_capacity(self):
+        (self.cache / "a/b/entryR").write_bytes(b"x" * (self.context["budget_bytes"] + 1))
+        def unsafe(snapshot, target, ctx):
+            (snapshot / "injected").symlink_to(self.cache / "a/b/entryR")
+        with mock.patch.object(transport, "cleanup_ccache_snapshot", side_effect=unsafe), \
+                self.assertRaisesRegex(ValueError, "symlink") as rejected:
+            transport.pack(self.cache, self.root / "unsafe-copy", self.context, self.origin)
+        self.assertNotIsInstance(rejected.exception, transport.ExportCapacityExhausted)
+        def empty(snapshot, target, ctx):
+            (snapshot / "a/b/entryR").unlink()
+        with mock.patch.object(transport, "cleanup_ccache_snapshot", side_effect=empty), \
+                self.assertRaises(transport.ExportCapacityExhausted) as exhausted:
+            transport.pack(self.cache, self.root / "empty-copy", self.context, self.origin)
+        self.assertEqual(exhausted.exception.report["reason"], "empty-after-cleanup")
+        self.assertFalse((self.root / "empty-copy").exists())
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "Linux mount identity requires a POSIX host")
+    def test_linux_cleanup_uses_only_verified_local_image_and_isolated_configuration(self):
+        private = self.root / "private"
+        snapshot = private / "cache"
+        snapshot.mkdir(parents=True)
+        image = "example.invalid/toolchain@sha256:" + "a" * 64
+        ctx = {**self.context, "compatibility": {"platform": "Linux", "toolchain": {"image": image}}}
+        with mock.patch.dict(os.environ, {"CCACHE_PREFIX": "must-not-run", "CCACHE_MAXSIZE": "99G"}), \
+                mock.patch.object(transport.subprocess, "run") as run:
+            transport.cleanup_ccache_snapshot(snapshot, 900000, ctx)
+        command = run.call_args.args[0]
+        for token in ("docker", "--pull=never", "--network=none", image, "-i", "ccache", "--cleanup"):
+            self.assertIn(token, command)
+        self.assertNotIn("must-not-run", command)
+        self.assertTrue(all(not key.startswith("CCACHE_") for key in run.call_args.kwargs["env"]))
+        self.assertTrue(run.call_args.kwargs["check"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        self.assertFalse(run.call_args.kwargs.get("shell", False))
+        self.assertEqual((private / "trusted-ccache.conf").read_text(), "max_size = 900.000k\n")
+        self.assertIn("CCACHE_CONFIGPATH=/compiler-export/trusted-ccache.conf", command)
+        self.assertIn("CCACHE_DIR=/compiler-export/cache", command)
+        self.assertFalse((snapshot / "ccache.conf").exists())
+        wrong = {**ctx, "compatibility": {"platform": "Linux", "toolchain": {"image": "mutable:latest"}}}
+        other = self.root / "bad-private/cache"
+        other.mkdir(parents=True)
+        with mock.patch.object(transport.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "immutable"):
+            transport.cleanup_ccache_snapshot(other, 900000, wrong)
+        run.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("ccache") and shutil.which("clang"), "real ccache/clang unavailable")
+    def test_real_ccache_transient_free_export_retains_compile_hit_and_source_bytes(self):
+        live = self.root / "real-cache"
+        live.mkdir()
+        source = self.root / "probe.c"
+        source.write_text("int answer(void) { return 42; }\n")
+        config = self.root / "trusted-live.conf"
+        config.write_text("max_size = 500M\ncompiler_check = content\n")
+        base = {key: value for key, value in os.environ.items() if not key.startswith("CCACHE_")}
+        def environment(cache):
+            return {**base, "CCACHE_DIR": str(cache), "CCACHE_CONFIGPATH": str(config),
+                    "CCACHE_TEMPDIR": str(cache / "tmp")}
+        command = [shutil.which("ccache"), shutil.which("clang"), "-c", str(source), "-o", str(self.root / "probe.o")]
+        subprocess.run(command, env=environment(live), check=True, capture_output=True, timeout=30)
+        (live / "tmp").mkdir(exist_ok=True)
+        (live / "tmp/runtime-fixture").write_bytes(b"x" * (self.context["budget_bytes"] + 1))
+        def snapshot():
+            return {p.relative_to(live).as_posix(): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+                    for p in live.rglob("*") if p.is_file()}
+        before, trusted = snapshot(), config.read_bytes()
+        bundle = self.root / "real-bundle"
+        with mock.patch.object(transport, "cleanup_ccache_snapshot") as cleanup:
+            manifest = transport.pack(live, bundle, self.context, self.origin)
+        cleanup.assert_not_called()
+        self.assertLessEqual(manifest["object_bytes"], self.context["budget_bytes"])
+        imported = self.root / "real-imported"
+        transport.extract_objects(bundle / "objects.tar", imported, self.context)
+        subprocess.run([shutil.which("ccache"), "--zero-stats"], env=environment(imported), check=True,
+                       capture_output=True, timeout=30)
+        subprocess.run(command, env=environment(imported), check=True, capture_output=True, timeout=30)
+        result = subprocess.run([shutil.which("ccache"), "--print-stats"], env=environment(imported), check=True,
+                                capture_output=True, text=True, timeout=30)
+        counts = dict(line.split() for line in result.stdout.splitlines())
+        self.assertEqual(int(counts["direct_cache_hit"]) + int(counts["preprocessed_cache_hit"]), 1)
+        self.assertEqual(int(counts["cache_miss"]), 0)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(config.read_bytes(), trusted)
+
     def test_archive_configuration_is_not_imported(self):
         (self.cache / "ccache.conf").write_text("prefix = arbitrary-program\n")
         transport.pack(self.cache, self.root / "clean-bundle", self.context, self.origin)
@@ -539,7 +939,7 @@ class CompilerObjectTransportTests(unittest.TestCase):
         (self.cache / "link").unlink()
         (self.cache / "large").write_bytes(b"x" * (1024 * 1024))
         with self.assertRaisesRegex(ValueError, "budget"):
-            transport.pack(self.cache, self.root / "large-bundle", self.context, self.origin)
+            transport.pack(self.cache, self.root / "large-bundle", {**self.context, "kind": "sccache"}, self.origin)
 
     def test_tar_traversal_and_case_aliases_are_rejected(self):
         for names in (("../escape",), ("A/file", "a/file"), ("C:stream",), ("ccache.conf",)):

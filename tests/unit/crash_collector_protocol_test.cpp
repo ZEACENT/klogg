@@ -184,6 +184,103 @@ struct FakeOps {
 };
 } // namespace
 
+TEST_CASE( "Postfailure stack plan uses known active span within the unchanged total budget" )
+{
+    auto data = diagnostic();
+    data.input.flags = stackLimitsAvailable;
+    data.input.stackLow = 0x1000;
+    data.input.stackHigh = 0x9000;
+    const auto full = diagnosticStackPlan( data.input, 0x8800, 1400 );
+    CHECK( full.boundsKnown );
+    CHECK( full.desiredBytes == 2048 );
+    CHECK( full.readBytes == 2048 );
+    const auto bounded = diagnosticStackPlan( data.input, 0x2000, 1400 );
+    CHECK( bounded.desiredBytes == 0x7000 );
+    CHECK( bounded.readBytes == maximumDiagnosticReadBytes - 1400 );
+    CHECK( diagnosticStackPlan( data.input, 0x2000, maximumDiagnosticReadBytes ).readBytes == 0 );
+    CHECK( diagnosticStackPlan( data.input, 0x2000, 0xffffffffU ).readBytes == 0 );
+    CHECK( diagnosticStackPlan( data.input, 0x8fff, 0 ).readBytes == 1 );
+    for ( const auto sp : { 0xfffULL, 0x9000ULL, 0xffffffffffffffffULL } ) {
+        const auto unknown = diagnosticStackPlan( data.input, sp, 0 );
+        CHECK_FALSE( unknown.boundsKnown );
+        CHECK( unknown.desiredBytes == 0 );
+        CHECK( unknown.readBytes == maximumStackSample );
+    }
+    data.input.stackLow = 0;
+    CHECK_FALSE( diagnosticStackPlan( data.input, 0x8800, 0 ).boundsKnown );
+    data.input.stackLow = data.input.stackHigh;
+    CHECK_FALSE( diagnosticStackPlan( data.input, 0x8800, 0 ).boundsKnown );
+    data.input.flags = 0;
+    CHECK_FALSE( diagnosticStackPlan( data.input, 0x8800, 0 ).boundsKnown );
+    CHECK( diagnosticStackPlan( data.input, 0x8800, maximumDiagnosticReadBytes - 10 ).readBytes == 10 );
+    // Retained release failure: only 256 of this 1968-byte active span was previously sampled.
+    data.input.flags = stackLimitsAvailable;
+    data.input.stackLow = 152759173120ULL;
+    data.input.stackHigh = 152760221696ULL;
+    const auto retained = diagnosticStackPlan( data.input, 152760219728ULL, 1400 );
+    CHECK( retained.desiredBytes == 1968 );
+    CHECK( retained.readBytes == 1968 );
+}
+
+TEST_CASE( "Derived stack coverage distinguishes desired requested and actually transferred bytes" )
+{
+    auto data = diagnostic();
+    data.input.flags = stackLimitsAvailable;
+    data.input.stackLow = 0x1000;
+    data.input.stackHigh = 0x9000;
+    data.input.sp = 0x8e00;
+    data.result.recordCount = 2;
+    for ( auto index : { 0U, 1U } ) {
+        auto& record = data.records[ index ];
+        record.kind = static_cast<std::uint32_t>( DiagnosticKind::Read );
+        record.object = static_cast<std::uint32_t>( DiagnosticObject::Stack );
+        record.status = static_cast<std::uint32_t>( DiagnosticStatus::Complete );
+        record.address = data.input.sp + index * 256;
+        record.requested = 256;
+        record.transferred = 256;
+    }
+    auto summary = summarizeDiagnosticStack( data );
+    CHECK( summary.desiredBytes == 512 );
+    CHECK( summary.requestedBytes == 512 );
+    CHECK( summary.transferredBytes == 512 );
+    CHECK( summary.complete );
+    data.records[ 1 ].address = data.records[ 0 ].address;
+    CHECK_FALSE( summarizeDiagnosticStack( data ).recordsValid );
+    data.records[ 1 ].address += 256;
+    data.records[ 1 ].status = static_cast<std::uint32_t>( DiagnosticStatus::Error );
+    CHECK_FALSE( summarizeDiagnosticStack( data ).complete );
+    data.records[ 1 ].status = static_cast<std::uint32_t>( DiagnosticStatus::Partial );
+    data.records[ 1 ].transferred = 32;
+    summary = summarizeDiagnosticStack( data );
+    CHECK( summary.requestedBytes == 512 );
+    CHECK( summary.transferredBytes == 288 );
+    CHECK_FALSE( summary.complete );
+    data.records[ 1 ].status = static_cast<std::uint32_t>( DiagnosticStatus::Budget );
+    summary = summarizeDiagnosticStack( data );
+    CHECK( summary.requestedBytes == 256 );
+    CHECK( summary.transferredBytes == 256 );
+    CHECK_FALSE( summary.complete );
+    data.result.recordCount = 1;
+    data.input.flags = 0;
+    CHECK_FALSE( summarizeDiagnosticStack( data ).complete );
+    data.input.flags = stackLimitsAvailable;
+    data.records[ 0 ].requested = 0xffffffffffffffffULL;
+    CHECK_FALSE( summarizeDiagnosticStack( data ).recordsValid );
+    CHECK( diagnosticVersion == 1 );
+    CHECK( sizeof( SharedPage ) == 72 );
+}
+
+TEST_CASE( "Full readable stack observation preserves an earlier partial-copy dump failure" )
+{
+    auto data = diagnostic();
+    const Outcome failed{ Stage::Dump, ErrorDomain::DumpHResult, 0x8007012bU, false, false };
+    const auto observation = observeDumpOutcome( &data, capture(), 64, true, failed,
+        []( DiagnosticData& observed ) { observed.result.decoded = 7; } );
+    CHECK_FALSE( observation.primary.succeeded );
+    CHECK( observation.primary.error == 0x8007012bU );
+    CHECK( data.result.decoded == 7 );
+}
+
 TEST_CASE( "Complete wrapper diagnostics use observed roots and decoded stack in order" )
 {
     auto data = diagnostic();

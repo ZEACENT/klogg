@@ -142,6 +142,14 @@ class CompilerDescriptorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "digest"):
             self.make(image="ubuntu:latest")
 
+    def test_windows_policy_binds_native_overlap_and_authenticated_rendezvous(self):
+        helpers = {"scripts/ci_native_overlap.py", "scripts/ci_native_rendezvous.py"}
+        self.assertTrue(helpers.issubset(descriptor.PLATFORM_POLICY["Windows"]))
+        self.assertTrue(helpers.issubset(descriptor.PLATFORM_POLICY["macOS"]))
+        self.assertTrue(helpers.isdisjoint(descriptor.PLATFORM_POLICY["Linux"]))
+        for policy in descriptor.NATIVE_POLICY.values():
+            self.assertTrue(helpers.isdisjoint(policy))
+
     def test_windows_reuses_current_validated_state_identity_and_existing_budget(self):
         self.env.update(RUNNER_OS="Windows", KLOGG_LABEL="x64-qt6")
         state = {"ready": True, "run": {key: self.env[key] for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA")},

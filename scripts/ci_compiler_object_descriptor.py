@@ -50,6 +50,7 @@ PLATFORM_POLICY = {
         ".github/actions/agent-build/action.yml", ".github/actions/agent-run-tests/action.yml",
         ".github/actions/agent-package-win/action.yml", "scripts/ci_windows_object_cache.py",
         "cmake/WindowsObjectCache.cmake", "ci/tools/sccache-windows.json",
+        "scripts/ci_native_overlap.py", "scripts/ci_native_rendezvous.py",
     ),
 }
 NATIVE_COMMON_POLICY = (

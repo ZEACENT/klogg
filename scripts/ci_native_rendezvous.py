@@ -123,13 +123,28 @@ def evaluate(expected, run, jobs, artifacts, producers):
     return None if waiting else ready
 
 
-def validate_receipt(receipt, expected, architecture):
+def profile(platform, architecture):
+    if platform == "macOS" and architecture in ("x86_64", "arm64"):
+        target = "macos-" + architecture
+        gates = ["KLOGG_ADB_HELPER_REQUIRED", "KLOGG_ENABLE_IOS_NATIVE_STACK"]
+        artifacts = {"ios-native-" + architecture: "iOS native stack " + architecture}
+    elif platform == "Windows" and architecture == "x86_64":
+        target = "windows-x86_64"
+        gates = ["KLOGG_ADB_HELPER_REQUIRED"]
+        artifacts = {}
+    else:
+        raise ValueError("unsupported native overlap platform/architecture")
+    artifacts.update({"adb-helper-" + target: "Source-built ADB helper " + target,
+                      "adb-helper-package-support": "Build ADB helper legal assets"})
+    return {"platform": platform, "architecture": architecture, "target": target,
+            "gates": gates, "artifacts": artifacts}
+
+
+def validate_receipt(receipt, expected, architecture, *, platform="macOS"):
     if (not isinstance(receipt, dict) or receipt.get("schema_version") != 1
             or receipt.get("identity") != expected):
         raise ValueError("native rendezvous receipt identity mismatch")
-    names = {"adb-helper-macos-" + architecture: "Source-built ADB helper macos-" + architecture,
-             "ios-native-" + architecture: "iOS native stack " + architecture,
-             "adb-helper-package-support": "Build ADB helper legal assets"}
+    names = profile(platform, architecture)["artifacts"]
     artifacts = receipt.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(names):
         raise ValueError("native rendezvous receipt artifact names mismatch")
@@ -190,15 +205,15 @@ def wait(expected, producers, *, api=github_api, timeout=1800, clock=time.monoto
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--architecture", choices=("x86_64", "arm64"), required=True)
+    parser.add_argument("--platform", choices=("macOS", "Windows"), default="macOS")
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=1800)
     args = parser.parse_args(argv)
     try:
         expected = identity()
-        target = "macos-" + args.architecture
-        producers = {"Source-built ADB helper " + target: ["adb-helper-" + target],
-                     "iOS native stack " + args.architecture: ["ios-native-" + args.architecture],
-                     "Build ADB helper legal assets": ["adb-helper-package-support"]}
+        contract = profile(args.platform, args.architecture)
+        target = contract["target"]
+        producers = {producer: [name] for name, producer in contract["artifacts"].items()}
         ready = wait(expected, producers, timeout=args.timeout)
         receipt = {"schema_version": 1, "identity": expected, "artifacts": ready}
         args.receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -209,7 +224,8 @@ def main(argv=None):
             for key, name in (("adb-artifact-id", "adb-helper-" + target),
                               ("ios-artifact-id", "ios-native-" + args.architecture),
                               ("support-artifact-id", "adb-helper-package-support")):
-                output.write(f"{key}={ready[name]['artifact_id']}\n")
+                if name in ready:
+                    output.write(f"{key}={ready[name]['artifact_id']}\n")
         return 0
     except (OSError, ValueError, KeyError, TimeoutError) as error:
         parser.exit(1, f"error: {error}\n")

@@ -1,7 +1,9 @@
 #include "platform/platform_files.h"
 
+#include <cerrno>
 #include <cstdint>
 #include <limits>
+#include <system_error>
 #include <vector>
 
 #include <QByteArray>
@@ -19,7 +21,6 @@
 #include <io.h>
 #include <windows.h>
 #else
-#include <cerrno>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -341,6 +342,65 @@ std::optional<FileIdentity> fileIdentity( const QString& path )
     return FileIdentity{ static_cast<std::uint64_t>( info.st_dev ),
                          static_cast<std::uint64_t>( info.st_ino ) };
 #endif
+}
+
+ReadOnlyFileOpenResult openFileReadOnly( QFile& file )
+{
+    if ( file.isOpen() || file.fileName().isEmpty() ) {
+        return { ReadOnlyFileOpenStatus::Failed,
+                 QStringLiteral( "read-only open requires a closed file and a nonempty path" ) };
+    }
+#if defined( Q_OS_WIN )
+    const auto nativePath = extendedNativePath( file.fileName() );
+    const auto rawHandle
+        = CreateFileW( reinterpret_cast<LPCWSTR>( nativePath.utf16() ), GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, nullptr );
+    const auto openError = rawHandle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    NativeHandle handle( rawHandle );
+    if ( !handle ) {
+        const auto missing = openError == ERROR_FILE_NOT_FOUND || openError == ERROR_PATH_NOT_FOUND;
+        return { missing ? ReadOnlyFileOpenStatus::Missing : ReadOnlyFileOpenStatus::Failed,
+                 QString::fromStdString(
+                     std::system_category().message( static_cast<int>( openError ) ) ) };
+    }
+    const auto descriptor = _open_osfhandle(
+        reinterpret_cast<intptr_t>( handle.get() ), _O_RDONLY | _O_BINARY | _O_NOINHERIT );
+    const auto descriptorError = errno;
+    if ( descriptor == -1 ) {
+        return { ReadOnlyFileOpenStatus::Failed,
+                 QString::fromStdString( std::generic_category().message( descriptorError ) ) };
+    }
+    (void) handle.release(); // The CRT descriptor now owns the HANDLE.
+#else
+    const auto nativePath = QFile::encodeName( file.fileName() );
+    int descriptor;
+    int openError;
+    while ( true ) {
+        // POSIX open() is variadic for creation flags; these fixed flags never create files.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+        descriptor = ::open( nativePath.constData(), O_RDONLY | O_CLOEXEC );
+        openError = errno;
+        if ( descriptor != -1 || openError != EINTR ) {
+            break;
+        }
+    }
+    if ( descriptor == -1 ) {
+        const auto status = openError == ENOENT ? ReadOnlyFileOpenStatus::Missing
+                                              : ReadOnlyFileOpenStatus::Failed;
+        return { status, QString::fromStdString( std::generic_category().message( openError ) ) };
+    }
+#endif
+    if ( file.open( descriptor, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle ) ) {
+        return { ReadOnlyFileOpenStatus::Opened, {} };
+    }
+    const auto error = file.errorString();
+#if defined( Q_OS_WIN )
+    _close( descriptor );
+#else
+    ::close( descriptor );
+#endif
+    return { ReadOnlyFileOpenStatus::Failed, error };
 }
 
 bool openFileSharedForReplacement( QFile& file, QIODevice::OpenMode mode )
