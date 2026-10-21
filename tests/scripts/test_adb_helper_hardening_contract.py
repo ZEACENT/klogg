@@ -823,13 +823,15 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         root.mkdir(exist_ok=True)
         repository, archives, lock_path, lock = self.make_legal_fixture(root)
         core = root / "immutable-core"
-        result = run_contract_cli(
-            [sys.executable, str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
-             "--archive-root", str(archives), "--repository-root", str(repository),
-             "--output", str(core)],
-            capture_output=True, text=True, check=False, timeout=10,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # This is setup for in-process overlay assertions, not a CLI boundary
+        # test. Run the real generator with a fresh module and fixture instead
+        # of paying interpreter startup for every negative admission scenario.
+        # Explicit CLI tests and byte-for-byte fixture parity cover the boundary.
+        command = [str(LEGAL_SCRIPT), "--core-only", "--lock", str(lock_path),
+                   "--archive-root", str(archives), "--repository-root", str(repository),
+                   "--output", str(core)]
+        with mock.patch.object(sys, "argv", command):
+            self.assertEqual(load_legal_module().main(), 0)
         build_path, source_pin, build_pin = self.write_original_build_receipt(
             core, lock_path, lock, build_changes)
         args = argparse.Namespace(
