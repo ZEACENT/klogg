@@ -376,10 +376,15 @@ ReadOnlyFileOpenResult openFileReadOnly( QFile& file )
     const auto nativePath = QFile::encodeName( file.fileName() );
     int descriptor;
     int openError;
-    do {
+    while ( true ) {
+        // POSIX open() is variadic for creation flags; these fixed flags never create files.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
         descriptor = ::open( nativePath.constData(), O_RDONLY | O_CLOEXEC );
         openError = errno;
-    } while ( descriptor == -1 && openError == EINTR );
+        if ( descriptor != -1 || openError != EINTR ) {
+            break;
+        }
+    }
     if ( descriptor == -1 ) {
         const auto status = openError == ENOENT ? ReadOnlyFileOpenStatus::Missing
                                               : ReadOnlyFileOpenStatus::Failed;

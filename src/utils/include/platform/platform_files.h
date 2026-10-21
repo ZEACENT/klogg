@@ -40,7 +40,7 @@ bool operator!=( const FileIdentity& left, const FileIdentity& right );
 std::optional<FileIdentity> fileIdentity( const QFileDevice& file );
 std::optional<FileIdentity> fileIdentity( const QString& path );
 
-enum class ReadOnlyFileOpenStatus { Opened, Missing, Failed };
+enum class ReadOnlyFileOpenStatus : std::uint8_t { Opened, Missing, Failed };
 
 struct ReadOnlyFileOpenResult {
     ReadOnlyFileOpenStatus status{ ReadOnlyFileOpenStatus::Failed };

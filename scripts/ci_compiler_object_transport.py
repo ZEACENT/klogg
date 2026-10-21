@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -323,38 +324,168 @@ def backend_matches(cache, ctx, repository_id, current_tree):
             and source_covered(ctx, value["source_tree"], current_tree))
 
 
-def pack(cache_root, output, ctx, origin):
-    cache_root, output = Path(cache_root), Path(output)
+class ExportCapacityExhausted(ValueError):
+    """A validated private ccache snapshot still cannot meet the unchanged cap."""
+
+    def __init__(self, report):
+        super().__init__("private compiler cache cannot satisfy bounded nonempty export after cleanup")
+        self.report = dict(report)
+
+
+def cache_inventory(cache_root, kind):
+    cache_root = Path(cache_root)
     require(cache_root.is_dir() and not cache_root.is_symlink(), "compiler cache is not an ordinary directory")
-    require(not output.exists() and not output.is_symlink(), "export destination already exists")
-    files, seen, size = [], set(), 0
-    for directory, dirs, names in os.walk(cache_root, followlinks=False):
+    files, seen, paths = [], set(), {}
+    report = {"source_bytes": 0, "source_file_count": 0, "persistent_bytes": 0,
+              "excluded_transient_bytes": 0, "excluded_metadata_bytes": 0}
+    def scan_error(error):
+        raise error
+    for directory, dirs, names in os.walk(cache_root, followlinks=False, onerror=scan_error):
         for name in dirs + names:
             require(not (Path(directory) / name).is_symlink(), "compiler cache contains a symlink")
+        for name in dirs:
+            safe_name((Path(directory) / name).relative_to(cache_root).as_posix())
         for name in sorted(names):
             path = Path(directory) / name
-            if name.lower() in ("ccache.conf", BACKEND_MARKER):
-                continue
+            observed = path.lstat()
+            require(stat.S_ISREG(observed.st_mode), "special compiler object")
+            report["source_file_count"] += 1
+            require(report["source_file_count"] <= MAX_MEMBERS, "compiler cache exceeds inventory member limit")
+            report["source_bytes"] += observed.st_size
             relative = path.relative_to(cache_root).as_posix()
-            safe_name(relative)
-            require(relative.casefold() not in seen and stat.S_ISREG(path.stat().st_mode),
-                    "duplicate or special compiler object")
-            seen.add(relative.casefold())
-            size += path.stat().st_size
-            require(len(files) < MAX_MEMBERS and size <= ctx["budget_bytes"], "compiler cache exceeds export budget")
-            files.append((relative, path, path.stat().st_size))
-    require(files, "compiler cache has no object data")
+            if name.lower() in ("ccache.conf", BACKEND_MARKER):
+                if path.parent != cache_root:
+                    safe_name(path.parent.relative_to(cache_root).as_posix())
+                report["excluded_metadata_bytes"] += observed.st_size
+                continue
+            parts = track_name(relative, seen, paths)
+            # ccache's documented default temporary_dir is cache_dir/tmp. Its
+            # inode hash accelerator also lives there (ccache 4.8/4.13 InodeCache).
+            # It is not persistent compiler output. Validate it before exclusion;
+            # do not guess result suffixes (new ccache also uses suffixless keys).
+            if kind == "ccache" and parts[0] == "tmp":
+                require(len(parts) > 1, "ccache temporary namespace is not a directory")
+                report["excluded_transient_bytes"] += observed.st_size
+                continue
+            report["persistent_bytes"] += observed.st_size
+            files.append((relative, path, observed))
+    return files, report
+
+
+def same_inventory_file(observed, expected):
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    return stat.S_ISREG(observed.st_mode) and all(getattr(observed, key) == getattr(expected, key) for key in fields)
+
+
+def copy_cache_inventory(files, snapshot):
+    snapshot.mkdir()
+    for relative, source, expected in files:
+        destination = snapshot.joinpath(*relative.split("/"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream, destination.open("xb") as target:
+            before = os.fstat(stream.fileno())
+            require(same_inventory_file(before, expected), "compiler cache changed during snapshot copy")
+            remaining = expected.st_size
+            while remaining:
+                chunk = stream.read(min(remaining, 1024 * 1024))
+                require(chunk, "compiler cache truncated during snapshot copy")
+                target.write(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(stream.fileno())
+            require(not stream.read(1) and same_inventory_file(after, expected)
+                    and same_inventory_file(source.lstat(), expected), "compiler cache changed during snapshot copy")
+        destination.chmod(0o600)
+        os.utime(destination, ns=(before.st_atime_ns, expected.st_mtime_ns))
+
+
+def cleanup_ccache_snapshot(snapshot, target_bytes, ctx):
+    """Use native LRU only on a real private copy, never replayed configuration."""
+    require(0 < target_bytes < ctx["budget_bytes"], "invalid private cleanup headroom")
+    size = f"{target_bytes // 1000}.{target_bytes % 1000:03d}k"
+    private = snapshot.parent.resolve(strict=True)
+    config = private / "trusted-ccache.conf"
+    config.write_text("max_size = " + size + "\n", encoding="utf-8")
+    (private / "runtime").mkdir()
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("CCACHE_")}
+    compatibility = ctx.get("compatibility", {})
+    if compatibility.get("platform") == "Linux":
+        image = compatibility.get("toolchain", {}).get("image")
+        require(isinstance(image, str) and re.fullmatch(r"(?:[A-Za-z0-9./:_-]+@)?sha256:[0-9a-f]{64}", image),
+                "private cleanup requires the verified immutable Linux image")
+        require("," not in str(private), "unsafe private cache mount path")
+        command = ["docker", "run", "--pull=never", "--rm", "--network=none",
+                   "--user", f"{os.getuid()}:{os.getgid()}",
+                   "--mount", f"type=bind,source={private},target=/compiler-export",
+                   "--entrypoint", "/usr/bin/env", image, "-i",
+                   "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                   "HOME=/compiler-export", "CCACHE_DIR=/compiler-export/cache",
+                   "CCACHE_CONFIGPATH=/compiler-export/trusted-ccache.conf",
+                   "CCACHE_TEMPDIR=/compiler-export/runtime", "ccache", "--cleanup"]
+    else:
+        executable = shutil.which("ccache")
+        require(executable is not None, "native ccache cleanup executable unavailable")
+        environment.update(CCACHE_DIR=str(snapshot.resolve(strict=True)), CCACHE_CONFIGPATH=str(config),
+                           CCACHE_TEMPDIR=str(private / "runtime"))
+        command = [executable, "--cleanup"]
+    subprocess.run(command, env=environment, check=True, capture_output=True, text=True, timeout=60)
+
+
+def pack(cache_root, output, ctx, origin, *, report=None):
+    cache_root, output = Path(cache_root), Path(output)
+    require(not output.exists() and not output.is_symlink(), "export destination already exists")
+    require(cache_root.resolve() not in output.resolve().parents, "export destination overlaps compiler cache")
+    files, inventory = cache_inventory(cache_root, ctx["kind"])
+    require(files and inventory["persistent_bytes"] > 0, "compiler cache has no object data")
+    report = {} if report is None else report
+    report.update(inventory, budget_bytes=ctx["budget_bytes"], status="packed", copy_wall_ms=0, cleanup_wall_ms=0)
+    size = inventory["persistent_bytes"]
+    overflow = size > ctx["budget_bytes"]
+    if overflow:
+        require(ctx["kind"] == "ccache", "compiler cache exceeds export budget")
+        allowance = max(1_000_000, ctx["budget_bytes"] // 100)
+        require(size <= ctx["budget_bytes"] + allowance, "compiler cache exceeds validated backend allowance")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".compiler-export-", dir=output.parent) as temporary:
+        if overflow:
+            private = Path(temporary) / "private"
+            private.mkdir()
+            snapshot = private / "cache"
+            started = time.monotonic()
+            copy_cache_inventory(files, snapshot)
+            report["copy_wall_ms"] = round((time.monotonic() - started) * 1000)
+            headroom = min(allowance, max(1, ctx["budget_bytes"] // 2))
+            target = ctx["budget_bytes"] - headroom
+            report["scratch_target_bytes"] = target
+            started = time.monotonic()
+            cleanup_ccache_snapshot(snapshot, target, ctx)
+            report["cleanup_wall_ms"] = round((time.monotonic() - started) * 1000)
+            files, cleaned = cache_inventory(snapshot, "ccache")
+            size = cleaned["persistent_bytes"]
+            report.update(status="compacted", retained_bytes=size, retained_file_count=len(files))
+            if not files or size == 0 or size > ctx["budget_bytes"]:
+                report.update(status="capacity-exhausted",
+                              reason="empty-after-cleanup" if size == 0 else "oversized-after-cleanup")
+                raise ExportCapacityExhausted(report)
         staging = Path(temporary) / "bundle"
         staging.mkdir()
         archive_path = staging / "objects.tar"
         with tarfile.open(archive_path, "w", format=tarfile.USTAR_FORMAT) as archive:
-            for relative, path, length in sorted(files):
+            for relative, path, expected in sorted(files):
                 info = tarfile.TarInfo(relative)
-                info.size, info.mode, info.mtime = length, 0o600, 0
-                with path.open("rb") as stream:
-                    archive.addfile(info, stream)
+                info.size, info.mode, info.mtime = expected.st_size, 0o600, 0
+                if ctx["kind"] == "sccache":
+                    # Preserve the Windows path: CPython 3.12 lstat/fstat ctime
+                    # mean CreationTime/ChangeTime respectively, not one identity.
+                    with path.open("rb") as stream:
+                        archive.addfile(info, stream)
+                else:
+                    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                    with os.fdopen(descriptor, "rb") as stream:
+                        require(same_inventory_file(os.fstat(stream.fileno()), expected), "compiler cache changed during packing")
+                        archive.addfile(info, stream)
+                        require(not stream.read(1) and same_inventory_file(os.fstat(stream.fileno()), expected)
+                                and same_inventory_file(path.lstat(), expected), "compiler cache changed during packing")
         require(archive_path.stat().st_size <= archive_limit(ctx), "object envelope exceeds export budget")
         manifest = {"schema_version": 1, "kind": "ordinary-compiler-objects", "context": ctx,
                     "origin": origin, "archive_sha256": digest(archive_path),
@@ -362,6 +493,7 @@ def pack(cache_root, output, ctx, origin):
         data = canonical(manifest)
         require(len(data) <= MAX_MANIFEST, "compiler object manifest is oversized")
         (staging / "manifest.json").write_bytes(data)
+        report.update(retained_bytes=size, retained_file_count=len(files), archive_bytes=archive_path.stat().st_size)
         staging.rename(output)
     return manifest
 
@@ -832,9 +964,18 @@ def main(argv=None):
             marker = mark_backend(args.cache, ctx, origin)
             emit({"marked": True, "backend-marker": marker, "compatibility-key": ctx["key"]})
         elif args.command == "pack":
-            pack(args.cache, args.output, ctx, origin)
+            report = {}
+            try:
+                pack(args.cache, args.output, ctx, origin, report=report)
+            except ExportCapacityExhausted as error:
+                # Only a fully validated private copy that exhausted native LRU
+                # cleanup is optional. Integrity, tool and admission errors stay fatal.
+                print("KLOGG_COMPILER_EXPORT_JSON=" + json.dumps(error.report, sort_keys=True))
+                emit({"packed": False, "export-status": "capacity-exhausted", "compatibility-key": ctx["key"]})
+                return 0
+            print("KLOGG_COMPILER_EXPORT_JSON=" + json.dumps(report, sort_keys=True))
             emit({"artifact-name": artifact_name(ctx, origin["run_attempt"]), "path": args.output,
-                  "packed": True, "compatibility-key": ctx["key"]})
+                  "packed": True, "export-status": report["status"], "compatibility-key": ctx["key"]})
         else:
             # Existing backend objects are retained on a bridge miss. On a hit,
             # install only fully authenticated data, never extract over a cache.
