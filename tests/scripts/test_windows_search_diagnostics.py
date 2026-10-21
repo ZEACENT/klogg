@@ -362,6 +362,24 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.assert_collector_capture_contract(spoof + "// " + source.replace("\n", " "))
 
+    def test_postfailure_stack_observation_is_bounded_and_labels_actual_coverage(self):
+        collector = (ROOT / "tests/helpers/collector.cpp").read_text()
+        stack = self.cpp_function_body(collector, "readStack")
+        self.assertIn("diagnosticStackPlan( data.input, address, data.result.requestedBytes )", stack)
+        self.assertRegex(stack, r"std::array<std::uint8_t, maximumDiagnosticReadBytes> stackScratch")
+        self.assertRegex(stack, r"if\s*\(\s*plan.readBytes != 0\s*\)")
+        self.assertRegex(stack, r"readDiagnosticObject\(\s*capabilities_, address, stackScratch.data\(\),"
+                         r"\s*plan.readBytes, DiagnosticObject::Stack\s*\)")
+        self.assertIn("diagnosticTruncated", stack)
+        self.assertIn("diagnosticUnavailable", stack)
+        self.assert_collector_capture_contract(collector)
+        parent = (ROOT / "tests/helpers/crash_trace.cpp").read_text()
+        self.assertIn("summarizeDiagnosticStack( data )", parent)
+        for field in ("stack-span", "boundsKnown", "desiredBytes", "requestedBytes",
+                      "transferredBytes", "complete", "diagnosticTruncated"):
+            self.assertIn(field, parent)
+        self.assertIn('\\"extendedXstate\\":\\"unknown\\"', parent)
+
     def test_dump_writer_runs_in_a_separate_restricted_collector(self):
         source = (ROOT / "tests/helpers/crash_trace.cpp").read_text()
         self.assertNotRegex(source, r"\bMiniDumpWriteDump\s*\(",

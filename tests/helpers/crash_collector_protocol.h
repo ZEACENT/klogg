@@ -478,6 +478,75 @@ inline bool visitDiagnosticException( std::array<std::uint64_t, maximumException
     return true;
 }
 
+struct DiagnosticStackPlan {
+    std::uint64_t desiredBytes{};
+    std::uint32_t readBytes{};
+    bool boundsKnown{};
+};
+
+inline DiagnosticStackPlan diagnosticStackPlan( const DiagnosticInput& input, std::uint64_t sp,
+                                                std::uint32_t reservedBytes ) noexcept
+{
+    const auto known = input.flags == stackLimitsAvailable && input.stackLow != 0
+                       && input.stackLow <= sp && sp < input.stackHigh;
+    const auto desired = known ? input.stackHigh - sp : 0;
+    const auto wanted = known ? desired : maximumStackSample;
+    const auto remaining = reservedBytes < maximumDiagnosticReadBytes
+                               ? maximumDiagnosticReadBytes - reservedBytes : 0;
+    return { desired, static_cast<std::uint32_t>( wanted < remaining ? wanted : remaining ), known };
+}
+
+struct DiagnosticStackSummary {
+    std::uint64_t address{};
+    std::uint64_t desiredBytes{};
+    std::uint32_t requestedBytes{};
+    std::uint32_t transferredBytes{};
+    bool boundsKnown{};
+    bool recordsValid{ true };
+    bool complete{};
+};
+
+inline DiagnosticStackSummary summarizeDiagnosticStack( const DiagnosticData& data ) noexcept
+{
+    DiagnosticStackSummary summary{};
+    summary.address = ( data.result.decoded & contextDecoded ) != 0 ? data.result.sp : data.input.sp;
+    const auto plan = diagnosticStackPlan( data.input, summary.address, 0 );
+    summary.desiredBytes = plan.desiredBytes;
+    summary.boundsKnown = plan.boundsKnown;
+    if ( data.result.recordCount > data.records.size() ) {
+        summary.recordsValid = false;
+        return summary;
+    }
+    bool allComplete = true;
+    for ( std::size_t index = 0; index < data.result.recordCount; ++index ) {
+        const auto& record = data.records[ index ];
+        if ( record.kind != static_cast<std::uint32_t>( DiagnosticKind::Read )
+             || record.object != static_cast<std::uint32_t>( DiagnosticObject::Stack ) ) {
+            continue;
+        }
+        const auto status = static_cast<DiagnosticStatus>( record.status );
+        allComplete = allComplete && status == DiagnosticStatus::Complete && record.error == 0;
+        if ( status != DiagnosticStatus::Complete && status != DiagnosticStatus::Partial
+             && status != DiagnosticStatus::Error ) {
+            // Region/budget rejection did not issue ReadProcessMemory.
+            continue;
+        }
+        if ( record.address < summary.address
+             || record.address - summary.address != summary.requestedBytes
+             || record.requested > maximumDiagnosticReadBytes - summary.requestedBytes
+             || record.transferred > record.requested ) {
+            summary.recordsValid = false;
+            return summary;
+        }
+        summary.requestedBytes += static_cast<std::uint32_t>( record.requested );
+        summary.transferredBytes += static_cast<std::uint32_t>( record.transferred );
+    }
+    summary.complete = summary.boundsKnown && allComplete
+                       && summary.requestedBytes == summary.desiredBytes
+                       && summary.transferredBytes == summary.desiredBytes;
+    return summary;
+}
+
 template <class Probes>
 void probeDiagnosticObjects( DiagnosticData& data, Probes& probes )
 {

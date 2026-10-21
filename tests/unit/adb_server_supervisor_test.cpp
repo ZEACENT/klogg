@@ -29,6 +29,7 @@
 #include <QTest>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -685,13 +686,21 @@ struct HelperFileObservation {
     }
 };
 
-HelperFileObservation readHelperRecords( const QString& path, qint64 maximum )
+HelperFileObservation readHelperRecords( const QString& path, qint64 maximum,
+                                        const std::function<void()>& afterFailedOpen = {} )
 {
     HelperFileObservation observed;
     QFile file( path );
-    if ( !file.open( QIODevice::ReadOnly ) ) {
-        observed.state = QFileInfo::exists( path ) ? "open-error" : "missing";
-        observed.error = file.errorString().toStdString();
+    const auto opened = klogg::platform::openFileReadOnly( file );
+    if ( opened.status != klogg::platform::ReadOnlyFileOpenStatus::Opened ) {
+        if ( afterFailedOpen ) {
+            afterFailedOpen();
+        }
+        // A helper may publish between the failed open and this classification.
+        // Use that operation's typed result, never the pathname's later state.
+        observed.state = opened.status == klogg::platform::ReadOnlyFileOpenStatus::Missing
+                             ? "missing" : "open-error";
+        observed.error = opened.error.toStdString();
         return observed;
     }
     observed.records = file.read( maximum + 1 );
@@ -1862,6 +1871,131 @@ TEST_CASE( "Qt helper keeps committed progress while a partial publication is he
     helper.request( QStringLiteral( ".complete-partial" ) );
     helper.requireObservation( []( const auto& observed ) { return observed.progress >= 2u; } );
     helper.stopAndWait();
+}
+
+TEST_CASE( "read-only PAL open distinguishes missing and hard failures without losing ownership",
+           "[livecapture][adb][supervisor][progress][platform]" )
+{
+    using klogg::platform::ReadOnlyFileOpenStatus;
+    QTemporaryDir directory;
+    REQUIRE( directory.isValid() );
+    const auto path = directory.filePath( QStringLiteral( "publication" ) );
+    QFile missing( path );
+    const auto absent = klogg::platform::openFileReadOnly( missing );
+    CHECK( absent.status == ReadOnlyFileOpenStatus::Missing );
+    CHECK_FALSE( absent.error.isEmpty() );
+    CHECK_FALSE( missing.isOpen() );
+    CHECK_FALSE( QFileInfo::exists( path ) );
+    QFile unnamed;
+    const auto invalid = klogg::platform::openFileReadOnly( unnamed );
+    CHECK( invalid.status == ReadOnlyFileOpenStatus::Failed );
+    CHECK_FALSE( invalid.error.isEmpty() );
+    CHECK_FALSE( unnamed.isOpen() );
+
+    QFile writer( path );
+    REQUIRE( writer.open( QIODevice::WriteOnly ) );
+    REQUIRE( writer.write( "1\n" ) == 2 );
+    writer.close();
+    const auto opened = klogg::platform::openFileReadOnly( missing );
+    REQUIRE( opened.status == ReadOnlyFileOpenStatus::Opened );
+    CHECK( opened.error.isEmpty() );
+    const auto descriptor = missing.handle();
+    REQUIRE( descriptor >= 0 );
+    const auto alreadyOpen = klogg::platform::openFileReadOnly( missing );
+    CHECK( alreadyOpen.status == ReadOnlyFileOpenStatus::Failed );
+    CHECK( missing.isOpen() );
+    CHECK( missing.handle() == descriptor );
+    CHECK( missing.readAll() == QByteArrayLiteral( "1\n" ) );
+    CHECK( missing.error() == QFileDevice::NoError );
+    missing.close();
+    CHECK_FALSE( missing.isOpen() );
+    CHECK( missing.handle() == -1 );
+
+    QFile directoryFile( directory.path() );
+    const auto directoryOpen = klogg::platform::openFileReadOnly( directoryFile );
+    CHECK( directoryOpen.status != ReadOnlyFileOpenStatus::Missing );
+    if ( directoryOpen.status == ReadOnlyFileOpenStatus::Opened ) {
+        directoryFile.read( 1 );
+        CHECK( directoryFile.error() != QFileDevice::NoError );
+    }
+    else {
+        CHECK_FALSE( directoryOpen.error.isEmpty() );
+    }
+}
+
+TEST_CASE( "Qt helper missing publication stays pending when created after a failed open",
+           "[livecapture][adb][supervisor][progress][startup-race]" )
+{
+    QTemporaryDir directory;
+    REQUIRE( directory.isValid() );
+    const std::vector<std::pair<QString, QByteArray>> publications{
+        { directory.filePath( QStringLiteral( "heartbeat" ) ), QByteArrayLiteral( "1\n" ) },
+        { directory.filePath( QStringLiteral( "status" ) ),
+          QByteArrayLiteral( "phase main-entered\n" ) },
+    };
+    for ( const auto& publication : publications ) {
+        DYNAMIC_SECTION( QFileInfo( publication.first ).fileName().toStdString() )
+        {
+            bool publishedAfterFailure = false;
+            const auto observed = readHelperRecords( publication.first, 4096, [ & ] {
+                REQUIRE_FALSE( QFileInfo::exists( publication.first ) );
+                QFile writer( publication.first );
+                REQUIRE( writer.open( QIODevice::WriteOnly ) );
+                REQUIRE( writer.write( publication.second ) == publication.second.size() );
+                writer.close();
+                publishedAfterFailure = true;
+                // Classification must retain the failed open's error, not a
+                // later operation's errno or the now-existing pathname.
+                errno = EACCES;
+            } );
+            REQUIRE( publishedAfterFailure );
+            INFO( "read=" << observed.state << " error=" << observed.error );
+            CHECK( observed.state == "missing" );
+            CHECK_FALSE( observed.failed() );
+            CHECK( observed.records.isEmpty() );
+            const auto committed = readHelperRecords( publication.first, 4096 );
+            CHECK( committed.state == "complete" );
+            CHECK( committed.records == publication.second );
+        }
+    }
+}
+
+TEST_CASE( "Qt helper keeps genuine open failures fatal when the pathname is absent",
+           "[livecapture][adb][supervisor][progress][startup-race]" )
+{
+    QTemporaryDir directory;
+    REQUIRE( directory.isValid() );
+    // All supported local filesystems reject this oversized single component;
+    // unlike a missing publication, it cannot become valid by waiting.
+    const auto path = directory.filePath( QString( 1024, QLatin1Char( 'x' ) ) );
+    const auto observed = readHelperRecords( path, 64 );
+    INFO( "read=" << observed.state << " error=" << observed.error );
+    CHECK( observed.state == "open-error" );
+    CHECK( observed.failed() );
+    CHECK_FALSE( observed.error.empty() );
+    CHECK( observed.records.isEmpty() );
+}
+
+TEST_CASE( "Qt helper observation reads Unicode paths with unchanged record bounds",
+           "[livecapture][adb][supervisor][progress]" )
+{
+    QTemporaryDir directory;
+    REQUIRE( directory.isValid() );
+    const auto path = directory.filePath( QStringLiteral( "status-" ) + QChar( 0x4e2d )
+                                          + QChar( 0x00e9 ) );
+    const auto record = QByteArrayLiteral( "phase main-entered\n" );
+    QFile writer( path );
+    REQUIRE( writer.open( QIODevice::WriteOnly ) );
+    REQUIRE( writer.write( record ) == record.size() );
+    writer.close();
+    const auto observed = readHelperRecords( path, 4096 );
+    CHECK( observed.state == "complete" );
+    CHECK( observed.records == record );
+    CHECK_FALSE( observed.failed() );
+    const auto bounded = readHelperRecords( path, 4 );
+    CHECK( bounded.state == "over-budget" );
+    CHECK( bounded.records.isEmpty() );
+    CHECK( bounded.failed() );
 }
 
 TEST_CASE( "Qt helper observations distinguish missing partial invalid and failed publication",

@@ -273,9 +273,22 @@ public:
 
     void readStack( std::uint64_t address ) noexcept
     {
-        std::array<std::uint8_t, maximumStackSample> stackScratch{};
-        static_cast<void>( readDiagnosticObject( capabilities_, address, stackScratch.data(),
-                                                 stackScratch.size(), DiagnosticObject::Stack ) );
+        auto& data = *capabilities_.diagnostics;
+        const auto plan = diagnosticStackPlan( data.input, address, data.result.requestedBytes );
+        if ( !plan.boundsKnown ) {
+            data.result.flags |= diagnosticUnavailable;
+        }
+        const auto wanted = plan.boundsKnown ? plan.desiredBytes : maximumStackSample;
+        if ( plan.readBytes < wanted ) {
+            data.result.flags |= diagnosticTruncated;
+        }
+        // Cover the active fault-thread stack only within the existing total read budget.
+        // This says nothing about other threads or the original CONTEXT's XSTATE extent.
+        std::array<std::uint8_t, maximumDiagnosticReadBytes> stackScratch{};
+        if ( plan.readBytes != 0 ) {
+            static_cast<void>( readDiagnosticObject( capabilities_, address, stackScratch.data(),
+                                                     plan.readBytes, DiagnosticObject::Stack ) );
+        }
     }
 
 private:

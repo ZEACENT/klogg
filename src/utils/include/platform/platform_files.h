@@ -40,6 +40,17 @@ bool operator!=( const FileIdentity& left, const FileIdentity& right );
 std::optional<FileIdentity> fileIdentity( const QFileDevice& file );
 std::optional<FileIdentity> fileIdentity( const QString& path );
 
+enum class ReadOnlyFileOpenStatus { Opened, Missing, Failed };
+
+struct ReadOnlyFileOpenResult {
+    ReadOnlyFileOpenStatus status{ ReadOnlyFileOpenStatus::Failed };
+    QString error;
+};
+
+// Classify the native open operation itself, not a later pathname lookup.
+// On success QFile owns the descriptor; failures leave the closed file closed.
+ReadOnlyFileOpenResult openFileReadOnly( QFile& file );
+
 // Open a QFile with shared deletion/rename access. On Windows this adds
 // FILE_SHARE_DELETE to Qt's normal sharing contract, but QSaveFile replacement
 // still requires suspending the destination writer. Other platforms use QFile::open().
