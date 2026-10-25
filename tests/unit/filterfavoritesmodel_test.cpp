@@ -20,6 +20,7 @@
 #include <catch2/catch.hpp>
 
 #include <memory>
+#include <type_traits>
 
 #include <QAbstractItemModel>
 #include <QDialogButtonBox>
@@ -360,6 +361,29 @@ klogg::ui::ScopedMessageHandler captureMessages( CapturedMessage& message )
         } };
 }
 } // namespace
+
+TEST_CASE( "Favorite operation results require an explicit status", "[filter-favorites][construction]" )
+{
+    using Filters = PredefinedFiltersCollection;
+    CHECK_FALSE( std::is_default_constructible_v<Filters::LoadResult> );
+    CHECK_FALSE( std::is_default_constructible_v<Filters::CommitResult> );
+
+    const Filters::Collection filters{ { QStringLiteral( "name" ), QStringLiteral( "pattern" ), true } };
+    const Filters::LoadResult loaded{ Filters::LoadStatus::Success, filters };
+    REQUIRE( loaded.status == Filters::LoadStatus::Success );
+    REQUIRE( loaded.filters == filters );
+    const Filters::CommitResult committed{ Filters::CommitStatus::Conflict, filters };
+    REQUIRE( committed.status == Filters::CommitStatus::Conflict );
+    REQUIRE( committed.storedFilters == filters );
+}
+
+TEST_CASE( "A default favorite uses literal matching", "[filter-favorites][construction]" )
+{
+    const PredefinedFilter filter;
+    REQUIRE_FALSE( filter.useRegex );
+    REQUIRE( filter.name.isEmpty() );
+    REQUIRE( filter.pattern.isEmpty() );
+}
 
 TEST_CASE( "Scoped UI message handlers support reentrancy and non-LIFO cleanup",
            "[filter-favorites][ui-message]" )

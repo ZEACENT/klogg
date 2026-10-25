@@ -18,6 +18,7 @@
  */
 
 #include <catch2/catch.hpp>
+#include <type_traits>
 
 #include <QDir>
 #include <QSettings>
@@ -25,6 +26,7 @@
 
 #include "configuration.h"
 #include "highlighterset.h"
+#include "hsregularexpression.h"
 #include "test_utils.h"
 
 namespace {
@@ -111,6 +113,16 @@ HighlighterSetCollection loadHighlighterSetCollection(
 }
 
 } // namespace
+
+#ifdef KLOGG_HAS_VECTORSCAN
+TEST_CASE( "Vectorscan match contexts require explicit pattern counts", "[vectorscan][construction]" )
+{
+    REQUIRE_FALSE( ( std::is_convertible_v<std::size_t, HsMatcherContext> ) );
+    REQUIRE( std::is_default_constructible_v<HsMatcherContext> );
+    HsMatcherContext context{ 3 };
+    REQUIRE( context.matchingPatterns.size() == 3 );
+}
+#endif
 
 TEST_CASE( "Configured regex backend matches the built product", "[vectorscan][backend]" )
 {

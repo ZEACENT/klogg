@@ -85,21 +85,20 @@ parseBooleanExpressions( QString& pattern, bool isCaseSensitive, bool isPlainTex
     subPatterns.reserve( static_cast<size_t>( pattern.size() ) );
 
     int currentIndex = 0;
-    int leftQuote = -1;
-    int rightQuote = -1;
 
     while ( currentIndex < pattern.size() ) {
-        leftQuote = type_safe::narrow_cast<int>( pattern.indexOf( QChar( '"' ), currentIndex ) );
+        const auto leftQuote
+            = type_safe::narrow_cast<int>( pattern.indexOf( QChar( '"' ), currentIndex ) );
         if ( leftQuote < 0 ) {
             break;
         }
 
         currentIndex = leftQuote + 1;
         if ( precedingBackslashCount( pattern, leftQuote ) % 2 != 0 ) {
-            leftQuote = -1;
             continue;
         }
 
+        int rightQuote = -1;
         while ( currentIndex < pattern.size() ) {
             rightQuote
                 = type_safe::narrow_cast<int>( pattern.indexOf( QChar( '"' ), currentIndex ) );
@@ -130,8 +129,6 @@ parseBooleanExpressions( QString& pattern, bool isCaseSensitive, bool isPlainTex
                          QString::fromStdString( subPatterns.back().id() ) );
 
         currentIndex = 0;
-        leftQuote = -1;
-        rightQuote = -1;
     }
 
     if ( pattern.contains( '"' ) ) {

@@ -41,6 +41,7 @@
 #define PREDEFINEDFILTERS_H_
 
 #include <cstdint>
+#include <utility>
 
 #include <QList>
 #include <QString>
@@ -50,7 +51,7 @@
 struct PredefinedFilter {
     QString name;
     QString pattern;
-    bool useRegex;
+    bool useRegex = false;
 };
 
 inline bool operator==( const PredefinedFilter& left, const PredefinedFilter& right )
@@ -80,6 +81,10 @@ class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCo
     };
 
     struct LoadResult {
+        LoadResult( LoadStatus resultStatus, Collection resultFilters )
+            : status( resultStatus ), filters( std::move( resultFilters ) )
+        {}
+
         LoadStatus status;
         Collection filters;
     };
@@ -95,6 +100,10 @@ class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCo
     };
 
     struct CommitResult {
+        CommitResult( CommitStatus resultStatus, Collection resultFilters )
+            : status( resultStatus ), storedFilters( std::move( resultFilters ) )
+        {}
+
         CommitStatus status;
         Collection storedFilters;
     };
