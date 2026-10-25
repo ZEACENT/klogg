@@ -44,7 +44,7 @@ occurrenceFragments( const QRegularExpressionMatch& match, klogg::MatchProjectio
     } );
     std::sort( fragments.begin(), fragments.end() );
     size_t count = 0;
-    for ( const auto fragment : fragments ) {
+    for ( const auto& fragment : fragments ) {
         if ( count > 0 && fragment.first <= fragments[ count - 1 ].second ) {
             fragments[ count - 1 ].second
                 = std::max( fragments[ count - 1 ].second, fragment.second );

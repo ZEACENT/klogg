@@ -76,8 +76,8 @@ protected:
 
 class MatchSelectionView : public AbstractLogView {
 public:
-    MatchSelectionView( MatchSelectionData* data, const QuickFindPattern* pattern )
-        : AbstractLogView( data, pattern )
+    MatchSelectionView( MatchSelectionData* logData, const QuickFindPattern* pattern )
+        : AbstractLogView( logData, pattern )
     {
         HighlighterSetCollection::getSynced();
     }
