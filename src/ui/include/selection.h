@@ -24,6 +24,8 @@
 #include <QString>
 #include <QStringList>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -47,6 +49,20 @@ class Portion {
     {
     }
 
+    // Display columns drive painting and navigation. Optional inclusive raw
+    // columns let batch selections copy original text without expanding tabs.
+    Portion( LineNumber line, LineColumn startColumn, LineColumn endColumn,
+             LineColumn rawStartColumn, LineColumn rawEndColumn )
+        : Portion( line, startColumn, endColumn )
+    {
+        rawColumns_ = std::make_pair( rawStartColumn, rawEndColumn );
+    }
+
+    const std::optional<std::pair<LineColumn, LineColumn>>& rawColumns() const
+    {
+        return rawColumns_;
+    }
+
     LineNumber line() const
     {
         return *line_;
@@ -62,7 +78,9 @@ class Portion {
 
     bool isValid() const
     {
-        return !!line_ && endColumn_ >= startColumn_ && startColumn_ >= 0_lcol;
+        return !!line_ && endColumn_ >= startColumn_ && startColumn_ >= 0_lcol
+               && ( !rawColumns_ || ( rawColumns_->first >= 0_lcol
+                                      && rawColumns_->second >= rawColumns_->first ) );
     }
 
     LineLength size() const
@@ -74,6 +92,7 @@ class Portion {
     OptionalLineNumber line_;
     LineColumn startColumn_;
     LineColumn endColumn_;
+    std::optional<std::pair<LineColumn, LineColumn>> rawColumns_;
 };
 
 // Represents a selection in an AbstractLogView
@@ -87,6 +106,8 @@ class Selection {
     {
         selectedPartial_.line = {};
         selectedLine_ = {};
+        selectedRange_.startLine = {};
+        selectedPortions_.clear();
         toggledRanges_.clear();
         lastToggledLine_ = {};
     }
@@ -94,10 +115,7 @@ class Selection {
     // Select one line
     void selectLine( LineNumber line )
     {
-        selectedPartial_.line = {};
-        selectedRange_.startLine = {};
-        toggledRanges_.clear();
-        lastToggledLine_ = {};
+        clear();
         selectedLine_ = line;
     }
     // Select a portion of line (both start and end included)
@@ -106,6 +124,20 @@ class Selection {
     {
         selectPortion( selection.line(), selection.startColumn(), selection.endColumn() );
     }
+    enum class PortionOverlap : std::uint8_t { Merge, Preserve };
+
+    // Select partial fragments in stable row/start order, ignoring invalid ones.
+    // Merge unions compatible overlaps, never adjacency. Preserve keeps distinct
+    // overlapping occurrences separate after caller-side capture merging.
+    void selectPortions( std::vector<Portion> portions,
+                         PortionOverlap overlap = PortionOverlap::Merge );
+    std::vector<Portion> getPortionsForLine( LineNumber line ) const;
+    // Identifies selectPortions mode, including a single surviving fragment.
+    bool isMultiPortion() const
+    {
+        return !selectedPortions_.empty();
+    }
+
     // Select a range of lines (both start and end included)
     void selectRange( LineNumber startLine, LineNumber endLine );
 
@@ -125,7 +157,8 @@ class Selection {
     // Returns whether the selection is empty
     bool isEmpty() const
     {
-        return ( !selectedPartial_.line ) && ( !selectedLine_ ) && toggledRanges_.empty();
+        return !selectedPartial_.line && !selectedLine_ && !selectedRange_.startLine
+               && selectedPortions_.empty() && toggledRanges_.empty();
     }
 
     // Returns whether the selection is a single line
@@ -137,17 +170,14 @@ class Selection {
     // Returns whether the selection is a portion of line
     bool isPortion() const
     {
-        return !!selectedPartial_.line;
+        return !!selectedPartial_.line || isMultiPortion();
     }
 
     // Returns whether the selection is a portion of line
-    bool isPortion( LineNumber line ) const
-    {
-        return !!selectedPartial_.line && *selectedPartial_.line == line;
-    }
+    bool isPortion( LineNumber line ) const;
 
-    // Returns whether a portion is selected or not on the passed line.
-    // If so, returns the portion position.
+    // Returns the first portion on the passed line, or an invalid portion.
+    // Use getPortionsForLine() when all fragments on that line are needed.
     Portion getPortionForLine( LineNumber line ) const;
     // Get a list of selected line(s), in order.
     klogg::vector<LineNumber> getLines() const;
@@ -166,10 +196,10 @@ class Selection {
     // Returns the text selected from the passed AbstractLogData
     QString getSelectedText( const AbstractLogData* logData, bool lineNumbers = false ) const;
 
-    // Returns the selected text as one string per selected line, in row order
-    // (non-copyable rows, e.g. folder group headers, are skipped). A portion
-    // selection yields a single entry. Unlike getSelectedText() nothing is
-    // joined with platform line separators: consumers that match text per log
+    // Returns the selected text as one string per whole line or partial fragment,
+    // in row/start order (non-copyable rows, e.g. folder headers, are skipped).
+    // Multiple fragments on one row yield separate entries. Unlike getSelectedText(),
+    // nothing is joined with platform line separators: consumers matching text per log
     // line (e.g. color labels) must use this, as an entry containing a line
     // feed can never match a single line.
     QStringList getSelectedLinesText( const AbstractLogData* logData ) const;
@@ -218,6 +248,12 @@ class Selection {
     };
     struct SelectedPartial selectedPartial_;
     struct SelectedRange selectedRange_;
+
+    // Distinct from selectedPartial_: even one fragment retains batch-selection
+    // identity so views can invalidate it when its source changes. Ordered by
+    // row/start column; adjacency is never merged. Preserved occurrences may overlap.
+    std::vector<Portion> selectedPortions_;
+    std::vector<Portion>::const_iterator firstPortionForLine( LineNumber line ) const;
 
     // Inclusive [firstLine, lastLine] intervals toggled line-by-line
     // (ctrl+click), kept ascending, non-overlapping and non-adjacent

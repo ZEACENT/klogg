@@ -18,10 +18,8 @@
  */
 
 // This file implements Selection.
-// This class implements the selection handling. No check is made on
-// the validity of the selection, it must be handled by the caller.
-// There are three types of selection, only one type might be active
-// at any time.
+// Selection modes are mutually exclusive. Batch portions discard invalid
+// coordinates; callers remain responsible for bounds against the source data.
 
 #include <algorithm>
 #include <numeric>
@@ -42,24 +40,89 @@ Selection::Selection()
 
 void Selection::selectPortion( LineNumber line, LineColumn startColumn, LineColumn endColumn )
 {
-    // First unselect any whole line or range
-    selectedLine_ = {};
-    selectedRange_.startLine = {};
-    toggledRanges_.clear();
-    lastToggledLine_ = {};
+    clear();
 
     selectedPartial_.line = line;
     selectedPartial_.startColumn = std::min( startColumn, endColumn );
     selectedPartial_.endColumn = std::max( startColumn, endColumn );
 }
 
+void Selection::selectPortions( std::vector<Portion> portions, PortionOverlap overlap )
+{
+    clear();
+    portions.erase( std::remove_if( portions.begin(), portions.end(),
+                                    []( const Portion& portion ) { return !portion.isValid(); } ),
+                    portions.end() );
+    const auto rowStartLess = []( const Portion& lhs, const Portion& rhs ) {
+        return lhs.line() < rhs.line()
+               || ( lhs.line() == rhs.line() && lhs.startColumn() < rhs.startColumn() );
+    };
+    if ( !std::is_sorted( portions.begin(), portions.end(), rowStartLess ) ) {
+        std::stable_sort( portions.begin(), portions.end(), rowStartLess );
+    }
+
+    if ( overlap == PortionOverlap::Preserve ) {
+        selectedPortions_ = std::move( portions );
+        return;
+    }
+
+    selectedPortions_.reserve( portions.size() );
+    for ( const auto& portion : portions ) {
+        if ( !selectedPortions_.empty() ) {
+            const auto& previous = selectedPortions_.back();
+            const auto& raw = portion.rawColumns();
+            const auto& previousRaw = previous.rawColumns();
+            // Mixed coordinate conventions cannot be merged without source text.
+            const bool compatible = raw.has_value() == previousRaw.has_value()
+                                    && ( !raw || ( raw->first <= previousRaw->second
+                                                  && previousRaw->first <= raw->second ) );
+            if ( previous.line() == portion.line()
+                 && portion.startColumn() <= previous.endColumn() && compatible ) {
+                const auto endColumn = std::max( previous.endColumn(), portion.endColumn() );
+                const auto merged = raw
+                    ? Portion( portion.line(), previous.startColumn(), endColumn,
+                               std::min( previousRaw->first, raw->first ),
+                               std::max( previousRaw->second, raw->second ) )
+                    : Portion( portion.line(), previous.startColumn(), endColumn );
+                selectedPortions_.back() = merged;
+                continue;
+            }
+        }
+        selectedPortions_.push_back( portion );
+    }
+}
+
+std::vector<Portion>::const_iterator Selection::firstPortionForLine( LineNumber line ) const
+{
+    return std::lower_bound( selectedPortions_.begin(), selectedPortions_.end(), line,
+                             []( const Portion& portion, LineNumber row ) {
+                                 return portion.line() < row;
+                             } );
+}
+
+std::vector<Portion> Selection::getPortionsForLine( LineNumber line ) const
+{
+    if ( selectedPartial_.line && *selectedPartial_.line == line ) {
+        return { getPortionForLine( line ) };
+    }
+    const auto first = firstPortionForLine( line );
+    const auto last = std::find_if( first, selectedPortions_.end(),
+                                    [line]( const Portion& portion ) { return portion.line() != line; } );
+    return { first, last };
+}
+
+bool Selection::isPortion( LineNumber line ) const
+{
+    if ( selectedPartial_.line && *selectedPartial_.line == line ) {
+        return true;
+    }
+    const auto first = firstPortionForLine( line );
+    return first != selectedPortions_.end() && first->line() == line;
+}
+
 void Selection::selectRange( LineNumber startLine, LineNumber endLine )
 {
-    // First unselect any whole line and portion
-    selectedLine_ = {};
-    selectedPartial_.line = {};
-    toggledRanges_.clear();
-    lastToggledLine_ = {};
+    clear();
 
     selectedRange_.startLine = std::min( startLine, endLine );
     selectedRange_.endLine = std::max( startLine, endLine );
@@ -81,6 +144,7 @@ void Selection::toggleLine( LineNumber line )
         selectedRange_.startLine = {};
     }
     selectedPartial_.line = {};
+    selectedPortions_.clear();
 
     // The last ctrl-clicked line becomes the shift+click anchor whether the
     // toggle added or removed it.
@@ -154,6 +218,8 @@ void Selection::selectRangeFromPrevious( LineNumber line )
         previous_line = selectedRange_.firstLine;
     else if ( selectedPartial_.line.has_value() )
         previous_line = *selectedPartial_.line;
+    else if ( !selectedPortions_.empty() )
+        previous_line = selectedPortions_.front().line();
     else if ( lastToggledLine_.has_value() ) {
         // Shift+click on a ctrl-click selection extends a range from the last
         // toggled line and merges it into the toggled set, keeping the
@@ -175,6 +241,11 @@ void Selection::crop( LineNumber last_line )
 
     if ( selectedPartial_.line.has_value() && *selectedPartial_.line > last_line )
         selectedPartial_.line = {};
+
+    selectedPortions_.erase(
+        std::upper_bound( selectedPortions_.begin(), selectedPortions_.end(), last_line,
+                          []( LineNumber line, const Portion& portion ) { return line < portion.line(); } ),
+        selectedPortions_.end() );
 
     if ( selectedRange_.endLine > last_line )
         selectedRange_.endLine = last_line;
@@ -205,7 +276,10 @@ Portion Selection::getPortionForLine( LineNumber line ) const
         return Portion( *selectedPartial_.line, selectedPartial_.startColumn,
                         selectedPartial_.endColumn );
     }
-
+    const auto first = firstPortionForLine( line );
+    if ( first != selectedPortions_.end() && first->line() == line ) {
+        return *first;
+    }
     return {};
 }
 
@@ -224,12 +298,18 @@ bool Selection::isPortionSelected( LineNumber line, LineColumn startColumn,
         return true;
     }
 
-    const auto portion = getPortionForLine( line );
-    if ( !portion.isValid() ) {
-        return false;
+    if ( selectedPartial_.line ) {
+        const auto portion = getPortionForLine( line );
+        return portion.isValid() && startColumn >= portion.startColumn()
+               && endColumn <= portion.endColumn();
     }
-
-    return startColumn >= portion.startColumn() && endColumn <= portion.endColumn();
+    for ( auto it = firstPortionForLine( line );
+          it != selectedPortions_.end() && it->line() == line; ++it ) {
+        if ( startColumn >= it->startColumn() && endColumn <= it->endColumn() ) {
+            return true;
+        }
+    }
+    return false;
 }
 
 OptionalLineNumber Selection::selectedLine() const
@@ -255,6 +335,13 @@ klogg::vector<LineNumber> Selection::getLines() const
     else if ( selectedPartial_.line.has_value() ) {
         selection.push_back( *selectedPartial_.line );
     }
+    else if ( !selectedPortions_.empty() ) {
+        for ( const auto& portion : selectedPortions_ ) {
+            if ( selection.empty() || selection.back() != portion.line() ) {
+                selection.push_back( portion.line() );
+            }
+        }
+    }
     else if ( selectedRange_.startLine.has_value() ) {
         selection.resize( selectedRange_.size().get() );
         std::iota( selection.begin(), selection.end(), *selectedRange_.startLine );
@@ -275,7 +362,17 @@ klogg::vector<LineNumber> Selection::getLines() const
 
 LinesCount Selection::getSelectedLinesCount() const
 {
+    if ( selectedLine_ || selectedPartial_.line ) {
+        return 1_lcount;
+    }
     auto count = selectedRange_.size();
+    OptionalLineNumber previousLine;
+    for ( const auto& portion : selectedPortions_ ) {
+        if ( previousLine != portion.line() ) {
+            ++count;
+            previousLine = portion.line();
+        }
+    }
     for ( const auto& range : toggledRanges_ ) {
         count += ( range.second - range.first ) + 1_lcount;
     }
@@ -348,6 +445,29 @@ Selection::getSelectionWithLineNumbers( const AbstractLogData* logData ) const
                           selectedPartial_.size().get() ) );
         }
     }
+    else if ( !selectedPortions_.empty() ) {
+        selectionData.reserve( selectedPortions_.size() );
+        OptionalLineNumber cachedLine;
+        QString text;
+        bool cachedRaw = false;
+        for ( const auto& portion : selectedPortions_ ) {
+            if ( !logData->isLineCopyable( portion.line() ) ) {
+                continue;
+            }
+            const bool useRaw = portion.rawColumns().has_value();
+            if ( cachedLine != portion.line() || cachedRaw != useRaw ) {
+                text = useRaw ? logData->getLineString( portion.line() )
+                              : logData->getExpandedLineString( portion.line() );
+                cachedLine = portion.line();
+                cachedRaw = useRaw;
+            }
+            const auto columns = portion.rawColumns().value_or(
+                std::make_pair( portion.startColumn(), portion.endColumn() ) );
+            const auto length = ( columns.second - columns.first ) + 1_length;
+            selectionData.emplace_back( logData->getLineNumber( portion.line() ),
+                                        text.mid( columns.first.get(), length.get() ) );
+        }
+    }
     else if ( selectedRange_.startLine.has_value() ) {
         const auto list = logData->getLines( *selectedRange_.startLine, selectedRange_.size() );
         LineNumber ln = *selectedRange_.startLine;
@@ -397,6 +517,12 @@ FilePosition Selection::getNextPosition() const
         line = *selectedPartial_.line;
         column = selectedPartial_.endColumn + 1_length;
     }
+    else if ( !selectedPortions_.empty() ) {
+        line = selectedPortions_.back().line();
+        for ( auto it = firstPortionForLine( line ); it != selectedPortions_.end(); ++it ) {
+            column = std::max( column, it->endColumn() + 1_length );
+        }
+    }
 
     return FilePosition( line, column );
 }
@@ -418,6 +544,10 @@ FilePosition Selection::getPreviousPosition() const
     else if ( selectedPartial_.line.has_value() ) {
         line = *selectedPartial_.line;
         column = selectedPartial_.startColumn - 1_length;
+    }
+    else if ( !selectedPortions_.empty() ) {
+        line = selectedPortions_.front().line();
+        column = selectedPortions_.front().startColumn() - 1_length;
     }
 
     return FilePosition( line, column );

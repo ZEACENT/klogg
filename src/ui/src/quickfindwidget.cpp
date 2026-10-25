@@ -220,6 +220,18 @@ void QuickFindWidget::clearNotification()
     notificationText_->setText( "" );
 }
 
+bool QuickFindWidget::inputHasFocus() const
+{
+    return editQuickFind_->hasFocus() || editQuickFind_->lineEdit()->hasFocus();
+}
+
+void QuickFindWidget::confirmCurrentPattern()
+{
+    recordSearchHistory( editQuickFind_->currentText() );
+    Q_EMIT patternConfirmed( editQuickFind_->currentText(), isIgnoreCase(), isRegexSearch(),
+                             isWholeWord() );
+}
+
 // User clicks forward arrow
 void QuickFindWidget::doSearchForward()
 {
@@ -229,8 +241,7 @@ void QuickFindWidget::doSearchForward()
     // the widget to stay visible.
     userRequested_ = true;
 
-    recordSearchHistory( editQuickFind_->currentText() );
-    Q_EMIT patternConfirmed( editQuickFind_->currentText(), isIgnoreCase(), isRegexSearch(), isWholeWord() );
+    confirmCurrentPattern();
     Q_EMIT searchForward();
 }
 
@@ -243,8 +254,7 @@ void QuickFindWidget::doSearchBackward()
     // the widget to stay visible.
     userRequested_ = true;
 
-    recordSearchHistory( editQuickFind_->currentText() );
-    Q_EMIT patternConfirmed( editQuickFind_->currentText(), isIgnoreCase(), isRegexSearch(), isWholeWord() );
+    confirmCurrentPattern();
     Q_EMIT searchBackward();
 }
 

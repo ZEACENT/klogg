@@ -45,6 +45,7 @@
 
 #include "linetypes.h"
 #include "quickfindpattern.h"
+#include "matchprojection.h"
 
 #include "configuration.h"
 
@@ -145,14 +146,12 @@ bool QuickFindPattern::matchLine( const QString& line,
     matches.clear();
 
     if ( active_ ) {
-        QRegularExpressionMatchIterator matchIterator = regexp_.globalMatch( line );
-        const auto& config = Configuration::get();
-        const auto backColor = config.qfBackColor();
-        while ( matchIterator.hasNext() ) {
-            QRegularExpressionMatch match = matchIterator.next();
-            matches.emplace_back( LineColumn{ match.capturedStart() },
-                                  LineLength{ match.capturedLength() }, QfForeColor, backColor );
-        }
+        const auto backColor = Configuration::get().qfBackColor();
+        klogg::visitLineMatchFragments(
+            regexp_, line, klogg::MatchProjection::FullMatch,
+            [ & ]( LineColumn start, LineLength length ) {
+                matches.emplace_back( start, length, QfForeColor, backColor );
+            } );
     }
 
     return ( !matches.empty() );

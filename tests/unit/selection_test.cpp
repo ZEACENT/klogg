@@ -109,7 +109,283 @@ class SelectionStubLogData : public AbstractLogData {
     QStringList lines_;
 };
 
+// Models projected rows with a non-copyable header and repeated source numbers.
+class SelectionProjectedLogData : public SelectionStubLogData {
+  public:
+    using SelectionStubLogData::SelectionStubLogData;
+
+  protected:
+    QString doGetExpandedLineString( LineNumber line ) const override
+    {
+        return untabify( doGetLineString( line ) );
+    }
+
+    bool doIsLineCopyable( LineNumber line ) const override
+    {
+        return line != 1_lnum;
+    }
+
+    LineNumber doGetLineNumber( LineNumber ) const override
+    {
+        return 7_lnum;
+    }
+};
+
+QString selectionLineSeparator()
+{
+#if defined( Q_OS_WIN )
+    return QStringLiteral( "\r\n" );
+#else
+    return QStringLiteral( "\n" );
+#endif
+}
+
 } // namespace
+
+TEST_CASE( "partial fragments are ordered and enumerate unique selected rows",
+           "[selection][multi-portion]" )
+{
+    Selection selection;
+    selection.selectPortions( { Portion( 3_lnum, 4_lcol, 6_lcol ),
+                                Portion( 1_lnum, 5_lcol, 7_lcol ),
+                                Portion( 1_lnum, 0_lcol, 2_lcol ) } );
+
+    REQUIRE_FALSE( selection.isEmpty() );
+    REQUIRE( selection.isPortion() );
+    REQUIRE( selection.isMultiPortion() );
+    REQUIRE_FALSE( selection.isSingleLine() );
+    REQUIRE_FALSE( selection.selectedLine().has_value() );
+    REQUIRE( selection.isPortion( 1_lnum ) );
+    REQUIRE( selection.isPortion( 3_lnum ) );
+    REQUIRE_FALSE( selection.isPortion( 2_lnum ) );
+    REQUIRE_FALSE( selection.isLineSelected( 1_lnum ) );
+    REQUIRE( selection.getSelectedLinesCount() == 2_lcount );
+    REQUIRE( selection.getLines() == klogg::vector<LineNumber>{ 1_lnum, 3_lnum } );
+
+    const auto portions = selection.getPortionsForLine( 1_lnum );
+    REQUIRE( portions.size() == 2 );
+    REQUIRE( portions[ 0 ].startColumn() == 0_lcol );
+    REQUIRE( portions[ 0 ].endColumn() == 2_lcol );
+    REQUIRE( portions[ 1 ].startColumn() == 5_lcol );
+    REQUIRE( portions[ 1 ].endColumn() == 7_lcol );
+    REQUIRE( selection.getPortionsForLine( 2_lnum ).empty() );
+    REQUIRE( selection.getPortionForLine( 1_lnum ).startColumn() == 0_lcol );
+    REQUIRE( selection.isPortionSelected( 1_lnum, 5_lcol, 7_lcol ) );
+    REQUIRE( selection.isPortionSelected( 3_lnum, 5_lcol, 5_lcol ) );
+    REQUIRE_FALSE( selection.isPortionSelected( 1_lnum, 2_lcol, 5_lcol ) );
+    REQUIRE_FALSE( selection.isPortionSelected( 2_lnum, 0_lcol, 0_lcol ) );
+    // LineColumn subtraction saturates at zero, matching ordinary portion navigation.
+    REQUIRE( selection.getPreviousPosition() == FilePosition( 1_lnum, 0_lcol ) );
+    REQUIRE( selection.getNextPosition() == FilePosition( 3_lnum, 7_lcol ) );
+}
+
+TEST_CASE( "partial fragments ignore invalid inputs and merge overlaps but not adjacency",
+           "[selection][multi-portion]" )
+{
+    Selection selection;
+    selection.selectPortions( { Portion{}, Portion( 1_lnum, 7_lcol, 6_lcol ),
+                                Portion( 1_lnum, LineColumn( -1 ), 2_lcol ),
+                                Portion( 1_lnum, 2_lcol, 4_lcol ),
+                                Portion( 1_lnum, 0_lcol, 2_lcol ),
+                                Portion( 1_lnum, 1_lcol, 1_lcol ),
+                                Portion( 1_lnum, 5_lcol, 6_lcol ) } );
+    const auto portions = selection.getPortionsForLine( 1_lnum );
+    REQUIRE( portions.size() == 2 );
+    REQUIRE( portions[ 0 ].startColumn() == 0_lcol );
+    REQUIRE( portions[ 0 ].endColumn() == 4_lcol );
+    REQUIRE( portions[ 1 ].startColumn() == 5_lcol );
+    REQUIRE( portions[ 1 ].endColumn() == 6_lcol );
+    REQUIRE( selection.getSelectedLinesCount() == 1_lcount );
+    REQUIRE( selection.isMultiPortion() );
+
+    selection.selectPortions( { Portion( 2_lnum, 1_lcol, 3_lcol ),
+                                Portion( 2_lnum, 1_lcol, 3_lcol ) } );
+    REQUIRE( selection.isPortion() );
+    REQUIRE( selection.isMultiPortion() );
+    REQUIRE( selection.getPortionsForLine( 2_lnum ).size() == 1 );
+
+    selection.selectPortions( { Portion{} } );
+    REQUIRE( selection.isEmpty() );
+    REQUIRE( selection.getSelectedLinesCount() == 0_lcount );
+}
+
+TEST_CASE( "partial fragment copy preserves each adjacent occurrence in row order",
+           "[selection][multi-portion]" )
+{
+    SelectionStubLogData logData{ { QStringLiteral( "abcXYZtail" ),
+                                    QStringLiteral( "second" ) } };
+    Selection selection;
+    selection.selectPortions( { Portion( 1_lnum, 1_lcol, 3_lcol ),
+                                Portion( 0_lnum, 3_lcol, 5_lcol ),
+                                Portion( 0_lnum, 0_lcol, 2_lcol ) } );
+    const QStringList fragments{ QStringLiteral( "abc" ), QStringLiteral( "XYZ" ),
+                                 QStringLiteral( "eco" ) };
+    REQUIRE( selection.getSelectedLinesText( &logData ) == fragments );
+    REQUIRE( selection.getSelectedText( &logData ) == fragments.join( selectionLineSeparator() ) );
+    // AbstractLogData converts zero-based source indices to one-based labels.
+    const QStringList numbered{ QStringLiteral( "1: abc" ), QStringLiteral( "1: XYZ" ),
+                                QStringLiteral( "2: eco" ) };
+    REQUIRE( selection.getSelectedText( &logData, true )
+             == numbered.join( selectionLineSeparator() ) );
+}
+
+TEST_CASE( "preserved overlapping occurrences remain distinct copy fragments",
+           "[selection][multi-portion]" )
+{
+    SelectionStubLogData logData{ { QStringLiteral( "aaa" ) } };
+    Selection selection;
+    // Two distinct lookahead occurrences of (?=(aa)), not two captures of one match.
+    selection.selectPortions( { Portion( 0_lnum, 1_lcol, 2_lcol ),
+                                Portion( 0_lnum, 0_lcol, 1_lcol ) },
+                              Selection::PortionOverlap::Preserve );
+    const auto portions = selection.getPortionsForLine( 0_lnum );
+    REQUIRE( portions.size() == 2 );
+    REQUIRE( portions[ 0 ].startColumn() == 0_lcol );
+    REQUIRE( portions[ 1 ].startColumn() == 1_lcol );
+    REQUIRE( selection.getSelectedText( &logData )
+             == QStringLiteral( "aa" ) + selectionLineSeparator() + QStringLiteral( "aa" ) );
+    REQUIRE( selection.getSelectedLinesCount() == 1_lcount );
+    REQUIRE( selection.isPortionSelected( 0_lnum, 0_lcol, 1_lcol ) );
+    REQUIRE( selection.isPortionSelected( 0_lnum, 1_lcol, 2_lcol ) );
+    REQUIRE_FALSE( selection.isPortionSelected( 0_lnum, 0_lcol, 2_lcol ) );
+    REQUIRE( selection.getNextPosition() == FilePosition( 0_lnum, 3_lcol ) );
+
+    // Equal starts retain occurrence order; a nested final fragment must not
+    // move the forward search anchor back inside the larger selection.
+    selection.selectPortions( { Portion( 0_lnum, 0_lcol, 2_lcol ),
+                                Portion( 0_lnum, 0_lcol, 0_lcol ) },
+                              Selection::PortionOverlap::Preserve );
+    REQUIRE( selection.getSelectedText( &logData )
+             == QStringLiteral( "aaa" ) + selectionLineSeparator() + QStringLiteral( "a" ) );
+    REQUIRE( selection.getNextPosition() == FilePosition( 0_lnum, 3_lcol ) );
+}
+
+TEST_CASE( "partial copy uses expanded columns and preserves projected row identity",
+           "[selection][multi-portion]" )
+{
+    SelectionProjectedLogData logData{ { QStringLiteral( "\tAB" ), QStringLiteral( "header" ),
+                                        QStringLiteral( "\tCD" ) } };
+    Selection selection;
+    selection.selectPortions( { Portion( 2_lnum, 8_lcol, 9_lcol ),
+                                Portion( 1_lnum, 0_lcol, 5_lcol ),
+                                Portion( 0_lnum, 8_lcol, 9_lcol ) } );
+    REQUIRE( selection.getSelectedLinesText( &logData )
+             == QStringList{ QStringLiteral( "AB" ), QStringLiteral( "CD" ) } );
+    REQUIRE( selection.getSelectedText( &logData, true )
+             == QStringLiteral( "8: AB" ) + selectionLineSeparator() + QStringLiteral( "8: CD" ) );
+
+    selection.selectPortion( 0_lnum, 9_lcol, 8_lcol );
+    REQUIRE_FALSE( selection.isMultiPortion() );
+    REQUIRE( selection.getPortionsForLine( 0_lnum ).size() == 1 );
+    REQUIRE( selection.getSelectedText( &logData ) == QStringLiteral( "AB" ) );
+}
+
+TEST_CASE( "raw fragment columns preserve tabs while display columns drive hit testing",
+           "[selection][multi-portion][raw-portion]" )
+{
+    SelectionProjectedLogData logData{ { QStringLiteral( "\tprefix A\tB tail" ) } };
+    Selection selection;
+    // The leading tab shifts A to display column 15; the inner tab is column 16-23.
+    selection.selectPortions( { Portion( 0_lnum, 15_lcol, 24_lcol, 8_lcol, 10_lcol ) } );
+    REQUIRE( selection.getSelectedText( &logData ) == QStringLiteral( "A\tB" ) );
+    REQUIRE( selection.isPortionSelected( 0_lnum, 16_lcol, 23_lcol ) );
+    REQUIRE_FALSE( selection.isPortionSelected( 0_lnum, 8_lcol, 10_lcol ) );
+    REQUIRE( selection.getNextPosition() == FilePosition( 0_lnum, 25_lcol ) );
+    REQUIRE( selection.getPreviousPosition() == FilePosition( 0_lnum, 14_lcol ) );
+
+    SECTION( "overlap merges display and raw extents" )
+    {
+        selection.selectPortions( { Portion( 0_lnum, 15_lcol, 23_lcol, 8_lcol, 9_lcol ),
+                                    Portion( 0_lnum, 16_lcol, 24_lcol, 9_lcol, 10_lcol ) } );
+        REQUIRE( selection.getPortionsForLine( 0_lnum ).size() == 1 );
+        REQUIRE( selection.getSelectedText( &logData ) == QStringLiteral( "A\tB" ) );
+    }
+    SECTION( "invalid raw coordinates are ignored" )
+    {
+        selection.selectPortions( { Portion( 0_lnum, 15_lcol, 24_lcol, 10_lcol, 8_lcol ),
+                                    Portion( 0_lnum, 15_lcol, 24_lcol, LineColumn( -1 ), 8_lcol ) } );
+        REQUIRE( selection.isEmpty() );
+    }
+}
+
+TEST_CASE( "cropping partial fragments drops missing rows and updates navigation anchors",
+           "[selection][multi-portion]" )
+{
+    Selection selection;
+    selection.selectPortions( { Portion( 5_lnum, 1_lcol, 3_lcol ),
+                                Portion( 2_lnum, 2_lcol, 4_lcol ) } );
+    selection.crop( 3_lnum );
+    REQUIRE( selection.getLines() == klogg::vector<LineNumber>{ 2_lnum } );
+    REQUIRE( selection.isMultiPortion() );
+    REQUIRE( selection.getNextPosition() == FilePosition( 2_lnum, 5_lcol ) );
+    REQUIRE( selection.getPreviousPosition() == FilePosition( 2_lnum, 1_lcol ) );
+    selection.selectRangeFromPrevious( 4_lnum );
+    REQUIRE( selection.getLines() == klogg::vector<LineNumber>{ 2_lnum, 3_lnum, 4_lnum } );
+    REQUIRE_FALSE( selection.isPortion() );
+
+    selection.selectPortions( { Portion( 5_lnum, 1_lcol, 3_lcol ) } );
+    selection.crop( 3_lnum );
+    REQUIRE( selection.isEmpty() );
+    REQUIRE( selection.getSelectedLinesCount() == 0_lcount );
+}
+
+TEST_CASE( "selection gestures replace partial fragments and fragments replace other modes",
+           "[selection][multi-portion]" )
+{
+    Selection selection;
+    selection.selectPortions( { Portion( 2_lnum, 1_lcol, 3_lcol ),
+                                Portion( 5_lnum, 1_lcol, 3_lcol ) } );
+    REQUIRE( selection.isMultiPortion() );
+
+    SECTION( "line" ) { selection.selectLine( 7_lnum ); }
+    SECTION( "range" ) { selection.selectRange( 7_lnum, 8_lnum ); }
+    SECTION( "toggle" ) { selection.toggleLine( 7_lnum ); }
+    SECTION( "single portion" ) { selection.selectPortion( 7_lnum, 3_lcol, 1_lcol ); }
+    SECTION( "clear" ) { selection.clear(); }
+
+    REQUIRE_FALSE( selection.isMultiPortion() );
+    REQUIRE( selection.getPortionsForLine( 2_lnum ).empty() );
+    REQUIRE( selection.getPortionsForLine( 5_lnum ).empty() );
+    selection.selectPortions( { Portion( 1_lnum, 0_lcol, 1_lcol ) } );
+    REQUIRE( selection.getLines() == klogg::vector<LineNumber>{ 1_lnum } );
+    REQUIRE( selection.getSelectedLinesCount() == 1_lcount );
+    REQUIRE_FALSE( selection.isLineSelected( 7_lnum ) );
+    selection.selectPortions( {} );
+    REQUIRE( selection.isEmpty() );
+}
+
+TEST_CASE( "clearing a range removes membership copy and shift anchor",
+           "[selection][selection-clear]" )
+{
+    SelectionStubLogData logData{ { QStringLiteral( "zero" ), QStringLiteral( "one" ),
+                                    QStringLiteral( "two" ) } };
+    Selection selection;
+    selection.selectRange( 1_lnum, 2_lnum );
+    SECTION( "range is not empty" )
+    {
+        REQUIRE_FALSE( selection.isEmpty() );
+    }
+    SECTION( "clear removes the range" )
+    {
+        selection.clear();
+        REQUIRE_FALSE( selection.isLineSelected( 1_lnum ) );
+        REQUIRE( selection.getLines().empty() );
+        REQUIRE( selection.getSelectedLinesCount() == 0_lcount );
+        REQUIRE( selection.getSelectedText( &logData ).isEmpty() );
+        selection.selectRangeFromPrevious( 2_lnum );
+        REQUIRE( selection.isLineSelected( 0_lnum ) );
+    }
+}
+
+TEST_CASE( "single line and portion selection counts match their enumerated rows",
+           "[selection][selection-count]" )
+{
+    Selection selection;
+    SECTION( "whole line" ) { selection.selectLine( 2_lnum ); }
+    SECTION( "portion" ) { selection.selectPortion( 2_lnum, 5_lcol, 2_lcol ); }
+    REQUIRE( selection.getSelectedLinesCount() == 1_lcount );
+    REQUIRE( selection.getLines() == klogg::vector<LineNumber>{ 2_lnum } );
+}
 
 TEST_CASE( "toggled disjoint lines are all selected and enumerated in row order",
            "[selection]" )

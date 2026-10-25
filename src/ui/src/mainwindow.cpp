@@ -626,6 +626,8 @@ void MainWindow::reTranslateUI()
 
     selectAllAction->setText( transAction( action::selectAllText ) );
     selectAllAction->setStatusTip( transAction( action::selectAllStatusTip ) );
+    selectAllMatchesAction->setText( tr( "Select All Matches" ) );
+    copyMatchesAction->setText( tr( "Copy Matches" ) );
 
     goToLineAction->setText( transAction( action::goToLineText ) );
     goToLineAction->setStatusTip( transAction( action::goToLineStatusTip ) );
@@ -865,6 +867,19 @@ void MainWindow::createActions()
     selectAllAction = new QAction( tr( action::selectAllText ), this );
     selectAllAction->setStatusTip( tr( action::selectAllStatusTip ) );
     connect( selectAllAction, &QAction::triggered, this, [ this ]( auto ) { this->selectAll(); } );
+
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    selectAllMatchesAction = new QAction( tr( "Select All Matches" ), this );
+    selectAllMatchesAction->setObjectName( QStringLiteral( "selectAllMatchesAction" ) );
+    connect( selectAllMatchesAction, &QAction::triggered, this,
+             [ this ] { selectAllMatches(); } );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    copyMatchesAction = new QAction( tr( "Copy Matches" ), this );
+    copyMatchesAction->setObjectName( QStringLiteral( "copyMatchesAction" ) );
+    connect( copyMatchesAction, &QAction::triggered, this,
+             [ this ] { selectAllMatches( true ); } );
 
     goToLineAction = new QAction( tr( action::goToLineText ), this );
     goToLineAction->setObjectName( QStringLiteral( "goToLineAction" ) );
@@ -1186,6 +1201,8 @@ void MainWindow::updateShortcuts()
     setShortcuts( exitAction, ShortcutAction::MainWindowQuit );
     setShortcuts( copyAction, ShortcutAction::MainWindowCopy );
     setShortcuts( selectAllAction, ShortcutAction::MainWindowSelectAll );
+    setShortcuts( selectAllMatchesAction, ShortcutAction::MainWindowSelectAllMatches );
+    setShortcuts( copyMatchesAction, ShortcutAction::MainWindowCopyMatches );
     setShortcuts( findAction, ShortcutAction::MainWindowOpenQf );
     setShortcuts( clearLogAction, ShortcutAction::MainWindowClearFile );
     setShortcuts( openContainingFolderAction, ShortcutAction::MainWindowOpenContainingFolder );
@@ -1265,6 +1282,8 @@ void MainWindow::createMenus()
     editMenu->setObjectName( QStringLiteral( "editMenu" ) );
     editMenu->addAction( copyAction );
     editMenu->addAction( selectAllAction );
+    editMenu->addAction( selectAllMatchesAction );
+    editMenu->addAction( copyMatchesAction );
     editMenu->addSeparator();
     editMenu->addAction( findAction );
     editMenu->addSeparator();
@@ -1830,6 +1849,24 @@ void MainWindow::selectAll()
     }
 }
 
+void MainWindow::selectAllMatches( bool copy )
+{
+    auto* const document = currentDocument();
+    if ( document == nullptr ) {
+        return;
+    }
+    const bool quickFind = quickFindWidget_.inputHasFocus();
+    if ( quickFind ) {
+        quickFindWidget_.confirmCurrentPattern();
+    }
+    if ( !document->selectAllMatches( quickFind, copy ) ) {
+        statusBar()->showMessage(
+            tr( "Match selection requires a non-empty supported pattern and completed results. "
+                "Boolean and inverse filters are not supported." ),
+            5000 );
+    }
+}
+
 // Copy the currently selected line into the clipboard
 void MainWindow::copy()
 {
@@ -1840,6 +1877,9 @@ void MainWindow::copy()
         }
 
         if ( auto current = currentDocument(); current != nullptr ) {
+            if ( current->deferCopyUntilMatchSelection() ) {
+                return;
+            }
             auto text = current->getSelectedText();
             text.replace( QChar::Null, QChar::Space );
 

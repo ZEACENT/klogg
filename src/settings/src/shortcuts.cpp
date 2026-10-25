@@ -204,6 +204,20 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             },
         },
         {
+            MainWindowSelectAllMatches,
+            {
+                QApplication::tr( "Select all matches" ),
+                QStringList{ "Alt+Return", "Alt+Enter" },
+            },
+        },
+        {
+            MainWindowCopyMatches,
+            {
+                QApplication::tr( "Copy matches to clipboard" ),
+                QStringList{},
+            },
+        },
+        {
             MainWindowCopy,
             {
                 QApplication::tr( "Copy selection to clipboard" ),

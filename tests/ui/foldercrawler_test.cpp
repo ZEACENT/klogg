@@ -524,6 +524,57 @@ TEST_CASE( "FolderCrawlerWidget places the Marks-and-matches combo leftmost in t
     REQUIRE( toolbarIndexOf( visibilityBox ) == 0 );
 }
 
+TEST_CASE( "Folder match selection reveals every completed result group", "[folder][match-selection]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "ERROR one ERROR\ncontext\n" );
+    const auto b = writeFile( dir, "b.log", "ERROR two\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b } );
+    widget.show();
+    REQUIRE_FALSE( widget.canSelectAllMatches() );
+    widget.searchFor( "ERROR" );
+    REQUIRE_FALSE( widget.canSelectAllMatches() );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    widget.collapseAll();
+    REQUIRE( widget.canSelectAllMatches() );
+    SafeQSignalSpy finished( widget.filteredView(), SIGNAL( matchSelectionFinished( bool ) ) );
+    REQUIRE( widget.selectAllMatches( false, true ) );
+    REQUIRE( finished.safeWait( 5000 ) );
+    REQUIRE( finished.at( 0 ).at( 0 ).toBool() );
+    REQUIRE( QApplication::clipboard()->text().replace( "\r\n", "\n" )
+             == QStringLiteral( "ERROR\nERROR\nERROR" ) );
+    REQUIRE( widget.filteredView()->hasFocus() );
+    REQUIRE( widget.folderResults()->visibility()
+             == FolderSearchResults::Visibility::MarksAndMatches );
+    REQUIRE_FALSE( widget.folderResults()->isCollapsed( 0 ) );
+    REQUIRE_FALSE( widget.folderResults()->isCollapsed( 1 ) );
+
+    // Remapping must invalidate synchronously, before the coalesced repaint.
+    widget.collapseAll();
+    REQUIRE( widget.filteredView()->getSelectedText().isEmpty() );
+}
+
+TEST_CASE( "Folder match selection readiness belongs to the current pane",
+           "[folder][match-selection]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", "ERROR alpha\nWARN beta\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { path } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( "WARN" );
+    REQUIRE( widget.isSearchActive() );
+    REQUIRE_FALSE( widget.canSelectAllMatches() );
+    widget.resultsTabs()->setCurrentIndex( 0 );
+    REQUIRE( widget.canSelectAllMatches() );
+}
+
 TEST_CASE( "FolderCrawlerWidget search populates grouped results", "[folder]" )
 {
     QTemporaryDir dir;
@@ -4745,6 +4796,25 @@ void resetFolderViewRefreshCounts( FolderFilteredView& view )
 }
 
 } // namespace
+
+TEST_CASE( "Stopped folder result prefixes are not advertised as all matches",
+           "[folder][match-selection][match-selection-stop]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, QStringLiteral( "partial.log" ), QByteArrayLiteral( "X\n" ) );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { path } );
+    widget.searchFor( QStringLiteral( "X" ) );
+    // Publish a completed file group while keeping the owner at the in-flight
+    // boundary. Worker notifications remain queued until after the assertions.
+    widget.folderResults()->addFileGroup( 0, oneFolderMatch( path, 0_lnum ) );
+    REQUIRE_FALSE( widget.canSelectAllMatches() );
+    FolderCrawlerAccess::stopSearch( &widget );
+    FolderCrawlerAccess::finishSearch( &widget );
+    REQUIRE_FALSE( widget.canSelectAllMatches() );
+    REQUIRE_FALSE( widget.selectAllMatches() );
+}
 
 TEST_CASE( "Folder result commits coalesce into one latest-state presentation refresh",
            "[folder][refresh-throttling][presentation]" )

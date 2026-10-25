@@ -425,6 +425,7 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
 
 void AbstractLogView::stopSearchAndWait()
 {
+    cancelMatchSelection();
     // Interrupt and join the QuickFind QThreadPool worker (stopSearch ->
     // interruptAndWait -> waitForFinished). Public so a host can join the worker
     // before the view's AbstractLogData source is destroyed, when the view
@@ -470,6 +471,7 @@ void AbstractLogView::changeEvent( QEvent* changeEvent )
 
 void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 {
+    cancelMatchSelection();
     ensureLineMapFresh();
     auto line = convertCoordToLine( mouseEvent->pos().y() );
 
@@ -1049,6 +1051,12 @@ std::optional<LineNumber> AbstractLogView::findMarkedLine( LineNumber from, bool
 
 void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
 {
+    if ( keyEvent->key() == Qt::Key_Escape
+         && ( matchSelection_ || selection_.isMultiPortion() ) ) {
+        invalidateMatchSelection();
+        keyEvent->accept();
+        return;
+    }
     LOG_DEBUG << "keyPressEvent received " << keyEvent->text();
 
     const auto text = keyEvent->text();
@@ -1157,6 +1165,9 @@ void AbstractLogView::resizeEvent( QResizeEvent* )
 
 bool AbstractLogView::event( QEvent* e )
 {
+    if ( e->type() == QEvent::Hide ) {
+        cancelMatchSelection();
+    }
     LOG_DEBUG << "Event! Type: " << e->type();
 
     // Make sure we ignore the gesture events as
@@ -1424,12 +1435,17 @@ LineNumber AbstractLogView::getViewPosition() const
 
 void AbstractLogView::searchUsingFunction( QuickFindSearchFn searchFunction )
 {
+    cancelMatchSelection();
+    acceptQuickFindResults_ = true;
     disableFollow();
     ( quickFind_->*searchFunction )( selection_, quickFindPattern_->getMatcher() );
 }
 
 void AbstractLogView::setQuickFindResult( bool hasMatch, const Portion& portion )
 {
+    if ( !acceptQuickFindResults_ ) {
+        return;
+    }
     if ( portion.isValid() ) {
         LOG_DEBUG << "search " << portion.line();
         displayLine( portion.line() );
@@ -1482,6 +1498,7 @@ void AbstractLogView::allowFollowMode( bool allow )
 
 void AbstractLogView::setSearchPattern( const RegularExpressionPattern& pattern )
 {
+    invalidateMatchSelection();
     searchPattern_ = pattern;
     forceRefresh();
 }
@@ -1573,6 +1590,7 @@ void AbstractLogView::handlePatternUpdated()
 {
     LOG_DEBUG << "AbstractLogView::handlePatternUpdated()";
 
+    invalidateMatchSelection();
     quickFind_->resetLimits();
     forceRefresh();
 }
@@ -1634,7 +1652,9 @@ void AbstractLogView::findPreviousSelected()
 // Copy the selection to the clipboard
 void AbstractLogView::copy()
 {
-
+    if ( deferCopyUntilMatchSelection() ) {
+        return;
+    }
     try {
         auto text = selection_.getSelectedText( logData_ );
         text.replace( QChar::Null, QChar::Space );
@@ -1849,6 +1869,10 @@ void AbstractLogView::updateData()
     ++updateDataCountForTest_;
     presentedLineCountForTest_ = logData_->getNbLine().get();
     const auto lastLineNumber = LineNumber( logData_->getNbLine().get() );
+    if ( ( selection_.isMultiPortion() && logData_->getNbLine() < matchSelectionRows_ )
+         || ( matchSelection_ && logData_->getNbLine() < matchSelection_->totalRows ) ) {
+        invalidateMatchSelection();
+    }
 
     // Check the top Line is within range
     if ( firstLine_ >= lastLineNumber ) {
@@ -1858,8 +1882,13 @@ void AbstractLogView::updateData()
         horizontalScrollBar()->setValue( 0 );
     }
 
-    // Crop selection if it become out of range
-    selection_.crop( lastLineNumber - 1_lcount );
+    // Avoid unsigned underflow when a source is cleared.
+    if ( lastLineNumber == 0_lnum ) {
+        selection_.clear();
+    }
+    else {
+        selection_.crop( lastLineNumber - 1_lcount );
+    }
 
     // Invalidate cached column count - file size change affects nbDigitsInLineNumber
     // which affects leftMarginPx_ in drawTextArea()
@@ -1996,7 +2025,13 @@ bool AbstractLogView::isPartialSelection() const
 
 void AbstractLogView::selectAll()
 {
-    selection_.selectRange( 0_lnum, LineNumber( logData_->getNbLine().get() ) - 1_lcount );
+    cancelMatchSelection();
+    if ( logData_->getNbLine() == 0_lcount ) {
+        selection_.clear();
+    }
+    else {
+        selection_.selectRange( 0_lnum, LineNumber( logData_->getNbLine().get() ) - 1_lcount );
+    }
     forceRefresh();
 }
 
@@ -2011,6 +2046,7 @@ void AbstractLogView::trySelectLine( LineNumber lineToSelect )
 
 void AbstractLogView::selectAndDisplayLine( LineNumber line )
 {
+    cancelMatchSelection();
     disableFollow();
     selection_.selectLine( line );
     selectionStartPos_ = FilePosition{ line, 0_lcol };
@@ -2022,6 +2058,7 @@ void AbstractLogView::selectAndDisplayLine( LineNumber line )
 void AbstractLogView::selectPortionAndDisplayLine( LineNumber line, LinesCount nLines,
                                                    LineColumn startCol, LineLength nSymbols )
 {
+    cancelMatchSelection();
     disableFollow();
     selection_.selectLine( line );
     selectionStartPos_ = FilePosition{ line, startCol };
@@ -2118,6 +2155,7 @@ LineKind AbstractLogView::lineKind( LineNumber /*lineNumber*/ ) const
 
 void AbstractLogView::setDataSource( const AbstractLogData* newLogData )
 {
+    invalidateMatchSelection();
     logData_ = newLogData;
     // A new document invalidates the search range inherited from the previous
     // data: the folder main view is built on an empty placeholder, so the
@@ -2139,6 +2177,11 @@ void AbstractLogView::setDataSource( const AbstractLogData* newLogData )
 
 void AbstractLogView::setSearchLimits( LineNumber startLine, LineNumber endLine )
 {
+    // Owners also extend the end on ordinary appends. That must not grow or
+    // discard an existing snapshot; explicit user changes invalidate at source.
+    if ( startLine != searchStart_ || endLine < searchEnd_ ) {
+        invalidateMatchSelection();
+    }
     searchStart_ = startLine;
     searchEnd_ = endLine;
 
@@ -2489,6 +2532,7 @@ void AbstractLogView::displayLine( LineNumber line )
 // Move the selection up and down by the passed number of lines
 void AbstractLogView::moveSelection( LinesCount delta, bool isDeltaNegative )
 {
+    cancelMatchSelection();
     LOG_DEBUG << "AbstractLogView::moveSelection delta=" << delta;
 
     auto selection = selection_.getLines();
@@ -2617,6 +2661,7 @@ void AbstractLogView::updateGlobalSelection()
 
 void AbstractLogView::selectAndDisplayRange( FilePosition pos )
 {
+    cancelMatchSelection();
     disableFollow();
     selection_.selectRange( selectionStartPos_.line(), pos.line() );
     selectionCurrentEndPos_ = pos;
@@ -3440,14 +3485,13 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             { HighlightLayer::QuickFind, std::move( quickFindMatches ) } );
 
         // Selection (already in the expanded column space).
-        const auto selectionPortion = selection_.getPortionForLine( lineNumber );
-        if ( selectionPortion.isValid() ) {
-            highlightSources.push_back(
-                { HighlightLayer::Selection,
-                  { HighlightedMatch{ selectionPortion.startColumn(), selectionPortion.size(),
-                                      palette.color( QPalette::HighlightedText ),
-                                      palette.color( QPalette::Highlight ) } } } );
+        klogg::vector<HighlightedMatch> selectionMatches;
+        for ( const auto& portion : selection_.getPortionsForLine( lineNumber ) ) {
+            selectionMatches.emplace_back( portion.startColumn(), portion.size(),
+                                           palette.color( QPalette::HighlightedText ),
+                                           palette.color( QPalette::Highlight ) );
         }
+        highlightSources.push_back( { HighlightLayer::Selection, std::move( selectionMatches ) } );
 
         HighlightedMatchRanges allHighlights = composeLineHighlights( highlightSources );
 

@@ -51,6 +51,27 @@ bool containsExactRuntimeMatch( const QStringList& bindings, const QKeySequence&
 }
 } // namespace
 
+TEST_CASE( "Match selection commands are configurable and reserve Alt Enter", "[match-selection]" )
+{
+    const auto& shortcuts = ShortcutAction::defaultShortcutList();
+    const auto select = shortcuts.find( "mainwindow.select_all_matches" );
+    REQUIRE( select != shortcuts.end() );
+    REQUIRE( containsExactRuntimeMatch( select->second.keySequence,
+                                       QKeySequence( QStringLiteral( "Alt+Return" ) ) ) );
+    REQUIRE( containsExactRuntimeMatch( select->second.keySequence,
+                                       QKeySequence( QStringLiteral( "Alt+Enter" ) ) ) );
+    REQUIRE( shortcuts.find( "mainwindow.copy_matches" ) != shortcuts.end() );
+    for ( const auto& entry : shortcuts ) {
+        if ( entry.first == select->first ) {
+            continue;
+        }
+        for ( const auto& binding : select->second.keySequence ) {
+            REQUIRE_FALSE( containsExactRuntimeMatch( entry.second.keySequence,
+                                QKeySequence( binding, QKeySequence::PortableText ) ) );
+        }
+    }
+}
+
 TEST_CASE( "Shortcut bindings: disconnect and reconnect source have defaults" )
 {
     const auto& shortcuts = ShortcutAction::defaultShortcutList();

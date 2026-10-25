@@ -50,6 +50,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QPushButton>
+#include <QPointer>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTimer>
@@ -104,6 +105,9 @@ class CrawlerWidget : public QSplitter,
     // Instructs the widget to select all the text in the window the user
     // is interacting with
     void selectAll() override;
+    bool canSelectAllMatches( bool quickFind = false ) const override;
+    bool selectAllMatches( bool quickFind = false, bool copy = false ) override;
+    bool deferCopyUntilMatchSelection() override;
 
     std::optional<int> encodingMib() const override;
 
@@ -324,6 +328,7 @@ class CrawlerWidget : public QSplitter,
     void replaceCurrentSearch( const QString& searchText );
     void updateSearchCombo();
     AbstractLogView* activeView() const;
+    void invalidateMatchSelections();
     void printSearchInfoMessage( LinesCount nbMatches = 0_lcount );
     void changeDataStatus( DataStatus status );
     void updateEncoding();
@@ -335,6 +340,7 @@ class CrawlerWidget : public QSplitter,
 
     void connectAllFilteredViewSlots( FilteredView* view);
     void connectSearchPublication( LogFilteredData* source );
+    void interruptCurrentSearch();
     bool acceptsSearchPublication( const LogFilteredData* source, quint64 generation ) const;
     void queuePresentationRefresh( bool searchCatchUp );
     void deliverPresentationCatchUp();
@@ -363,6 +369,13 @@ class CrawlerWidget : public QSplitter,
     LogMainView* logMainView_ = nullptr;
     FilteredView* filteredView_ = nullptr;
     std::unordered_map<FilteredView*, std::shared_ptr<LogFilteredData>> filteredViewsData_;
+    // A terminal publication after Stop settles partial results, not all matches.
+    // Keep the outcome per pane/generation so queued signals cannot resurrect it.
+    struct MatchSearchState {
+        quint64 generation;
+        bool cancelled;
+    };
+    std::unordered_map<const LogFilteredData*, MatchSearchState> matchSearchStates_;
     QTabWidget* tabbedFilteredView_;
 
     OverviewWidget* overviewWidget_;
@@ -392,7 +405,7 @@ class CrawlerWidget : public QSplitter,
 
     // Reference to the QuickFind Pattern (not owned)
 
-    QWidget* qfSavedFocus_ = nullptr;
+    QPointer<QWidget> qfSavedFocus_;
 
     // Search state (for auto-refresh and truncation)
     SearchState searchState_;

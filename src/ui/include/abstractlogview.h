@@ -55,6 +55,7 @@
 #include <QColor>
 #include <QEvent>
 #include <QFontMetrics>
+#include <QPointer>
 
 #include "abstractlogdata.h"
 #include "linekind.h"
@@ -72,6 +73,7 @@
 class QMenu;
 class QAction;
 class QShortcut;
+class QProgressDialog;
 class HighlightersMenu;
 
 // Utility class representing a buffer for number entered on the keyboard
@@ -194,6 +196,14 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     bool isPartialSelection() const;
     // Instructs the widget to select the whole text.
     void selectAll();
+    // Match selection is batched and published atomically. Hosts validate filter
+    // completion and invalidate before result-row remapping or source replacement.
+    bool canSelectAllMatches( bool quickFind = false ) const;
+    bool selectAllMatches( bool quickFind = false, bool copy = false );
+    void cancelMatchSelection();
+    void invalidateMatchSelection();
+    // Ordinary Copy can arrive before the batched selection is published.
+    bool deferCopyUntilMatchSelection();
     // Inject a read-only mark source (for views without LogFilteredData, e.g.
     // the folder main view and folder results view). Subclass lineType()
     // overrides OR in LineTypeFlags::Mark from it; the LogViewNextMark/PrevMark
@@ -294,6 +304,8 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     virtual void selectPrevMark();
 
   Q_SIGNALS:
+    void matchSelectionFinished( bool completed );
+    void matchSelectionProgress( quint64 processed, quint64 total );
     // Sent up to the MainWindow to enable/disable the follow mode
     void followModeChanged( bool enabled );
     // Sent when the view wants the QuickFind widget pattern to change.
@@ -514,6 +526,28 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     OptionalLineNumber markingClickLine_;
 
     Selection selection_;
+
+    struct MatchSelection {
+        QRegularExpression expression;
+        QRegularExpressionMatchIterator iterator;
+        QString text;
+        std::vector<Portion> portions;
+        std::vector<std::pair<klogg::ContainerIndex, klogg::ContainerIndex>> tabDeltas;
+        QPointer<QProgressDialog> progress;
+        LineNumber nextRow = 0_lnum;
+        LinesCount totalRows = 0_lcount;
+        bool quickFind = false;
+        bool copyWhenFinished = false;
+        bool readingLine = false;
+    };
+    std::unique_ptr<MatchSelection> matchSelection_;
+    quint64 matchSelectionGeneration_ = 0;
+    LinesCount matchSelectionRows_ = 0_lcount;
+    bool acceptQuickFindResults_ = true;
+
+    QRegularExpression matchSelectionExpression( bool quickFind ) const;
+    void continueMatchSelection( quint64 generation );
+    void finishMatchSelection( bool completed );
     RegularExpressionPattern searchPattern_;
 
     std::vector<QuickHighlighters> quickHighlighters_ = std::vector<QuickHighlighters>{ 9 };

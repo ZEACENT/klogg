@@ -134,6 +134,7 @@ void registerCrawlerShortcuts( QWidget* host, std::map<QString, QShortcut*>& sho
                                           Qt::WidgetWithChildrenShortcut, [ hooks ]() {
                                               auto* const activeView = hooks.activeView();
                                               if ( activeView != nullptr ) {
+                                                  activeView->invalidateMatchSelection();
                                                   activeView->setFocus();
                                               }
                                           } );

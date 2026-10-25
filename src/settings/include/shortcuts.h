@@ -60,6 +60,8 @@ struct ShortcutAction {
     static constexpr auto MainWindowPreference = "mainwindow.preference";
     static constexpr auto MainWindowCopy = "mainwindow.copy_selection";
     static constexpr auto MainWindowSelectAll = "mainwindow.select_all";
+    static constexpr auto MainWindowSelectAllMatches = "mainwindow.select_all_matches";
+    static constexpr auto MainWindowCopyMatches = "mainwindow.copy_matches";
     static constexpr auto MainWindowOpenQf = "mainwindow.open_qf";
     static constexpr auto MainWindowOpenQfForward = "mainwindow.open_qf_forward";
     static constexpr auto MainWindowOpenQfBackward = "mainwindow.open_qf_backward";

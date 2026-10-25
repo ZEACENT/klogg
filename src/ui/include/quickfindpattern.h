@@ -134,6 +134,7 @@ class QuickFindPattern : public QObject {
     bool matchLine( const QString& line, klogg::vector<HighlightedMatch>& matches ) const;
 
     QuickFindMatcher getMatcher() const;
+    QRegularExpression regularExpression() const { return regexp_; }
 
   Q_SIGNALS:
     // Sent when the pattern is changed
