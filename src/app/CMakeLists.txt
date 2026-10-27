@@ -196,6 +196,11 @@ if(WIN32)
   target_sources(klogg_grep PRIVATE ${ProductVersionResourceFiles})
 
 elseif(APPLE)
+  # main.cpp installs the Foundation uncaught-exception handler directly.
+  # Do not rely on Qt's transitive framework linkage (not provided by Qt 5).
+  foreach(target IN ITEMS klogg klogg_portable)
+    target_link_libraries(${target} PRIVATE "-framework Foundation")
+  endforeach()
   # Do not let CMake touch rpaths at install time.  macdeployqt handles
   # rpath adjustment; DMG creation uses hdiutil directly (not CPack),
   # so there is no install step that needs rpath manipulation.
