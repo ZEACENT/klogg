@@ -4537,7 +4537,7 @@ void MainWindow::displayQuickFindBar( QuickFindMux::QFDirection direction )
     }
 
     const auto* document = currentDocument();
-    if ( document != nullptr && document->isPartialSelection() ) {
+    if ( document != nullptr && document->canUseSelectionAsSearchOperand() ) {
         const auto selection = document->getSelectedText();
         if ( !selection.isEmpty() ) {
             quickFindWidget_.changeDisplayedPattern( selection, Configuration::get().qfIgnoreCase(),

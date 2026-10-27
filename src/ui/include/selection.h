@@ -25,11 +25,14 @@
 #include <QStringList>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include "linetypes.h"
+#include "logsnapshot.h"
 
 class AbstractLogData;
 
@@ -107,7 +110,9 @@ class Selection {
         selectedPartial_.line = {};
         selectedLine_ = {};
         selectedRange_.startLine = {};
-        selectedPortions_.clear();
+        portionPayload_.reset();
+        portionLayout_.reset();
+        navigationBounds_.reset();
         toggledRanges_.clear();
         lastToggledLine_ = {};
     }
@@ -131,11 +136,37 @@ class Selection {
     // overlapping occurrences separate after caller-side capture merging.
     void selectPortions( std::vector<Portion> portions,
                          PortionOverlap overlap = PortionOverlap::Merge );
+    struct CapturedPortion {
+        Portion portion;
+        LineNumber sourceLineNumber;
+        QString text;
+        std::optional<klogg::LogRowId> identity = std::nullopt;
+        OptionalLineNumber presentedRow = std::nullopt;
+    };
+
+    // Own the captured text and its one-based source line label (getLineNumber()).
+    // Sort by portion row/start and preserve distinct overlaps. With a stable identity,
+    // portion.line() is immutable snapshot order and presentedRow is current geometry
+    // (nullopt means hidden); legacy entries use portion.line() as their display row.
+    // Ignore invalid/empty entries. Caller establishes row eligibility; copying never
+    // consults logData, and hidden fragments remain part of the semantic selection.
+    void selectCapturedPortions( std::vector<CapturedPortion> portions );
+
+    // Resolve each stable fragment/occurrence identity once and atomically replace
+    // visible geometry and navigation. Payload order/labels are unchanged; legacy
+    // entries are not passed to the resolver.
+    void remapCapturedRows(
+        const std::function<OptionalLineNumber( const klogg::LogRowId& )>& resolveRow );
+
+    // Search operands require one nonempty contiguous fragment, not every
+    // selection shape that isPortion() exposes for painting.
+    bool canUseAsSearchOperand() const;
+
     std::vector<Portion> getPortionsForLine( LineNumber line ) const;
-    // Identifies selectPortions mode, including a single surviving fragment.
+    // Identifies either batch-selection mode, including a single surviving fragment.
     bool isMultiPortion() const
     {
-        return !selectedPortions_.empty();
+        return portionPayload_ != nullptr;
     }
 
     // Select a range of lines (both start and end included)
@@ -151,14 +182,15 @@ class Selection {
     // of range (shift+click behaviour)
     void selectRangeFromPrevious( LineNumber line );
 
-    // Crop selection so that in fit in the range ending with the line passed.
+    // Crop to the last display row. Stable captured rows outside the range become
+    // hidden without losing payload; ordinary/legacy selections are truncated.
     void crop( LineNumber lastLine );
 
     // Returns whether the selection is empty
     bool isEmpty() const
     {
         return !selectedPartial_.line && !selectedLine_ && !selectedRange_.startLine
-               && selectedPortions_.empty() && toggledRanges_.empty();
+               && !portionPayload_ && toggledRanges_.empty();
     }
 
     // Returns whether the selection is a single line
@@ -179,9 +211,10 @@ class Selection {
     // Returns the first portion on the passed line, or an invalid portion.
     // Use getPortionsForLine() when all fragments on that line are needed.
     Portion getPortionForLine( LineNumber line ) const;
-    // Get a list of selected line(s), in order.
+    // Get selected visible display rows in order, excluding hidden captured rows.
     klogg::vector<LineNumber> getLines() const;
 
+    // Count selected source rows, deduplicating stable identities even when hidden.
     LinesCount getSelectedLinesCount() const;
 
     // Returns wether the line passed is selected (entirely).
@@ -193,16 +226,35 @@ class Selection {
     // Returns the line selected or -1 if not a single line selection
     OptionalLineNumber selectedLine() const;
 
-    // Returns the text selected from the passed AbstractLogData
+    // Returns captured payloads without accessing logData, or reads the current
+    // source for ordinary selections.
     QString getSelectedText( const AbstractLogData* logData, bool lineNumbers = false ) const;
 
+    // Worker-safe serialization of an immutable captured selection copy. No source
+    // access is possible. Cancellation or noncaptured input returns nullopt; an empty
+    // callback never cancels. Checks occur per fragment, per bounded text chunk,
+    // and before returning success. Hidden fragments remain in semantic copy order.
+    bool hasCapturedPayload() const;
+    std::optional<QString> serializeCapturedText(
+        bool withLineNumbers, const std::function<bool()>& cancelled ) const;
+
     // Returns the selected text as one string per whole line or partial fragment,
-    // in row/start order (non-copyable rows, e.g. folder headers, are skipped).
+    // in row/start order. Ordinary selections skip non-copyable rows, e.g. folder
+    // headers; captured selections return their owned payloads without source reads.
     // Multiple fragments on one row yield separate entries. Unlike getSelectedText(),
     // nothing is joined with platform line separators: consumers matching text per log
     // line (e.g. color labels) must use this, as an entry containing a line
     // feed can never match a single line.
     QStringList getSelectedLinesText( const AbstractLogData* logData ) const;
+
+    // Occurrence navigation is independent of capture geometry, including zero
+    // fragments. A stable identity names previous.line()'s source row. Remapping
+    // preserves columns and next.line()'s relative row delta (e.g. an EOF sentinel).
+    // Hidden stable anchors retain semantics but report neutral navigation positions.
+    // Ordinary selection replacement/clear retires the anchor.
+    void setNavigationBounds( FilePosition previous, FilePosition next,
+                              std::optional<klogg::LogRowId> identity = std::nullopt );
+    bool hasStableNavigationAnchor() const;
 
     // Return the position immediately after the current selection
     // (used for searches).
@@ -214,9 +266,9 @@ class Selection {
 
   private:
     // Row-ordered (lineNumber, text) pairs -- NOT a map: folder results can
-    // legitimately select the same source line number from DIFFERENT files
-    // (each row maps to its own file's local line), and the copied text must
-    // follow the view's row order, not sorted-by-line order.
+    // legitimately select the same source line number from DIFFERENT files.
+    // Copy follows the selection's immutable semantic row order, not source-label
+    // order or a later display remapping.
     std::vector<std::pair<LineNumber, QString>>
     getSelectionWithLineNumbers( const AbstractLogData* logData ) const;
 
@@ -249,11 +301,49 @@ class Selection {
     struct SelectedPartial selectedPartial_;
     struct SelectedRange selectedRange_;
 
-    // Distinct from selectedPartial_: even one fragment retains batch-selection
-    // identity so views can invalidate it when its source changes. Ordered by
-    // row/start column; adjacency is never merged. Preserved occurrences may overlap.
-    std::vector<Portion> selectedPortions_;
-    std::vector<Portion>::const_iterator firstPortionForLine( LineNumber line ) const;
+    struct NavigationBounds {
+        FilePosition previous;
+        FilePosition next;
+        std::optional<klogg::LogRowId> identity;
+        OptionalLineNumber presentedRow;
+    };
+    std::optional<NavigationBounds> navigationBounds_;
+
+    struct SelectedPortion {
+        Portion portion;
+        // Only semantic entries own payload; the display index stores no text.
+        // Batch setters keep ownership homogeneous: either every entry is captured
+        // or none is. Cropping/remapping cannot change that ownership mode.
+        std::optional<std::pair<LineNumber, QString>> capturedText;
+        std::optional<klogg::LogRowId> identity;
+    };
+
+    struct PortionPayload {
+        // Semantic order never changes with presentation. Distinct occurrences may overlap.
+        std::vector<SelectedPortion> portions;
+        LinesCount lineCount = 0_lcount;
+    };
+    struct PortionLayout {
+        // Geometry is separate from payload: remapping does not copy fragment text entries.
+        std::vector<OptionalLineNumber> rows;
+        std::vector<std::size_t> visible;
+    };
+
+    // Published batch values are immutable. Copying a captured selection into a
+    // worker copies these two handles, not any per-fragment payload or layout vectors.
+    // Empty batches use null handles; replacement/cropping cannot mutate other readers.
+    std::shared_ptr<const PortionPayload> portionPayload_;
+    std::shared_ptr<const PortionLayout> portionLayout_;
+    const std::vector<SelectedPortion>& portions() const;
+    const PortionLayout& layout() const;
+    void setPortions( std::vector<SelectedPortion> entries,
+                      std::vector<OptionalLineNumber> rows );
+    static std::shared_ptr<const PortionLayout>
+    makePortionLayout( const std::vector<SelectedPortion>& entries,
+                       std::vector<OptionalLineNumber> rows );
+    LineNumber displayedRow( std::size_t index ) const;
+    Portion displayedPortion( std::size_t index ) const;
+    std::vector<std::size_t>::const_iterator firstPortionForLine( LineNumber line ) const;
 
     // Inclusive [firstLine, lastLine] intervals toggled line-by-line
     // (ctrl+click), kept ascending, non-overlapping and non-adjacent

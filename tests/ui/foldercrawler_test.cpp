@@ -524,7 +524,8 @@ TEST_CASE( "FolderCrawlerWidget places the Marks-and-matches combo leftmost in t
     REQUIRE( toolbarIndexOf( visibilityBox ) == 0 );
 }
 
-TEST_CASE( "Folder match selection reveals every completed result group", "[folder][match-selection]" )
+TEST_CASE( "Folder match selection uses canonical matches without revealing result groups",
+           "[folder][match-selection][owner-canonical-scope]" )
 {
     QTemporaryDir dir;
     REQUIRE( dir.isValid() );
@@ -537,24 +538,190 @@ TEST_CASE( "Folder match selection reveals every completed result group", "[fold
     widget.searchFor( "ERROR" );
     REQUIRE_FALSE( widget.canSelectAllMatches() );
     REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
-    widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    SECTION( "collapsed matches remain collapsed" )
+    {
+        widget.setResultsVisibility( FolderSearchResults::Visibility::Matches );
+    }
+    SECTION( "Marks-only results remain hidden" )
+    {
+        widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    }
     widget.collapseAll();
+    const auto visibility = widget.folderResults()->visibility();
+    const auto visibleRows = widget.folderResults()->getNbLine();
+    REQUIRE( widget.folderResults()->isCollapsed( 0 ) );
+    REQUIRE( widget.folderResults()->isCollapsed( 1 ) );
     REQUIRE( widget.canSelectAllMatches() );
     SafeQSignalSpy finished( widget.filteredView(), SIGNAL( matchSelectionFinished( bool ) ) );
     REQUIRE( widget.selectAllMatches( false, true ) );
+    REQUIRE( widget.folderResults()->visibility() == visibility );
+    REQUIRE( widget.folderResults()->getNbLine() == visibleRows );
+    REQUIRE( widget.folderResults()->isCollapsed( 0 ) );
+    REQUIRE( widget.folderResults()->isCollapsed( 1 ) );
     REQUIRE( finished.safeWait( 5000 ) );
     REQUIRE( finished.at( 0 ).at( 0 ).toBool() );
     REQUIRE( QApplication::clipboard()->text().replace( "\r\n", "\n" )
              == QStringLiteral( "ERROR\nERROR\nERROR" ) );
     REQUIRE( widget.filteredView()->hasFocus() );
-    REQUIRE( widget.folderResults()->visibility()
-             == FolderSearchResults::Visibility::MarksAndMatches );
-    REQUIRE_FALSE( widget.folderResults()->isCollapsed( 0 ) );
-    REQUIRE_FALSE( widget.folderResults()->isCollapsed( 1 ) );
+    REQUIRE( widget.folderResults()->visibility() == visibility );
+    REQUIRE( widget.folderResults()->getNbLine() == visibleRows );
+    REQUIRE( widget.folderResults()->isCollapsed( 0 ) );
+    REQUIRE( widget.folderResults()->isCollapsed( 1 ) );
+}
 
-    // Remapping must invalidate synchronously, before the coalesced repaint.
-    widget.collapseAll();
-    REQUIRE( widget.filteredView()->getSelectedText().isEmpty() );
+TEST_CASE( "Folder layout changes preserve published payload and synchronously remap geometry",
+           "[folder][match-selection][owner-layout]" )
+{
+    const bool presentationActive = GENERATE( true, false );
+    CAPTURE( presentationActive );
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "context\nERROR one\ncontext\nERROR two\n" );
+    const auto b = writeFile( dir, "b.log", "ERROR three\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b } );
+    widget.show();
+    widget.setResultsVisibility( FolderSearchResults::Visibility::MarksAndMatches );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
+    auto* const view = widget.filteredView();
+    SafeQSignalSpy selected{ view, &AbstractLogView::matchSelectionFinished };
+    REQUIRE( widget.selectAllMatches() );
+    REQUIRE( selected.safeWait( 5000 ) );
+    REQUIRE( selected.at( 0 ).at( 0 ).toBool() );
+    const auto payload = view->getSelectedText();
+    REQUIRE( QString{ payload }.replace( "\r\n", "\n" ) == QStringLiteral( "ERROR\nERROR\nERROR" ) );
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    REQUIRE( Access::selectedLines( view ) == klogg::vector<LineNumber>{ 1_lnum, 2_lnum, 4_lnum } );
+    widget.setPresentationActive( presentationActive );
+
+    SECTION( "collapse and expand change geometry, not selection membership" )
+    {
+        widget.collapseAll();
+        REQUIRE( view->getSelectedText() == payload );
+        REQUIRE( Access::selectedLines( view ).empty() );
+        widget.expandAll();
+    }
+    SECTION( "a single header fold remaps the later group's selected row" )
+    {
+        widget.clickHeaderRow( 0_lnum );
+        REQUIRE( view->getSelectedText() == payload );
+        REQUIRE( Access::selectedLines( view ) == klogg::vector<LineNumber>{ 2_lnum } );
+        widget.clickHeaderRow( 0_lnum );
+    }
+    SECTION( "Marks-only visibility hides and restores selected geometry" )
+    {
+        widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+        REQUIRE( view->getSelectedText() == payload );
+        REQUIRE( Access::selectedLines( view ).empty() );
+        widget.setResultsVisibility( FolderSearchResults::Visibility::MarksAndMatches );
+    }
+    SECTION( "inserting and removing a mark-only row remaps every group" )
+    {
+        widget.markMainViewLine( 0_lnum );
+        REQUIRE( view->getSelectedText() == payload );
+        REQUIRE( Access::selectedLines( view ) == klogg::vector<LineNumber>{ 2_lnum, 3_lnum, 5_lnum } );
+        widget.unmarkMainViewLine( 0_lnum );
+    }
+    REQUIRE( view->getSelectedText() == payload );
+    REQUIRE( Access::selectedLines( view ) == klogg::vector<LineNumber>{ 1_lnum, 2_lnum, 4_lnum } );
+    widget.setPresentationActive( true );
+    flushFolderPresentation( widget );
+    REQUIRE( view->getSelectedText() == payload );
+    REQUIRE( Access::selectedLines( view ) == klogg::vector<LineNumber>{ 1_lnum, 2_lnum, 4_lnum } );
+}
+
+TEST_CASE( "Folder pending Copy does not grow its accepted Quick Find scope when groups expand",
+           "[folder][match-selection][owner-layout-copy]" )
+{
+    const bool alreadyPublished = GENERATE( false, true );
+    CAPTURE( alreadyPublished );
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "ERROR accepted\n" );
+    const auto b = writeFile( dir, "b.log", "ERROR later\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b } );
+    widget.show();
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    widget.clickHeaderRow( 2_lnum );
+    REQUIRE_FALSE( widget.folderResults()->isCollapsed( 0 ) );
+    REQUIRE( widget.folderResults()->isCollapsed( 1 ) );
+    auto pattern = std::make_shared<QuickFindPattern>();
+    pattern->changeSearchPattern( QStringLiteral( "ERROR \\w+" ), false, true, false );
+    widget.setQuickFindPattern( pattern );
+    auto* const view = widget.filteredView();
+    view->setFocus();
+    REQUIRE( waitFor( [ & ] { return view->hasFocus(); } ) );
+    if ( alreadyPublished ) {
+        SafeQSignalSpy selected{ view, &AbstractLogView::matchSelectionFinished };
+        REQUIRE( widget.selectAllMatches( true ) );
+        REQUIRE( selected.safeWait( 5000 ) );
+        REQUIRE( selected.at( 0 ).at( 0 ).toBool() );
+        REQUIRE( view->getSelectedText() == QStringLiteral( "ERROR accepted" ) );
+    }
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ view, &AbstractLogView::matchSelectionFinished };
+    REQUIRE( ( alreadyPublished ? widget.deferCopyUntilMatchSelection()
+                                : widget.selectAllMatches( true, true ) ) );
+    widget.expandAll();
+    REQUIRE_FALSE( widget.folderResults()->isCollapsed( 1 ) );
+    REQUIRE( copied.safeWait( 5000 ) );
+    REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "ERROR accepted" ) );
+    REQUIRE( view->getSelectedText() == QStringLiteral( "ERROR accepted" ) );
+}
+
+TEST_CASE( "Folder Quick Find origins cannot route commands to an inactive pane",
+           "[folder][match-selection][owner-routing]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", "ERROR alpha\nWARN beta\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { path } );
+    widget.show();
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    auto* const firstPane = widget.filteredView();
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( "WARN" );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    auto* const secondPane = widget.filteredView();
+    REQUIRE( firstPane != secondPane );
+    widget.resultsTabs()->setCurrentIndex( 0 );
+    firstPane->setFocus();
+    REQUIRE( waitFor( [ & ] { return firstPane->hasFocus(); } ) );
+    firstPane->selectAll();
+    const auto firstSelection = firstPane->getSelectedText();
+    REQUIRE_FALSE( firstSelection.isEmpty() );
+    widget.enteringQuickFind();
+    widget.focusSearchEdit();
+    REQUIRE( widget.getActiveSearchable() == firstPane );
+    REQUIRE( widget.getSelectedText() == firstSelection );
+
+    SECTION( "exit retires the origin before a later pane switch" )
+    {
+        widget.exitingQuickFind();
+        REQUIRE( firstPane->hasFocus() );
+    }
+    SECTION( "switching panes during Quick Find retires the origin" ) {}
+
+    widget.resultsTabs()->setCurrentIndex( 1 );
+    widget.focusSearchEdit();
+    REQUIRE( widget.searchToolbar()->searchLineEdit()->lineEdit()->hasFocus() );
+    REQUIRE( widget.getActiveSearchable() == secondPane );
+    widget.selectAll();
+    const auto secondSelection = secondPane->getSelectedText();
+    REQUIRE_FALSE( secondSelection.isEmpty() );
+    REQUIRE( secondSelection != firstSelection );
+    REQUIRE( widget.getSelectedText() == secondSelection );
+    REQUIRE( firstPane->getSelectedText() == firstSelection );
+    // A delayed exit must not reactivate the hidden pane or steal toolbar focus.
+    widget.exitingQuickFind();
+    REQUIRE( widget.searchToolbar()->searchLineEdit()->lineEdit()->hasFocus() );
 }
 
 TEST_CASE( "Folder match selection readiness belongs to the current pane",
@@ -731,7 +898,7 @@ TEST_CASE( "FolderCrawlerWidget main view caches the line map across unchanged m
 
     auto* const mainView = widget.mainView();
 
-    // First refresh builds the map.
+    // A prior paint may already have published the map.
     mainView->ensureLineMapFresh();
     REQUIRE( mainView->isLineMapCurrent() );
     const int buildsAfterFirst = mainView->visibleLineMapBuildCount();
@@ -741,11 +908,11 @@ TEST_CASE( "FolderCrawlerWidget main view caches the line map across unchanged m
     mainView->ensureLineMapFresh();
     REQUIRE( mainView->visibleLineMapBuildCount() == buildsAfterFirst );
 
-    // Swapping the underlying file changes the map's inputs (data ptr + line
-    // count), so the cache must invalidate and the next refresh must rebuild.
+    // Prevent paint from publishing the replacement map first: this specifically
+    // verifies on-demand rebuilding between a source swap and the next paint.
+    mainView->setUpdatesEnabled( false );
     selectResultRowAndWaitForFile( widget, 3_lnum, b ); // open b.log
-    QTest::qWait( 200 );
-
+    REQUIRE_FALSE( mainView->isLineMapCurrent() );
     mainView->ensureLineMapFresh();
     REQUIRE( mainView->visibleLineMapBuildCount() > buildsAfterFirst );
 
@@ -753,6 +920,7 @@ TEST_CASE( "FolderCrawlerWidget main view caches the line map across unchanged m
     const int buildsAfterSwap = mainView->visibleLineMapBuildCount();
     mainView->ensureLineMapFresh();
     REQUIRE( mainView->visibleLineMapBuildCount() == buildsAfterSwap );
+    mainView->setUpdatesEnabled( true );
 }
 
 TEST_CASE( "FolderCrawlerWidget search toolbar shares the results pane (sits between the views)",
@@ -1737,7 +1905,7 @@ TEST_CASE( "FolderCrawlerWidget applyConfiguration re-applies view config on dem
 
 TEST_CASE( "FolderCrawlerWidget copy/selectAll delegate to the active view", "[folder]" )
 {
-    // FolderCrawlerWidget must override getSelectedText/selectAll/isPartialSelection
+    // FolderCrawlerWidget must override getSelectedText/selectAll/canUseSelectionAsSearchOperand
     // (AbstractCrawlerWidget) so MainWindow::copy/selectAll work on folder tabs.
     // Previously they gated on the current crawler widget (a CrawlerWidget cast,
     // null for a folder tab) and the Edit-menu items were enabled but silent
@@ -1764,7 +1932,7 @@ TEST_CASE( "FolderCrawlerWidget copy/selectAll delegate to the active view", "[f
     const auto text = base->getSelectedText();
     REQUIRE_FALSE( text.isEmpty() );
     REQUIRE( text.contains( QStringLiteral( "ERROR" ) ) );
-    REQUIRE_NOTHROW( base->isPartialSelection() );
+    REQUIRE_NOTHROW( base->canUseSelectionAsSearchOperand() );
 }
 
 TEST_CASE( "FolderCrawlerWidget is a QuickFind selector (Ctrl+F dispatch target)", "[folder]" )

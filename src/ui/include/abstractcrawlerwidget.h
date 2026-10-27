@@ -71,8 +71,8 @@ class AbstractCrawlerWidget : public ViewInterface {
     }
     // Ordinary Copy can join an in-flight match-selection batch without blocking.
     virtual bool deferCopyUntilMatchSelection() { return false; }
-    // True if the active view has a partial (non-full-line) selection.
-    virtual bool isPartialSelection() const
+    // True only for one contiguous fragment usable as a search operand.
+    virtual bool canUseSelectionAsSearchOperand() const
     {
         return false;
     }

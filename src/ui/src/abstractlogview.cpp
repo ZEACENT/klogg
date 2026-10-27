@@ -85,6 +85,7 @@
 #include "containers.h"
 #include "highlightedmatch.h"
 #include "highlightcompose.h"
+#include "matchprojection.h"
 #include "linetypes.h"
 
 #include "active_screen.h"
@@ -277,7 +278,8 @@ public:
     // fm.height() instead packs the segments at the top of the slot and leaves
     // a blank band at the end of every wrapped line.
     void draw( QPainter* painter, int initialXPos, int initialYPos, int lineWidth,
-               const WrappedString& wrappedLines, int leftExtraBackgroundPx, int linePitchPx )
+               const WrappedString& wrappedLines, int leftExtraBackgroundPx, int linePitchPx,
+               uint64_t& paintedTextUnits )
     {
         QFontMetrics fm = painter->fontMetrics();
         const int fontHeight = linePitchPx > 0 ? linePitchPx : fm.height();
@@ -285,6 +287,7 @@ public:
 
         int xPos = initialXPos;
         int yPos = initialYPos;
+        bool firstChunk = true;
         // LOG_INFO << "drawing chunks " << chunks_.size();
         for ( const auto& chunk : chunks_ ) {
             // Draw each chunk
@@ -293,6 +296,11 @@ public:
             const auto& wrappedChunks = wrappedLines.mid( chunk.start(), chunk.size() );
             bool isFirstLine = true;
             for ( const auto& chunkText : wrappedChunks ) {
+                // A clipped first chunk already starts at its painted wrap row.
+                // mid() retains a leading empty boundary part for later chunks.
+                if ( firstChunk && isFirstLine && chunkText.isEmpty() ) {
+                    continue;
+                }
                 if ( !isFirstLine ) {
                     xPos = initialXPos;
                     yPos += fontHeight;
@@ -316,6 +324,7 @@ public:
                     painter->fillRect( xPos, yPos, chunkWidth, fontHeight, chunk.backColor() );
                 }
 
+                paintedTextUnits += static_cast<uint64_t>( chunkText.size() );
                 painter->setPen( chunk.foreColor() );
                 painter->drawText(
                     xPos, yPos + fontAscent,
@@ -323,6 +332,7 @@ public:
 
                 xPos += chunkWidth;
             }
+            firstChunk = false;
         }
 
         // Draw the empty block at the end of the line
@@ -390,6 +400,7 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
     , pixmapFontMetrics_( this->font() )
 {
     setViewport( nullptr );
+    bindSourceInterpretation();
 
     useTextWrap_ = Configuration::get().useTextWrap();
 
@@ -399,13 +410,7 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
     createMenu();
 
     connect( quickFindPattern_, SIGNAL( patternUpdated() ), this, SLOT( handlePatternUpdated() ) );
-    connect( quickFind_, SIGNAL( notify( const QFNotification& ) ), this,
-             SIGNAL( notifyQuickFind( const QFNotification& ) ) );
-    connect( quickFind_, SIGNAL( clearNotification() ), this,
-             SIGNAL( clearQuickFindNotification() ) );
-
-    connect( quickFind_, &QuickFind::searchDone, this, &AbstractLogView::setQuickFindResult,
-             Qt::QueuedConnection );
+    connectQuickFindSource();
 
     connect( &followElasticHook_, SIGNAL( lengthChanged() ), this, SLOT( repaint() ) );
     connect( &followElasticHook_, SIGNAL( hooked( bool ) ), this,
@@ -423,9 +428,34 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
     } );
 }
 
+void AbstractLogView::connectQuickFindSource()
+{
+    const QPointer<QuickFind> source{ quickFind_ };
+    connect( quickFind_, &QuickFind::notify, this, [ this, source ]( const QFNotification& notice ) {
+        if ( source && source == quickFind_ ) {
+            Q_EMIT notifyQuickFind( notice );
+        }
+    } );
+    connect( quickFind_, &QuickFind::clearNotification, this, [ this, source ] {
+        if ( source && source == quickFind_ ) {
+            Q_EMIT clearQuickFindNotification();
+        }
+    } );
+    connect( quickFind_, &QuickFind::searchDone, this,
+        [ this, source ]( const QuickFindResult& result ) {
+            if ( source && source == quickFind_ && result.requestId == source->currentRequestId() ) {
+                setQuickFindResult( result );
+            }
+        }, Qt::QueuedConnection );
+}
+
 void AbstractLogView::stopSearchAndWait()
 {
     cancelMatchSelection();
+    for ( auto& worker : matchSelectionWorkers_ ) {
+        worker.waitForFinished();
+    }
+    matchSelectionWorkers_.clear();
     // Interrupt and join the QuickFind QThreadPool worker (stopSearch ->
     // interruptAndWait -> waitForFinished). Public so a host can join the worker
     // before the view's AbstractLogData source is destroyed, when the view
@@ -603,7 +633,7 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
         markAction_->setEnabled( hasUnmarkedLines );
         deleteMarkAction_->setEnabled( hasMarkedLines );
 
-        if ( selection_.isPortion() ) {
+        if ( selection_.canUseAsSearchOperand() ) {
             findNextAction_->setEnabled( true );
             findPreviousAction_->setEnabled( true );
             addToSearchAction_->setEnabled( true );
@@ -1275,7 +1305,8 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     auto deltaY = textAreaCache_.first_line_.get() - firstLine_.get();
 
     if ( textAreaCache_.invalid_ || ( textAreaCache_.first_column_ != firstCol_ )
-         || selectionChanged_ ) {
+         || selectionChanged_
+         || ( useTextWrap_ && textAreaCache_.bottom_aligned_ != shouldBottomAlignFrame() ) ) {
         // Force a full redraw
         deltaY = std::numeric_limits<decltype( deltaY )>::max();
     }
@@ -1314,8 +1345,6 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
             Qt::QueuedConnection );
     }
 
-    // Height including the potentially invisible last line
-    const auto wholeHeight = static_cast<int>( getNbVisibleLines().get() ) * charHeight_;
     // Height in pixels of the "pull to follow" bottom bar.
     const auto pullToFollowHeight = mapPullToFollowLength( followElasticHook_.size() );
 
@@ -1330,23 +1359,8 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
 
     // Calculate effective height for text wrapping and pull-to-follow bar positioning
     const int availableTextHeight = textViewportHeight();
-    const int effectiveHeight
-        = textAreaCache_.actual_height_ > 0 ? textAreaCache_.actual_height_ : wholeHeight;
-
-    int drawingTopPosition = 0;
-    if ( shouldBottomAlignFrame() ) {
-        const int hiddenHeightPx = std::max( 0, effectiveHeight - availableTextHeight );
-        const bool wrappedContentOverflows
-            = useTextWrap_ && textAreaCache_.actual_height_ > availableTextHeight;
-        const bool contentFitsEmptyScrollRange
-            = verticalScrollBar()->maximum() == 0 && !wrappedContentOverflows;
-        drawingTopOffset_ = contentFitsEmptyScrollRange ? 0 : -hiddenHeightPx;
-        drawingTopPosition = drawingTopOffset_;
-    }
-    else {
-        drawingTopOffset_ = -pullToFollowHeight;
-        drawingTopPosition = drawingTopOffset_;
-    }
+    drawingTopOffset_ = drawingOffsetForHeight( textAreaCache_.actual_height_ );
+    const int drawingTopPosition = drawingTopOffset_ + textAreaCache_.origin_y_;
 
     // The pull-to-follow strip occupies the bottom pullToFollowHeight pixels of
     // the text viewport; the stripe pixmap is taller and is clipped by the
@@ -1441,20 +1455,32 @@ void AbstractLogView::searchUsingFunction( QuickFindSearchFn searchFunction )
     ( quickFind_->*searchFunction )( selection_, quickFindPattern_->getMatcher() );
 }
 
-void AbstractLogView::setQuickFindResult( bool hasMatch, const Portion& portion )
+void AbstractLogView::setQuickFindResult( const QuickFindResult& result ) try
 {
     if ( !acceptQuickFindResults_ ) {
         return;
     }
-    if ( portion.isValid() ) {
-        LOG_DEBUG << "search " << portion.line();
-        displayLine( portion.line() );
-        selection_.selectPortion( portion );
-        Q_EMIT newSelection( portion.line(), 1_lcount, 0_lcol, 0_length );
+    auto selected = result.selection;
+    auto presented = result.line;
+    klogg::LogSnapshot::Ptr presentation;
+    if ( result.rowIdentity ) {
+        presentation = remapMatchSelection( selected );
+        if ( !logData_->containsRowIdentity( *result.rowIdentity ) || !presentation ) {
+            return;
+        }
+        presented = logData_->rowForIdentity( *result.rowIdentity );
     }
-    else if ( !hasMatch ) {
-        selection_.clear();
+    selection_ = std::move( selected );
+    matchSelectionPresentation_ = selection_.hasCapturedPayload() || selection_.hasStableNavigationAnchor()
+        ? std::move( presentation ) : nullptr;
+    if ( presented ) {
+        displayLine( *presented );
+        Q_EMIT newSelection( *presented, selection_.getSelectedLinesCount(), 0_lcol, 0_length );
     }
+    forceRefresh();
+}
+catch ( const std::exception& error ) {
+    LOG_ERROR << "Cannot publish Quick Find selection: " << error.what();
 }
 
 void AbstractLogView::searchForward()
@@ -1479,15 +1505,26 @@ void AbstractLogView::incrementallySearchBackward()
 
 void AbstractLogView::incrementalSearchAbort()
 {
-    selection_ = quickFind_->incrementalSearchAbort();
+    // Reset routing clears the preview; restore only after those synchronous updates.
+    const QPointer<AbstractLogView> guard{ this };
     Q_EMIT changeQuickFind( "", QuickFindMux::Forward );
+    if ( !guard ) {
+        return;
+    }
+    selection_ = quickFind_->incrementalSearchAbort();
+    matchSelectionPresentation_.reset();
+    refreshMatchSelection();
+    forceRefresh();
 }
 
 void AbstractLogView::incrementalSearchStop()
 {
     auto oldSelection = quickFind_->incrementalSearchStop();
-    if ( selection_.isEmpty() ) {
-        selection_ = oldSelection;
+    if ( selection_.isEmpty() && !selection_.hasStableNavigationAnchor() ) {
+        selection_ = std::move( oldSelection );
+        matchSelectionPresentation_.reset();
+        refreshMatchSelection();
+        forceRefresh();
     }
 }
 
@@ -1590,7 +1627,8 @@ void AbstractLogView::handlePatternUpdated()
 {
     LOG_DEBUG << "AbstractLogView::handlePatternUpdated()";
 
-    invalidateMatchSelection();
+    // Pattern edits replace the preview but retain the original selection for Escape.
+    clearCurrentMatchSelection();
     quickFind_->resetLimits();
     forceRefresh();
 }
@@ -1598,7 +1636,7 @@ void AbstractLogView::handlePatternUpdated()
 // OR the current selection with the current search expression
 void AbstractLogView::addToSearch()
 {
-    if ( selection_.isPortion() ) {
+    if ( selection_.canUseAsSearchOperand() ) {
         LOG_DEBUG << "AbstractLogView::addToSearch()";
         Q_EMIT addToSearch( selection_.getSelectedText( logData_ ) );
     }
@@ -1610,7 +1648,7 @@ void AbstractLogView::addToSearch()
 // Replace the current search expression with the current selection
 void AbstractLogView::replaceSearch()
 {
-    if ( selection_.isPortion() ) {
+    if ( selection_.canUseAsSearchOperand() ) {
         LOG_DEBUG << "AbstractLogView::replaceSearch()";
         Q_EMIT replaceSearch( selection_.getSelectedText( logData_ ) );
     }
@@ -1621,7 +1659,7 @@ void AbstractLogView::replaceSearch()
 
 void AbstractLogView::excludeFromSearch()
 {
-    if ( selection_.isPortion() ) {
+    if ( selection_.canUseAsSearchOperand() ) {
         LOG_DEBUG << "AbstractLogView::excludeFromSearch()";
         Q_EMIT excludeFromSearch( selection_.getSelectedText( logData_ ) );
     }
@@ -1634,7 +1672,7 @@ void AbstractLogView::excludeFromSearch()
 void AbstractLogView::findNextSelected()
 {
     // Use the selected 'word' and search forward
-    if ( selection_.isPortion() ) {
+    if ( selection_.canUseAsSearchOperand() ) {
         Q_EMIT changeQuickFind( selection_.getSelectedText( logData_ ), QuickFindMux::Forward );
         Q_EMIT searchNext();
     }
@@ -1643,7 +1681,7 @@ void AbstractLogView::findNextSelected()
 // Find next previous of the selected text (#)
 void AbstractLogView::findPreviousSelected()
 {
-    if ( selection_.isPortion() ) {
+    if ( selection_.canUseAsSearchOperand() ) {
         Q_EMIT changeQuickFind( selection_.getSelectedText( logData_ ), QuickFindMux::Backward );
         Q_EMIT searchNext();
     }
@@ -1667,6 +1705,9 @@ void AbstractLogView::copy()
 // Copy the selection with line numbers to the clipboard
 void AbstractLogView::copyWithLineNumbers()
 {
+    if ( serializeMatchSelection( true ) ) {
+        return;
+    }
     try {
         auto text = selection_.getSelectedText( logData_, true );
         text.replace( QChar::Null, QChar::Space );
@@ -1867,12 +1908,10 @@ void AbstractLogView::updateData()
     LOG_DEBUG << "AbstractLogView::updateData";
 
     ++updateDataCountForTest_;
+    visibleLineMapKeyValid_ = false;
     presentedLineCountForTest_ = logData_->getNbLine().get();
     const auto lastLineNumber = LineNumber( logData_->getNbLine().get() );
-    if ( ( selection_.isMultiPortion() && logData_->getNbLine() < matchSelectionRows_ )
-         || ( matchSelection_ && logData_->getNbLine() < matchSelection_->totalRows ) ) {
-        invalidateMatchSelection();
-    }
+    refreshMatchSelection();
 
     // Check the top Line is within range
     if ( firstLine_ >= lastLineNumber ) {
@@ -1883,11 +1922,13 @@ void AbstractLogView::updateData()
     }
 
     // Avoid unsigned underflow when a source is cleared.
-    if ( lastLineNumber == 0_lnum ) {
-        selection_.clear();
-    }
-    else {
-        selection_.crop( lastLineNumber - 1_lcount );
+    if ( !selection_.hasCapturedPayload() && !selection_.hasStableNavigationAnchor() ) {
+        if ( lastLineNumber == 0_lnum ) {
+            selection_.clear();
+        }
+        else {
+            selection_.crop( lastLineNumber - 1_lcount );
+        }
     }
 
     // Invalidate cached column count - file size change affects nbDigitsInLineNumber
@@ -2018,9 +2059,9 @@ QStringList AbstractLogView::getSelectedLinesText() const
     return selection_.getSelectedLinesText( logData_ );
 }
 
-bool AbstractLogView::isPartialSelection() const
+bool AbstractLogView::canUseSelectionAsSearchOperand() const
 {
-    return selection_.isPortion();
+    return selection_.canUseAsSearchOperand();
 }
 
 void AbstractLogView::selectAll()
@@ -2155,8 +2196,15 @@ LineKind AbstractLogView::lineKind( LineNumber /*lineNumber*/ ) const
 
 void AbstractLogView::setDataSource( const AbstractLogData* newLogData )
 {
+    auto nextSearch = std::make_unique<QuickFind>( *newLogData );
+    stopSearchAndWait();
     invalidateMatchSelection();
+    acceptQuickFindResults_ = false;
+    delete quickFind_;
+    quickFind_ = nextSearch.release();
     logData_ = newLogData;
+    connectQuickFindSource();
+    bindSourceInterpretation();
     // A new document invalidates the search range inherited from the previous
     // data: the folder main view is built on an empty placeholder, so the
     // inherited range ended at line 0 and every line of a real file rendered as
@@ -2190,32 +2238,20 @@ void AbstractLogView::setSearchLimits( LineNumber startLine, LineNumber endLine 
 
 void AbstractLogView::ensureLineMapFresh()
 {
-    // A layout change (forceRefresh) or data swap (setDataSource) invalidates the
-    // visible-line map (wrappedLinesInfo_), which is normally rebuilt as a side
-    // effect of drawTextArea on the next (async) paint. A mouse event delivered
-    // before that paint -- or on a viewport Qt never painted (hidden/unrealized,
-    // where QWidget::repaint() is a no-op) -- converted coordinates against a
-    // stale/empty map: a click on a freshly swapped folder main view was
-    // swallowed (convertCoordToLine -> nullopt -> no selection). Rebuild the map
-    // paint-free so hit-testing is correct at click time regardless of paint
-    // delivery. Called only from mouse handlers.
-
-    // Signature cache: this runs on every press/move/release, and in wrap mode
-    // buildVisibleLineMap re-reads and re-wraps every line from the viewport to
-    // EOF. Consecutive mouse events share data/geometry, so skip the rebuild when
-    // nothing that determines the map has changed since the last build -- turning
-    // a per-hover full re-wrap into a cheap key compare. Any real change (scroll,
-    // resize, data swap, wrap toggle, font change) changes the key, so the map
-    // cannot silently go stale. The !empty() guard covers out-of-band clears
-    // (setDataSource, setTextWrap) that empty wrappedLinesInfo_ without touching
-    // the key, so no scattered dirty flags are needed.
+    // Painting and paint-free hit testing publish the same frame geometry.
+    // Source/interpretation updates retire it even when the row count is stable;
+    // color-only refreshes and unchanged mouse events keep the reusable map.
     const auto key = currentVisibleLineMapKey();
-    if ( visibleLineMapKeyValid_ && !wrappedLinesInfo_.empty() && lastVisibleLineMapKey_ == key ) {
+    const bool fontMatches = !useTextWrap_
+        || ( wrappedLayoutFont_ && *wrappedLayoutFont_ == pixmapFontMetrics_ );
+    if ( visibleLineMapKeyValid_ && !wrappedLinesInfo_.empty()
+         && lastVisibleLineMapKey_ == key && fontMatches ) {
+        // Scrolling can change the transform without changing a logical row.
+        drawingTopOffset_ = drawingOffsetForHeight(
+            static_cast<int>( wrappedLinesInfo_.size() ) * charHeight_ );
         return;
     }
     buildVisibleLineMap();
-    lastVisibleLineMapKey_ = key;
-    visibleLineMapKeyValid_ = true;
 }
 
 AbstractLogView::VisibleLineMapKey AbstractLogView::currentVisibleLineMapKey() const
@@ -2233,6 +2269,82 @@ AbstractLogView::VisibleLineMapKey AbstractLogView::currentVisibleLineMapKey() c
     return key;
 }
 
+std::shared_ptr<const WrappedString> AbstractLogView::layoutLine(
+    LineNumber line, const QString& text ) const
+{
+    const QString expanded = untabify( QString{ text } );
+    if ( !useTextWrap_ ) {
+        return std::make_shared<const WrappedString>(
+            expanded, LineLength{ klogg::isize( expanded ) + 1 } );
+    }
+    const int width = viewport()->width() - leftMarginPx_ - 1;
+    if ( wrappedLayoutFont_ && *wrappedLayoutFont_ == pixmapFontMetrics_
+         && wrappedLayoutWidth_ == width ) {
+        const auto previous = std::lower_bound(
+            wrappedLinesInfo_.begin(), wrappedLinesInfo_.end(), line,
+            []( const WrappedLineData& row, LineNumber candidate ) {
+                return row.lineNumber < candidate;
+            } );
+        if ( previous != wrappedLinesInfo_.end() && previous->lineNumber == line
+             && previous->wrappedString->text() == expanded ) {
+            return previous->wrappedString;
+        }
+    }
+    return std::make_shared<const WrappedString>( expanded, width,
+        [ this ]( QStringView part ) { return textWidth( pixmapFontMetrics_, part ); } );
+}
+
+klogg::vector<AbstractLogView::FrameLine> AbstractLogView::layoutFrame() const
+{
+    klogg::vector<FrameLine> frame;
+    if ( !logData_ || firstLine_ >= logData_->getNbLine() || charHeight_ <= 0 ) {
+        return frame;
+    }
+    const auto available = logData_->getNbLine() - LinesCount{ firstLine_.get() };
+    const auto count = std::min( available, getNbVisibleLines() + ( useTextWrap_ ? 1_lcount : 0_lcount ) );
+    auto lines = logData_->getLines( firstLine_, count );
+    int height = 0;
+    for ( size_t index = 0; index < lines.size(); ++index ) {
+        const auto line = firstLine_ + LinesCount{ index };
+        auto layout = layoutLine( line, lines[ index ] );
+        height += charHeight_ * static_cast<int>( layout->wrappedLinesCount() );
+        frame.push_back( { line, std::move( lines[ index ] ), std::move( layout ) } );
+        if ( useTextWrap_ && !shouldBottomAlignFrame() && height > viewport()->height() ) {
+            break;
+        }
+    }
+    return frame;
+}
+
+void AbstractLogView::publishLineMap( const klogg::vector<FrameLine>& frame )
+{
+    wrappedLinesInfo_.clear();
+    for ( const auto& line : frame ) {
+        for ( size_t row = 0; row < line.layout->wrappedLinesCount(); ++row ) {
+            wrappedLinesInfo_.push_back( { line.lineNumber, row, line.layout } );
+        }
+    }
+    wrappedLayoutFont_ = useTextWrap_ ? std::optional<QFontMetrics>{ pixmapFontMetrics_ } : std::nullopt;
+    wrappedLayoutWidth_ = viewport()->width() - leftMarginPx_ - 1;
+    lastVisibleLineMapKey_ = currentVisibleLineMapKey();
+    visibleLineMapKeyValid_ = true;
+}
+
+int AbstractLogView::drawingOffsetForHeight( int height ) const
+{
+    if ( !shouldBottomAlignFrame() ) {
+        return -mapPullToFollowLength( followElasticHook_.size() );
+    }
+    const int availableHeight = textViewportHeight();
+    const bool wrappedOverflow = useTextWrap_ && height > availableHeight;
+    if ( verticalScrollBar()->maximum() == 0 && !wrappedOverflow ) {
+        return 0;
+    }
+    const int effectiveHeight = height > 0 ? height
+        : static_cast<int>( getNbVisibleLines().get() ) * charHeight_;
+    return -std::max( 0, effectiveHeight - availableHeight );
+}
+
 void AbstractLogView::buildVisibleLineMap()
 {
     // Test instrumentation: counts every entry into the paint-free rebuild so
@@ -2240,31 +2352,15 @@ void AbstractLogView::buildVisibleLineMap()
     // suppresses redundant rebuilds across mouse events.
     ++visibleLineMapBuildCount_;
 
-    // Geometry-only subset of drawTextArea's per-line loop: reproduces the
-    // viewport-y -> LineNumber map (wrappedLinesInfo_) WITHOUT a QPainter. The
-    // wrap math MUST mirror drawTextArea (same leftMarginPx_, availableWidth and
-    // font metrics); in non-wrap mode the map is just firstLine_+i so the margin
-    // constants are irrelevant, but in wrap mode a drift would mis-resolve rows.
-    // The four margin constants below duplicate drawTextArea's static constexpr
-    // locals (SeparatorWidth/BulletAreaWidth/ContentMarginWidth/LineNumberPadding).
-    wrappedLinesInfo_.clear();
-
-    if ( logData_ == nullptr ) {
-        return;
-    }
-
-    const auto linesInFile = logData_->getNbLine();
-    if ( firstLine_ >= linesInFile ) {
-        return;
-    }
-
-    if ( charHeight_ <= 0 ) {
+    // Resolve the same frame without a QPainter. Only the margin preamble is
+    // needed here; layoutFrame owns the shared wrapping and row-cutoff rules.
+    if ( logData_ == nullptr || firstLine_ >= logData_->getNbLine() || charHeight_ <= 0 ) {
+        wrappedLinesInfo_.clear();
         return;
     }
 
     constexpr int SeparatorWidth = 1;
     constexpr int BulletAreaWidth = 11;
-    constexpr int ContentMarginWidth = 1;
     constexpr int LineNumberPadding = 3;
 
     // Recompute leftMarginPx_ (drawTextArea's preamble sets it during paint; it
@@ -2280,66 +2376,13 @@ void AbstractLogView::buildVisibleLineMap()
     leftMarginPx_ = contentStartPosX + SeparatorWidth;
     cachedVisibleColsValid_ = false;
 
-    const auto linesAvailable = linesInFile - LinesCount( firstLine_.get() );
-    const auto maxLinesToFetch
-        = useTextWrap_ ? linesAvailable : qMin( getNbVisibleLines(), linesAvailable );
-
-    // Wrap mode fetches lazily (batches) and stops as soon as the viewport is
-    // covered: wrapping to EOF made every mouse press/hover re-wrap (and, on
-    // folder results, re-read from disk) the whole tail of the document, and
-    // turned one multi-MB line into a bad_alloc. Non-wrap mode keeps the
-    // single bounded fetch.
-    klogg::vector<QString> logLines;
-    if ( !useTextWrap_ ) {
-        logLines = logData_->getLines( firstLine_, maxLinesToFetch );
+    const auto frame = layoutFrame();
+    int height = 0;
+    for ( const auto& line : frame ) {
+        height += charHeight_ * static_cast<int>( line.layout->wrappedLinesCount() );
     }
-    LinesCount fetchedLines = 0_lcount;
-
-    int yPos = 0;
-    for ( auto currentLine = 0_lcount; currentLine < maxLinesToFetch; ++currentLine ) {
-        if ( useTextWrap_ && currentLine >= fetchedLines ) {
-            const LinesCount fetchBatch = getNbVisibleLines() + 1_lcount;
-            const auto batch
-                = qMin( fetchBatch, LinesCount( maxLinesToFetch.get() - currentLine.get() ) );
-            auto more = logData_->getLines( firstLine_ + fetchedLines, batch );
-            logLines.insert( logLines.end(), std::make_move_iterator( more.begin() ),
-                             std::make_move_iterator( more.end() ) );
-            fetchedLines = fetchedLines + batch;
-        }
-        const auto lineNumber = firstLine_ + currentLine;
-        QString logLine = logLines[ currentLine.get() ];
-        const QString expandedLine = untabify( std::move( logLine ) );
-
-        WrappedString wrappedLineView = [ &, this ] {
-            if ( useTextWrap_ ) {
-                const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
-                auto twFn = [ this ]( QStringView s ) -> int {
-                    return textWidth( pixmapFontMetrics_, s );
-                };
-                return WrappedString{ expandedLine, availableWidth, twFn };
-            }
-            return WrappedString{ expandedLine,
-                                  LineLength{ klogg::isize( expandedLine ) + 1 } };
-        }();
-
-        // One shared WrappedString per logical line (was: a full copy per
-        // visual segment -- O(segments^2) memory per line).
-        const auto sharedWrappedLine
-            = std::make_shared<const WrappedString>( std::move( wrappedLineView ) );
-        for ( size_t i = 0u; i < sharedWrappedLine->wrappedLinesCount(); ++i ) {
-            wrappedLinesInfo_.emplace_back(
-                WrappedLineData{ lineNumber, i, sharedWrappedLine } );
-        }
-
-        if ( useTextWrap_ ) {
-            yPos += charHeight_ * static_cast<int>( sharedWrappedLine->wrappedLinesCount() );
-            // Mirrors drawTextArea's stop rule (complete the current line's
-            // slot, then stop once the viewport is covered).
-            if ( yPos > viewport()->height() ) {
-                break;
-            }
-        }
-    }
+    publishLineMap( frame );
+    drawingTopOffset_ = drawingOffsetForHeight( height );
 }
 
 //
@@ -2567,6 +2610,9 @@ void AbstractLogView::jumpToStartOfLine()
 
 LineLength AbstractLogView::maxLineLength( const klogg::vector<LineNumber>& lines ) const
 {
+    if ( lines.empty() ) {
+        return 0_length;
+    }
     const auto longestLine = std::max_element(
         lines.cbegin(), lines.cend(), [ this ]( const auto& lhs, const auto& rhs ) {
             const auto lhsLength = logData_->getLineLength( lhs );
@@ -2581,6 +2627,9 @@ LineLength AbstractLogView::maxLineLength( const klogg::vector<LineNumber>& line
 void AbstractLogView::jumpToEndOfLine()
 {
     const auto selection = selection_.getLines();
+    if ( selection.empty() ) {
+        return;
+    }
     horizontalScrollBar()->setValue( type_safe::narrow_cast<int>( maxLineLength( selection ).get()
                                                                   - getNbVisibleCols().get() ) );
 }
@@ -2883,21 +2932,13 @@ AbstractLogView::WrappedBottomFrame AbstractLogView::getWrappedBottomFrame() con
     bool contentOverflows = false;
     LineNumber unwrappedLineNumber{ totalLines.get() - 1 };
 
-    // Pixel-accurate wrapping width for the text content area
-    static constexpr int ContentMarginWidth = 1;
-    const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
-    auto twFn = [this]( QStringView s ) -> int {
-        return textWidth( pixmapFontMetrics_, s );
-    };
-
     // Count from bottom: how many unwrapped lines the bottom frame holds when
     // the viewport is filled with wrapped lines. The frame's top line is
     // counted even when it only partially fits, so the frame stays filled.
     while ( wrappedLinesCount < visibleLines ) {
-        QString expandedLine = logData_->getExpandedLineString( unwrappedLineNumber );
-        WrappedString wrapped{ expandedLine, availableWidth, twFn };
+        const auto wrapped = layoutLine( unwrappedLineNumber, logData_->getLineString( unwrappedLineNumber ) );
         const auto thisLineWrappedCount = LinesCount(
-            type_safe::narrow_cast<LinesCount::UnderlyingType>( wrapped.wrappedLinesCount() ) );
+            type_safe::narrow_cast<LinesCount::UnderlyingType>( wrapped->wrappedLinesCount() ) );
 
         if ( wrappedLinesCount + thisLineWrappedCount > visibleLines ) {
             // The frame's top line does not fully fit: the wrapped document is
@@ -3080,6 +3121,7 @@ void AbstractLogView::updateScrollBars()
 
 void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 {
+    paintedTextUnitsForTest_ = 0;
     const auto dpr = viewport()->devicePixelRatioF();
 
     if ( !useTextWrap_ && paintDevice == &textAreaCache_.pixmap_ ) {
@@ -3089,8 +3131,8 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 
         const bool needsRecreate = textAreaCache_.pixmap_.isNull()
             || ( textAreaCache_.pixmap_.devicePixelRatioF() != dpr )
-            || ( textAreaCache_.pixmap_.width() < requiredPixW )
-            || ( textAreaCache_.pixmap_.height() < requiredPixH );
+            || ( textAreaCache_.pixmap_.width() != requiredPixW )
+            || ( textAreaCache_.pixmap_.height() != requiredPixH );
 
         if ( needsRecreate ) {
             textAreaCache_.pixmap_ = QPixmap{ requiredPixW, requiredPixH };
@@ -3098,35 +3140,19 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         }
     }
 
-    // When text wrapping is enabled, create pixmap with sufficient height for wrapped content.
-    // We can't pre-calculate this in updateDisplaySize because wrapped line count is variable.
-    // Allocate height for all remaining lines to ensure complete rendering.
+    // Cache a viewport-sized window, not every wrapped row of a long record.
+    // The logical origin below preserves bottom alignment without a giant pixmap.
     if ( useTextWrap_ && paintDevice == &textAreaCache_.pixmap_ ) {
-        // Allocate a buffer large enough for wrapped content visible from firstLine_.
-        // The height must accommodate the tallest wrapped line (which could be very long)
-        // plus enough context for bottom-alignment scrolling.
         static constexpr int MinWrapCacheHeightPx = 512;
-        static constexpr int AbsoluteMaxWrapCacheHeightPx = 65536;
-        // Estimate max wrapped line height from the longest line in the data
-        const auto visibleCols = getNbVisibleCols();
-        const int maxWrappedLineHeight
-            = ( visibleCols > 0_length )
-                  ? ( static_cast<int>( logData_->getMaxLength().get() / visibleCols.get() + 1 )
-                      * charHeight_ )
-                  : charHeight_;
-        // Need at least viewport height + one max wrapped line for bottom alignment
-        const int dynamicMax = std::max( viewport()->height() * 2,
-                                          viewport()->height() + maxWrappedLineHeight );
-        const int estimatedHeight = std::clamp( dynamicMax, MinWrapCacheHeightPx,
-                                                AbsoluteMaxWrapCacheHeightPx );
+        const int estimatedHeight = std::max( viewport()->height() * 2, MinWrapCacheHeightPx );
         // Add charWidth_ padding to prevent last-character clipping from font rounding
         const int requiredPixW = static_cast<int>( std::ceil( ( viewport()->width() + charWidth_ ) * dpr ) );
         const int requiredPixH = static_cast<int>( std::ceil( estimatedHeight * dpr ) );
 
         const bool needsRecreate = textAreaCache_.pixmap_.isNull()
             || ( textAreaCache_.pixmap_.devicePixelRatioF() != dpr )
-            || ( textAreaCache_.pixmap_.width() < requiredPixW )
-            || ( textAreaCache_.pixmap_.height() < requiredPixH );
+            || ( textAreaCache_.pixmap_.width() != requiredPixW )
+            || ( textAreaCache_.pixmap_.height() != requiredPixH );
 
         if ( needsRecreate ) {
             textAreaCache_.pixmap_ = QPixmap{ requiredPixW, requiredPixH };
@@ -3170,21 +3196,6 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 
     if ( firstLine_ >= linesInFile )
         firstLine_ = LineNumber( linesInFile.get() ? linesInFile.get() - 1 : 0 );
-
-    // When text wrapping is enabled, we need to fetch more lines than visible
-    // because wrapped lines take up more vertical space. The loop will stop
-    // when yPos exceeds viewport height, ensuring we draw all wrapped lines
-    // of the last visible unwrapped line.
-    const auto maxLinesToFetch = useTextWrap_ 
-        ? ( linesInFile - LinesCount( firstLine_.get() ) )
-        : qMin( getNbVisibleLines(), linesInFile - LinesCount( firstLine_.get() ) );
-    const auto nbLines = maxLinesToFetch;
-
-    const int bottomOfTextPx = static_cast<int>( nbLines.get() ) * fontHeight;
-
-    LOG_DEBUG << "drawing lines from " << firstLine_ << " (" << nbLines << " lines)";
-    LOG_DEBUG << "bottomOfTextPx: " << bottomOfTextPx;
-    LOG_DEBUG << "Height: " << paintDeviceHeight;
 
     painter->fillRect( 0, 0, paintDeviceWidth, paintDeviceHeight,
                        palette.color( QPalette::Window ) );
@@ -3288,16 +3299,19 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         return index;
     }();
 
-    // Lines to write. Wrap mode fetches lazily in batches: the paint loop
-    // below stops as soon as the viewport is filled, so an eager fetch of
-    // every line to EOF wasted work -- and, on folder results where each row
-    // is a disk read, made every paint O(document). Non-wrap mode keeps the
-    // single bounded fetch.
-    klogg::vector<QString> logLines;
-    if ( !useTextWrap_ ) {
-        logLines = logData_->getLines( firstLine_, nbLines );
+    // Resolve logical geometry once before choosing the cached pixel window.
+    // Existing immutable row layouts are reusable only for equal text/font/width.
+    const auto frame = layoutFrame();
+    int frameHeight = 0;
+    for ( const auto& line : frame ) {
+        frameHeight += fontHeight * static_cast<int>( line.layout->wrappedLinesCount() );
     }
-    LinesCount fetchedLines = 0_lcount;
+    textAreaCache_.actual_height_ = frameHeight;
+    textAreaCache_.bottom_aligned_ = shouldBottomAlignFrame();
+    textAreaCache_.origin_y_ = useTextWrap_ && textAreaCache_.bottom_aligned_
+        ? std::max( 0, frameHeight - paintDeviceHeight ) : 0;
+    const int paintOrigin = textAreaCache_.origin_y_;
+    painter->translate( 0, -paintOrigin );
 
     const auto highlightPatternMatches = Configuration::get().mainSearchHighlight();
     const auto variateHighlightPatternMatches = Configuration::get().variateMainSearchHighlight();
@@ -3340,20 +3354,16 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 
     // Position in pixel of the base line of the line to print
     int yPos = 0;
-    wrappedLinesInfo_.clear();
     klogg::vector<std::pair<QColor, QColor>> highlightColors;
-    for ( auto currentLine = 0_lcount; currentLine < nbLines; ++currentLine ) {
-        if ( useTextWrap_ && currentLine >= fetchedLines ) {
-            const LinesCount fetchBatch = getNbVisibleLines() + 1_lcount;
-            const auto batch
-                = qMin( fetchBatch, LinesCount( nbLines.get() - currentLine.get() ) );
-            auto more = logData_->getLines( firstLine_ + fetchedLines, batch );
-            logLines.insert( logLines.end(), std::make_move_iterator( more.begin() ),
-                             std::make_move_iterator( more.end() ) );
-            fetchedLines = fetchedLines + batch;
+    for ( const auto& frameLine : frame ) {
+        const auto lineNumber = frameLine.lineNumber;
+        const QString& logLine = frameLine.text;
+        const auto& wrappedLineView = *frameLine.layout;
+        const int finalLineHeight = fontHeight * static_cast<int>( wrappedLineView.wrappedLinesCount() );
+        if ( yPos + finalLineHeight <= paintOrigin || yPos >= paintOrigin + paintDeviceHeight ) {
+            yPos += finalLineHeight;
+            continue;
         }
-        const auto lineNumber = firstLine_ + currentLine;
-        QString logLine = logLines[ currentLine.get() ];
 
         const int xPos = contentStartPosX + ContentMarginWidth;
 
@@ -3381,7 +3391,7 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         // explicit priority + blend contract (see highlightcompose.h). logLine-
         // space sources (ANSI, HighlighterSet, search-match gray, quick
         // highlighters) are mapped to the expanded (untabified) column space;
-        // QuickFind and Selection are already in that space. composeLineHighlights
+        // QuickFind is mapped identically; Selection is already in that space. composeLineHighlights
         // is now the ONLY owner of the z-order -- it replaces the scattered
         // addMatches() calls whose implicit order let the gray search match mask
         // configured HighlighterSet colors. On a search-match/highlighter overlap
@@ -3396,30 +3406,11 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         // Map a logLine-space match into the expanded (untabified) column
         // space. logLine is still alive here: it is moved into expandedLine
         // only after every logLine-space source has been gathered.
-        const auto untabifyMatch = [ &logLine ]( const HighlightedMatch& match ) {
-            const auto prefix = QStringView{ logLine }.left( match.startColumn().get() );
-            const auto matchPart
-                = QStringView{ logLine }.mid( match.startColumn().get(), match.size().get() );
-            const auto expandedPrefixLength = untabify( prefix.toString() ).size();
-            const LineLength startDelta
-                = LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
-                    expandedPrefixLength - prefix.size() ) };
-
-            const LineLength expandedMatchLength = LineLength{
-                untabify( matchPart.toString(),
-                          LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>(
-                              expandedPrefixLength ) } )
-                    .size()
-            };
-
-            const auto lengthDelta
-                = expandedMatchLength
-                  - LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
-                      matchPart.size() ) };
-
-            return HighlightedMatch{ match.startColumn() + startDelta,
-                                     match.size() + lengthDelta, match.foreColor(),
-                                     match.backColor() };
+        const klogg::MatchTextColumns textColumns{ logLine };
+        const auto untabifyMatch = [ &textColumns ]( const HighlightedMatch& match ) {
+            const auto start = textColumns.displayColumn( match.startColumn() );
+            const auto end = textColumns.displayColumn( match.startColumn() + match.size() );
+            return HighlightedMatch{ start, end - start, match.foreColor(), match.backColor() };
         };
 
         // ANSI color spans (lowest layer). Unset channels inherit the base.
@@ -3475,14 +3466,16 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             }
         }
 
-        // string to print, cut to fit the length and position of the view
-        const QString& expandedLine = untabify( std::move( logLine ) );
-
-        // QuickFind (already in the expanded column space).
+        // Quick Find uses the same matching text and mapping as Filter.
         klogg::vector<HighlightedMatch> quickFindMatches;
-        quickFindPattern_->matchLine( expandedLine, quickFindMatches );
+        quickFindPattern_->matchLine( logLine, quickFindMatches );
+        std::transform( quickFindMatches.begin(), quickFindMatches.end(),
+                        quickFindMatches.begin(), untabifyMatch );
         highlightSources.push_back(
             { HighlightLayer::QuickFind, std::move( quickFindMatches ) } );
+
+        // string to print, cut to fit the length and position of the view
+        const QString& expandedLine = wrappedLineView.text();
 
         // Selection (already in the expanded column space).
         klogg::vector<HighlightedMatch> selectionMatches;
@@ -3493,37 +3486,34 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         }
         highlightSources.push_back( { HighlightLayer::Selection, std::move( selectionMatches ) } );
 
-        HighlightedMatchRanges allHighlights = composeLineHighlights( highlightSources );
-
-
-        WrappedString wrappedLineView = [&, this] {
-            if ( useTextWrap_ ) {
-                const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
-                auto twFn = [this]( QStringView s ) -> int {
-                    return textWidth( pixmapFontMetrics_, s );
-                };
-                return WrappedString{ expandedLine, availableWidth, twFn };
-            }
-            return WrappedString{ expandedLine,
-                                  LineLength{ klogg::isize( expandedLine ) + 1 } };
-        }();
-        const auto finalLineHeight
-            = fontHeight * static_cast<int>( wrappedLineView.wrappedLinesCount() );
-        // LOG_INFO << "Draw line " << lineNumber << ": " << expandedLine;
-
-        const bool isLastLineInFile = ( lineNumber.get() + 1 ) >= linesInFile.get();
-
         painter->fillRect( xPos - ContentMarginWidth, yPos, viewport()->width(), finalLineHeight,
                            backColor );
 
         LineDrawer lineDrawer( backColor );
-        const auto firstVisibleColumn = std::clamp( useTextWrap_ ? 0_lcol : firstCol_, 0_lcol,
-                                                    LineColumn{ klogg::isize( expandedLine ) } );
-        const auto lastVisibleColumn = useTextWrap_
-            ? LineColumn{ klogg::isize( expandedLine ) }
-            : std::min( LineColumn{ klogg::isize( expandedLine ) },
-                        firstCol_ + nbVisibleCols + renderColumnOverscan );
-        allHighlights.clamp( firstVisibleColumn, lastVisibleColumn );
+        auto firstVisibleColumn = std::clamp( useTextWrap_ ? 0_lcol : firstCol_, 0_lcol,
+                                              LineColumn{ klogg::isize( expandedLine ) } );
+        int firstPaintedRow = 0;
+        auto lastVisibleColumn = std::min( LineColumn{ klogg::isize( expandedLine ) },
+                                          firstCol_ + nbVisibleCols + renderColumnOverscan );
+        if ( useTextWrap_ ) {
+            firstPaintedRow = std::max( 0, paintOrigin - yPos ) / std::max( 1, fontHeight );
+            const auto paintableRows = static_cast<size_t>(
+                ( std::max( 0, paintOrigin + paintDeviceHeight - yPos ) + fontHeight - 1 )
+                / std::max( 1, fontHeight ) );
+            const auto count = std::min( paintableRows, wrappedLineView.wrappedLinesCount() );
+            firstVisibleColumn = 0_lcol;
+            lastVisibleColumn = 0_lcol;
+            for ( size_t row = 0; row < count; ++row ) {
+                const LineLength length{ type_safe::narrow_cast<LineLength::UnderlyingType>(
+                    wrappedLineView.wrappedLine( row ).size() ) };
+                lastVisibleColumn = lastVisibleColumn + length;
+                if ( row < static_cast<size_t>( firstPaintedRow ) ) {
+                    firstVisibleColumn = firstVisibleColumn + length;
+                }
+            }
+        }
+        HighlightedMatchRanges allHighlights = composeLineHighlights(
+            highlightSources, nullptr, HighlightViewport{ firstVisibleColumn, lastVisibleColumn - 1_length } );
 
         if ( !allHighlights.empty() && !expandedLine.isEmpty() ) {
             // first part without highlight
@@ -3556,22 +3546,17 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 
             // last part without highlight
             const auto lastHighlightColumn = allHighlights.back().endColumn();
-            if ( lastHighlightColumn < lastVisibleColumn ) {
-                lineDrawer.addChunk( lastHighlightColumn + 1_length, lastVisibleColumn, foreColor,
-                                     backColor );
+            if ( lastHighlightColumn + 1_length < lastVisibleColumn ) {
+                lineDrawer.addChunk( lastHighlightColumn + 1_length, lastVisibleColumn - 1_length,
+                                     foreColor, backColor );
             }
         }
         else {
-            if ( useTextWrap_ ) {
-                lineDrawer.addChunk( 0_lcol, LineColumn{ expandedLine.size() }, foreColor,
-                                     backColor );
-            }
-            else {
-                lineDrawer.addChunk( firstCol_, lastVisibleColumn, foreColor, backColor );
-            }
+            lineDrawer.addChunk( firstVisibleColumn, lastVisibleColumn - 1_length, foreColor, backColor );
         }
-        lineDrawer.draw( painter.get(), xPos, yPos, viewport()->width(), wrappedLineView,
-                         ContentMarginWidth, fontHeight );
+        lineDrawer.draw( painter.get(), xPos, yPos + firstPaintedRow * fontHeight,
+                         viewport()->width(), wrappedLineView, ContentMarginWidth, fontHeight,
+                         paintedTextUnitsForTest_ );
 
         if ( isWholeLineSelected || selection_.getPortionForLine( lineNumber ).isValid() ) {
             auto selectionPen = QPen( palette.color( QPalette::Highlight ) );
@@ -3630,35 +3615,9 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             painter->drawText( lineNumberAreaStartX + LineNumberPadding, yPos + fontAscent,
                                lineNumberStr );
         }
-        // One shared WrappedString per logical line (was: a full copy per
-        // visual segment -- O(segments^2) memory per line, a bad_alloc bomb
-        // for multi-MB lines).
-        const auto sharedWrappedLine
-            = std::make_shared<const WrappedString>( std::move( wrappedLineView ) );
-        for ( size_t i = 0u; i < sharedWrappedLine->wrappedLinesCount(); ++i ) {
-            wrappedLinesInfo_.emplace_back(
-                WrappedLineData{ lineNumber, i, sharedWrappedLine } );
-        }
-
         yPos += finalLineHeight;
-        
-        // Check if we should stop drawing. However, if this is the last line in the file
-        // and text wrapping is enabled, we should draw all wrapped lines even if they
-        // exceed the viewport height, so the user can see the complete last line.
-        // Also, if lastLineAligned_ is true, we need a bounded buffer for bottom alignment:
-        // draw up to the paint device height (which is 2x viewport in wrap mode).
-        const bool continueForLastLine = useTextWrap_ && isLastLineInFile;
-        const bool continueForBottomAlign = useTextWrap_ && lastLineAligned_ && ( yPos < paintDeviceHeight );
-        if ( yPos > viewport()->height() && !continueForLastLine && !continueForBottomAlign ) {
-            break;
-        }
-    } // For each line
-    
-    // Store the actual drawn height for proper alignment in paintEvent.
-    // Use the real yPos (not clamped) so bottom-alignment offsets are accurate.
-    textAreaCache_.actual_height_ = yPos;
-    
-    // Drawing complete; actual_height_ is used for bottom-alignment in paintEvent().
+    }
+    publishLineMap( frame );
 }
 
 // Draw the "pull to follow" bar and return a pixmap.

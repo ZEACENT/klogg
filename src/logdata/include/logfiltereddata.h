@@ -175,12 +175,19 @@ class LogFilteredData : public AbstractLogData {
     // the rationale).
     using SearchGeneration = LogFilteredDataWorker::OperationGeneration;
 
-    // Generation of the search currently active.  Each runSearch() /
-    // updateSearch() call advances the worker's generation counter; this
+    // Generation of the search currently active. Only a new logical query
+    // advances this counter; incremental updates retain it. This
     // accessor returns that value.  Receivers of searchProgressed can compare
     // the signal-supplied generation against this value to drop stale signals
     // that were queued before the search was replaced.
     SearchGeneration currentSearchGeneration() const { return workerThread_.currentGeneration(); }
+
+    // Readiness belongs to the current operation/cutoff, not merely its query generation.
+    bool isSearchComplete() const;
+    CompletedSearchResult::Ptr completedSearchResult() const;
+    klogg::LogSnapshot::Ptr createReadSnapshot( klogg::SnapshotScope scope ) const override;
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override;
+    bool containsRowIdentity( const klogg::LogRowId& identity ) const override;
     SearchPerformanceCounters searchPerformanceCounters() const
     {
         return workerThread_.performanceCounters();
@@ -253,6 +260,12 @@ class LogFilteredData : public AbstractLogData {
     const SearchableLogData* sourceLogData_;
 
     RegularExpressionPattern currentRegExp_;
+    CompletedSearchResult::Ptr completedResult_;
+    mutable SearchableLogData::ReadSnapshot::Ptr presentedSource_;
+    mutable bool completedSourceInvalid_ = false;
+    void setPresentedSource( SearchableLogData::ReadSnapshot::Ptr source ) const;
+    void refreshPresentedSourceForDisplay();
+    SearchResultArray presentedRows( const SearchableLogData::ReadSnapshot& source ) const;
     LineLength maxLength_;
     LineLength maxLengthMarks_;
     // Number of lines of the LogData that has been searched for:
@@ -300,6 +313,7 @@ class LogFilteredData : public AbstractLogData {
     struct CachedSearchResult {
         SearchResultArray matching_lines;
         LineLength maxLength;
+        CompletedSearchResult::Ptr completed;
     };
 
     using SearchCacheKey = std::tuple<RegularExpressionPattern, LineNumber::UnderlyingType,

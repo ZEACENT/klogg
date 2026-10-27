@@ -60,6 +60,7 @@
 
 #include "encodingdetector.h"
 #include "linepositionarray.h"
+#include "indexedcontent.h"
 #include "loadingstatus.h"
 
 struct IndexedHash {
@@ -81,6 +82,9 @@ public:
         : data_( data )
         , guard_( data->dataMutex_ )
     {
+        // The lease is destroyed after guard_, so clearing the last published
+        // snapshot cannot delete a spill file while holding the index mutex.
+        contentLease_ = data_->contentSnapshot_;
     }
 
     ~IndexingDataAccessor() = default;
@@ -93,6 +97,16 @@ public:
     IndexedHash getHash() const
     {
         return data_->getHash();
+    }
+
+    IndexedContentSnapshot::Ptr getContentSnapshot() const
+    {
+        return data_->contentSnapshot_;
+    }
+
+    void setContentSnapshot( IndexedContentSnapshot::Ptr snapshot )
+    {
+        data_->contentSnapshot_ = std::move( snapshot );
     }
 
     // Get the length of the longest line
@@ -182,6 +196,7 @@ public:
 
 private:
     Data data_;
+    IndexedContentSnapshot::Ptr contentLease_;
     LockGuard guard_;
 };
 
@@ -239,6 +254,7 @@ private:
 
     FileDigest hashBuilder_;
     IndexedHash hash_;
+    IndexedContentSnapshot::Ptr contentSnapshot_;
 
     QTextCodec* encodingGuess_{};
     QTextCodec* encodingForced_{};
@@ -286,7 +302,7 @@ Q_SIGNALS:
 
 protected:
     using BlockBuffer = klogg::vector<char>;
-    using BlockData = std::pair<OffsetInFile::UnderlyingType, BlockBuffer*>;
+    using BlockData = std::pair<OffsetInFile::UnderlyingType, std::shared_ptr<BlockBuffer>>;
     using BlockPrefetcher = tbb::flow::limiter_node<BlockData>;
 
     // Returns the total size indexed
@@ -306,6 +322,7 @@ private:
 
     std::chrono::microseconds readFileInBlocks( QFile& file, BlockPrefetcher& blockPrefetcher );
     void indexNextBlock( IndexingState& state, const BlockData& blockData );
+    std::unique_ptr<IndexedContentBuilder> contentBuilder_;
 };
 
 class FullIndexOperation : public IndexOperation {

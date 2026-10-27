@@ -1,78 +1,25 @@
 #include "abstractlogview.h"
 
-#include <QElapsedTimer>
+#include <QFutureWatcher>
 #include <QProgressDialog>
 #include <QTimer>
+#include <QtConcurrent>
 #include <algorithm>
 #include <exception>
 
+#include "clipboard.h"
 #include "log.h"
-#include "matchprojection.h"
-
-namespace {
-using TabDeltas = std::vector<std::pair<klogg::ContainerIndex, klogg::ContainerIndex>>;
-
-TabDeltas tabDeltas( const QString& text )
-{
-    TabDeltas result;
-    klogg::ContainerIndex delta = 0;
-    auto position = text.indexOf( QChar::Tabulation );
-    while ( position >= 0 ) {
-        delta += TabStop - ( ( position + delta ) % TabStop ) - 1;
-        result.emplace_back( position, delta );
-        position = text.indexOf( QChar::Tabulation, position + 1 );
-    }
-    return result;
-}
-
-LineColumn expandedColumn( LineColumn column, const TabDeltas& deltas )
-{
-    const auto next
-        = std::lower_bound( deltas.begin(), deltas.end(), column.get(),
-                            []( const auto& tab, auto offset ) { return tab.first < offset; } );
-    return LineColumn{ column.get() + ( next == deltas.begin() ? 0 : std::prev( next )->second ) };
-}
-
-// Merge captures only inside this occurrence. Separate lookahead occurrences
-// may overlap and must still produce separate clipboard entries.
-std::vector<std::pair<LineColumn, LineColumn>>
-occurrenceFragments( const QRegularExpressionMatch& match, klogg::MatchProjection projection )
-{
-    std::vector<std::pair<LineColumn, LineColumn>> fragments;
-    klogg::visitMatchFragments( match, projection, [ & ]( LineColumn start, LineLength length ) {
-        fragments.emplace_back( start, start + length - 1_length );
-    } );
-    std::sort( fragments.begin(), fragments.end() );
-    size_t count = 0;
-    for ( const auto& fragment : fragments ) {
-        if ( count > 0 && fragment.first <= fragments[ count - 1 ].second ) {
-            fragments[ count - 1 ].second
-                = std::max( fragments[ count - 1 ].second, fragment.second );
-        }
-        else {
-            fragments[ count++ ] = fragment;
-        }
-    }
-    fragments.resize( count );
-    return fragments;
-}
-} // namespace
 
 QRegularExpression AbstractLogView::matchSelectionExpression( bool quickFind ) const
 {
     if ( quickFind ) {
         return quickFindPattern_ != nullptr && quickFindPattern_->isActive()
-                   ? quickFindPattern_->regularExpression()
-                   : QRegularExpression{};
+                   ? quickFindPattern_->regularExpression() : QRegularExpression{};
     }
-    if ( searchPattern_.isBoolean || searchPattern_.isExclude
-         || searchPattern_.pattern.isEmpty() ) {
+    if ( searchPattern_.isBoolean || searchPattern_.isExclude || searchPattern_.pattern.isEmpty() ) {
         return {};
     }
-    auto expression = static_cast<QRegularExpression>( searchPattern_ );
-    expression.setPatternOptions( expression.patternOptions()
-                                  & ~QRegularExpression::DontCaptureOption );
-    return expression;
+    return searchPattern_.toRegularExpression();
 }
 
 bool AbstractLogView::canSelectAllMatches( bool quickFind ) const
@@ -81,36 +28,109 @@ bool AbstractLogView::canSelectAllMatches( bool quickFind ) const
     return !expression.pattern().isEmpty() && expression.isValid();
 }
 
+void AbstractLogView::bindSourceInterpretation()
+{
+    disconnect( interpretationConnection_ );
+    interpretationConnection_ = connect( logData_, &AbstractLogData::interpretationChanged,
+        this, [ this ] {
+            visibleLineMapKeyValid_ = false;
+            invalidateMatchSelection();
+        } );
+}
+
+klogg::LogSnapshot::Ptr AbstractLogView::remapMatchSelection(
+    Selection& selection, const klogg::LogSnapshot::Ptr& previous ) const
+{
+    try {
+        auto presentation = logData_->createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+        if ( !presentation ) {
+            return {};
+        }
+        if ( previous && presentation->preservesPresentationOf( *previous ) ) {
+            return presentation;
+        }
+        selection.remapCapturedRows( [ & ]( const klogg::LogRowId& identity ) {
+            if ( !logData_->containsRowIdentity( identity ) ) {
+                throw klogg::SnapshotError{ "Selected source row no longer exists" };
+            }
+            return presentation->presentedRowForIdentity( identity );
+        } );
+        return presentation;
+    }
+    catch ( const std::exception& error ) {
+        LOG_DEBUG << "Match selection is no longer current: " << error.what();
+        return {};
+    }
+}
+
+bool AbstractLogView::hasMatchSelection() const
+{
+    return matchSelection_ || selection_.hasCapturedPayload() || selection_.hasStableNavigationAnchor();
+}
+
+void AbstractLogView::refreshMatchSelection()
+{
+    if ( selection_.hasCapturedPayload() || selection_.hasStableNavigationAnchor() ) {
+        matchSelectionPresentation_ = remapMatchSelection( selection_, matchSelectionPresentation_ );
+        if ( !matchSelectionPresentation_ ) {
+            invalidateMatchSelection();
+        }
+    }
+    else {
+        matchSelectionPresentation_.reset();
+    }
+}
+
+void AbstractLogView::showMatchSelectionProgress()
+{
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    auto* progress = new QProgressDialog( tr( "Selecting match fragments..." ), tr( "Cancel" ),
+                                          0, 1000, this );
+    matchSelection_->progress = progress;
+    progress->setWindowModality( Qt::NonModal );
+    progress->setMinimumDuration( 750 );
+    progress->setAutoClose( false );
+    progress->setAutoReset( false );
+    connect( progress, &QProgressDialog::canceled, this, &AbstractLogView::cancelMatchSelection );
+}
+
 bool AbstractLogView::selectAllMatches( bool quickFind, bool copy )
 {
-    if ( !canSelectAllMatches( quickFind ) || logData_->getNbLine() == 0_lcount ) {
+    if ( !canSelectAllMatches( quickFind ) ) {
         return false;
     }
-    cancelMatchSelection();
-    quickFind_->stopSearch();
-    acceptQuickFindResults_ = false;
-    disableFollow();
-
-    auto operation = std::make_unique<MatchSelection>();
-    operation->expression = matchSelectionExpression( quickFind );
-    operation->expression.optimize();
-    operation->quickFind = quickFind;
-    operation->copyWhenFinished = copy;
-    operation->totalRows = logData_->getNbLine();
-    // Qt parent ownership covers view teardown; normal completion uses deleteLater.
-    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
-    operation->progress = new QProgressDialog( tr( "Selecting match fragments..." ), tr( "Cancel" ),
-                                               0, 1000, this );
-    operation->progress->setWindowModality( Qt::NonModal );
-    operation->progress->setMinimumDuration( 750 );
-    operation->progress->setAutoClose( false );
-    operation->progress->setAutoReset( false );
-    connect( operation->progress.data(), &QProgressDialog::canceled, this,
-             &AbstractLogView::cancelMatchSelection );
-    matchSelection_ = std::move( operation );
-    const auto generation = ++matchSelectionGeneration_;
-    QTimer::singleShot( 0, this, [ this, generation ] { continueMatchSelection( generation ); } );
-    return true;
+    try {
+        const auto source = logData_->createReadSnapshot(
+            quickFind ? klogg::SnapshotScope::PresentedRows : klogg::SnapshotScope::Matches );
+        if ( !source || source->lineCount() == 0_lcount ) {
+            return false;
+        }
+        const auto presentation = quickFind ? source
+            : logData_->createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+        if ( !presentation ) {
+            return false;
+        }
+        cancelMatchSelection();
+        quickFind_->stopSearch();
+        acceptQuickFindResults_ = false;
+        disableFollow();
+        auto operation = std::make_unique<MatchSelection>();
+        operation->totalRows = source->lineCount();
+        operation->presentation = presentation;
+        operation->copyWhenFinished = copy;
+        operation->job = std::make_shared<klogg::MatchSelectionJob>(
+            source, presentation, matchSelectionExpression( quickFind ), operation->cancelled );
+        matchSelection_ = std::move( operation );
+        showMatchSelectionProgress();
+        const auto generation = ++matchSelectionGeneration_;
+        QTimer::singleShot( 0, this, [ this, generation ] { continueMatchSelection( generation ); } );
+        return true;
+    }
+    catch ( const std::exception& error ) {
+        LOG_ERROR << "Cannot acquire match selection: " << error.what();
+        cancelMatchSelection();
+        return false;
+    }
 }
 
 void AbstractLogView::continueMatchSelection( quint64 generation )
@@ -118,80 +138,98 @@ void AbstractLogView::continueMatchSelection( quint64 generation )
     if ( !matchSelection_ || generation != matchSelectionGeneration_ ) {
         return;
     }
-    try {
-        auto& operation = *matchSelection_;
-        if ( logData_->getNbLine() < operation.totalRows ) {
-            invalidateMatchSelection();
+    // QObject parent owns the watcher until its deferred deletion.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    auto* watcher = new QFutureWatcher<klogg::MatchSelectionStep>( this );
+    connect( watcher, &QFutureWatcher<klogg::MatchSelectionStep>::finished, this,
+             [ this, watcher, generation ] {
+        watcher->deleteLater();
+        matchSelectionWorkers_.erase(
+            std::remove_if( matchSelectionWorkers_.begin(), matchSelectionWorkers_.end(),
+                            []( const auto& worker ) { return worker.isFinished(); } ),
+            matchSelectionWorkers_.end() );
+        if ( !matchSelection_ || generation != matchSelectionGeneration_ ) {
             return;
         }
-        QElapsedTimer elapsed;
-        elapsed.start();
-        unsigned rows = 0;
-        unsigned occurrences = 0;
-        // Bound both rows and occurrences: one long line must not monopolize
-        // the event loop. The existing live-presentation cadence is unchanged.
-        while ( operation.nextRow < operation.totalRows && rows < 128 && occurrences < 1024
-                && elapsed.elapsed() < 8 ) {
-            if ( !operation.readingLine ) {
-                if ( !logData_->isLineCopyable( operation.nextRow )
-                     || ( !operation.quickFind
-                          && !lineType( operation.nextRow )
-                                  .testFlag( AbstractLogData::LineTypeFlags::Match ) ) ) {
-                    ++operation.nextRow;
-                    ++rows;
-                    continue;
-                }
-                operation.text = operation.quickFind
-                                     ? logData_->getExpandedLineString( operation.nextRow )
-                                     : logData_->getLineString( operation.nextRow );
-                operation.tabDeltas
-                    = operation.quickFind ? TabDeltas{} : tabDeltas( operation.text );
-                operation.iterator = operation.expression.globalMatch( operation.text );
-                operation.readingLine = true;
+        try {
+            const auto step = watcher->result();
+            if ( step.outcome == klogg::MatchSelectionStep::Outcome::Failed ) {
+                LOG_ERROR << "Match selection failed: " << step.error;
+                finishMatchSelection( false );
+                return;
             }
-            if ( !operation.iterator.hasNext() ) {
-                operation.readingLine = false;
-                ++operation.nextRow;
-                ++rows;
-                continue;
-            }
-            const auto projection = operation.quickFind
-                                        ? klogg::MatchProjection::FullMatch
-                                        : klogg::MatchProjection::CapturesOrFullMatch;
-            for ( const auto& fragment :
-                  occurrenceFragments( operation.iterator.next(), projection ) ) {
-                if ( operation.quickFind ) {
-                    operation.portions.emplace_back( operation.nextRow, fragment.first,
-                                                     fragment.second );
+            if ( step.outcome == klogg::MatchSelectionStep::Outcome::Complete ) {
+                if ( matchSelection_->serializing ) {
+                    if ( step.withLineNumbers != matchSelection_->withLineNumbers ) {
+                        // A newer Copy command changed policy after this worker started.
+                        // Keep the accepted payload, but never publish obsolete formatting.
+                        QTimer::singleShot( 0, this,
+                            [ this, generation ] { continueMatchSelection( generation ); } );
+                        return;
+                    }
+                    matchSelection_->clipboard = step.clipboard;
+                    finishMatchSelection( step.clipboard.has_value() );
+                    return;
                 }
-                else {
-                    operation.portions.emplace_back(
-                        operation.nextRow, expandedColumn( fragment.first, operation.tabDeltas ),
-                        expandedColumn( fragment.second + 1_length, operation.tabDeltas )
-                            - 1_length,
-                        fragment.first, fragment.second );
+                matchSelection_->result = step.selection;
+                if ( !matchSelection_->copyWhenFinished ) {
+                    finishMatchSelection( true );
+                    return;
                 }
+                matchSelection_->serializing = true;
+                matchSelection_->progress->setLabelText( tr( "Copying match fragments..." ) );
             }
-            ++occurrences;
+            const auto total = matchSelection_->totalRows.get();
+            matchSelection_->progress->setValue( total == 0 ? 0 : static_cast<int>(
+                1000.0 * static_cast<double>( step.processed ) / static_cast<double>( total ) ) );
+            const QPointer<AbstractLogView> guard{ this };
+            Q_EMIT matchSelectionProgress( step.processed, total );
+            if ( guard && matchSelection_ && generation == matchSelectionGeneration_ ) {
+                QTimer::singleShot( 0, this,
+                    [ this, generation ] { continueMatchSelection( generation ); } );
+            }
         }
-        if ( operation.nextRow >= operation.totalRows ) {
-            finishMatchSelection( true );
-            return;
+        catch ( const std::exception& error ) {
+            LOG_ERROR << "Match selection completion failed: " << error.what();
+            finishMatchSelection( false );
         }
-        const auto processed = operation.nextRow.get();
-        const auto total = operation.totalRows.get();
-        operation.progress->setValue( static_cast<int>( 1000.0 * static_cast<double>( processed )
-                                                        / static_cast<double>( total ) ) );
-        Q_EMIT matchSelectionProgress( processed, total );
-        // A progress listener may cancel or replace the operation synchronously.
-        if ( matchSelection_ && generation == matchSelectionGeneration_ ) {
-            QTimer::singleShot( 0, this,
-                                [ this, generation ] { continueMatchSelection( generation ); } );
+        catch ( ... ) {
+            LOG_ERROR << "Unknown match selection completion failure";
+            finishMatchSelection( false );
         }
-    } catch ( const std::exception& error ) {
-        LOG_ERROR << "Match selection failed: " << error.what();
-        cancelMatchSelection();
+    } );
+    QFuture<klogg::MatchSelectionStep> future;
+    if ( matchSelection_->serializing ) {
+        const auto payload = matchSelection_->result;
+        const auto cancelled = matchSelection_->cancelled;
+        const auto numbered = matchSelection_->withLineNumbers;
+        future = QtConcurrent::run( [ payload, cancelled, numbered ] {
+            klogg::MatchSelectionStep step;
+            step.withLineNumbers = numbered;
+            try {
+                const auto stopped = [ & ] { return cancelled->load( std::memory_order_relaxed ); };
+                if ( !stopped() ) {
+                    step.clipboard = payload->isEmpty() ? std::optional<QString>{ QString{} }
+                        : payload->serializeCapturedText( numbered, stopped );
+                }
+                if ( step.clipboard ) {
+                    step.clipboard->replace( QChar::Null, QChar::Space );
+                }
+                step.outcome = klogg::MatchSelectionStep::Outcome::Complete;
+            }
+            catch ( const std::exception& error ) {
+                step.outcome = klogg::MatchSelectionStep::Outcome::Failed;
+                step.error = QString::fromUtf8( error.what() );
+            }
+            return step;
+        } );
     }
+    else {
+        const auto job = matchSelection_->job;
+        future = QtConcurrent::run( [ job ] { return job->step(); } );
+    }
+    matchSelectionWorkers_.push_back( future );
+    watcher->setFuture( future );
 }
 
 void AbstractLogView::finishMatchSelection( bool completed )
@@ -199,50 +237,88 @@ void AbstractLogView::finishMatchSelection( bool completed )
     if ( !matchSelection_ ) {
         return;
     }
-    if ( completed ) {
-        Selection selected;
-        selected.selectPortions( std::move( matchSelection_->portions ),
-                                 Selection::PortionOverlap::Preserve );
-        selection_ = std::move( selected );
-        matchSelectionRows_ = matchSelection_->totalRows;
+    auto operation = std::move( matchSelection_ );
+    const auto presentation = completed && operation->result
+        ? remapMatchSelection( *operation->result, operation->presentation ) : klogg::LogSnapshot::Ptr{};
+    if ( completed && !presentation ) {
+        completed = false;
+        matchSelectionPresentation_.reset();
+        if ( selection_.hasCapturedPayload() ) {
+            selection_.clear();
+            forceRefresh();
+        }
+    }
+    operation->cancelled->store( true, std::memory_order_relaxed );
+    ++matchSelectionGeneration_;
+    if ( completed && operation->publishSelection ) {
+        selection_ = std::move( *operation->result );
+        matchSelectionPresentation_ = selection_.hasCapturedPayload() ? presentation : nullptr;
         if ( !selection_.isEmpty() ) {
             selectionStartPos_ = selection_.getPreviousPosition();
             selectionCurrentEndPos_ = selection_.getNextPosition();
         }
-    }
-    auto operation = std::move( matchSelection_ );
-    ++matchSelectionGeneration_;
-    disconnect( operation->progress.data(), nullptr, this, nullptr );
-    operation->progress->hide();
-    operation->progress->deleteLater();
-    if ( completed ) {
-        setFocus( Qt::ShortcutFocusReason );
         forceRefresh();
-        if ( operation->copyWhenFinished ) {
-            copy();
-        }
     }
-    Q_EMIT matchSelectionFinished( completed );
+    if ( operation->progress ) {
+        disconnect( operation->progress.data(), nullptr, this, nullptr );
+        operation->progress->hide();
+        operation->progress->deleteLater();
+    }
+    const QPointer<AbstractLogView> guard{ this };
+    if ( completed && operation->clipboard ) {
+        sendTextToClipboard( std::move( *operation->clipboard ), true );
+    }
+    if ( guard ) {
+        Q_EMIT matchSelectionFinished( completed );
+    }
+}
+
+bool AbstractLogView::serializeMatchSelection( bool withLineNumbers )
+{
+    if ( matchSelection_ ) {
+        matchSelection_->copyWhenFinished = true;
+        matchSelection_->withLineNumbers = withLineNumbers;
+        return true;
+    }
+    if ( !selection_.hasCapturedPayload() ) {
+        return false;
+    }
+    auto operation = std::make_unique<MatchSelection>();
+    operation->result = std::make_shared<Selection>( selection_ );
+    operation->presentation = matchSelectionPresentation_;
+    operation->serializing = true;
+    operation->publishSelection = false;
+    operation->withLineNumbers = withLineNumbers;
+    matchSelection_ = std::move( operation );
+    showMatchSelectionProgress();
+    matchSelection_->progress->setLabelText( tr( "Copying match fragments..." ) );
+    const auto generation = ++matchSelectionGeneration_;
+    QTimer::singleShot( 0, this, [ this, generation ] { continueMatchSelection( generation ); } );
+    return true;
 }
 
 bool AbstractLogView::deferCopyUntilMatchSelection()
 {
-    if ( !matchSelection_ ) {
-        return false;
-    }
-    matchSelection_->copyWhenFinished = true;
-    return true;
+    return serializeMatchSelection( false );
 }
 
 void AbstractLogView::cancelMatchSelection()
 {
+    matchSelectionPresentation_.reset();
     finishMatchSelection( false );
 }
 
 void AbstractLogView::invalidateMatchSelection()
 {
+    quickFind_->incrementalSearchAbort();
+    clearCurrentMatchSelection();
+}
+
+void AbstractLogView::clearCurrentMatchSelection()
+{
+    acceptQuickFindResults_ = false;
     cancelMatchSelection();
-    if ( selection_.isMultiPortion() ) {
+    if ( selection_.isMultiPortion() || selection_.hasStableNavigationAnchor() ) {
         selection_.clear();
         forceRefresh();
     }

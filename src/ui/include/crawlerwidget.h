@@ -96,8 +96,8 @@ class CrawlerWidget : public QSplitter,
     LineNumber getTopLine() const;
     // Get the selected text as a string (from the main window)
     QString getSelectedText() const override;
-    // True for partial selection
-    bool isPartialSelection() const override;
+    // True for a selection usable as one search operand.
+    bool canUseSelectionAsSearchOperand() const override;
 
     // Display the QFB at the bottom, remembering where the focus was
     void displayQuickFindBar( QuickFindMux::QFDirection direction );
@@ -340,7 +340,6 @@ class CrawlerWidget : public QSplitter,
 
     void connectAllFilteredViewSlots( FilteredView* view);
     void connectSearchPublication( LogFilteredData* source );
-    void interruptCurrentSearch();
     bool acceptsSearchPublication( const LogFilteredData* source, quint64 generation ) const;
     void queuePresentationRefresh( bool searchCatchUp );
     void deliverPresentationCatchUp();
@@ -369,13 +368,6 @@ class CrawlerWidget : public QSplitter,
     LogMainView* logMainView_ = nullptr;
     FilteredView* filteredView_ = nullptr;
     std::unordered_map<FilteredView*, std::shared_ptr<LogFilteredData>> filteredViewsData_;
-    // A terminal publication after Stop settles partial results, not all matches.
-    // Keep the outcome per pane/generation so queued signals cannot resurrect it.
-    struct MatchSearchState {
-        quint64 generation;
-        bool cancelled;
-    };
-    std::unordered_map<const LogFilteredData*, MatchSearchState> matchSearchStates_;
     QTabWidget* tabbedFilteredView_;
 
     OverviewWidget* overviewWidget_;
@@ -403,8 +395,8 @@ class CrawlerWidget : public QSplitter,
     // Default palette to be remembered
     QPalette searchInfoLineDefaultPalette_;
 
-    // Reference to the QuickFind Pattern (not owned)
-
+    // Origin of the current Quick Find interaction; cleared on exit or when
+    // its results pane stops being active. Never a general command-routing cache.
     QPointer<QWidget> qfSavedFocus_;
 
     // Search state (for auto-refresh and truncation)

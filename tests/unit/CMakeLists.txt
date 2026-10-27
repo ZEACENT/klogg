@@ -245,6 +245,8 @@ add_executable(klogg_tests
     linehighlight_compose_test.cpp
     match_projection_test.cpp
     match_selection_test.cpp
+    quickfind_snapshot_test.cpp
+    indexedcontent_test.cpp
     linepositionarray_test.cpp
     livecapture_state_test.cpp
     live_data_queue_test.cpp

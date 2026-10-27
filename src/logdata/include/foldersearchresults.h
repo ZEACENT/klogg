@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -50,9 +51,11 @@ class QFile;
 // always reports the TOTAL match count for the group so the user can see what
 // is hidden, regardless of collapse state.
 //
-// Line text for match rows is fetched on demand by seeking the source file to
-// the recorded byte offset (see MatchRecord); it is never stored. Result sets
-// are therefore cheap regardless of how many lines matched.
+// Scanned groups own immutable packed byte leases and shared match records.
+// Decoded strings are produced on demand. Snapshot acquisition leases an already
+// published immutable layout rather than copying result records or source text.
+// Legacy manually constructed groups retain their ordinary path-backed reads,
+// but cannot satisfy the immutable snapshot contract.
 //
 // THREAD SAFETY: all mutation still happens on the main thread (streaming
 // commits, collapse, visibility), but READERS also run on the QuickFind
@@ -73,9 +76,13 @@ class FolderSearchResults : public AbstractLogData {
     FolderSearchResults( const FolderSearchResults& ) = delete;
     FolderSearchResults& operator=( const FolderSearchResults& ) = delete;
 
-    // Replace the full result set. Files with zero matches must already be
-    // filtered out by the caller. Resets collapse state. Emits layoutChanged().
+    // Replace the full result set. Zero-match members retain their source lease
+    // without a header. Resets collapse state. Emits layoutChanged().
     void setResults( std::vector<klogg::folder::FileGroup> groups );
+
+    klogg::LogSnapshot::Ptr createReadSnapshot( klogg::SnapshotScope scope ) const override;
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override;
+    bool containsRowIdentity( const klogg::LogRowId& identity ) const override;
 
     // --- Streaming API (stable incremental display) ---
     // beginSearch resets for a streaming search, retains `expectedFileOrder` as
@@ -233,7 +240,33 @@ class FolderSearchResults : public AbstractLogData {
         std::vector<LineNumber> localLines; // sorted ascending
     };
 
+    using GroupPtr = std::shared_ptr<const klogg::folder::FileGroup>;
+    struct MatchRow {
+        klogg::folder::FileId fileId = 0;
+        size_t matchIndex = 0;
+    };
+    struct SnapshotLayout {
+        std::vector<GroupPtr> groups;
+        QHash<QString, klogg::folder::ScannedFileContent::Ptr> sources;
+        std::shared_ptr<const std::vector<VisibleRow>> visible;
+        // Compact references, not additional copies of every VisibleRow or
+        // MatchRecord. Presented indices retain the original header offsets.
+        std::vector<size_t> presented;
+        std::vector<MatchRow> matches;
+        std::map<std::pair<uint64_t, uint64_t>, klogg::folder::FileId> members;
+
+        std::optional<klogg::folder::FileId> memberForIdentity( const klogg::LogRowId& identity ) const;
+        OptionalLineNumber visibleRowForIdentity( const klogg::LogRowId& identity ) const;
+        OptionalLineNumber matchRowForIdentity( const klogg::LogRowId& identity ) const;
+        uint64_t localLine( const VisibleRow& item ) const;
+    };
+    class ReadSnapshot;
+
     void rebuildVisibleRows();
+    void rebuildSnapshotLayout();
+    // Retain every scanned member; return whether presented text or failure
+    // status changed and therefore needs a new layout publication.
+    bool retainSource( const klogg::folder::FileGroup& group );
     // Full result-set replacement invalidates every file-backed cache. Caller
     // holds dataMutex_ uniquely; this helper takes fileIoMutex_ second.
     void resetFileCaches();
@@ -253,6 +286,11 @@ class FolderSearchResults : public AbstractLogData {
     // scaling to any file size; multi-byte/stateful codecs use the (capped)
     // whole-file decoded-line cache.
     QString readMarkLine( const QString& filePath, LineNumber localLine, QTextCodec* codec ) const;
+    QString readRetainedMarkLine( const QString& filePath, LineNumber localLine, QTextCodec* codec,
+                                 const klogg::folder::ScannedFileContent::Ptr& source ) const;
+    // Caller holds fileIoMutex_; both retained and legacy marked rows share the
+    // existing aggregate text/entry budgets rather than allocating per member.
+    QString cacheMarkText( const QString& key, QString text ) const;
     void ensureMarkLines( const QString& filePath, QTextCodec* codec ) const;
     QString readMarkLineSeek( const QString& filePath, LineNumber localLine,
                               QTextCodec* codec ) const;
@@ -280,8 +318,17 @@ class FolderSearchResults : public AbstractLogData {
     // AFTER dataMutex_ when both are needed, never the reverse.
     mutable std::mutex fileIoMutex_;
 
-    std::vector<klogg::folder::FileGroup> groups_;
-    std::vector<VisibleRow> visibleRows_;
+    std::vector<GroupPtr> groups_;
+    std::shared_ptr<std::vector<VisibleRow>> visibleRows_
+        = std::make_shared<std::vector<VisibleRow>>();
+    // Includes scanned zero-match members, so marks never borrow current paths
+    // under the immutable snapshot contract. Old layouts own their group leases.
+    QHash<QString, klogg::folder::ScannedFileContent::Ptr> retainedSources_;
+    // Source existence, independent of layout membership. Includes zero-match
+    // members and stores their accepted scan cutoff for bounded identity checks.
+    std::map<std::pair<uint64_t, uint64_t>, LinesCount> retainedMembers_;
+    QString retentionError_;
+    std::shared_ptr<const SnapshotLayout> snapshotLayout_ = std::make_shared<SnapshotLayout>();
     QSet<klogg::folder::FileId> collapsed_;
     // Snapshot of collapsed groups' filePaths captured in beginSearch and
     // re-applied as each group streams back in, so a re-scan (e.g. a context-line
@@ -317,8 +364,9 @@ class FolderSearchResults : public AbstractLogData {
     // Resolved mark-line TEXT cache for the seek path (byte-newline-safe files).
     // The view re-fetches every visible mark row on each repaint; without this,
     // a mark near the end of a large file rescans from byte 0 every frame. Key
-    // is filePath + null + codec name + null + localLine. Only seek-path reads
-    // populate it (whole-file path already caches all lines). Invalidated at
+    // is filePath + null + codec name + null + localLine for legacy reads;
+    // retained-source keys additionally include incarnation/member identity.
+    // Retained and legacy seek reads share this budget. Invalidated at
     // full result-set replacement boundaries and alongside markLineCache_ on an
     // encoding-override change (same prefix sweep covers both). Guarded by
     // fileIoMutex_.

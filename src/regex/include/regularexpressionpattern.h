@@ -22,9 +22,10 @@
 
 #include <QRegularExpression>
 #include <QString>
+#include <atomic>
 #include <cstdint>
-#include <qregularexpression.h>
 #include <string>
+#include <tuple>
 
 #include "uuid.h"
 
@@ -60,21 +61,27 @@ struct RegularExpressionPattern {
         return patternId_;
     }
 
+    // Capture groups participate in matching semantics: suppressing unnamed
+    // groups invalidates or renumbers backreferences and capture conditionals.
+    // Predicate and occurrence consumers must compile the same expression.
+    static QRegularExpression::PatternOptions qtPatternOptions( bool caseSensitive )
+    {
+        QRegularExpression::PatternOptions options = QRegularExpression::UseUnicodePropertiesOption;
+        if ( !caseSensitive ) {
+            options |= QRegularExpression::CaseInsensitiveOption;
+        }
+        return options;
+    }
+
+    QRegularExpression toRegularExpression() const
+    {
+        const auto finalPattern = isPlainText ? QRegularExpression::escape( pattern ) : pattern;
+        return QRegularExpression{ finalPattern, qtPatternOptions( isCaseSensitive ) };
+    }
+
     explicit operator QRegularExpression() const
     {
-        auto patternOptions = QRegularExpression::UseUnicodePropertiesOption
-                              | QRegularExpression::DontCaptureOption;
-
-        if ( !isCaseSensitive ) {
-            patternOptions |= QRegularExpression::CaseInsensitiveOption;
-        }
-
-        auto finalPattern = pattern;
-        if ( isPlainText ) {
-            finalPattern = QRegularExpression::escape( pattern );
-        }
-
-        return QRegularExpression( finalPattern, patternOptions );
+        return toRegularExpression();
     }
 
     bool operator==( const RegularExpressionPattern& other ) const

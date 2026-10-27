@@ -163,6 +163,7 @@ void IndexingData::clear()
     maxLength_ = 0_length;
     hash_ = {};
     hashBuilder_.reset();
+    contentSnapshot_.reset();
     if ( config.useCompressedIndex() ) {
         linePosition_ = LinePositionArrayType( LinePositionArray{} );
     }
@@ -526,15 +527,15 @@ std::chrono::microseconds IndexOperation::readFileInBlocks( QFile& file,
             break;
         }
 
-        BlockData blockData{ file.pos(), new klogg::vector<char>( IndexingBlockSize ) };
+        BlockData blockData{ file.pos(), std::make_shared<BlockBuffer>( IndexingBlockSize ) };
 
         clock::time_point ioT1 = clock::now();
         const auto readBytes
             = file.read( blockData.second->data(), klogg::ssize( *blockData.second ) );
 
         if ( readBytes < 0 ) {
-            LOG_ERROR << "Reading past the end of file";
-            break;
+            throw IndexedContentError( "Cannot read block for indexing: "
+                                       + file.errorString().toStdString() );
         }
 
         if ( readBytes < klogg::ssize( *blockData.second ) ) {
@@ -555,7 +556,7 @@ std::chrono::microseconds IndexOperation::readFileInBlocks( QFile& file,
         sentBlocksCount++;
     }
 
-    auto lastBlock = std::make_pair( -1, new klogg::vector<char>{} );
+    const BlockData lastBlock{ -1, std::make_shared<BlockBuffer>() };
     while ( !blockPrefetcher.try_put( lastBlock ) && !interruptRequest_ ) {
         std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
     }
@@ -575,12 +576,19 @@ void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& bloc
         return;
     }
 
-    IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
-
-    guessEncoding( block, scopedAccessor, state );
+    {
+        IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
+        guessEncoding( block, scopedAccessor, state );
+    }
 
     if ( !block.empty() ) {
         const auto linePositions = parseDataBlock( blockBeginning, block, state );
+        // Retain exactly the bytes parsed above, before releasing the block.
+        // Spill writes and boundary reads must stay outside the index mutex.
+        contentBuilder_->appendBlock( blockBeginning, block.data(), block.size(),
+                                      linePositions.range( 0_lnum, linePositions.size() ) );
+        const auto snapshot = contentBuilder_->snapshot( state.fileTextCodec->name() );
+        IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
         auto maxLength = state.max_length;
         if ( maxLength > std::numeric_limits<LineLength::UnderlyingType>::max() ) {
             LOG_ERROR << "Too long lines " << maxLength;
@@ -590,6 +598,7 @@ void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& bloc
         scopedAccessor.addAll(
             block, LineLength( type_safe::narrow_cast<LineLength::UnderlyingType>( maxLength ) ),
             linePositions, state.encodingGuess );
+        scopedAccessor.setContentSnapshot( snapshot );
 
         // Update the caller for progress indication
         const auto progress
@@ -602,6 +611,7 @@ void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& bloc
         }
     }
     else {
+        IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
         scopedAccessor.setEncodingGuess( state.encodingGuess );
     }
 
@@ -612,6 +622,12 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
 {
     LOG_INFO << "Indexing file " << fileName_;
     QFile file( fileName_ );
+    const auto previousContent
+        = IndexingData::ConstAccessor{ indexing_data_.get() }.getContentSnapshot();
+    if ( initialPosition.get() != 0 && !previousContent ) {
+        throw IndexedContentError( "Indexed bytes are unavailable for append continuation" );
+    }
+    contentBuilder_ = std::make_unique<IndexedContentBuilder>( previousContent );
 
     if ( !( file.isOpen() || file.open( QIODevice::ReadOnly ) ) ) {
         // TODO: Check that the file is seekable?
@@ -630,6 +646,8 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
             fallbackCodec = QTextCodec::codecForName( "UTF-8" );
         }
         scopedAccessor.setEncodingGuess( fallbackCodec );
+        const IndexedContentBuilder emptyContent;
+        scopedAccessor.setContentSnapshot( emptyContent.snapshot( fallbackCodec->name() ) );
 
         scopedAccessor.setProgress( 100 );
         Q_EMIT indexingProgressed( 100 );
@@ -671,10 +689,20 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
     auto blockPrefetcher = tbb::flow::limiter_node<BlockData>( indexingGraph, prefetchBufferSize );
     auto blockQueue = tbb::flow::queue_node<BlockData>( indexingGraph );
 
+    std::exception_ptr indexingError;
     auto blockParser = tbb::flow::function_node<BlockData, tbb::flow::continue_msg>(
-        indexingGraph, tbb::flow::serial, [ this, &state ]( const BlockData& blockData ) {
-            indexNextBlock( state, blockData );
-            delete blockData.second;
+        indexingGraph, tbb::flow::serial,
+        [ this, &state, &indexingError ]( const BlockData& blockData ) {
+            if ( !indexingError ) {
+                try {
+                    indexNextBlock( state, blockData );
+                } catch ( ... ) {
+                    // Unblock the producer before propagating an IO failure.
+                    // Throwing through TBB here could strand it at the limiter.
+                    indexingError = std::current_exception();
+                    interruptRequest_.set();
+                }
+            }
             return tbb::flow::continue_msg{};
         } );
 
@@ -682,20 +710,46 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
     tbb::flow::make_edge( blockQueue, blockParser );
     tbb::flow::make_edge( blockParser, blockPrefetcher.decrementer() );
 
-    file.seek( state.pos );
-    ioDuration = readFileInBlocks( file, blockPrefetcher );
+    if ( !file.seek( state.pos ) ) {
+        throw IndexedContentError( "Cannot seek source for indexing" );
+    }
+    try {
+        ioDuration = readFileInBlocks( file, blockPrefetcher );
+    } catch ( ... ) {
+        interruptRequest_.set();
+        indexingGraph.wait_for_all();
+        throw;
+    }
     indexingGraph.wait_for_all();
+    if ( indexingError ) {
+        std::rethrow_exception( indexingError );
+    }
 
+    if ( !state.encodingGuess ) {
+        const auto defaultEncodingMib = Configuration::get().defaultEncodingMib();
+        state.encodingGuess = defaultEncodingMib >= 0
+                                  ? QTextCodec::codecForMib( defaultEncodingMib ) : nullptr;
+        if ( !state.encodingGuess ) {
+            state.encodingGuess = QTextCodec::codecForName( "UTF-8" );
+        }
+    }
+    if ( !state.fileTextCodec ) {
+        state.fileTextCodec = state.encodingGuess;
+    }
+    const auto finalSnapshot = contentBuilder_->snapshot( state.fileTextCodec->name(), true );
+    const auto finalLine = finalSnapshot->lineCount().get() > 0
+                              ? finalSnapshot->lineEnd( LineNumber( finalSnapshot->lineCount().get() - 1 ) )
+                              : 0_offset;
     IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
 
     LOG_DEBUG << "Indexed up to " << state.pos;
 
-    // Check if there is a non LF terminated line at the end of the file
-    if ( !interruptRequest_ && state.file_size > state.pos ) {
+    // A synthetic LF belongs to the retained extent, not a stale stat size.
+    if ( !interruptRequest_ && finalLine.get() > finalSnapshot->byteSize() ) {
         LOG_WARNING << "Non LF terminated file, adding a fake end of line";
 
         FastLinePositionArray line_position;
-        line_position.append( OffsetInFile( state.file_size + 1 ) );
+        line_position.append( finalLine );
         line_position.setFakeFinalLF();
 
         scopedAccessor.addAll( {}, 0_length, line_position, state.encodingGuess );
@@ -736,6 +790,9 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
                     / ( 1024 * 1024 )
              << " MiB/s";
     LOG_INFO << "Memory usage " << readableSize( usedMemory() );
+
+    scopedAccessor.setEncodingGuess( state.encodingGuess );
+    scopedAccessor.setContentSnapshot( finalSnapshot );
 
     if ( interruptRequest_ ) {
         scopedAccessor.clear();

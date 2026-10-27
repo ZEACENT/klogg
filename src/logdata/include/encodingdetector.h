@@ -32,8 +32,11 @@ class QTextDecoder;
 
 struct EncodingParameters {
     EncodingParameters() = default;
-    explicit EncodingParameters( const QTextCodec* codec );
+    explicit EncodingParameters( const QTextCodec* sourceCodec );
 
+    // Frozen decoder identity, not merely newline framing. Qt owns codec
+    // instances; retaining this pointer avoids codec-registry locks per record.
+    const QTextCodec* codec = nullptr;
     bool isUtf8Compatible{ false };
     bool isUtf16LE{ false };
 

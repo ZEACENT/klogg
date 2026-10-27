@@ -199,7 +199,7 @@ class FolderCrawlerWidget : public QWidget,
     // focused view, so MainWindow::copy/selectAll work on folder tabs instead of
     // being enabled no-ops (currentCrawlerWidget() is null for a folder tab).
     QString getSelectedText() const override;
-    bool isPartialSelection() const override;
+    bool canUseSelectionAsSearchOperand() const override;
     void selectAll() override;
     bool canSelectAllMatches( bool quickFind = false ) const override;
     bool selectAllMatches( bool quickFind = false, bool copy = false ) override;
@@ -450,8 +450,8 @@ class FolderCrawlerWidget : public QWidget,
     // whole load window, and canceling that open must find its override still
     // pinned.
     std::optional<int> encodingMibOverride_;
-    // View that had focus when the QuickFind bar opened (enteringQuickFind);
-    // restored on exitingQuickFind. Mirrors CrawlerWidget::qfSavedFocus_.
+    // Origin of the current Quick Find interaction; restored once on exit and
+    // retired when its pane stops being active. Never a command-routing cache.
     QPointer<QWidget> qfSavedFocus_;
     // Last finished search's result text ("No matches" / "N match(es)");
     // re-shown with the stale hint when an option toggle invalidates it.

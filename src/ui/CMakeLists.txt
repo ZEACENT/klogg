@@ -49,6 +49,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindow.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindowtext.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/matchprojection.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/matchselectionjob.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mergefileorder.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/menu.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/optionsdialog.h
@@ -139,6 +140,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindowtext.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/matchselection.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/matchselectionjob.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mergefileorder.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/menu.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/optionsdialog.cpp

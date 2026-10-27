@@ -43,11 +43,10 @@ class PatternMatcher;
 // folder search: no byte-offset index is built, every search is a full scan
 // (requirement: "search the whole folder each time, like grep").
 //
-// Matching reuses RegularExpression/PatternMatcher exactly as LogFilteredData
-// does for a single file: compile once per search (RegularExpression), create a
-// matcher, and call matcher->hasMatch(line) per line. (klogg evaluated and
-// disabled PatternMatcher::scanBuffer -- per-line hasMatch is faster at scale
-// and scanBuffer miscounts complex patterns; see logfiltereddataworker.cpp.)
+// Matching reuses RegularExpression/PatternMatcher and the shared normalized
+// record contract. Eligible UTF-8 files retain block scanning; the shared
+// capability gate routes patterns that cannot preserve per-record semantics
+// through hasMatch(line), alongside context and non-UTF-8 streaming scans.
 //
 // Files are scanned on a worker thread; results are accumulated thread-safely
 // and handed to the caller via takeResults() after searchFinished. Signals
@@ -120,7 +119,8 @@ class FolderSearchEngine : public QObject {
     quint64 currentGeneration() const noexcept { return generation_.load( std::memory_order_relaxed ); }
     quint64 matchCount() const noexcept { return matchCount_.load( std::memory_order_relaxed ); }
 
-    // Thread-safe: swap out the accumulated result groups.
+    // Thread-safe: consume accumulated groups in enumeration order. Successful
+    // zero-match members are omitted; retention failures remain explicit.
     std::vector<klogg::folder::FileGroup> takeResults();
 
     // Thread-safe: move out the per-file streaming group for `fileIndex` (the
@@ -137,7 +137,8 @@ class FolderSearchEngine : public QObject {
     static klogg::folder::FileGroup scanFile( const QString& path, const PatternMatcher& matcher,
                                               qint64 blockSize = DefaultBlockSize,
                                               std::function<bool()> shouldStop = {},
-                                              klogg::folder::ContextOptions context = {} );
+                                              klogg::folder::ContextOptions context = {},
+                                              std::shared_ptr<klogg::folder::ScanArena> arena = {} );
 
   Q_SIGNALS:
     void searchStarted( quint64 generation );
@@ -180,12 +181,9 @@ class FolderSearchEngine : public QObject {
     std::thread workerThread_;
 
     std::mutex resultsMutex_;
-    std::vector<klogg::folder::FileGroup> results_;
-    // Per-file streaming buffer indexed by file index. Workers store each
-    // finished FileGroup here under resultsMutex_ before emitting fileGroupReady;
-    // the main-thread consumer drains it via takeCompletedGroup. Rebuilt in
-    // enumeration order into results_ at the end of each search so takeResults()
-    // (sync/test/benchmark) returns a deterministic, enumeration-ordered set.
+    // Consume-once buffer in enumeration order. Streaming consumers move one
+    // completed group; synchronous consumers move all groups via takeResults.
+    // No second result owner copies records or retains drained source leases.
     std::vector<std::optional<klogg::folder::FileGroup>> pending_;
     std::atomic<quint64> matchCount_{ 0 };
 };

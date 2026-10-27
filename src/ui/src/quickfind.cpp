@@ -49,14 +49,85 @@
 #include <QMetaObject>
 #include <QtConcurrent>
 
+#include <exception>
+
 #include "abstractlogdata.h"
 #include "linetypes.h"
 #include "log.h"
-#include "qtcompat/qtcompat.h"
 #include "quickfindpattern.h"
 #include "selection.h"
 
 #include "quickfind.h"
+#include "matchprojection.h"
+
+namespace {
+LineNumber presentedRow( const klogg::LogSnapshot& snapshot, const klogg::SnapshotRow& row )
+{
+    const auto presented = snapshot.presentedRowForIdentity( row.identity );
+    if ( !presented ) {
+        throw klogg::SnapshotError{ "Quick Find snapshot has no frozen presented-row mapping" };
+    }
+    return *presented;
+}
+
+// PresentedRows are ordered in view order, but synthetic headers can leave gaps.
+// Locate the starting snapshot ordinal without scanning every preceding row.
+LineNumber firstRowAtOrAfter( const klogg::LogSnapshot& snapshot, LineNumber position )
+{
+    uint64_t first = 0;
+    auto last = snapshot.lineCount().get();
+    while ( first < last ) {
+        const auto middle = first + ( last - first ) / 2;
+        if ( presentedRow( snapshot, snapshot.row( LineNumber{ middle } ) ) < position ) {
+            first = middle + 1;
+        }
+        else {
+            last = middle;
+        }
+    }
+    return LineNumber{ first };
+}
+
+QuickFindResult occurrenceResult( LineNumber ordinal, const klogg::SnapshotRow& row,
+                                  LineNumber line, const QString& text,
+                                  const QRegularExpressionMatch& match )
+{
+    QuickFindResult result;
+    result.found = true;
+    result.line = line;
+    result.rowIdentity = row.identity;
+    const klogg::MatchTextColumns columns{ text };
+    const auto occurrence = klogg::projectMatchOccurrence( match );
+    std::vector<Selection::CapturedPortion> fragments;
+    for ( const auto& fragment : occurrence.fragments ) {
+        const auto end = fragment.start + fragment.length;
+        fragments.push_back( {
+            Portion{ ordinal, columns.displayColumn( fragment.start ),
+                     columns.displayColumn( end ) - 1_length,
+                     fragment.start, end - 1_length },
+            row.sourceLineNumber, text.mid( fragment.start.get(), fragment.length.get() ),
+            row.identity, line } );
+    }
+    result.selection.selectCapturedPortions( std::move( fragments ) );
+    auto nextRaw = match.capturedEnd();
+    FilePosition next{ line, columns.displayColumn( LineColumn{ nextRaw } ) };
+    if ( match.capturedLength() == 0 ) {
+        if ( nextRaw == text.size() ) {
+            next = FilePosition{ line + 1_lcount, 0_lcol };
+        }
+        else {
+            const bool surrogate = text.at( nextRaw ).isHighSurrogate()
+                                   && nextRaw + 1 < text.size()
+                                   && text.at( nextRaw + 1 ).isLowSurrogate();
+            nextRaw += surrogate ? 2 : 1;
+            next = FilePosition{ line, columns.displayColumn( LineColumn{ nextRaw } ) };
+        }
+    }
+    result.selection.setNavigationBounds(
+        FilePosition{ line, columns.displayColumn( occurrence.start ) }, next, row.identity );
+    return result;
+}
+} // namespace
 
 void SearchingNotifier::reset()
 {
@@ -131,7 +202,8 @@ QuickFind::QuickFind( const AbstractLogData& logData )
     connect( &searchingNotifier_, &SearchingNotifier::notify, this, &QuickFind::sendNotification,
              Qt::DirectConnection );
 
-    connect( &operationWatcher_, &QFutureWatcher<Portion>::finished, this,
+    qRegisterMetaType<QuickFindResult>();
+    connect( &operationWatcher_, &QFutureWatcher<QuickFindResult>::finished, this,
              &QuickFind::onSearchFutureReady );
 }
 
@@ -140,6 +212,7 @@ Selection QuickFind::incrementalSearchStop()
     if ( incrementalSearchStatus_.isOngoing() ) {
         Selection s = incrementalSearchStatus_.initialSelection();
         incrementalSearchStatus_ = IncrementalSearchStatus();
+        ++requestId_;
         interruptRequested_.set();
 
         return s;
@@ -154,6 +227,7 @@ Selection QuickFind::incrementalSearchAbort()
     if ( incrementalSearchStatus_.isOngoing() ) {
         Selection s = incrementalSearchStatus_.initialSelection();
         incrementalSearchStatus_ = IncrementalSearchStatus();
+        ++requestId_;
         interruptRequested_.set();
         return s;
     }
@@ -193,22 +267,21 @@ void QuickFind::runBeforeLineReadCallbackForTesting()
 void QuickFind::stopSearch()
 {
     LOG_INFO << "Stop search for quickfind " << this;
+    ++requestId_;
     interruptAndWait();
 }
 
 void QuickFind::onSearchFutureReady()
 {
-    auto selection = operationFuture_.result();
-
-    if ( selection.isValid() ) {
-        Q_EMIT searchDone( true, selection );
+    auto result = operationFuture_.result();
+    if ( result.requestId != requestId_ ) {
+        return;
     }
-    else if ( incrementalSearchStatus_.direction() != None ) {
-        Q_EMIT searchDone( false, Portion{ incrementalSearchStatus_.position().line(), 0_lcol, 0_lcol } );
+    if ( !result.found && incrementalSearchStatus_.direction() != None ) {
+        result.line = incrementalSearchStatus_.position().line();
+        result.selection.selectPortion( *result.line, 0_lcol, 0_lcol );
     }
-    else {
-        Q_EMIT searchDone( false, selection );
-    }
+    Q_EMIT searchDone( result );
 }
 
 void QuickFind::incrementallySearchForward( Selection selection, QuickFindMatcher matcher )
@@ -231,13 +304,7 @@ void QuickFind::incrementallySearchForward( Selection selection, QuickFindMatche
         incrementalSearchStatus_ = IncrementalSearchStatus( Forward, start_position, selection );
     }
 
-    interruptRequested_.clear();
-    operationFuture_ = klogg::qtcompat::runConcurrent(
-        QOverload<const FilePosition&, const Selection&, const QuickFindMatcher&>::of(
-            &QuickFind::doSearchForward ),
-        this, start_position, selection, matcher );
-
-    operationWatcher_.setFuture( operationFuture_ );
+    startSearch( Forward, start_position, selection, matcher );
 }
 
 void QuickFind::incrementallySearchBackward( Selection selection, QuickFindMatcher matcher )
@@ -260,12 +327,7 @@ void QuickFind::incrementallySearchBackward( Selection selection, QuickFindMatch
         incrementalSearchStatus_ = IncrementalSearchStatus( Backward, start_position, selection );
     }
 
-    interruptRequested_.clear();
-    operationFuture_ = klogg::qtcompat::runConcurrent(
-        QOverload<const FilePosition&, const Selection&, const QuickFindMatcher&>::of(
-            &QuickFind::doSearchBackward ),
-        this, start_position, selection, matcher );
-    operationWatcher_.setFuture( operationFuture_ );
+    startSearch( Backward, start_position, selection, matcher );
 }
 
 void QuickFind::searchForward( Selection selection, QuickFindMatcher matcher )
@@ -273,11 +335,7 @@ void QuickFind::searchForward( Selection selection, QuickFindMatcher matcher )
     incrementalSearchStatus_ = IncrementalSearchStatus();
     interruptAndWait();
 
-    interruptRequested_.clear();
-    operationFuture_ = klogg::qtcompat::runConcurrent(
-        QOverload<const Selection&, const QuickFindMatcher&>::of( &QuickFind::doSearchForward ),
-        this, selection, matcher );
-    operationWatcher_.setFuture( operationFuture_ );
+    startSearch( Forward, selection.getNextPosition(), selection, matcher );
 }
 
 void QuickFind::searchBackward( Selection selection, QuickFindMatcher matcher )
@@ -285,188 +343,150 @@ void QuickFind::searchBackward( Selection selection, QuickFindMatcher matcher )
     incrementalSearchStatus_ = IncrementalSearchStatus();
     interruptAndWait();
 
+    startSearch( Backward, selection.getPreviousPosition(), selection, matcher );
+}
+
+void QuickFind::startSearch( QFDirection direction, const FilePosition& startPosition,
+                            const Selection& selection, const QuickFindMatcher& matcher )
+{
+    const auto requestId = ++requestId_;
+    klogg::LogSnapshot::Ptr snapshot;
+    // This is the only source access: acceptance captures both immutable text
+    // and presented-row membership on the source owner's thread.
+    try {
+        snapshot = logData_.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+        if ( !snapshot ) {
+            throw klogg::SnapshotError{ "The source cannot provide an immutable snapshot" };
+        }
+    }
+    catch ( const std::exception& error ) {
+        sendNotification( QFNotification{ tr( "Quick Find unavailable: %1" )
+                                              .arg( QString::fromUtf8( error.what() ) ) } );
+    }
+    catch ( ... ) {
+        sendNotification( QFNotification{ tr( "Quick Find snapshot acquisition failed" ) } );
+    }
+
     interruptRequested_.clear();
-    operationFuture_ = klogg::qtcompat::runConcurrent(
-        QOverload<const Selection&, const QuickFindMatcher&>::of( &QuickFind::doSearchBackward ),
-        this, selection, matcher );
+    operationFuture_ = QtConcurrent::run(
+        [ this, snapshot = std::move( snapshot ), startPosition, selection = selection,
+          matcher = matcher, direction, requestId ] {
+            QuickFindResult result;
+            try {
+                if ( snapshot ) {
+                    result = direction == Forward
+                        ? doSearchForward( *snapshot, startPosition, selection, matcher )
+                        : doSearchBackward( *snapshot, startPosition, selection, matcher );
+                }
+            }
+            catch ( const std::exception& error ) {
+                sendNotification( QFNotification{ tr( "Quick Find failed: %1" )
+                                                      .arg( QString::fromUtf8( error.what() ) ) } );
+            }
+            catch ( ... ) {
+                sendNotification( QFNotification{ tr( "Quick Find snapshot read failed" ) } );
+            }
+            result.requestId = requestId;
+            return result;
+        } );
     operationWatcher_.setFuture( operationFuture_ );
 }
 
-Portion QuickFind::doSearchForward( const Selection& selection, const QuickFindMatcher& matcher )
+QuickFindResult QuickFind::doSearchForward( const klogg::LogSnapshot& snapshot,
+                                          const FilePosition& startPosition,
+                                          const Selection& selection,
+                                          const QuickFindMatcher& matcher )
 {
-    return doSearchForward( selection.getNextPosition(), selection, matcher );
-}
-
-// Internal implementation of forward search,
-// returns the line where the pattern is found or -1 if not found.
-// Parameters are the position the search shall start
-Portion QuickFind::doSearchForward( const FilePosition& start_position, const Selection& selection,
-                                    const QuickFindMatcher& matcher )
-{
-    bool found = false;
-    LineColumn found_start_col{};
-    LineColumn found_end_col{};
-
-    if ( !matcher.isActive() )
-        return {};
+    if ( !matcher.isActive() ) return {};
 
 #if defined( KLOGG_ASAN_BUILD )
     runBeforeLineReadCallbackForTesting();
 #endif
 
-    // Optimisation: if we are already after the last match,
-    // we don't do any search at all.
-    if ( lastMatch_.isLater( start_position ) ) {
-        // Send a notification
-        sendNotification( QFNotificationReachedEndOfFile() );
-
+    if ( lastMatch_.isLater( startPosition ) ) {
+        sendNotification( QFNotificationReachedEndOfFile{} );
         return {};
     }
 
-    auto line = start_position.line();
-    LOG_DEBUG << "Start searching at line " << line;
-    // We look at the rest of the first line
-    if ( matcher.isLineMatching( logData_.getExpandedLineString( line ),
-                                 start_position.column() ) ) {
-        std::tie( found_start_col, found_end_col ) = matcher.getLastMatch();
-        found = true;
-    }
-    else {
-        searchingNotifier_.reset();
-        // And then the rest of the file
-        const auto nb_lines = logData_.getNbLine();
-        ++line;
-        while ( line < nb_lines ) {
-            if ( matcher.isLineMatching( logData_.getExpandedLineString( line ) ) ) {
-                std::tie( found_start_col, found_end_col ) = matcher.getLastMatch();
-                found = true;
-                break;
-            }
-            ++line;
-
-            // See if we need to notify of the ongoing search
-            searchingNotifier_.ping( line, nb_lines, false );
-
-            if ( interruptRequested_ ) {
-                break;
+    const auto count = snapshot.lineCount();
+    auto ordinal = firstRowAtOrAfter( snapshot, startPosition.line() );
+    searchingNotifier_.reset();
+    while ( ordinal < count && !interruptRequested_ ) {
+        const auto row = snapshot.row( ordinal );
+        const auto line = presentedRow( snapshot, row );
+        if ( row.copyable ) {
+            const auto text = snapshot.lineString( ordinal );
+            const klogg::MatchTextColumns columns{ text };
+            const auto start = line == startPosition.line()
+                                   ? columns.searchColumn( startPosition.column() ) : 0_lcol;
+            if ( matcher.isLineMatching( text, start ) ) {
+                Q_EMIT clearNotification();
+                return occurrenceResult( ordinal, row, line, text, matcher.lastOccurrence() );
             }
         }
+        ++ordinal;
+        searchingNotifier_.ping( ordinal, count, false );
     }
 
-    if ( found ) {
-        // Clear any notification
-        Q_EMIT clearNotification();
-
-        return Portion{ line, found_start_col, found_end_col };
+    if ( !interruptRequested_ ) {
+        lastMatch_.set( selection.getPreviousPosition() );
+        sendNotification( QFNotificationReachedEndOfFile{} );
     }
     else {
-        if ( !interruptRequested_ ) {
-            // Update the position of the last match
-            FilePosition last_match_position = selection.getPreviousPosition();
-            lastMatch_.set( last_match_position );
-
-            // Send a notification
-            sendNotification( QFNotificationReachedEndOfFile{} );
-        }
-        else {
-            // Send a notification
-            sendNotification( QFNotificationInterrupted{} );
-        }
-
-        return {};
+        sendNotification( QFNotificationInterrupted{} );
     }
+    return {};
 }
 
-Portion QuickFind::doSearchBackward( const Selection& selection, const QuickFindMatcher& matcher )
+QuickFindResult QuickFind::doSearchBackward( const klogg::LogSnapshot& snapshot,
+                                           const FilePosition& startPosition,
+                                           const Selection& selection,
+                                           const QuickFindMatcher& matcher )
 {
-    return doSearchBackward( selection.getPreviousPosition(), selection, matcher );
-}
-
-// Internal implementation of backward search,
-// returns the line where the pattern is found or -1 if not found.
-// Parameters are the position the search shall start
-Portion QuickFind::doSearchBackward( const FilePosition& start_position, const Selection& selection,
-                                     const QuickFindMatcher& matcher )
-{
-    bool found = false;
-    LineColumn start_col{};
-    LineColumn end_col{};
-
-    if ( !matcher.isActive() )
-        return {};
+    if ( !matcher.isActive() ) return {};
 
 #if defined( KLOGG_ASAN_BUILD )
     runBeforeLineReadCallbackForTesting();
 #endif
 
-    // Optimisation: if we are already before the first match,
-    // we don't do any search at all.
-    if ( firstMatch_.isSooner( start_position ) ) {
-        // Send a notification
-        sendNotification( QFNotificationReachedBegininningOfFile() );
-
+    if ( firstMatch_.isSooner( startPosition ) ) {
+        sendNotification( QFNotificationReachedBegininningOfFile{} );
         return {};
     }
 
-    auto line = start_position.line();
-    LOG_DEBUG << "Start searching at line " << line;
-    // We look at the beginning of the first line
-    if ( ( start_position.column() > 0_lcol )
-         && ( matcher.isLineMatchingBackward( logData_.getExpandedLineString( line ),
-                                              start_position.column() ) ) ) {
-        std::tie( start_col, end_col ) = matcher.getLastMatch();
-        found = true;
+    const auto count = snapshot.lineCount();
+    if ( count == 0_lcount ) return {};
+    auto next = firstRowAtOrAfter( snapshot, startPosition.line() );
+    if ( next < count && presentedRow( snapshot, snapshot.row( next ) ) == startPosition.line() ) {
+        ++next;
     }
-    else {
-        searchingNotifier_.reset();
-        // And then the rest of the file
-        const auto nb_lines = logData_.getNbLine();
-        if ( line > 0_lnum ) {
-            --line;
-            while ( true ) {
-                if ( matcher.isLineMatchingBackward( logData_.getExpandedLineString( line ) ) ) {
-                    std::tie( start_col, end_col ) = matcher.getLastMatch();
-                    found = true;
-                    break;
-                }
-                if ( line == 0_lnum ) {
-                    break;
-                }
-
-                --line;
-
-                // See if we need to notify of the ongoing search
-                searchingNotifier_.ping( line, nb_lines, true );
-
-                if ( interruptRequested_ ) {
-                    break;
-                }
+    searchingNotifier_.reset();
+    while ( next > 0_lnum && !interruptRequested_ ) {
+        const auto ordinal = --next;
+        const auto row = snapshot.row( ordinal );
+        const auto line = presentedRow( snapshot, row );
+        if ( row.copyable ) {
+            const auto text = snapshot.lineString( ordinal );
+            const klogg::MatchTextColumns columns{ text };
+            const auto boundary = line == startPosition.line()
+                                      ? columns.searchColumn( startPosition.column() )
+                                      : LineColumn{ -1 };
+            if ( matcher.isLineMatchingBackward( text, boundary ) ) {
+                Q_EMIT clearNotification();
+                return occurrenceResult( ordinal, row, line, text, matcher.lastOccurrence() );
             }
         }
+        searchingNotifier_.ping( ordinal, count, true );
     }
 
-    if ( found ) {
-        // Clear any notification
-        Q_EMIT clearNotification();
-
-        return Portion{ line, start_col, end_col };
+    if ( !interruptRequested_ ) {
+        firstMatch_.set( selection.getNextPosition() );
+        sendNotification( QFNotificationReachedBegininningOfFile{} );
     }
     else {
-        if ( !interruptRequested_ ) {
-            // Update the position of the first match
-            FilePosition first_match_position = selection.getNextPosition();
-            firstMatch_.set( first_match_position );
-
-            // Send a notification
-            sendNotification( QFNotificationReachedBegininningOfFile() );
-        }
-        else {
-            // Send a notification
-            sendNotification( QFNotificationInterrupted{} );
-        }
-
-        return {};
+        sendNotification( QFNotificationInterrupted{} );
     }
+    return {};
 }
 
 void QuickFind::resetLimits()

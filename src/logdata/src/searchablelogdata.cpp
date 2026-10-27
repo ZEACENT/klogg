@@ -2,9 +2,103 @@
 
 #include <limits>
 
+#include "log.h"
 #include "simdutf_wrapper.h"
 
-#include "log.h"
+namespace {
+struct Utf8Inspection {
+    bool compatible = false;
+    bool hasRecordHeader = false;
+    bool hasTerminalCr = false;
+};
+
+Utf8Inspection inspectUtf8( std::string_view bytes, const EncodingParameters& params,
+                            SearchableLogData::RawLines::TrailingCrPolicy policy )
+{
+    Utf8Inspection result;
+    if ( !params.codec || !params.isUtf8Compatible || params.lineFeedWidth != 1 ) return result;
+    constexpr int Utf8Mib = 106;
+    result.compatible = bytes.empty() || ( params.codec->mibEnum() == Utf8Mib
+        ? simdutf::validate_utf8( bytes.data(), bytes.size() )
+        : simdutf::validate_ascii( bytes.data(), bytes.size() ) );
+    if ( !result.compatible ) return result;
+    result.hasTerminalCr = policy == SearchableLogData::RawLines::TrailingCrPolicy::StripFramingCr
+        && ( ( !bytes.empty() && bytes.back() == '\r' )
+             || bytes.find( "\r\n" ) != std::string_view::npos );
+    constexpr std::string_view Bom{ "\xef\xbb\xbf", 3 };
+    for ( auto at = bytes.find( Bom ); at != std::string_view::npos;
+          at = bytes.find( Bom, at + Bom.size() ) ) {
+        if ( at == 0 || bytes[ at - 1 ] == '\n' ) {
+            result.hasRecordHeader = true;
+            break;
+        }
+    }
+    return result;
+}
+}
+
+bool SearchableLogData::ReadSnapshot::preservesPresentationOf(
+    const klogg::LogSnapshot& previous ) const
+{
+    if ( this == &previous ) return true;
+    const auto* old = dynamic_cast<const ReadSnapshot*>( &previous );
+    if ( !old || !isAppendOf( *old ) || lineCount() < old->lineCount() ) return false;
+    if ( old->lineCount() == 0_lcount ) return true;
+    // isAppendOf permits re-searching an old unterminated final record. Its
+    // identity must also survive before presentation positions can be reused.
+    const LineNumber last{ old->lineCount().get() - 1 };
+    const auto oldRow = old->row( last );
+    const auto currentRow = row( last );
+    return currentRow.identity == oldRow.identity
+        && currentRow.sourceLineNumber == oldRow.sourceLineNumber
+        && currentRow.copyable == oldRow.copyable;
+}
+
+QString SearchableLogData::ReadSnapshot::lineString( LineNumber index ) const
+{
+    const auto lines = getLinesRaw( index, 1_lcount ).decodeLinesStrict();
+    if ( lines.size() != 1 ) {
+        throw klogg::SnapshotError{ "Snapshot did not provide the requested row" };
+    }
+    return lines.front();
+}
+
+klogg::vector<QString> SearchableLogData::RawLines::decodeLinesStrict() const
+{
+    klogg::vector<QString> lines;
+    if ( endOfLines.empty() ) {
+        return lines;
+    }
+    const auto* codec = textDecoder.encodingParams.codec;
+    if ( !codec ) {
+        throw klogg::SnapshotError{ "Snapshot has no frozen text codec" };
+    }
+    lines.reserve( endOfLines.size() );
+    qint64 start = 0;
+    const auto separatorWidth = textDecoder.encodingParams.lineFeedWidth;
+    for ( const auto end : endOfLines ) {
+        if ( end < start || end - start < separatorWidth ) {
+            throw klogg::SnapshotError{ "Snapshot has invalid row boundaries" };
+        }
+        const auto length = end - start - separatorWidth;
+        if ( start > klogg::ssize( buffer ) || length > klogg::ssize( buffer ) - start
+             || length >= std::numeric_limits<int>::max() / 2 ) {
+            throw klogg::SnapshotError{ "Snapshot row is truncated or exceeds decoder capacity" };
+        }
+        // A physical record is a complete decoding unit. Stateless conversion
+        // flushes incomplete sequences with Qt's replacement policy instead of
+        // carrying them across LF into the next row or dropping a final prefix.
+        auto text = codec->toUnicode( buffer.data() + start, static_cast<int>( length ) );
+        if ( trailingCrPolicy == TrailingCrPolicy::StripFramingCr
+             && text.endsWith( QChar::CarriageReturn ) ) {
+            text.chop( 1 );
+        }
+        text = processLogLine( std::move( text ), ansiProcessingMode, prefilterPattern ).text;
+        lines.push_back( std::move( text ) );
+        start = end;
+    }
+    return lines;
+}
 
 klogg::vector<QString> SearchableLogData::RawLines::decodeLines() const
 {
@@ -36,13 +130,18 @@ klogg::vector<QString> SearchableLogData::RawLines::decodeLines() const
                 break;
             }
 
-            auto decodedLine = textDecoder.decoder->toUnicode(
-                buffer.data() + lineStart, type_safe::narrow_cast<int>( length ) );
+            const auto* codec = textDecoder.encodingParams.codec;
+            auto decodedLine = codec
+                ? codec->toUnicode( buffer.data() + lineStart, type_safe::narrow_cast<int>( length ) )
+                : textDecoder.decoder->toUnicode( buffer.data() + lineStart,
+                                                   type_safe::narrow_cast<int>( length ) );
 
-            decodedLine = processAnsiSequences( std::move( decodedLine ), ansiProcessingMode ).text;
-            if ( !prefilterPattern.pattern().isEmpty() ) {
-                decodedLine.remove( prefilterPattern );
+            if ( trailingCrPolicy == TrailingCrPolicy::StripFramingCr
+                 && decodedLine.endsWith( QChar::CarriageReturn ) ) {
+                decodedLine.chop( 1 );
             }
+            decodedLine = processLogLine( std::move( decodedLine ), ansiProcessingMode,
+                                          prefilterPattern ).text;
 
             decodedLines.push_back( std::move( decodedLine ) );
 
@@ -82,10 +181,17 @@ klogg::vector<klogg::vector<AnsiColorSpan>> SearchableLogData::RawLines::decodeL
                 break;
             }
 
-            auto decodedLine = textDecoder.decoder->toUnicode(
-                buffer.data() + lineStart, type_safe::narrow_cast<int>( length ) );
-            colors.push_back(
-                processAnsiSequences( std::move( decodedLine ), ansiProcessingMode ).colorSpans );
+            const auto* codec = textDecoder.encodingParams.codec;
+            auto decodedLine = codec
+                ? codec->toUnicode( buffer.data() + lineStart, type_safe::narrow_cast<int>( length ) )
+                : textDecoder.decoder->toUnicode( buffer.data() + lineStart,
+                                                   type_safe::narrow_cast<int>( length ) );
+            if ( trailingCrPolicy == TrailingCrPolicy::StripFramingCr
+                 && decodedLine.endsWith( QChar::CarriageReturn ) ) {
+                decodedLine.chop( 1 );
+            }
+            colors.push_back( processLogLine( std::move( decodedLine ), ansiProcessingMode,
+                                               prefilterPattern ).colorSpans );
 
             lineStart = lineEnd;
         }
@@ -97,67 +203,83 @@ klogg::vector<klogg::vector<AnsiColorSpan>> SearchableLogData::RawLines::decodeL
     return colors;
 }
 
+bool SearchableLogData::RawLines::canBorrowNormalizedUtf8(
+    std::string_view bytes, const EncodingParameters& params, TrailingCrPolicy policy )
+{
+    const auto inspected = inspectUtf8( bytes, params, policy );
+    return inspected.compatible && !inspected.hasRecordHeader && !inspected.hasTerminalCr;
+}
+
+SearchableLogData::RawLines::Utf8Block SearchableLogData::RawLines::buildUtf8Block() const
+{
+    Utf8Block result;
+    if ( endOfLines.empty() ) return result;
+    result.lines.reserve( endOfLines.size() );
+    result.endOfLines.reserve( endOfLines.size() );
+
+    const auto* rawData = buffer.empty() ? "" : buffer.data();
+    const auto inspected = inspectUtf8( std::string_view{ rawData, buffer.size() },
+                                        textDecoder.encodingParams, trailingCrPolicy );
+    const bool plainUtf8 = ansiProcessingMode == AnsiProcessingMode::Plain
+        && prefilterPattern.pattern().isEmpty() && inspected.compatible;
+    bool directlyFramed = plainUtf8 && !inspected.hasRecordHeader && !inspected.hasTerminalCr;
+    if ( plainUtf8 ) {
+        qint64 start = 0;
+        for ( const auto end : endOfLines ) {
+            const auto length = end - start - 1;
+            if ( length < 0 || start > klogg::ssize( buffer )
+                 || length > klogg::ssize( buffer ) - start ) {
+                throw klogg::SnapshotError{ "UTF8 snapshot has invalid row boundaries" };
+            }
+            std::string_view line{ rawData + start, static_cast<size_t>( length ) };
+            if ( trailingCrPolicy == TrailingCrPolicy::StripFramingCr
+                 && !line.empty() && line.back() == '\r' ) {
+                line.remove_suffix( 1 );
+                directlyFramed = false;
+            }
+            if ( end > klogg::ssize( buffer ) || buffer[ static_cast<size_t>( end - 1 ) ] != '\n' ) {
+                directlyFramed = false;
+            }
+            result.lines.push_back( line );
+            start = end;
+        }
+        if ( directlyFramed ) {
+            result.buffer = std::string_view{ buffer.data(), static_cast<size_t>( endOfLines.back() ) };
+            result.endOfLines = endOfLines;
+            return result;
+        }
+    }
+
+    utf8Data_.clear();
+    const auto append = [ this, &result ]( std::string_view line ) {
+        utf8Data_.insert( utf8Data_.end(), line.begin(), line.end() );
+        utf8Data_.push_back( '\n' );
+        result.endOfLines.push_back( static_cast<qint64>( utf8Data_.size() ) );
+    };
+    if ( plainUtf8 && !inspected.hasRecordHeader ) {
+        // Only framing/CR normalization changed; retain already valid UTF8 bytes.
+        for ( const auto line : result.lines ) append( line );
+    }
+    else {
+        // The display decoder is authoritative for malformed input, codec
+        // conversion, ANSI processing, and per-record anchored prefilters.
+        for ( const auto& line : decodeLinesStrict() ) {
+            const auto encoded = line.toUtf8();
+            append( std::string_view{ encoded.constData(), static_cast<size_t>( encoded.size() ) } );
+        }
+    }
+    result.buffer = std::string_view{ utf8Data_.data(), utf8Data_.size() };
+    result.lines.clear();
+    size_t start = 0;
+    for ( const auto end : result.endOfLines ) {
+        const auto boundary = static_cast<size_t>( end );
+        result.lines.emplace_back( utf8Data_.data() + start, boundary - start - 1 );
+        start = boundary;
+    }
+    return result;
+}
+
 klogg::vector<std::string_view> SearchableLogData::RawLines::buildUtf8View() const
 {
-    klogg::vector<std::string_view> lines;
-    if ( this->endOfLines.empty() || textDecoder.decoder == nullptr ) {
-        return lines;
-    }
-
-    try {
-        lines.reserve( endOfLines.size() );
-
-        std::string_view wholeString;
-
-        if ( ansiProcessingMode == AnsiProcessingMode::Plain && prefilterPattern.pattern().isEmpty()
-             && textDecoder.encodingParams.isUtf8Compatible ) {
-            wholeString = std::string_view( buffer.data(), buffer.size() );
-        }
-        else {
-            QString utf16Data;
-            if ( prefilterPattern.pattern().isEmpty() && textDecoder.encodingParams.isUtf16LE ) {
-                utf16Data = QString::fromRawData( reinterpret_cast<const QChar*>( buffer.data() ),
-                                                  klogg::isize( buffer ) / 2 );
-            }
-            else {
-                utf16Data = textDecoder.decoder->toUnicode( buffer.data(), klogg::isize( buffer ) );
-            }
-
-            if ( ansiProcessingMode != AnsiProcessingMode::Plain ) {
-                utf16Data = processAnsiSequences( std::move( utf16Data ), ansiProcessingMode ).text;
-            }
-
-            if ( !prefilterPattern.pattern().isEmpty() ) {
-                utf16Data.remove( prefilterPattern );
-            }
-
-            utf8Data_.resize( buffer.size() * 4 );
-            const auto resultSize = simdutf::convert_utf16_to_utf8(
-                reinterpret_cast<const char16_t*>( utf16Data.utf16() ),
-                static_cast<size_t>( utf16Data.size() ), utf8Data_.data() );
-
-            wholeString = { utf8Data_.data(), resultSize };
-        }
-
-        auto nextLineFeed = wholeString.find( '\n' );
-        while ( nextLineFeed != std::string_view::npos ) {
-            lines.push_back( wholeString.substr( 0, nextLineFeed ) );
-            wholeString.remove_prefix( nextLineFeed + 1 );
-            nextLineFeed = wholeString.find( '\n' );
-        }
-
-        if ( !wholeString.empty() ) {
-            lines.push_back( wholeString );
-        }
-    } catch ( const std::exception& e ) {
-        LOG_ERROR << "failed to transform lines to utf8 " << e.what();
-        const auto lastLineOffset = utf8Data_.size();
-        lines.reserve( this->endOfLines.size() - lines.size() );
-        while ( lines.size() < this->endOfLines.size() ) {
-            lines.emplace_back( utf8Data_.data() + lastLineOffset,
-                                utf8Data_.size() - lastLineOffset );
-        }
-    }
-
-    return lines;
+    return buildUtf8Block().lines;
 }

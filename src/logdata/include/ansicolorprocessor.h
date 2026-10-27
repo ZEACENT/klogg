@@ -4,6 +4,7 @@
 #include <optional>
 
 #include <QString>
+#include <QRegularExpression>
 #include <QtGlobal>
 
 #include "containers.h"
@@ -28,5 +29,9 @@ struct ProcessedAnsiLine {
 };
 
 ProcessedAnsiLine processAnsiSequences( QString line, AnsiProcessingMode mode );
+// Common decoded-text normalization: ANSI first, then prefilter removal, with
+// color coordinates expressed in the resulting text (before Tab expansion).
+ProcessedAnsiLine processLogLine( QString line, AnsiProcessingMode mode,
+                                  const QRegularExpression& prefilter );
 
 #endif // ANSICOLORPROCESSOR_H

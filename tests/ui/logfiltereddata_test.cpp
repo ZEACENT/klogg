@@ -20,6 +20,7 @@
 #include <catch2/catch.hpp>
 
 #include <QElapsedTimer>
+#include <QFile>
 #include <QDir>
 #include <QSignalSpy>
 #include <QTemporaryFile>
@@ -232,6 +233,40 @@ struct SearchConfigurationGuard {
     bool previousParallelSearch_;
     bool previousResultsCache_;
 };
+
+TEST_CASE( "Native file presentation proof accepts sealed append and rejects a changed mutable tail",
+           "[filtered-snapshot][match-layout-work]" )
+{
+    LogDataLoader loader;
+    const auto sealed = loader.log_data.searchableSnapshot();
+    REQUIRE( sealed );
+    const auto append = [ &loader ]( const QByteArray& bytes ) {
+        SafeQSignalSpy loaded{ &loader.log_data, &SearchableLogData::loadingFinished };
+        {
+            QFile file{ loader.file.fileName() };
+            REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Append ) );
+            REQUIRE( file.write( bytes ) == bytes.size() );
+        }
+        REQUIRE( QMetaObject::invokeMethod( &loader.log_data, "fileChangedOnDisk",
+                                            Qt::DirectConnection,
+                                            Q_ARG( QString, loader.file.fileName() ) ) );
+        REQUIRE( loaded.safeWait( 10000 ) );
+    };
+    append( QByteArrayLiteral( "ERROR mutable tail" ) );
+    const auto tail = loader.log_data.searchableSnapshot();
+    REQUIRE( tail );
+    REQUIRE( tail->isAppendOf( *sealed ) );
+    CHECK( tail->preservesPresentationOf( *sealed ) );
+    append( QByteArrayLiteral( " extended" ) );
+    const auto changed = loader.log_data.searchableSnapshot();
+    REQUIRE( changed );
+    REQUIRE( changed->isAppendOf( *tail ) );
+    REQUIRE( changed->lineCount() == tail->lineCount() );
+    CHECK_FALSE( changed->preservesPresentationOf( *tail ) );
+    CHECK( changed->preservesPresentationOf( *sealed ) );
+    CHECK( tail->lineString( LineNumber{ tail->lineCount().get() - 1 } )
+           == QStringLiteral( "ERROR mutable tail" ) );
+}
 
 TEST_CASE( "Overview range counts classify only visible matches and marks",
            "[logdata][overview][range-counts]" )

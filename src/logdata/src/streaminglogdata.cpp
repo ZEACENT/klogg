@@ -17,6 +17,63 @@
 namespace {
 constexpr qint64 CachedRawBatchBytesLimit = 256 * 1024 * 1024;
 constexpr size_t AnsiDisplayCacheLineLimit = 4096;
+
+class CaptureReadSnapshot final : public SearchableLogData::ReadSnapshot {
+  public:
+    CaptureReadSnapshot( CaptureStore::Snapshot snapshot, QTextCodec* codec,
+                         QRegularExpression prefilter, AnsiProcessingMode ansiMode )
+        : snapshot_( std::move( snapshot ) )
+        , codec_( codec )
+        , prefilter_( std::move( prefilter ) )
+        , ansiMode_( ansiMode )
+    {
+        if ( !codec_ ) {
+            throw klogg::SnapshotError( "Capture snapshot codec is unavailable" );
+        }
+    }
+
+    LinesCount lineCount() const override { return snapshot_.lineCount(); }
+    qint64 byteSize() const override { return snapshot_.byteSize(); }
+    klogg::SnapshotRow row( LineNumber index ) const override { return snapshot_.row( index ); }
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override
+    {
+        return snapshot_.rowForIdentity( identity );
+    }
+    std::optional<CacheKey> cacheKey() const override
+    {
+        return CacheKey{ klogg::LogRowId::Origin::Capture, snapshot_.incarnation(),
+                         snapshot_.version(), codec_->name(), prefilter_, ansiMode_ };
+    }
+    bool isAppendOf( const ReadSnapshot& previous ) const override
+    {
+        const auto* old = dynamic_cast<const CaptureReadSnapshot*>( &previous );
+        return old && codec_->name() == old->codec_->name() && prefilter_ == old->prefilter_
+               && ansiMode_ == old->ansiMode_ && snapshot_.isAppendOf( old->snapshot_ );
+    }
+
+    SearchableLogData::RawLines getLinesRaw( LineNumber first, LinesCount count ) const override
+    {
+        try {
+            auto raw = snapshot_.readRawLines( first, count );
+            raw.textDecoder = { std::make_unique<QTextDecoder>( codec_ ), EncodingParameters( codec_ ) };
+            // Capture row boundaries are normalized byte LFs, independent of
+            // the codec selected to interpret each record's content.
+            raw.textDecoder.encodingParams.lineFeedWidth = 1;
+            raw.prefilterPattern = prefilter_;
+            raw.ansiProcessingMode = ansiMode_;
+            return raw;
+        }
+        catch ( const std::bad_alloc& ) {
+            throw klogg::SnapshotError( "Not enough memory to decode capture snapshot" );
+        }
+    }
+
+  private:
+    CaptureStore::Snapshot snapshot_;
+    QTextCodec* codec_;
+    QRegularExpression prefilter_;
+    AnsiProcessingMode ansiMode_;
+};
 }
 
 StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
@@ -288,11 +345,8 @@ QByteArray StreamingLogData::transformOutputRecord( const OutputExportCandidate&
         if ( codec == nullptr ) {
             codec = QTextCodec::codecForName( "UTF-8" );
         }
-        auto line = codec->toUnicode( bytes );
-        if ( !candidate.prefilterPattern.isEmpty() ) {
-            line.remove( QRegularExpression( candidate.prefilterPattern ) );
-        }
-        output = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
+        output = processLogLine( codec->toUnicode( bytes ), AnsiProcessingMode::Strip,
+                                 QRegularExpression( candidate.prefilterPattern ) ).text.toUtf8();
     }
     if ( terminated ) {
         output.append( '\n' );
@@ -624,6 +678,7 @@ void StreamingLogData::clearCapture()
 
 void StreamingLogData::setCaptureLimits( CaptureStore::Limits limits )
 {
+    const std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
     rollingMaxFileSize_ = limits.rollingMaxFileSize;
     rollingBackupCount_ = limits.rollingBackupCount;
     captureStore_.setLimits( std::move( limits ) );
@@ -861,11 +916,19 @@ QDateTime StreamingLogData::getLastModifiedDate() const
 
 void StreamingLogData::reload( QTextCodec* forcedEncoding )
 {
-    if ( forcedEncoding ) {
-        codec_.setCodec( forcedEncoding );
-        clearAnsiDisplayCache();
+    bool encodingChanged = false;
+    {
+        const std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+        if ( forcedEncoding && codec_.codec() != forcedEncoding ) {
+            codec_.setCodec( forcedEncoding );
+            clearAnsiDisplayCache();
+            encodingChanged = true;
+        }
+        scheduleLoadingFinished();
     }
-    scheduleLoadingFinished();
+    if ( encodingChanged ) {
+        notifyInterpretationChanged();
+    }
 }
 
 QTextCodec* StreamingLogData::getDetectedEncoding() const
@@ -875,33 +938,74 @@ QTextCodec* StreamingLogData::getDetectedEncoding() const
 
 void StreamingLogData::setPrefilter( const QString& prefilterPattern )
 {
-    prefilterPattern_.setPattern( prefilterPattern );
-    clearAnsiDisplayCache();
+    {
+        const std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+        if ( prefilterPattern_.pattern() == prefilterPattern ) {
+            return;
+        }
+        prefilterPattern_.setPattern( prefilterPattern );
+        clearAnsiDisplayCache();
+    }
+    notifyInterpretationChanged();
 }
 
 void StreamingLogData::setAnsiProcessingMode( AnsiProcessingMode mode )
 {
-    if ( ansiProcessingMode_ == mode ) {
-        return;
+    {
+        const std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+        if ( ansiProcessingMode_ == mode ) {
+            return;
+        }
+        ansiProcessingMode_ = mode;
+        clearAnsiDisplayCache();
     }
-    ansiProcessingMode_ = mode;
-    clearAnsiDisplayCache();
+    notifyInterpretationChanged();
 }
 
 SearchableLogData::RawLines StreamingLogData::getLinesRaw( LineNumber first, LinesCount number ) const
 {
-    const auto encodingParams = EncodingParameters( codec_.codec() );
+    QTextCodec* codec = nullptr;
+    QRegularExpression prefilter;
+    AnsiProcessingMode ansiMode = AnsiProcessingMode::Plain;
+    {
+        const std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+        codec = codec_.codec();
+        prefilter = prefilterPattern_;
+        ansiMode = ansiProcessingMode_;
+    }
+    // Freeze interpretation, but do not hold the append lock across a leased
+    // cache read or disk IO: raw readers and capture ingress remain independent.
+    const auto encodingParams = EncodingParameters( codec );
     if ( encodingParams.isUtf8Compatible ) {
         if ( auto cachedRawLines = tryBuildCachedRawLines( first, number ) ) {
-            cachedRawLines->prefilterPattern = prefilterPattern_;
-            cachedRawLines->ansiProcessingMode = ansiProcessingMode_;
+            cachedRawLines->trailingCrPolicy = RawLines::TrailingCrPolicy::Preserve;
+            cachedRawLines->prefilterPattern = prefilter;
+            cachedRawLines->ansiProcessingMode = ansiMode;
             return *std::move( cachedRawLines );
         }
     }
 
-    auto rawLines = captureStore_.buildRawLines( first, number, codec_.codec(), prefilterPattern_ );
-    rawLines.ansiProcessingMode = ansiProcessingMode_;
+    auto rawLines = captureStore_.buildRawLines( first, number, codec, prefilter );
+    rawLines.ansiProcessingMode = ansiMode;
     return rawLines;
+}
+
+SearchableLogData::ReadSnapshot::Ptr StreamingLogData::searchableSnapshot() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+    return std::make_shared<CaptureReadSnapshot>( captureStore_.snapshot(), codec_.codec(),
+                                                 prefilterPattern_, ansiProcessingMode_ );
+}
+
+klogg::LogSnapshot::Ptr StreamingLogData::createReadSnapshot( klogg::SnapshotScope ) const
+{
+    return searchableSnapshot();
+}
+
+OptionalLineNumber StreamingLogData::rowForIdentity( const klogg::LogRowId& identity ) const
+{
+    const std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+    return captureStore_.rowForIdentity( identity );
 }
 
 bool StreamingLogData::isLiveSource() const
@@ -916,7 +1020,7 @@ QString StreamingLogData::doGetLineString( LineNumber line ) const
 
 QString StreamingLogData::doGetExpandedLineString( LineNumber line ) const
 {
-    return doGetLineString( line );
+    return untabify( doGetLineString( line ) );
 }
 
 klogg::vector<AnsiColorSpan> StreamingLogData::doGetLineAnsiColors( LineNumber line ) const
@@ -932,7 +1036,11 @@ klogg::vector<QString> StreamingLogData::doGetLines( LineNumber first, LinesCoun
 klogg::vector<QString> StreamingLogData::doGetExpandedLines( LineNumber first,
                                                              LinesCount number ) const
 {
-    return getLines( first, number );
+    auto lines = getLines( first, number );
+    for ( auto& line : lines ) {
+        line = untabify( std::move( line ) );
+    }
+    return lines;
 }
 
 LineNumber StreamingLogData::doGetLineNumber( LineNumber index ) const
@@ -952,11 +1060,13 @@ LineLength StreamingLogData::doGetMaxLength() const
 
 LineLength StreamingLogData::doGetLineLength( LineNumber line ) const
 {
-    return captureStore_.lineLength( line );
+    const LineLength expandedLength{ doGetExpandedLineString( line ).size() };
+    return expandedLength;
 }
 
 void StreamingLogData::doSetDisplayEncoding( const char* encoding )
 {
+    const std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
     codec_.setCodec( QTextCodec::codecForName( encoding ) );
     clearAnsiDisplayCache();
 }
@@ -990,6 +1100,7 @@ void StreamingLogData::scheduleLoadingFinished( int delayMs )
 
 ProcessedAnsiLine StreamingLogData::processedAnsiLine( LineNumber line ) const
 {
+    const std::lock_guard<std::recursive_mutex> orderingLock( appendOrderingMutex_ );
     if ( ansiProcessingMode_ == AnsiProcessingMode::Render ) {
         const auto key = line.get();
         {
@@ -1000,8 +1111,8 @@ ProcessedAnsiLine StreamingLogData::processedAnsiLine( LineNumber line ) const
             }
         }
 
-        auto processed = processAnsiSequences(
-            captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ ), ansiProcessingMode_ );
+        auto processed = processLogLine( captureStore_.lineAt( line, codec_.codec(), {} ),
+                                         ansiProcessingMode_, prefilterPattern_ );
 
         std::lock_guard<std::mutex> lock( ansiDisplayCacheMutex_ );
         if ( ansiDisplayCache_.find( key ) == ansiDisplayCache_.end() ) {
@@ -1015,8 +1126,8 @@ ProcessedAnsiLine StreamingLogData::processedAnsiLine( LineNumber line ) const
         return processed;
     }
 
-    return processAnsiSequences( captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ ),
-                                 ansiProcessingMode_ );
+    return processLogLine( captureStore_.lineAt( line, codec_.codec(), {} ),
+                           ansiProcessingMode_, prefilterPattern_ );
 }
 
 void StreamingLogData::clearAnsiDisplayCache()
@@ -1138,11 +1249,8 @@ void StreamingLogData::closeDisplayOutputFile( bool clearBinding )
 
 QByteArray StreamingLogData::displayOutputRecord( const QByteArray& bytes, bool terminated ) const
 {
-    auto line = codec_.codec()->toUnicode( bytes );
-    if ( !prefilterPattern_.pattern().isEmpty() ) {
-        line.remove( prefilterPattern_ );
-    }
-    auto output = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
+    auto output = processLogLine( codec_.codec()->toUnicode( bytes ), AnsiProcessingMode::Strip,
+                                  prefilterPattern_ ).text.toUtf8();
     if ( terminated ) {
         output.append( '\n' );
     }

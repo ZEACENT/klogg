@@ -52,9 +52,20 @@
 
 #include "atomicflag.h"
 #include "linetypes.h"
+#include "logsnapshot.h"
 #include "qfnotifications.h"
 #include "quickfindpattern.h"
 #include "selection.h"
+
+struct QuickFindResult {
+    bool found = false;
+    OptionalLineNumber line;
+    Selection selection;
+    // Identity also exists for zero-width occurrences with no captured portions.
+    std::optional<klogg::LogRowId> rowIdentity;
+    quint64 requestId = 0;
+};
+Q_DECLARE_METATYPE( QuickFindResult )
 
 class QuickFindPattern;
 class AbstractLogData;
@@ -116,6 +127,8 @@ class QuickFind : public QObject {
     void resetLimits();
 
     bool isSearchRunning() const { return operationWatcher_.isRunning(); }
+    // Owner-thread publication guard: queued completions retain their accepted ID.
+    quint64 currentRequestId() const { return requestId_; }
 
   public Q_SLOTS:
     // Used for incremental searches
@@ -147,7 +160,7 @@ class QuickFind : public QObject {
     // Sent when the UI shall clear the notification.
     void clearNotification();
     // Sent when search is completed
-    void searchDone( bool hasMatch, Portion selection );
+    void searchDone( const QuickFindResult& result );
 
   private Q_SLOTS:
     void sendNotification( QFNotification notification );
@@ -229,7 +242,8 @@ class QuickFind : public QObject {
         Selection initialSelection_;
     };
 
-    // Pointers to external objects
+    // Owner-thread acquisition only. Dispatched workers own immutable snapshots
+    // and never consult this source reference, even for identity/row mapping.
     const AbstractLogData& logData_;
 
     // Owned objects
@@ -244,21 +258,23 @@ class QuickFind : public QObject {
     // Incremental search status
     IncrementalSearchStatus incrementalSearchStatus_;
 
-    // Private functions
-    Portion doSearchForward( const Selection& selection, const QuickFindMatcher& matcher );
-    Portion doSearchForward( const FilePosition& start_position, const Selection& selection,
-                             const QuickFindMatcher& matcher );
-    Portion doSearchBackward( const Selection& selection, const QuickFindMatcher& matcher );
-    Portion doSearchBackward( const FilePosition& start_position, const Selection& selection,
-                              const QuickFindMatcher& matcher );
+    void startSearch( QFDirection direction, const FilePosition& startPosition,
+                      const Selection& selection, const QuickFindMatcher& matcher );
+    QuickFindResult doSearchForward( const klogg::LogSnapshot& snapshot,
+                                    const FilePosition& startPosition, const Selection& selection,
+                                    const QuickFindMatcher& matcher );
+    QuickFindResult doSearchBackward( const klogg::LogSnapshot& snapshot,
+                                     const FilePosition& startPosition, const Selection& selection,
+                                     const QuickFindMatcher& matcher );
 
+    quint64 requestId_ = 0;
     AtomicFlag interruptRequested_;
 #if defined( KLOGG_ASAN_BUILD )
     void runBeforeLineReadCallbackForTesting();
     std::function<void( const AtomicFlag& )> beforeLineReadCallbackForTesting_;
 #endif
-    QFuture<Portion> operationFuture_;
-    QFutureWatcher<Portion> operationWatcher_;
+    QFuture<QuickFindResult> operationFuture_;
+    QFutureWatcher<QuickFindResult> operationWatcher_;
 };
 
 #endif

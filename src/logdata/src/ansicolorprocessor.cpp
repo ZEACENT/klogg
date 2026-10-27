@@ -1,6 +1,66 @@
 #include "ansicolorprocessor.h"
 
 #include <QChar>
+#include <algorithm>
+
+ProcessedAnsiLine processLogLine( QString line, AnsiProcessingMode mode,
+                                  const QRegularExpression& prefilter )
+{
+    auto result = processAnsiSequences( std::move( line ), mode );
+    if ( prefilter.pattern().isEmpty() ) {
+        return result;
+    }
+    struct Removal {
+        klogg::ContainerIndex start;
+        klogg::ContainerIndex end;
+        klogg::ContainerIndex removedBefore;
+    };
+    klogg::vector<Removal> removals;
+    klogg::ContainerIndex removed = 0;
+    auto matches = prefilter.globalMatch( result.text );
+    while ( matches.hasNext() ) {
+        const auto match = matches.next();
+        if ( match.capturedLength() > 0 ) {
+            removals.push_back( { match.capturedStart(), match.capturedEnd(), removed } );
+            removed += match.capturedLength();
+        }
+    }
+    if ( removals.empty() ) {
+        return result;
+    }
+    const auto mapColumn = [ &removals ]( LineColumn column ) {
+        const auto position = column.get();
+        const auto next = std::upper_bound(
+            removals.begin(), removals.end(), position,
+            []( auto value, const Removal& removal ) { return value < removal.start; } );
+        if ( next == removals.begin() ) {
+            return column;
+        }
+        const auto& removal = *std::prev( next );
+        const auto inside = std::min<LineColumn::UnderlyingType>(
+            position - removal.start, removal.end - removal.start );
+        return LineColumn{ position - removal.removedBefore - inside };
+    };
+    size_t count = 0;
+    for ( const auto& span : result.colorSpans ) {
+        const auto start = mapColumn( span.startColumn );
+        const auto end = mapColumn( span.startColumn + span.length );
+        if ( end > start ) {
+            result.colorSpans[ count++ ] = { start, end - start, span.foreground, span.background };
+        }
+    }
+    result.colorSpans.resize( count );
+    QString kept;
+    kept.reserve( result.text.size() - removed );
+    klogg::ContainerIndex cursor = 0;
+    for ( const auto& removal : removals ) {
+        kept.append( result.text.constData() + cursor, removal.start - cursor );
+        cursor = removal.end;
+    }
+    kept.append( result.text.constData() + cursor, result.text.size() - cursor );
+    result.text = std::move( kept );
+    return result;
+}
 
 namespace {
 constexpr ushort Escape = 0x1B;

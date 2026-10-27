@@ -61,19 +61,9 @@
 #include "highlighterset.h"
 #include "matchprojection.h"
 
-QRegularExpression::PatternOptions getPatternOptions( bool ignoreCase )
-{
-    QRegularExpression::PatternOptions options = QRegularExpression::UseUnicodePropertiesOption;
-
-    if ( ignoreCase ) {
-        options |= QRegularExpression::CaseInsensitiveOption;
-    }
-    return options;
-}
-
 Highlighter::Highlighter( const QString& pattern, bool ignoreCase, bool onlyMatch,
                           const QColor& foreColor, const QColor& backColor )
-    : regexp_( pattern, getPatternOptions( ignoreCase ) )
+    : regexp_( pattern, RegularExpressionPattern::qtPatternOptions( !ignoreCase ) )
     , highlightOnlyMatch_( onlyMatch )
     , color_{ foreColor, backColor }
 {
@@ -98,7 +88,7 @@ bool Highlighter::ignoreCase() const
 
 void Highlighter::setIgnoreCase( bool ignoreCase )
 {
-    regexp_.setPatternOptions( getPatternOptions( ignoreCase ) );
+    regexp_.setPatternOptions( RegularExpressionPattern::qtPatternOptions( !ignoreCase ) );
 }
 
 bool Highlighter::useRegex() const
@@ -323,7 +313,8 @@ void Highlighter::retrieveFromStorage( QSettings& settings )
 
     regexp_ = QRegularExpression(
         settings.value( "regexp" ).toString(),
-        getPatternOptions( settings.value( "ignore_case", false ).toBool() ) );
+        RegularExpressionPattern::qtPatternOptions(
+            !settings.value( "ignore_case", false ).toBool() ) );
     highlightOnlyMatch_ = settings.value( "match_only", false ).toBool();
     useRegex_ = settings.value( "use_regex", true ).toBool();
     variateColors_ = settings.value( "variate_colors", false ).toBool();

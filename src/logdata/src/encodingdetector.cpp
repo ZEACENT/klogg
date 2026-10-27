@@ -73,7 +73,8 @@ class UchardetHolder {
 
 } // namespace
 
-EncodingParameters::EncodingParameters( const QTextCodec* codec )
+EncodingParameters::EncodingParameters( const QTextCodec* sourceCodec )
+    : codec( sourceCodec )
 {
     static constexpr QChar LineFeed( QChar::LineFeed );
     static constexpr int Utf16LEMib = 1014;

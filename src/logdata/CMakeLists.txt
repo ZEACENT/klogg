@@ -7,9 +7,14 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/compressedlinestorage.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingdetector.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingutils.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/logsnapshot.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/folderscanarena.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/folderscanarena.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchengine.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchresults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchtypes.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/indexedcontent.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/indexedcontent.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linekind.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linepositionarray.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/loadingstatus.h

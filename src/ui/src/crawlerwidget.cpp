@@ -207,20 +207,12 @@ LineNumber CrawlerWidget::getTopLine() const
 
 QString CrawlerWidget::getSelectedText() const
 {
-    // filteredView_ is nulled when its tab is closed (filteredViewDestroyed);
-    // when the filtered view is gone the focus can only be on the main view.
-    if ( filteredView_ != nullptr && filteredView_->hasFocus() )
-        return filteredView_->getSelectedText();
-    else
-        return logMainView_->getSelectedText();
+    return activeView()->getSelectedText();
 }
 
-bool CrawlerWidget::isPartialSelection() const
+bool CrawlerWidget::canUseSelectionAsSearchOperand() const
 {
-    if ( filteredView_ != nullptr && filteredView_->hasFocus() )
-        return filteredView_->isPartialSelection();
-    else
-        return logMainView_->isPartialSelection();
+    return activeView()->canUseSelectionAsSearchOperand();
 }
 
 void CrawlerWidget::selectAll()
@@ -238,19 +230,13 @@ bool CrawlerWidget::canSelectAllMatches( bool quickFind ) const
          || logFilteredData_->getNbMatches() == 0_lcount ) {
         return false;
     }
-    const auto completed = matchSearchStates_.find( logFilteredData_.get() );
-    return completed != matchSearchStates_.end() && !completed->second.cancelled
-           && completed->second.generation == logFilteredData_->currentSearchGeneration()
-           && filteredView_->canSelectAllMatches();
+    return logFilteredData_->isSearchComplete() && filteredView_->canSelectAllMatches();
 }
 
 bool CrawlerWidget::selectAllMatches( bool quickFind, bool copy )
 {
     if ( !canSelectAllMatches( quickFind ) ) {
         return false;
-    }
-    if ( !quickFind && visibilityBox_->currentIndex() == 1 ) {
-        visibilityBox_->setCurrentIndex( 0 );
     }
     auto* const view = quickFind ? activeView() : filteredView_;
     view->setFocus();
@@ -328,14 +314,13 @@ void CrawlerWidget::changeEvent( QEvent* event )
 
 void CrawlerWidget::stopLoading()
 {
-    interruptCurrentSearch();
+    logFilteredData_->interruptSearch();
     logData_->interruptLoading();
 }
 
 void CrawlerWidget::reload()
 {
     invalidateMatchSelections();
-    matchSearchStates_.clear();
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
     presentationSelectionRestorePending_ = false;
@@ -445,7 +430,7 @@ bool CrawlerWidget::refreshAuthoritativePresentation()
     logMainView_->updateData( searchStartLine_, searchEndLine_ );
     filteredView_->updateData( searchStartLine_, searchEndLine_ );
     if ( presentationSelectionRestorePending_ && !isFollowEnabled()
-         && logFilteredData_->getNbLine() > 0_lcount ) {
+         && !filteredView_->hasMatchSelection() && logFilteredData_->getNbLine() > 0_lcount ) {
         const auto currentLineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
         filteredView_->selectAndDisplayLine( currentLineIndex );
     }
@@ -587,7 +572,7 @@ void CrawlerWidget::startNewSearch()
 
         searchUpdateThrottleTimer_.stop();
         searchUpdatePending_ = false;
-        interruptCurrentSearch();
+        logFilteredData_->interruptSearch();
         logFilteredData_ = logData_->getNewFilteredData();
 
         filteredView_ = new FilteredView( logFilteredData_.get(), quickFindPattern_.get() );
@@ -632,7 +617,7 @@ void CrawlerWidget::stopSearch()
     searchUpdatePending_ = false;
     presentationSelectionRestorePending_ = false;
     retireSearchStatusPresentation();
-    interruptCurrentSearch();
+    logFilteredData_->interruptSearch();
     searchState_.stopSearch();
     printSearchInfoMessage();
 }
@@ -674,18 +659,6 @@ void CrawlerWidget::editSearchHistory()
     updateSearchCombo();
 }
 
-void CrawlerWidget::interruptCurrentSearch()
-{
-    const auto* const source = logFilteredData_.get();
-    const auto generation = source->currentSearchGeneration();
-    const auto previous = matchSearchStates_.find( source );
-    // Interrupting an already completed pane must not retire its valid snapshot.
-    if ( previous == matchSearchStates_.end() || previous->second.generation != generation ) {
-        matchSearchStates_[ source ] = { generation, true };
-    }
-    logFilteredData_->interruptSearch();
-}
-
 void CrawlerWidget::connectSearchPublication( LogFilteredData* source )
 {
     connect( source, &LogFilteredData::searchProgressed, this,
@@ -697,19 +670,6 @@ void CrawlerWidget::connectSearchPublication( LogFilteredData* source )
     connect( source, &LogFilteredData::searchResultsChanged, this,
              [ this, source ]( LinesCount nbMatches, LineNumber initialPosition, bool terminal,
                               quint64 generation ) {
-                 if ( terminal ) {
-                     const auto liveSource = std::find_if(
-                         filteredViewsData_.cbegin(), filteredViewsData_.cend(),
-                         [ source ]( const auto& entry ) { return entry.second.get() == source; } );
-                     if ( liveSource != filteredViewsData_.cend()
-                          && generation == source->currentSearchGeneration() ) {
-                         const auto previous = matchSearchStates_.find( source );
-                         if ( previous == matchSearchStates_.end()
-                              || previous->second.generation != generation ) {
-                             matchSearchStates_[ source ] = { generation, false };
-                         }
-                     }
-                 }
                  updateFilteredResults( source, nbMatches, initialPosition, terminal, generation );
              },
              Qt::QueuedConnection );
@@ -792,7 +752,8 @@ void CrawlerWidget::updateFilteredResults( LogFilteredData* source, LinesCount n
     }
     lastPublishedMatchCount_ = nbMatches;
     const bool restoreSelection = terminal && initialPosition == searchStartLine_
-                                  && !isFollowEnabled() && logFilteredData_->getNbLine() > 0_lcount;
+                                  && !isFollowEnabled() && !filteredView_->hasMatchSelection()
+                                  && logFilteredData_->getNbLine() > 0_lcount;
 
     if ( !presentationActive_ ) {
         presentationSelectionRestorePending_
@@ -833,7 +794,6 @@ void CrawlerWidget::updateLineNumberHandler( LineNumber line, LinesCount nLines,
 
 void CrawlerWidget::markLinesFromMain( const klogg::vector<LineNumber>& lines )
 {
-    filteredView_->invalidateMatchSelection();
     for ( const auto& line : lines ) {
         if ( line >= logData_->getNbLine() ) {
             continue;
@@ -852,6 +812,7 @@ void CrawlerWidget::markLinesFromMain( const klogg::vector<LineNumber>& lines )
         update();
     }
     else {
+        filteredView_->refreshMatchSelection();
         queuePresentationRefresh( false );
     }
 }
@@ -874,7 +835,6 @@ void CrawlerWidget::markLinesFromFiltered( const klogg::vector<LineNumber>& line
 
 void CrawlerWidget::deleteMarkLinesFromMain( const klogg::vector<LineNumber>& lines )
 {
-    filteredView_->invalidateMatchSelection();
     for ( const auto& line : lines ) {
         if ( line >= logData_->getNbLine() ) {
             continue;
@@ -893,6 +853,7 @@ void CrawlerWidget::deleteMarkLinesFromMain( const klogg::vector<LineNumber>& li
         update();
     }
     else {
+        filteredView_->refreshMatchSelection();
         queuePresentationRefresh( false );
     }
 }
@@ -1007,9 +968,13 @@ void CrawlerWidget::enteringQuickFind()
 
 void CrawlerWidget::exitingQuickFind()
 {
-    // Restore the focus once the QFBar has been hidden
-    if ( qfSavedFocus_ )
-        qfSavedFocus_->setFocus();
+    // The origin belongs to this interaction only. Retire it before restoring
+    // focus so later toolbar commands cannot reuse an old or hidden pane.
+    const auto origin = qfSavedFocus_;
+    qfSavedFocus_.clear();
+    if ( origin != nullptr && ( origin == logMainView_ || origin == filteredView_ ) ) {
+        origin->setFocus();
+    }
 }
 
 void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
@@ -1133,7 +1098,6 @@ void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
     // Handle the case where the file has been truncated
     if ( status == MonitoredFileStatus::Truncated ) {
         invalidateMatchSelections();
-        matchSearchStates_.clear();
         // Clear all marks (TODO offer the option to keep them)
         logFilteredData_->clearMarks();
         searchUpdateThrottleTimer_.stop();
@@ -1168,23 +1132,18 @@ void CrawlerWidget::invalidateMatchSelections()
 // Returns a pointer to the window in which the search should be done
 AbstractLogView* CrawlerWidget::activeView() const
 {
-    QWidget* activeView;
-
-    // Search in the window that has focus, or the window where 'Find' was
-    // called from, or the main window.
-    if ( ( filteredView_ != nullptr && filteredView_->hasFocus() ) || logMainView_->hasFocus() )
-        activeView = QApplication::focusWidget();
-    else
-        activeView = qfSavedFocus_;
-
-    if ( activeView ) {
-        auto* view = qobject_cast<AbstractLogView*>( activeView );
-        return view;
+    if ( filteredView_ != nullptr && filteredView_->hasFocus() ) {
+        return filteredView_;
     }
-    else {
-        LOG_WARNING << "No active view, defaulting to logMainView";
+    if ( logMainView_->hasFocus() ) {
         return logMainView_;
     }
+    // A saved Quick Find origin is usable only during that interaction and
+    // while it still names a current view, never a hidden results pane.
+    if ( qfSavedFocus_ == filteredView_ && filteredView_ != nullptr ) {
+        return filteredView_;
+    }
+    return logMainView_;
 }
 
 void CrawlerWidget::searchForward()
@@ -1219,17 +1178,21 @@ void CrawlerWidget::changeFilteredViewVisibility( int index )
 {
     QStandardItem* item = visibilityModel_->item( index );
     auto visibility = item->data().value<FilteredView::Visibility>();
-    filteredView_->invalidateMatchSelection();
+    // Whole-row selection restoration must not replace an accepted operation
+    // or its immutable payload when only the displayed row set changes.
+    const bool preserveMatchSelection = filteredView_->hasMatchSelection();
 
     if ( !presentationActive_ ) {
         logFilteredData_->setVisibility( visibility );
-        presentationSelectionRestorePending_ = logFilteredData_->getNbLine() > 0_lcount;
+        filteredView_->refreshMatchSelection();
+        presentationSelectionRestorePending_
+            = !preserveMatchSelection && logFilteredData_->getNbLine() > 0_lcount;
         queuePresentationRefresh( false );
         return;
     }
 
     filteredView_->setVisibility( visibility );
-    if ( logFilteredData_->getNbLine() > 0_lcount ) {
+    if ( !preserveMatchSelection && logFilteredData_->getNbLine() > 0_lcount ) {
         const auto lineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
         filteredView_->selectAndDisplayLine( lineIndex );
     }
@@ -1600,12 +1563,15 @@ void CrawlerWidget::changeFilteredView( int tabIndex )
     searchUpdatePending_ = false;
     presentationSelectionRestorePending_ = false;
     retireSearchStatusPresentation();
-    interruptCurrentSearch();
+    logFilteredData_->interruptSearch();
     if ( tabIndex >= 0 ) {
         auto* tabFilteredView
             = qobject_cast<FilteredView*>( tabbedFilteredView_->widget( tabIndex ) );
 
         filteredView_ = tabFilteredView;
+        if ( qfSavedFocus_ != logMainView_ && qfSavedFocus_ != filteredView_ ) {
+            qfSavedFocus_.clear();
+        }
         logFilteredData_ = filteredViewsData_.at( tabFilteredView );
         lastPublishedMatchCount_ = logFilteredData_->getNbMatches();
 
@@ -1646,11 +1612,7 @@ void CrawlerWidget::filteredViewDestroyed( FilteredView* view )
     if ( filteredView_ == view ) {
         filteredView_ = nullptr;
     }
-    const auto entry = filteredViewsData_.find( view );
-    if ( entry != filteredViewsData_.end() ) {
-        matchSearchStates_.erase( entry->second.get() );
-        filteredViewsData_.erase( entry );
-    }
+    filteredViewsData_.erase( view );
 }
 
 void CrawlerWidget::saveSplitterSizes() const
@@ -1756,7 +1718,7 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
     logMainView_->invalidateMatchSelection();
     filteredView_->invalidateMatchSelection();
     logFilteredData_->bumpSearchGeneration();
-    interruptCurrentSearch();
+    logFilteredData_->interruptSearch();
 
     lastPublishedMatchCount_ = 0_lcount;
     if ( presentationActive_ ) {
@@ -2164,7 +2126,6 @@ QString CrawlerWidgetContext::toString() const
 
 void CrawlerWidget::contextLinesModeChanged( int index )
 {
-    filteredView_->invalidateMatchSelection();
     // Get mode from user data
     const int mode = contextLinesComboBox_->itemData( index ).toInt();
     contextLinesMode_ = mode;
@@ -2180,6 +2141,7 @@ void CrawlerWidget::contextLinesModeChanged( int index )
             filteredView_->updateData();
         }
         else {
+            filteredView_->refreshMatchSelection();
             queuePresentationRefresh( false );
         }
     }
@@ -2187,7 +2149,6 @@ void CrawlerWidget::contextLinesModeChanged( int index )
 
 void CrawlerWidget::contextLinesValueChanged( int value )
 {
-    filteredView_->invalidateMatchSelection();
     // Apply context lines if mode is active
     if ( contextLinesMode_ > 0 && value > 0 ) {
         applyContextLines();
@@ -2201,6 +2162,7 @@ void CrawlerWidget::contextLinesValueChanged( int value )
             filteredView_->updateData();
         }
         else {
+            filteredView_->refreshMatchSelection();
             queuePresentationRefresh( false );
         }
     }
@@ -2212,7 +2174,6 @@ void CrawlerWidget::updateContextLinesModel()
         return;
     }
 
-    filteredView_->invalidateMatchSelection();
     const int count = contextLinesSpinBox_->value();
     switch ( contextLinesMode_ ) {
         case 1:
@@ -2227,6 +2188,9 @@ void CrawlerWidget::updateContextLinesModel()
         default:
             logFilteredData_->setContextLines( 0, 0 );
             break;
+    }
+    if ( !presentationActive_ ) {
+        filteredView_->refreshMatchSelection();
     }
 }
 

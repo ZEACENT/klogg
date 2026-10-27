@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 
 #include <QCoreApplication>
@@ -38,6 +39,20 @@
 #include "stagedoutputfile.h"
 
 namespace {
+uint64_t nextCaptureIncarnation()
+{
+    static std::atomic<uint64_t> next{ 1 };
+    auto value = next.load( std::memory_order_relaxed );
+    for ( ;; ) {
+        if ( value == std::numeric_limits<uint64_t>::max() ) {
+            throw klogg::SnapshotError( "Capture identity space exhausted" );
+        }
+        if ( next.compare_exchange_weak( value, value + 1, std::memory_order_relaxed ) ) {
+            return value;
+        }
+    }
+}
+
 QString makeSegmentFileName( qint64 segmentId )
 {
     return QString( "segment_%1.log" ).arg( segmentId, 6, 10,
@@ -1995,6 +2010,7 @@ CaptureStore::CaptureStore( QString captureId, QString rootPath, Limits limits )
     , rootPath_( rootPath.isEmpty() ? defaultRootPath() : std::move( rootPath ) )
     , capturePath_( capturePathForId( rootPath_, captureId_ ) )
     , limits_( sanitizeLimits( limits ) )
+    , incarnation_( nextCaptureIncarnation() )
 {
     // Activation precedes every directory operation so cleanup can never remove
     // a just-constructed capture between path resolution and first use. If a
@@ -2288,6 +2304,8 @@ bool CaptureStore::loadFromDisk()
             capturePathState_->mutex_ );
         ensureCaptureDir( false );
 
+        incarnation_ = nextCaptureIncarnation();
+        prefixRevision_ = ++visibleRevision_;
         oldSegments = std::move( segments_ );
         partialLine_.clear();
         reservedSegmentIds_.clear();
@@ -2670,8 +2688,10 @@ void CaptureStore::clear()
     persistenceFailure_.reset();
     nextSpillRetryMs_.reset();
     outputNeedsSeparator_ = false;
+    incarnation_ = nextCaptureIncarnation();
     auto retiredLeases = retireCaptureFiles();
     segments_.clear();
+    prefixRevision_ = ++visibleRevision_;
     fileSize_ = 0;
     memoryBytes_ = 0;
     pendingPersistenceBytes_ = 0;
@@ -2755,7 +2775,7 @@ CaptureStore::TrimResult CaptureStore::trimToLimits()
         if ( persistenceFailure_ && !front.spilled ) {
             break;
         }
-        const auto segmentLines = klogg::ssize( front.lineOffsets );
+        const auto segmentLines = klogg::ssize( *front.lineOffsets );
         const auto segmentBytes = front.byteSize;
 
         // Segment-local maxima make eviction independent of the number of lines
@@ -2772,7 +2792,7 @@ CaptureStore::TrimResult CaptureStore::trimToLimits()
         }
 
         fileSize_ -= segmentBytes;
-        if ( !front.spilled && !front.lineOffsets.empty() ) {
+        if ( !front.spilled && !front.lineOffsets->empty() ) {
             pendingPersistenceBytes_ -= segmentBytes;
             --pendingPersistenceSegments_;
         }
@@ -2789,6 +2809,7 @@ CaptureStore::TrimResult CaptureStore::trimToLimits()
         result.trimmedBytes += segmentBytes;
 
         segments_.erase( segments_.begin() );
+        prefixRevision_ = ++visibleRevision_;
     }
 
     // O(1) cumulative line count fixup: subtract removed lines from all remaining segments
@@ -3072,8 +3093,10 @@ void CaptureStore::deleteCaptureFiles()
     persistBufferedSegmentsOnDestroy_ = false;
     partialLine_.clear();
 
+    incarnation_ = nextCaptureIncarnation();
     auto retiredLeases = retireCaptureFiles();
     segments_.clear();
+    prefixRevision_ = ++visibleRevision_;
     fileSize_ = 0;
     memoryBytes_ = 0;
     // A reused store starts an empty persistence queue, just as clear() and
@@ -3125,6 +3148,7 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
 
         if ( totalRequestedLines == 0 ) {
             SearchableLogData::RawLines rawLines;
+            rawLines.trailingCrPolicy = SearchableLogData::RawLines::TrailingCrPolicy::Preserve;
             rawLines.startLine = first;
             return rawLines;
         }
@@ -3139,6 +3163,7 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
 
         if ( segIt == segments_.cend() ) {
             SearchableLogData::RawLines rawLines;
+            rawLines.trailingCrPolicy = SearchableLogData::RawLines::TrailingCrPolicy::Preserve;
             rawLines.startLine = first;
             return rawLines;
         }
@@ -3156,10 +3181,10 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
             const auto linesInThisSegment
                 = qMin( linesRemaining,
                         static_cast<LinesCount::UnderlyingType>(
-                            klogg::ssize( segIt->lineOffsets ) - localStart ) );
+                            klogg::ssize( *segIt->lineOffsets ) - localStart ) );
 
             if ( linesInThisSegment <= 0 || localStart < 0
-                 || localStart >= klogg::ssize( segIt->lineOffsets ) ) {
+                 || localStart >= klogg::ssize( *segIt->lineOffsets ) ) {
                 break;
             }
 
@@ -3167,13 +3192,13 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
             read.lineCount = static_cast<qint64>( linesInThisSegment );
 
             const auto byteStart
-                = segIt->lineOffsets[ static_cast<size_t>( localStart ) ];
+                = (*segIt->lineOffsets)[ static_cast<size_t>( localStart ) ];
             const auto lastLocalLine = localStart + static_cast<int>( linesInThisSegment ) - 1;
 
             qint64 byteLength;
             const auto nextLocalLine = static_cast<size_t>( lastLocalLine ) + 1U;
-            if ( nextLocalLine < segIt->lineOffsets.size() ) {
-                byteLength = segIt->lineOffsets[ nextLocalLine ] - byteStart;
+            if ( nextLocalLine < segIt->lineOffsets->size() ) {
+                byteLength = (*segIt->lineOffsets)[ nextLocalLine ] - byteStart;
             } else {
                 byteLength = segIt->byteSize - byteStart;
             }
@@ -3226,16 +3251,14 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
 
     const auto effectiveCodec = codec ? codec : QTextCodec::codecForName( "UTF-8" );
     const auto sourceEncodingParams = EncodingParameters( effectiveCodec );
-    const auto canUseRawUtf8
-        = sourceEncodingParams.isUtf8Compatible && prefilterPattern.pattern().isEmpty();
+    const auto canUseRawUtf8 = sourceEncodingParams.isUtf8Compatible;
 
     SearchableLogData::RawLines rawLines;
+    rawLines.trailingCrPolicy = SearchableLogData::RawLines::TrailingCrPolicy::Preserve;
     rawLines.startLine = first;
     auto* utf8Codec = QTextCodec::codecForName( "UTF-8" );
     rawLines.textDecoder.decoder.reset( utf8Codec->makeDecoder() );
-    rawLines.textDecoder.encodingParams = sourceEncodingParams;
-    rawLines.textDecoder.encodingParams.isUtf8Compatible = true;
-    rawLines.textDecoder.encodingParams.lineFeedWidth = 1;
+    rawLines.textDecoder.encodingParams = EncodingParameters( utf8Codec );
     rawLines.prefilterPattern = prefilterPattern;
 
     if ( canUseRawUtf8 ) {
@@ -3281,16 +3304,19 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
             }
         }
     } else {
-        // Slow path: bulk read per segment, per-line codec conversion or prefilter
+        // Slow path: codec conversion only. Shared RawLines decoding owns ANSI
+        // interpretation followed by exactly one prefilter pass.
         for ( const auto& read : segmentReads ) {
             const auto& segmentData = read.data;
 
             qint64 lineStart = 0;
             for ( qint64 lineIdx = 0; lineIdx < read.lineCount; ++lineIdx ) {
                 const auto remaining = segmentData.size() - static_cast<int>( lineStart );
-                if ( remaining <= 0 ) {
+                if ( remaining < 0
+                     || ( remaining == 0 && segmentData.size() != read.byteLength ) ) {
                     break;
                 }
+                // A complete zero-byte suffix can still be a committed sealed row.
                 const auto* nl = static_cast<const char*>(
                     std::memchr( segmentData.constData() + static_cast<int>( lineStart ), '\n',
                                  static_cast<size_t>( remaining ) ) );
@@ -3301,14 +3327,12 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
                     lineEnd = segmentData.size();
                 }
 
-                auto lineLength = lineEnd - lineStart;
-                if ( lineLength > 0 && segmentData[ static_cast<int>( lineStart + lineLength - 1 ) ] == '\r' ) {
-                    --lineLength;
-                }
+                // Ingress already removed the framing CR. Any remaining CR is payload.
+                const auto lineLength = lineEnd - lineStart;
 
                 const auto utf8Line = segmentData.mid( static_cast<int>( lineStart ),
                                                        static_cast<int>( lineLength ) );
-                const auto lineStr = decodeUtf8Line( utf8Line, effectiveCodec, prefilterPattern );
+                const auto lineStr = effectiveCodec->toUnicode( utf8Line );
                 const auto lineUtf8 = lineStr.toUtf8();
                 rawLines.buffer.insert( rawLines.buffer.end(), lineUtf8.begin(), lineUtf8.end() );
                 rawLines.buffer.push_back( '\n' );
@@ -3419,7 +3443,7 @@ void CaptureStore::commitLines( AppendResult& appendResult )
         const auto segmentRawStart = rawLineStart;
         const auto firstLineInSegment = lineIndex;
         auto segmentBytes = qint64{ 0 };
-        auto segmentMaxLineLength = 0;
+        auto segmentMaxLineLength = LineLength::UnderlyingType{ 0 };
 
         while ( lineIndex < lineCount ) {
             const auto lineEnd = appendResult.endOfLines[ lineIndex ];
@@ -3434,8 +3458,10 @@ void CaptureStore::commitLines( AppendResult& appendResult )
             if ( lineBytes <= 0 || lineBytes - 1 > std::numeric_limits<int>::max() ) {
                 throw std::runtime_error( "Invalid append line length while committing capture batch" );
             }
-            segmentMaxLineLength = qMax( segmentMaxLineLength,
-                                         type_safe::narrow_cast<int>( lineBytes - 1 ) );
+            const auto visibleWidth = getUntabifiedLength( std::string_view(
+                appendResult.rawUtf8Lines.constData() + rawLineStart,
+                static_cast<size_t>( lineBytes - 1 ) ) );
+            segmentMaxLineLength = qMax( segmentMaxLineLength, visibleWidth.get() );
             segmentBytes += lineBytes;
             rawLineStart = lineEnd;
             ++lineIndex;
@@ -3445,7 +3471,7 @@ void CaptureStore::commitLines( AppendResult& appendResult )
             }
         }
 
-        const bool startsPendingSegment = segment.lineOffsets.empty();
+        const bool startsPendingSegment = segment.lineOffsets->empty();
         const auto segmentOffset = segment.memoryData->size();
         if ( segmentBytes < 0 || segmentBytes > std::numeric_limits<int>::max() ) {
             throw std::runtime_error( "Invalid segment byte count while committing capture batch" );
@@ -3456,7 +3482,7 @@ void CaptureStore::commitLines( AppendResult& appendResult )
         // Grow the indexes geometrically: reserve(required) on every append makes
         // single-line batches reallocate and copy the full history quadratically.
         const auto requiredIndexEntries
-            = segment.lineOffsets.size() + lineIndex - firstLineInSegment;
+            = segment.lineOffsets->size() + lineIndex - firstLineInSegment;
         const auto reserveIndex = [ this, requiredIndexEntries ]( auto& index ) {
             if ( requiredIndexEntries <= index.capacity() ) {
                 return;
@@ -3469,7 +3495,12 @@ void CaptureStore::commitLines( AppendResult& appendResult )
                                      std::max( InitialIndexCapacity, doubled ) ) );
             ++commitIndexReservationsForTesting_;
         };
-        reserveIndex( segment.lineOffsets );
+        if ( segment.lineOffsetsPublished ) {
+            segment.lineOffsets
+                = std::make_shared<klogg::vector<qint64>>( *segment.lineOffsets );
+            segment.lineOffsetsPublished = false;
+        }
+        reserveIndex( *segment.lineOffsets );
         reserveIndex( segment.lineLengths );
         const auto requiredPayloadBytes = type_safe::narrow_cast<int>( segmentOffset + storedBytes );
         if ( requiredPayloadBytes > segment.memoryData->capacity() ) {
@@ -3487,7 +3518,7 @@ void CaptureStore::commitLines( AppendResult& appendResult )
             if ( lineBytes <= 0 || lineBytes - 1 > std::numeric_limits<int>::max() ) {
                 throw std::runtime_error( "Invalid metadata line length while committing capture batch" );
             }
-            segment.lineOffsets.push_back( localOffset );
+            segment.lineOffsets->push_back( localOffset );
             segment.lineLengths.push_back( type_safe::narrow_cast<int>( lineBytes - 1 ) );
             localOffset += lineBytes;
             localRawStart = lineEnd;
@@ -3511,6 +3542,7 @@ void CaptureStore::commitLines( AppendResult& appendResult )
             = appendResult.committedLines
               + LinesCount( static_cast<LinesCount::UnderlyingType>( committedLines ) );
         totalLines_ += committedLines;
+        ++visibleRevision_;
         segment.maxLineLength = qMax( segment.maxLineLength, segmentMaxLineLength );
         maxLineLength_ = qMax( maxLineLength_, segment.maxLineLength );
 
@@ -3659,7 +3691,7 @@ void CaptureStore::rebuildCumulativeLineCounts( bool onlyLast )
         const qint64 prevEnd = segments_.size() > 1
                                    ? segments_[ segments_.size() - 2 ].cumulativeEndLine
                                    : 0;
-        last.cumulativeEndLine = prevEnd + klogg::ssize( last.lineOffsets );
+        last.cumulativeEndLine = prevEnd + klogg::ssize( *last.lineOffsets );
         return;
     }
 
@@ -3675,7 +3707,7 @@ void CaptureStore::rebuildCumulativeLineCounts( bool onlyLast )
     memoryBytes_ = 0;
     maxLineLength_ = 0;
     for ( auto& segment : segments_ ) {
-        cumulative += klogg::ssize( segment.lineOffsets );
+        cumulative += klogg::ssize( *segment.lineOffsets );
         segment.cumulativeEndLine = cumulative;
         maxLineLength_ = qMax( maxLineLength_, segment.maxLineLength );
         if ( segment.memoryData ) {
@@ -3710,7 +3742,7 @@ bool CaptureStore::scanSegment( Segment& segment )
 
     qint64 offset = 0;
     if ( segment.byteSize == 0 ) {
-        segment.lineOffsets.push_back( 0 );
+        segment.lineOffsets->push_back( 0 );
         segment.lineLengths.push_back( 0 );
         segment.unterminated = true;
     }
@@ -3720,18 +3752,17 @@ bool CaptureStore::scanSegment( Segment& segment )
             break;
         }
         segment.unterminated = !lineBytes.endsWith( '\n' );
-        auto lineLength = lineBytes.endsWith( '\n' ) ? lineBytes.size() - 1 : lineBytes.size();
-        if ( lineLength > 0 && lineBytes[ lineLength - 1 ] == '\r' ) {
-            --lineLength;
-        }
-        segment.lineOffsets.push_back( offset );
+        // Native segment files contain already-normalized committed payload.
+        const auto lineLength = lineBytes.endsWith( '\n' ) ? lineBytes.size() - 1 : lineBytes.size();
+        segment.lineOffsets->push_back( offset );
         segment.lineLengths.push_back( type_safe::narrow_cast<int>( lineLength ) );
-        segment.maxLineLength
-            = qMax( segment.maxLineLength, type_safe::narrow_cast<int>( lineLength ) );
+        const auto visibleWidth = getUntabifiedLength( std::string_view(
+            lineBytes.constData(), static_cast<size_t>( lineLength ) ) );
+        segment.maxLineLength = qMax( segment.maxLineLength, visibleWidth.get() );
         fileSize_ += lineBytes.size();
         offset += lineBytes.size();
     }
-    totalLines_ += klogg::ssize( segment.lineOffsets );
+    totalLines_ += klogg::ssize( *segment.lineOffsets );
     return true;
 }
 
@@ -3740,7 +3771,7 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
     if ( segment.spilled || !segment.memoryData ) {
         return true;
     }
-    if ( segment.lineOffsets.empty() ) {
+    if ( segment.lineOffsets->empty() ) {
         return true;
     }
 
@@ -3897,12 +3928,12 @@ void CaptureStore::persistBufferedSegments()
 
 QByteArray CaptureStore::readSegmentLine( const Segment& segment, int localLine ) const
 {
-    if ( localLine < 0 || localLine >= klogg::isize( segment.lineOffsets ) ) {
+    if ( localLine < 0 || localLine >= klogg::isize( *segment.lineOffsets ) ) {
         return {};
     }
 
     if ( segment.memoryData ) {
-        const auto lineOffset = segment.lineOffsets[ static_cast<size_t>( localLine ) ];
+        const auto lineOffset = (*segment.lineOffsets)[ static_cast<size_t>( localLine ) ];
         const auto lineLength = segment.lineLengths[ static_cast<size_t>( localLine ) ];
         return segment.memoryData->mid( type_safe::narrow_cast<int>( lineOffset ), lineLength );
     }
@@ -3919,7 +3950,7 @@ QByteArray CaptureStore::readSegmentLine( const Segment& segment, int localLine 
     if ( !file ) {
         return {};
     }
-    const auto lineOffset = segment.lineOffsets[ static_cast<size_t>( localLine ) ];
+    const auto lineOffset = (*segment.lineOffsets)[ static_cast<size_t>( localLine ) ];
     const auto lineLength = segment.lineLengths[ static_cast<size_t>( localLine ) ];
     file->seek( lineOffset );
     return file->read( lineLength );
@@ -4151,12 +4182,21 @@ CaptureStore::Snapshot CaptureStore::snapshot() const
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     Snapshot result;
+    result.incarnation_ = incarnation_;
+    result.visibleRevision_ = visibleRevision_;
+    result.prefixRevision_ = prefixRevision_;
+    result.lineCount_ = LinesCount( static_cast<uint64_t>( totalLines_ ) );
+    result.byteSize_ = fileSize_;
     result.parts_.reserve( segments_.size() );
     for ( const auto& segment : segments_ ) {
-        if ( segment.lineOffsets.empty() ) {
+        if ( segment.lineOffsets->empty() ) {
             continue;
         }
         Snapshot::Part part;
+        part.lineOffsets = segment.lineOffsets;
+        segment.lineOffsetsPublished = true;
+        part.segmentId = static_cast<uint64_t>( segment.id );
+        part.endLine = static_cast<uint64_t>( segment.cumulativeEndLine );
         part.bytes = segment.byteSize;
         part.unterminated = segment.unterminated;
         if ( segment.memoryData ) {
@@ -4170,6 +4210,148 @@ CaptureStore::Snapshot CaptureStore::snapshot() const
         result.parts_.push_back( std::move( part ) );
     }
     return result;
+}
+
+OptionalLineNumber CaptureStore::rowForIdentity( const klogg::LogRowId& identity ) const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    if ( identity.origin != klogg::LogRowId::Origin::Capture
+         || identity.incarnation != incarnation_ ) {
+        return {};
+    }
+    const auto segment = std::lower_bound(
+        segments_.cbegin(), segments_.cend(), identity.member,
+        []( const Segment& part, uint64_t segmentId ) {
+            return static_cast<uint64_t>( part.id ) < segmentId;
+        } );
+    if ( segment == segments_.cend() || static_cast<uint64_t>( segment->id ) != identity.member
+         || identity.row >= segment->lineOffsets->size() ) {
+        return {};
+    }
+    return LineNumber( static_cast<uint64_t>( segment->cumulativeEndLine )
+                       - segment->lineOffsets->size() + identity.row );
+}
+
+klogg::SnapshotRow CaptureStore::Snapshot::row( LineNumber index ) const
+{
+    if ( index.get() >= lineCount_.get() ) {
+        throw klogg::SnapshotError( "Capture row is outside the snapshot" );
+    }
+    const auto part = std::lower_bound(
+        parts_.cbegin(), parts_.cend(), index.get(),
+        []( const Part& candidate, uint64_t line ) { return candidate.endLine <= line; } );
+    const auto localRow = index.get() - ( part->endLine - part->lineOffsets->size() );
+    return { { klogg::LogRowId::Origin::Capture, incarnation_, part->segmentId, localRow },
+             LineNumber{ index.get() + 1 }, true, false };
+}
+
+OptionalLineNumber
+CaptureStore::Snapshot::rowForIdentity( const klogg::LogRowId& identity ) const
+{
+    if ( identity.origin != klogg::LogRowId::Origin::Capture
+         || identity.incarnation != incarnation_ ) {
+        return {};
+    }
+    const auto part = std::lower_bound(
+        parts_.cbegin(), parts_.cend(), identity.member,
+        []( const Part& candidate, uint64_t segmentId ) { return candidate.segmentId < segmentId; } );
+    if ( part == parts_.cend() || part->segmentId != identity.member
+         || identity.row >= part->lineOffsets->size() ) {
+        return {};
+    }
+    return LineNumber( part->endLine - part->lineOffsets->size() + identity.row );
+}
+
+bool CaptureStore::Snapshot::isAppendOf( const Snapshot& previous ) const
+{
+    // A committed record is immutable, including an unterminated sealed record.
+    // Every non-append membership change advances prefixRevision_ under the same
+    // store lock as publication. This proves ancestry without scanning history.
+    return incarnation_ != 0 && incarnation_ == previous.incarnation_
+           && prefixRevision_ == previous.prefixRevision_
+           && visibleRevision_ >= previous.visibleRevision_
+           && lineCount_ >= previous.lineCount_;
+}
+
+SearchableLogData::RawLines CaptureStore::Snapshot::readRawLines( LineNumber first,
+                                                                 LinesCount count ) const
+{
+    if ( first.get() > lineCount_.get() || count.get() > lineCount_.get() - first.get() ) {
+        throw klogg::SnapshotError( "Capture range is outside the snapshot" );
+    }
+    try {
+        SearchableLogData::RawLines result;
+        result.trailingCrPolicy = SearchableLogData::RawLines::TrailingCrPolicy::Preserve;
+        result.startLine = first;
+        result.endOfLines.reserve( static_cast<size_t>( count.get() ) );
+        auto part = std::lower_bound(
+            parts_.cbegin(), parts_.cend(), first.get(),
+            []( const Part& candidate, uint64_t line ) { return candidate.endLine <= line; } );
+        auto current = first.get();
+        auto remaining = count.get();
+        while ( remaining > 0 ) {
+            const auto& offsets = *part->lineOffsets;
+            const auto local = static_cast<size_t>( current - ( part->endLine - offsets.size() ) );
+            const auto rows = static_cast<size_t>( std::min<uint64_t>( remaining, offsets.size() - local ) );
+            const auto next = local + rows;
+            const auto start = offsets[ local ];
+            const auto end = next < offsets.size() ? offsets[ next ] : part->bytes;
+            const auto outputStart = klogg::ssize( result.buffer );
+            if ( start < 0 || end < start || end > part->bytes ) {
+                throw klogg::SnapshotError( "Capture snapshot has invalid byte offsets" );
+            }
+
+            // The native shared index gives direct random-row access. Never scan
+            // or copy the rest of a large segment to retrieve a small row.
+            std::unique_ptr<QFile> file;
+            if ( part->file ) {
+                file = part->file->openForRead();
+                if ( !file || !file->seek( start ) ) {
+                    throw klogg::SnapshotError( "Capture snapshot file is unavailable" );
+                }
+            }
+            else if ( end > part->memory.size() ) {
+                throw klogg::SnapshotError( "Capture snapshot resident bytes are truncated" );
+            }
+            for ( auto offset = start; offset < end; ) {
+                const auto bytes = std::min<qint64>( end - offset, 64LL * 1024 );
+                if ( file ) {
+                    const auto chunk = file->read( bytes );
+                    if ( chunk.size() != bytes ) {
+                        throw klogg::SnapshotError( "Capture snapshot file read failed" );
+                    }
+                    result.buffer.insert( result.buffer.end(), chunk.constData(),
+                                          chunk.constData() + chunk.size() );
+                }
+                else {
+                    const auto begin = part->memory.constData() + offset;
+                    result.buffer.insert( result.buffer.end(), begin, begin + bytes );
+                }
+                offset += bytes;
+            }
+            // Stored sealed records have no LF, including an empty final record.
+            // Explicit row metadata, not scanning bytes, preserves that membership.
+            if ( next == offsets.size() && part->unterminated ) {
+                result.buffer.push_back( '\n' );
+            }
+            for ( auto rowIndex = local; rowIndex < next; ++rowIndex ) {
+                const auto rowEnd = rowIndex + 1 < offsets.size()
+                                        ? offsets[ rowIndex + 1 ]
+                                        : part->bytes + ( part->unterminated ? 1 : 0 );
+                result.endOfLines.push_back( outputStart + rowEnd - start );
+            }
+            current += rows;
+            remaining -= rows;
+            ++part;
+        }
+        return result;
+    }
+    catch ( const std::bad_alloc& ) {
+        throw klogg::SnapshotError( "Not enough memory to read capture snapshot" );
+    }
+    catch ( const std::length_error& ) {
+        throw klogg::SnapshotError( "Capture snapshot range exceeds buffer capacity" );
+    }
 }
 
 CaptureStore::Snapshot::Chunk CaptureStore::Snapshot::readChunk( Cursor& cursor,
