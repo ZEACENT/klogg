@@ -79,13 +79,11 @@ public:
         else {
             WrappedStringPart lineToWrap( longLine );
             while ( !lineToWrap.isEmpty() ) {
-                int totalWidth = textWidthFn( lineToWrap );
-                if ( totalWidth <= availablePixelWidth ) {
-                    wrappedLines_.push_back( lineToWrap );
-                    break;
-                }
-
-                // Binary search for the maximum number of characters that fit.
+                // Bracket the fitting prefix before binary search. Measuring the
+                // entire remaining suffix for every row repeatedly shapes the
+                // same offscreen text, making long-line wrapping quadratic.
+                // Keep exact prefix measurements (not summed character widths)
+                // and the existing monotonic-width assumption.
                 // WrappedStringPart is a QStringView, which is qsizetype-native
                 // on BOTH Qt 5 (>= 5.8) and Qt 6 -- so the search indices are
                 // plain qsizetype and NEVER narrow when passed to its left/mid.
@@ -93,10 +91,24 @@ public:
                 // QByteArray::size(), int on Qt 5, and would narrow against a
                 // QStringView receiver -- the exact Qt 5 CI break.)
                 const qsizetype maxChars = lineToWrap.size();
-                qsizetype low = 1;
-                qsizetype high = maxChars;
-                qsizetype fitCount = 1;
+                qsizetype fitCount = 0;
+                qsizetype probe = 1;
+                while ( textWidthFn( lineToWrap.left( probe ) ) <= availablePixelWidth ) {
+                    fitCount = probe;
+                    if ( probe == maxChars ) {
+                        break;
+                    }
+                    probe = probe > maxChars / 2 ? maxChars : probe * 2;
+                }
+                if ( fitCount == maxChars ) {
+                    // A fitting final suffix stays intact, even when it contains
+                    // a word boundary before its end.
+                    wrappedLines_.push_back( lineToWrap );
+                    break;
+                }
 
+                qsizetype low = fitCount + 1;
+                qsizetype high = probe - 1;
                 while ( low <= high ) {
                     const qsizetype mid = low + ( high - low ) / 2;
                     auto candidate = lineToWrap.left( mid );
@@ -139,6 +151,8 @@ public:
         }
         trimWhitespaceOnlyTail();
     }
+
+    const QString& text() const { return unwrappedLine_; }
 
     size_t wrappedLinesCount() const
     {
