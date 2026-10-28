@@ -31,6 +31,7 @@
 #include "crash_trace.h"
 #include <persistentinfo.h>
 #include "test_utils.h"
+#include "taskschedulerlifetime.h"
 
 const bool PersistentInfo::ForcePortable = true;
 
@@ -61,6 +62,7 @@ int main( int argc, char* argv[] )
     using klogg::testing::CaptureChildPhase;
     using klogg::testing::recordCaptureChildPhase;
     recordCaptureChildPhase( CaptureChildPhase::MainEnter );
+    klogg::TaskSchedulerLifetime taskScheduler;
     QApplication a( argc, argv );
     recordCaptureChildPhase( CaptureChildPhase::ApplicationReady );
 

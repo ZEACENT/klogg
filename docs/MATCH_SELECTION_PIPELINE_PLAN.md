@@ -947,10 +947,10 @@ lock/lease destruction order and aggregate defaults.
 | Integrated check | Result |
 | --- | --- |
 | Complete repository quality gate | All lint stages passed; 2,568 Python tests, 12 platform/tool-dependent skips |
-| macOS Qt6 native, ASan/UBSan, first-party TSan | Each CTest suite passed 38/38 |
+| macOS Qt6 native, ASan/UBSan, first-party TSan | Each CTest suite passed 38/38; the TSan run lacked CI's O1 project profile and is not CI-parity evidence |
 | Locked Linux GCC/Qt5 ASan/LSan | CTest 40/40 with CI sanitizer options and existing suppressions |
 | Locked GCC13/Qt6.9.3 coverage profile | CTest 39/39; line 81.6%, branch 46.5%; unchanged floors 61.1%/32.6% passed |
-| Locked clang-tidy-18 | Full PR diff against `306afd95`, affected-header fan-out, and standalone headers clean |
+| Locked clang-tidy-18 | Prior clean verdict invalidated: `/usr/local/src` did not match the authenticated header filter; canonical-path rerun required |
 | Locked strict cppcheck | 156 first-party compilation entries passed |
 | Optimized best-of-three 40,000-fragment performance | Selection/copy 233 ms; dense paint about 28 ms unwrapped / 102 ms wrapped |
 
@@ -962,3 +962,66 @@ jobs per suite. The unchanged macOS ASan ADB-helper startup timeout recurred onc
 its isolated 53 assertions and complete ASan rerun passed, without a sanitizer
 report. That failed attempt is retained as such. Hosted Windows x64 validation
 and the updated-head GitHub checks remain required after publication.
+
+### Updated-head review and validation corrections (2026-10-29)
+
+Hosted checks at `6b8545eb` exposed gaps not covered by the preceding acceptance:
+
+- The filtered presentation regression injected only `SnapshotError`, while
+  retained indexed storage can throw `IndexedContentError` and decoding can throw
+  standard allocation/length exceptions. The text and ANSI presentation boundaries
+  now contain `std::exception`; strict snapshots still propagate the original
+  type. Parameterized failure injection produced 18 failing assertions before
+  the fix; all 440 assertions in 26 filtered-snapshot cases then passed.
+- The owned-task capture guard's reference member violated the locked analyzer's
+  policy. A non-owning pointer preserves the same before-readiness destruction
+  ordering, including exceptions. No analyzer suppression was added.
+- The previous locked clang-tidy clean verdict was incomplete: the authenticated
+  `HeaderFilterRegex` requires `/klogg/src/`, but the local clone used
+  `/usr/local/src/`. The analyzer silently filtered header diagnostics. Keep the
+  signed policy inputs unchanged and configure the local analysis checkout and
+  compile database at `/klogg`. Before accepting a local result, run
+  `python3 scripts/check_clang_tidy_scope.py --source-root /klogg/src --clang-tidy /usr/bin/clang-tidy`.
+  The guard rejects the relocated worktree and verifies all actual first-party
+  headers plus dependency exclusion. The locked-tool canonical-path check passed
+  for 192 headers; analysis reruns are recorded separately below when complete.
+- The Windows support-policy fixture set `WIN32` using a `-D` cache argument.
+  CMake's Windows-host normal variable shadows that value, so its non-Windows
+  scenario incorrectly exercised Windows x86 rejection. Set the scenario's normal
+  variable explicitly from a test-only parameter after host initialization. A
+  host/target cross-product reproduces the original mismatch on macOS too: two
+  RED subcases, then all nine contract tests passed (three native-tool skips).
+- Hosted macOS TSan completed all 1,241 unit cases, then found a mimalloc shutdown
+  race with a TBB worker's TLS destructor. The local TSan compile database also
+  revealed a parity gap: `KLOGG_CI_MACOS_TSAN_O1=ON` without
+  `CMAKE_PROJECT_INCLUDE=.../cmake/CiMacosTsanProfile.cmake` did not activate the
+  CI optimization profile. The existing
+  `python3 scripts/verify_macos_tsan_profile.py build_root_tsan/compile_commands.json`
+  guard correctly rejected that configuration. Local reruns must load the actual
+  profile and pass this guard before building; neither successful test summaries
+  nor cache intent prove process-exit safety.
+- A shared process-scoped `TaskSchedulerLifetime` now outlives Qt applications
+  and their task producers, then explicitly finalizes TBB. External TBB callers
+  must be native-joined first, as the indexing/search workers already are; the
+  save graph runs synchronously on the UI thread. Finalization failure emits a
+  clear diagnostic and exits unsuccessfully rather than entering allocator
+  cleanup with live workers. Application, grep, unit/UI, and search benchmark
+  processes share this owner. Grep now returns through its event loop instead of
+  bypassing stack destruction with `exit`. A dedicated executable covers worker
+  TLS completion, no-work shutdown, retained-handle failure, unjoined-producer
+  failure, and application teardown after native producer joins. The original
+  raw-release-only implementation failed the TLS and failure-path assertions.
+  An eight-entry process ownership guard also passes.
+- The first locked Qt5 ASan rerun passed 40/41 entries but rejected the new test's
+  direct Qt-pool TBB caller. That test assumed more than production guarantees:
+  Qt5.15.3 `QThread::wait()` observes Qt's finished state before detached pthread
+  TLS teardown, so application/pool destruction is not a native join. The positive
+  regression now exercises the actual joined producer boundary and verifies both
+  producer and TBB-worker TLS completion. A separately gated, deliberately
+  unjoined native producer must still fail explicitly. No sleeps, finalization
+  retries, version-conditionals, or sanitizer suppressions were introduced.
+
+These corrections do not change the Windows x86 retirement, the strict required
+checks, authenticated receipts, or sanitizer suppression policy. The arm64 job
+cancellation at this head was a hosted-runner acquisition failure, not a source
+failure. Final updated-head CI and approval remain required.

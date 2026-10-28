@@ -11,11 +11,13 @@
 
 #include "capturestore.h"
 #include "persistentinfo.h"
+#include "taskschedulerlifetime.h"
 
 const bool PersistentInfo::ForcePortable = true;
 
 int main( int argc, char* argv[] )
 {
+    klogg::TaskSchedulerLifetime taskScheduler;
     QCoreApplication application( argc, argv );
     const auto result = Catch::Session().run( argc, argv );
     CaptureStore::shutdownBackgroundWorkers();

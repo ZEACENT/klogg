@@ -61,6 +61,7 @@
 #include "qtcompat/qtcompat.h"
 #include "regularexpressionpattern.h"
 #include "streaminglogdata.h"
+#include "taskschedulerlifetime.h"
 
 const bool PersistentInfo::ForcePortable = true;
 
@@ -1303,6 +1304,7 @@ void printSummary( QTextStream& out, const BenchmarkOptions& options, const QVec
 
 int main( int argc, char* argv[] )
 {
+    klogg::TaskSchedulerLifetime taskScheduler;
     QCoreApplication app( argc, argv );
     QCoreApplication::setApplicationName( QLatin1String( "regex_search_benchmark" ) );
     QCoreApplication::setOrganizationName( QLatin1String( "klogg" ) );

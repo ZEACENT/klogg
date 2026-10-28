@@ -61,9 +61,9 @@ auto runOwnedTask( Function function ) -> OwnedTaskFuture<std::invoke_result_t<F
                   // Capture teardown belongs to completion, including on failure.
                   // The shared future may outlive both the work and its receiver.
                   struct ReleaseCapture {
-                      std::optional<Function>& callable;
-                      ~ReleaseCapture() { callable.reset(); }
-                  } release{ callable };
+                      std::optional<Function>* callable;
+                      ~ReleaseCapture() { callable->reset(); }
+                  } release{ &callable };
                   return ( *callable )();
               } )
             , completion( std::move( notification ) ) {}

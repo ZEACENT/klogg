@@ -30,16 +30,19 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <locale>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <streambuf>
 #include <string>
 #include <thread>
+#include <type_traits>
 
 #ifndef Q_MOC_RUN
 #include <roaring.hh>
@@ -54,6 +57,7 @@
 #include "containers.h"
 #include "test_utils.h"
 #include "linetypes.h"
+#include "indexedcontent.h"
 #include "logfiltereddata.h"
 #include "logfiltereddataworker.h"
 #include "matchercache.h"
@@ -196,7 +200,9 @@ class FrozenSearchRows : public SearchableLogData::ReadSnapshot {
 public:
     explicit FrozenSearchRows( QStringList lines, std::shared_ptr<SnapshotReadGate> gate = {},
                                 bool failRead = false, uint64_t tailVersion = 0 )
-        : lines_( std::move( lines ) ), gate_( std::move( gate ) ), failRead_( failRead ),
+        : lines_( std::move( lines ) ), gate_( std::move( gate ) ),
+          readFailure_( failRead ? std::make_exception_ptr(
+              klogg::SnapshotError{ "Injected immutable range read failure" } ) : nullptr ),
           tailVersion_( tailVersion ) {}
     std::optional<CacheKey> cacheKey() const override
     {
@@ -220,11 +226,11 @@ public:
                  LineNumber{ index.get() + 1 }, true, false };
     }
     qint64 byteSize() const override { return 0; }
-    void failReads() { failRead_ = true; }
+    void failReads( std::exception_ptr failure ) { readFailure_ = std::move( failure ); }
     SearchableLogData::RawLines getLinesRaw( LineNumber first, LinesCount count ) const override
     {
         if ( gate_ ) gate_->beforeRead( first );
-        if ( failRead_ ) throw klogg::SnapshotError{ "Injected immutable range read failure" };
+        if ( readFailure_ ) std::rethrow_exception( readFailure_ );
         SearchableLogData::RawLines result;
         result.startLine = first;
         result.textDecoder = TextCodecHolder{ QTextCodec::codecForName( "UTF-8" ) }.makeDecoder();
@@ -238,7 +244,7 @@ public:
 private:
     QStringList lines_;
     std::shared_ptr<SnapshotReadGate> gate_;
-    bool failRead_ = false;
+    std::exception_ptr readFailure_;
     uint64_t tailVersion_ = 0;
     static uint64_t nextCacheVersion()
     {
@@ -685,8 +691,9 @@ private:
     }
 };
 
-TEST_CASE( "Filtered presentation contains retained source read failures without weakening snapshots",
-           "[filtered-snapshot][filtered-presentation-failure]" )
+TEMPLATE_TEST_CASE( "Filtered presentation contains retained source read failures without weakening snapshots",
+                    "[filtered-snapshot][filtered-presentation-failure]",
+                    klogg::SnapshotError, IndexedContentError, std::bad_alloc, std::length_error )
 {
     SnapshotSearchConfiguration configuration;
     SnapshotSearchSource source;
@@ -702,14 +709,22 @@ TEST_CASE( "Filtered presentation contains retained source read failures without
     REQUIRE( filtered.getLineString( 0_lnum ) == QStringLiteral( "ERROR retained" ) );
 
     // Retained storage can fail after successful search (for example, a truncated spill).
-    retained->failReads();
+    const auto failure = [] {
+        if constexpr ( std::is_same_v<TestType, std::bad_alloc> ) {
+            return TestType{};
+        }
+        else {
+            return TestType{ "Injected immutable range read failure" };
+        }
+    }();
+    retained->failReads( std::make_exception_ptr( failure ) );
     CHECK( filtered.getLineString( 0_lnum ).isEmpty() );
     CHECK( filtered.getExpandedLineString( 0_lnum ).isEmpty() );
     CHECK( filtered.getLineLength( 0_lnum ) == 0_length );
     CHECK( filtered.getLineAnsiColors( 0_lnum ).empty() );
     CHECK( filtered.getLines( 0_lnum, 1_lcount ) == klogg::vector<QString>{ QString{} } );
     CHECK( filtered.getExpandedLines( 0_lnum, 1_lcount ) == klogg::vector<QString>{ QString{} } );
-    CHECK_THROWS_AS( matches->lineString( 0_lnum ), klogg::SnapshotError );
+    CHECK_THROWS_AS( matches->lineString( 0_lnum ), TestType );
 }
 
 TEST_CASE( "Completed filtered snapshots retain source text and canonical matches",

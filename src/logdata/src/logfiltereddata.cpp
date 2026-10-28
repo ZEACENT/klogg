@@ -48,6 +48,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <exception>
 #include <functional>
 #include <numeric>
 #include <set>
@@ -1102,7 +1103,9 @@ QString LogFilteredData::doGetLineString( LineNumber index ) const
         if ( line >= presentedSource_->lineCount() ) return {};
         try {
             return presentedSource_->lineString( line );
-        } catch ( const klogg::SnapshotError& error ) {
+        } catch ( const std::exception& error ) {
+            // Retained storage and strict decoding can also throw standard
+            // exceptions. Contain them only at the presentation boundary.
             LOG_ERROR << "Cannot read presented row: " << error.what();
             return {};
         }
@@ -1171,7 +1174,7 @@ klogg::vector<AnsiColorSpan> LogFilteredData::doGetLineAnsiColors( LineNumber in
         try {
             auto colors = presentedSource_->getLinesRaw( line, 1_lcount ).decodeLineAnsiColors();
             return colors.empty() ? klogg::vector<AnsiColorSpan>{} : std::move( colors.front() );
-        } catch ( const klogg::SnapshotError& error ) {
+        } catch ( const std::exception& error ) {
             LOG_ERROR << "Cannot read presented row colors: " << error.what();
             return {};
         }

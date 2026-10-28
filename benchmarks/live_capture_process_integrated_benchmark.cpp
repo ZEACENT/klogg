@@ -25,6 +25,7 @@
 
 #include "capturestore.h"
 #include "persistentinfo.h"
+#include "taskschedulerlifetime.h"
 
 const bool PersistentInfo::ForcePortable = true;
 
@@ -320,6 +321,7 @@ void runArm( benchmark::BenchmarkArm arm, const benchmark::FramedFixture& framed
 
 int main( int argc, char* argv[] )
 {
+    klogg::TaskSchedulerLifetime taskScheduler;
     QCoreApplication application( argc, argv );
     const bool realDevice = argc > 1 && std::string{ argv[ 1 ] } == "--real-device";
     try {

@@ -67,16 +67,20 @@ class WindowsSupportPolicyTest(unittest.TestCase):
         block = guard + cmake.split(guard, 1)[1].split("endif()", 1)[0] + "endif()\n"
         with tempfile.TemporaryDirectory() as scratch:
             script = pathlib.Path(scratch) / "platform-check.cmake"
-            script.write_text(block)
-            for windows, pointer_size, rejected in (("ON", 4, True), ("ON", 8, False),
-                                                     ("OFF", 4, False), ("OFF", 8, False)):
-                with self.subTest(windows=windows, pointer_size=pointer_size):
-                    result = subprocess.run(["cmake", "-DWIN32=" + windows,
-                        "-DCMAKE_SIZEOF_VOID_P=" + str(pointer_size), "-P", str(script)],
-                        capture_output=True, text=True, timeout=10)
-                    self.assertEqual(result.returncode != 0, rejected, result.stderr)
-                    if rejected:
-                        self.assertIn("v26.08.08.1096", result.stderr)
+            # Model CMake's host-initialized normal variable, which shadows -D cache values.
+            script.write_text('set(WIN32 "${KLOGG_TEST_HOST_WIN32}")\n'
+                              'set(WIN32 "${KLOGG_TEST_WIN32}")\n' + block)
+            for host_windows in ("ON", "OFF"):
+                for windows, pointer_size, rejected in (("ON", 4, True), ("ON", 8, False),
+                                                         ("OFF", 4, False), ("OFF", 8, False)):
+                    with self.subTest(host_windows=host_windows, windows=windows, pointer_size=pointer_size):
+                        result = subprocess.run(["cmake", "-DKLOGG_TEST_WIN32=" + windows,
+                            "-DKLOGG_TEST_HOST_WIN32=" + host_windows,
+                            "-DCMAKE_SIZEOF_VOID_P=" + str(pointer_size), "-P", str(script)],
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode != 0, rejected, result.stderr)
+                        if rejected:
+                            self.assertIn("v26.08.08.1096", result.stderr)
 
     def test_package_entry_points_and_feeds_are_x64_only(self):
         packaging = ROOT / "packaging/windows"

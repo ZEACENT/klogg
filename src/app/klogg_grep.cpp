@@ -18,6 +18,7 @@
  */
 
 #include <mimalloc.h>
+#include "taskschedulerlifetime.h"
 
 #include "configuration.h"
 #include "logdata.h"
@@ -32,6 +33,7 @@ const bool PersistentInfo::ForcePortable = true;
 
 int main( int argc, char* argv[] )
 {
+    klogg::TaskSchedulerLifetime taskScheduler;
     mi_stats_reset();
     qRegisterMetaType<LinesCount>( "LinesCount" );
     qRegisterMetaType<LineNumber>( "LineNumber" );
@@ -64,7 +66,7 @@ int main( int argc, char* argv[] )
                     }
                 }
 
-                exit( EXIT_SUCCESS );
+                QCoreApplication::exit( EXIT_SUCCESS );
             }
         } );
 
@@ -73,6 +75,8 @@ int main( int argc, char* argv[] )
             [ & ] { filteredData->runSearch( RegularExpressionPattern( parameters.pattern ) ); } );
     } );
 
-    logData.attachFile( parameters.filenames.front() );
+    // Enter the event loop before loading: a synchronous completion must not
+    // call QCoreApplication::exit before exec has started.
+    dispatchToObject( [ & ] { logData.attachFile( parameters.filenames.front() ); }, &app );
     return app.exec();
 }

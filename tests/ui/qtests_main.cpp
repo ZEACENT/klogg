@@ -50,6 +50,7 @@
 #include <logger.h>
 #include <crash_trace.h>
 #include <test_utils.h>
+#include "taskschedulerlifetime.h"
 
 const bool PersistentInfo::ForcePortable = true;
 
@@ -261,6 +262,7 @@ class TestRunner : public QObject {
 
 int main( int argc, char* argv[] )
 {
+    klogg::TaskSchedulerLifetime taskScheduler;
     QApplication a( argc, argv );
 
 #ifdef Q_OS_WIN
