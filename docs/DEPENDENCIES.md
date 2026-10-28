@@ -58,29 +58,6 @@ are development prerequisites rather than application runtime dependencies.
 Vectorscan also needs Ragel. Follow the platform-specific [build instructions](BUILD.md)
 for their installation and configuration.
 
-## Windows Qt 5 OpenSSL runtime
-
-The legacy Windows Qt 5 input is OpenSSL **1.1.1w**, pinned separately in
-[`ci/tools/openssl-qt5.json`](../ci/tools/openssl-qt5.json). Its verifier checks
-original archive bytes, CRCs, version markers, and the exact x86/x64 runtime DLL
-hashes and PE identities. Windows consumption installs only the two selected
-runtime DLLs after complete verification; it does not unpack the vendor SDK.
-Qt 6 and the native iOS source-built OpenSSL closure do not use this input.
-
-FireDaemon no longer provides the configured 1.1.1 download. The unchanged
-archive is retained in the separately approved, non-Latest
-[dependency release](https://github.com/ZEACENT/klogg/releases/tag/openssl-qt5-1.1.1w-input-v1).
-The lock binds the repository, release and asset identities plus the archive
-size and SHA-256. Cold acquisition no longer depends on an expiring Actions
-artifact or a mutable latest-success selection. The release preserves the
-original OpenSSL/SSLeay license, acknowledgments, historical origin record and
-checksums; it is not independent vendor-signature proof or new qualification.
-CI only reads this release; it does not automatically publish or replace it.
-Caches remain optional accelerators. This preserves the existing legacy version;
-it does not assert a current security-support lifetime or authorize a
-vendor/version upgrade.
-See [CI input verification](CI_ENVIRONMENTS.md#windows-qt-5-runtime-input).
-
 ## Android capture helper
 
 Fresh Android sessions use the managed ADB smart-socket backend with a bundled,

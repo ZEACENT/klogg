@@ -17,13 +17,13 @@ SPEC = importlib.util.spec_from_file_location(
 VERIFY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VERIFY)
 
-COMMON_RUNTIME = (
+X64_RUNTIME = (
     "msvcp140.dll",
     "msvcp140_1.dll",
     "msvcp140_2.dll",
     "vcruntime140.dll",
+    "vcruntime140_1.dll",
 )
-X64_RUNTIME = (*COMMON_RUNTIME, "vcruntime140_1.dll")
 
 
 class WindowsRuntimeTest(unittest.TestCase):
@@ -46,12 +46,9 @@ class WindowsRuntimeTest(unittest.TestCase):
     def test_complete_x64_package_matches_staged_runtime(self):
         self.verify()
 
-    def test_x86_does_not_require_x64_only_runtime(self):
-        for root in (self.staged, self.package):
-            (root / "vcruntime140_1.dll").unlink()
-        self.verify("x86")
-        with self.assertRaisesRegex(ValueError, "vcruntime140_1.dll"):
-            self.verify("x64")
+    def test_retired_x86_runtime_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unsupported Windows runtime architecture"):
+            self.verify("x86")
 
     def test_each_required_dll_must_be_in_final_package(self):
         for name in X64_RUNTIME:

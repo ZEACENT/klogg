@@ -128,10 +128,6 @@
     "windows-x86_64": {
       "helper_target": "windows-x86_64",
       "architecture": "x86_64"
-    },
-    "windows-x86": {
-      "architecture": "x86",
-      "matching_helper_or_fail_closed": true
     }
   },
   "artifact_envelope": {

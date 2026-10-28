@@ -100,6 +100,10 @@ offer a different set of files.
 | Linux | Ubuntu 22.04, 24.04, and 26.04 DEB; AppImage | Choose the DEB for your Ubuntu version, or the AppImage for a compatible distribution. |
 | macOS | Separate Apple Silicon and Intel DMGs | Choose your processor architecture and check the release's minimum macOS version. |
 
+**Windows x86 (32-bit) support has ended.** The last Windows x86 release is
+[v26.08.08.1096](https://github.com/ZEACENT/klogg/releases/tag/v26.08.08.1096).
+It will receive no further fixes or updates. Current Windows builds require x64.
+
 **macOS packages are unsigned CI validation artifacts, not signed or notarized
 releases.** Gatekeeper may require explicit local approval. Review the source
 and release before approving an application; do not disable Gatekeeper globally.

@@ -90,22 +90,21 @@ if ($QtVersion -eq "Qt6") {
 
 } elseif ($QtVersion -eq "Qt5") {
     Write-Host "`nQt5 assertions:"
-    Write-Host "  Expected: OpenSSL 1.1.x DLLs present (x64 or x86 depending on arch)"
+    Write-Host "  Expected: OpenSSL 1.1.x x64 DLLs present"
     Write-Host "  Expected: No Schannel requirement (Qt5 uses OpenSSL exclusively)`n"
 
-    # Qt5 must ship OpenSSL 1.1.x DLLs
-    # Check both x64 and x86 naming patterns (one set should exist)
+    # Local Qt5 packages must ship only the x64 OpenSSL 1.1.x pair.
     $hasX64 = (Test-Path (Join-Path $ReleaseDir "libcrypto-1_1-x64.dll")) -and
               (Test-Path (Join-Path $ReleaseDir "libssl-1_1-x64.dll"))
-    $hasX86 = (Test-Path (Join-Path $ReleaseDir "libcrypto-1_1.dll")) -and
-              (Test-Path (Join-Path $ReleaseDir "libssl-1_1.dll"))
-    $hasOpenSsl11 = $hasX64 -or $hasX86
-
-    Write-CheckResult "OpenSSL 1.1.x DLLs present (x64: $hasX64, x86: $hasX86)" $hasOpenSsl11
+    Write-CheckResult "OpenSSL 1.1.x x64 DLLs present" $hasX64
+    Write-CheckResult "No libcrypto-1_1.dll in release root" (-not (Test-Path (Join-Path $ReleaseDir "libcrypto-1_1.dll")))
+    Write-CheckResult "No libssl-1_1.dll in release root" (-not (Test-Path (Join-Path $ReleaseDir "libssl-1_1.dll")))
 
     # Qt5 should NOT ship OpenSSL 3.x DLLs (incompatible)
     Write-CheckResult "No libcrypto-3-x64.dll in release root" (-not (Test-Path (Join-Path $ReleaseDir "libcrypto-3-x64.dll")))
     Write-CheckResult "No libssl-3-x64.dll in release root" (-not (Test-Path (Join-Path $ReleaseDir "libssl-3-x64.dll")))
+    Write-CheckResult "No libcrypto-3.dll in release root" (-not (Test-Path (Join-Path $ReleaseDir "libcrypto-3.dll")))
+    Write-CheckResult "No libssl-3.dll in release root" (-not (Test-Path (Join-Path $ReleaseDir "libssl-3.dll")))
 
 } else {
     Write-Error "Unknown QtVersion: $QtVersion (expected Qt5 or Qt6)"

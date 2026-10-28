@@ -22,7 +22,8 @@ class SetupMsvcActionContractTest(unittest.TestCase):
         for marker in (
             "vswhere.exe",
             "Launch-VsDevShell.ps1",
-            '$developerShellArch = if ($target -eq "x64") { "amd64" }',
+            'if ($target -ne "x64")',
+            '& $launcher -Arch amd64 -HostArch amd64 -SkipAutomaticLocation',
             "GITHUB_ENV",
             "/Bv /c",
             "VSCMD_ARG_TGT_ARCH",

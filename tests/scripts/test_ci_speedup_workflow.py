@@ -152,7 +152,7 @@ class EarlyWindowsCompilationTest(unittest.TestCase):
             for phase in ('prepare', 'finalize'):
                 (build / ('ci-build-phase-17-2-' + phase + '.json')).write_text(json.dumps({'phase': phase}))
                 (build / ('ci-build-phase-17-2-' + phase + '.ninja-log.txt')).write_text('# ninja log v5\n')
-            for job in ('WindowsPackages', 'WindowsX86', 'WindowsAsan', 'MacPackages', 'MacArmPackages'):
+            for job in ('WindowsPackages', 'WindowsAsan', 'MacPackages', 'MacArmPackages'):
                 with self.subTest(job=job):
                     upload = next(children['with'] for fields, children in steps(WORKFLOW.read_text(), job)
                                   if fields.get('name') == 'Upload current-run build metrics')
@@ -248,7 +248,7 @@ class EarlyWindowsCompilationTest(unittest.TestCase):
         triggers = QUALITY.workflow_trigger_mapping(text)
         blocks = QUALITY.workflow_job_blocks(text)
         for event in ('pull_request', 'push', 'workflow_dispatch'):
-            for job, package in (('WindowsPackages', True), ('WindowsX86', False), ('WindowsAsan', False)):
+            for job, package in (('WindowsPackages', True), ('WindowsAsan', False)):
                 with self.subTest(event=event, job=job):
                     self.assertIn(event, triggers)
                     values = QUALITY.workflow_job_condition_values(blocks[job])
@@ -271,7 +271,7 @@ class SharedApplicationObjectsTest(unittest.TestCase):
     def test_windows_descriptor_names_match_every_actual_producer_job(self):
         text = WORKFLOW.read_text()
         blocks = QUALITY.workflow_job_blocks(text)
-        for job in ('WindowsPackages', 'WindowsX86', 'WindowsAsan'):
+        for job in ('WindowsPackages', 'WindowsAsan'):
             with self.subTest(job=job):
                 block = '\n'.join(blocks[job])
                 environment = dict(re.findall(r'^      (KLOGG_\w+): (.+)$', block, re.M))

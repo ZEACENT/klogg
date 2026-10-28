@@ -52,11 +52,7 @@ struct Capabilities {
 void observeDiagnosticModules(
     std::array<DiagnosticModuleRecord, diagnosticModulesPerProcess>& modules ) noexcept
 {
-#ifdef _WIN64
     constexpr const wchar_t* asanName = L"clang_rt.asan_dynamic-x86_64.dll";
-#else
-    constexpr const wchar_t* asanName = L"clang_rt.asan_dynamic-i386.dll";
-#endif
     const std::array<const wchar_t*, diagnosticModulesPerProcess> names{
         L"dbghelp.dll", L"dbgcore.dll", asanName };
     for ( std::size_t index = 0; index < modules.size(); ++index ) {
@@ -259,15 +255,9 @@ public:
         }
         auto& result = capabilities_.diagnostics->result;
         result.contextFlags = static_cast<std::uint32_t>( observedContext.ContextFlags );
-#ifdef _WIN64
         result.pc = observedContext.Rip;
         result.sp = observedContext.Rsp;
         result.fp = observedContext.Rbp;
-#else
-        result.pc = observedContext.Eip;
-        result.sp = observedContext.Esp;
-        result.fp = observedContext.Ebp;
-#endif
         return true;
     }
 

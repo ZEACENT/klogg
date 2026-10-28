@@ -176,7 +176,7 @@ class MaterializeBoostTests(unittest.TestCase):
 
     def test_workflow_prefetch_transports_only_verified_original_archive(self):
         workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
-        prefetch = workflow.split("  PrefetchBoost:", 1)[1].split("  PrefetchOpenSsl:", 1)[0]
+        prefetch = workflow.split("  PrefetchBoost:", 1)[1].split("  PrefetchLinuxDeployQt:", 1)[0]
         self.assertIn("uses: actions/checkout@", prefetch)
         self.assertIn("python3 scripts/materialize_boost.py", prefetch)
         self.assertIn("hashFiles('ci/environments/materials.json')", prefetch)

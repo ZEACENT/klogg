@@ -1089,7 +1089,7 @@ def _check_close_without_loading_wait(text: str, path: Path) -> list[tuple[int, 
     The test calls loadInitialFile / loadFile and then triggers a
     destructive close action on the resulting tab.  If the only waits
     are for UI surface signals (tab count, path label) the file-load may
-    still be in progress on slower runners (especially Windows x86).
+    still be in progress on slower hosted runners.
     Closing a tab while the background loading thread holds references
     to heap allocations causes corruption in the loader's simdutf layer
     and a downstream free() SIGSEGV.
@@ -1124,8 +1124,7 @@ def _check_close_without_loading_wait(text: str, path: Path) -> list[tuple[int, 
             "qobject_cast<CrawlerWidget*>(tabArea->currentWidget())->isFirstLoadDone(); }) "
             "before any close or reload in load-then-close scenarios.  "
             "Without this, background loading threads can hold heap "
-            "references during teardown, causing SIGSEGV on slower CI "
-            "runners (esp. Windows x86).",
+            "references during teardown, causing SIGSEGV on slower CI runners.",
         )
     ]
 
@@ -1201,10 +1200,9 @@ def _check_vectorscan_capability_assertion(text: str, path: Path) -> list[tuple[
     """Flag test assertions that unconditionally REQUIRE hasBufferScan().
 
     PatternMatcher::hasBufferScan() is compiled to ``return false`` on
-    KLOGG_USE_VECTORSCAN=OFF builds -- e.g. the Windows x86-qt5 [QTRegex]
-    CI job -- so an unguarded REQUIRE passes on every vectorscan-enabled
-    dev machine (macOS / Linux / Windows x64) and fails only there.
-    PR #42 broke exactly that job with
+    KLOGG_USE_VECTORSCAN=OFF builds, so an unguarded REQUIRE passes on
+    vectorscan-enabled dev machines but fails on Qt-regex-only builds.
+    PR #42 exposed this with
     ``REQUIRE( matcher->hasBufferScan() )`` in foldersearchengine_test.cpp.
 
     Gate the test on the capability instead of asserting it: early-return
@@ -1248,8 +1246,7 @@ def _check_vectorscan_capability_assertion(text: str, path: Path) -> list[tuple[
                 (
                     i,
                     "Do not REQUIRE/CHECK matcher->hasBufferScan() unconditionally: "
-                    "it is always false on KLOGG_USE_VECTORSCAN=OFF builds "
-                    "(Windows x86-qt5 [QTRegex] CI job). Early-return with a "
+                    "it is always false on KLOGG_USE_VECTORSCAN=OFF builds. Early-return with a "
                     "vacuous pass when the capability is absent instead "
                     "(PR #42).",
                 )

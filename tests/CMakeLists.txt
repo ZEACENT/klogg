@@ -40,6 +40,13 @@ if(WIN32)
   )
   set_tests_properties(windows_crash_trace_smoke PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
   klogg_set_test_isolation(windows_crash_trace_smoke)
+
+  add_test(
+    NAME windows_support_policy_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_windows_support_policy.py
+  )
+  set_tests_properties(windows_support_policy_contract PROPERTIES TIMEOUT 120)
+  klogg_set_test_isolation(windows_support_policy_contract)
 endif()
 
 add_test(

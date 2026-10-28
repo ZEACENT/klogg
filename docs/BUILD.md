@@ -38,8 +38,8 @@ To build Klogg:
   confirmed process-group disappearance and preserves private state if cleanup
   remains uncertain. Docker supplies init at runtime; it is not bundled by Klogg.
 - Qt 5 or Qt 6 development libraries. Regular downloaded-Qt CI jobs use Qt
-  6.9.3; Windows x86 compatibility uses Qt 5.15.2, and Linux's instrumented-Qt
-  ThreadSanitizer job uses Qt 5.15.19. Linux distribution builds use their
+  6.9.3; Linux's instrumented-Qt ThreadSanitizer job uses Qt 5.15.19.
+  Windows CI builds are x64-only and use Qt 6. Linux distribution builds use their
   container's Qt packages; see [ci-build.yml](../.github/workflows/ci-build.yml).
   Required modules include:
   - QtCore
@@ -62,7 +62,6 @@ To build the Vectorscan regular expressions backend (default):
 To build installer for Windows:
 
 - nsis to build installer for Windows
-- Precompiled OpenSSL 1.1.x library (only needed for Qt5 builds; Qt6 uses Schannel TLS backend built into Windows)
 
 Building tests:
 
@@ -129,7 +128,9 @@ Install Microsoft Visual Studio 2022 with C++ support (Community edition is fine
 Note: Qt 6.10+ binaries are built with MSVC 2022.
 
 Install a supported Qt version using [online installer](https://www.qt.io/download-qt-installer).
-Make sure to select version matching Visual Studio installation. 64-bit libraries are recommended.
+Select the x64 libraries matching your Visual Studio installation. Windows x86
+(32-bit) builds are no longer supported; the compiler, Qt, and packaged runtime
+must all target x64.
 
 Install CMake from [Kitware](https://cmake.org/download/).
 Use version 3.14 or later.
@@ -168,7 +169,10 @@ CMake should generate `klogg.sln` file in `<path_to_project_root>\build_root` di
 
 Binaries are placed into `build_root/output`.
 
-For https network urls support with Qt6, no additional libraries are required — Qt6 uses the Schannel TLS backend built into Windows. For Qt5 builds, download a precompiled OpenSSL 1.1.x library from https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip and place `libcrypto-1_1*.dll` and `libssl-1_1*.dll` for the desired architecture next to the klogg binaries.
+Qt 6 uses the Schannel TLS backend built into Windows for HTTPS; no separate
+OpenSSL runtime is required. Current Windows CI and release packages use Qt 6.
+Local x64 Qt 5 source builds remain possible, but the former Windows Qt 5
+OpenSSL acquisition workflow is retired and no longer supplies their TLS runtime.
 
 ### Building on Mac OS
 

@@ -1,3 +1,8 @@
+@if not "%KLOGG_ARCH%"=="x64" (
+    echo ERROR: Windows packaging supports only x64. Set KLOGG_ARCH=x64.
+    exit /b 1
+)
+
 echo %KLOGG_QT%
 echo %KLOGG_QT_DIR%
 
@@ -70,14 +75,8 @@ if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\tbb12.dll (
     if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_64_md_relwithdebinfo\tbb12.dll (
         xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_64_md_relwithdebinfo\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
     )
-    if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_32_md_relwithdebinfo\tbb12.dll (
-        xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_32_md_relwithdebinfo\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
-    )
     if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_64_md_relwithdebinfo\tbb12.dll (
         xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_64_md_relwithdebinfo\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
-    )
-    if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_32_md_relwithdebinfo\tbb12.dll (
-        xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_32_md_relwithdebinfo\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
     )
 )
 
@@ -113,8 +112,8 @@ for %%R in (
 
 echo "Copying ssl..."
 if "%KLOGG_QT%"=="Qt5" (
-    xcopy %SSL_DIR%\libcrypto-1_1%SSL_ARCH%.dll %KLOGG_WORKSPACE%\release\ /y
-    xcopy %SSL_DIR%\libssl-1_1%SSL_ARCH%.dll %KLOGG_WORKSPACE%\release\ /y
+    xcopy "%SSL_DIR%\libcrypto-1_1-x64.dll" "%KLOGG_WORKSPACE%\release\" /y
+    xcopy "%SSL_DIR%\libssl-1_1-x64.dll" "%KLOGG_WORKSPACE%\release\" /y
 ) else (
     echo "Qt6: Skipping OpenSSL DLLs (Schannel TLS backend will be used instead)"
 )
