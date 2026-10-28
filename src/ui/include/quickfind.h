@@ -44,7 +44,6 @@
 #include <functional>
 #endif
 
-#include <QFuture>
 #include <QFutureWatcher>
 #include <QObject>
 #include <QPoint>
@@ -53,6 +52,7 @@
 #include "atomicflag.h"
 #include "linetypes.h"
 #include "logsnapshot.h"
+#include "ownedtaskfuture.h"
 #include "qfnotifications.h"
 #include "quickfindpattern.h"
 #include "selection.h"
@@ -126,7 +126,7 @@ class QuickFind : public QObject {
     // Make the object forget the 'no more match' flag.
     void resetLimits();
 
-    bool isSearchRunning() const { return operationWatcher_.isRunning(); }
+    bool isSearchRunning() const { return !operationFuture_.isFinished(); }
     // Owner-thread publication guard: queued completions retain their accepted ID.
     quint64 currentRequestId() const { return requestId_; }
 
@@ -164,6 +164,7 @@ class QuickFind : public QObject {
 
   private Q_SLOTS:
     void sendNotification( QFNotification notification );
+    void deliverNotification( const QString& message );
     void onSearchFutureReady();
 
   private:
@@ -273,8 +274,8 @@ class QuickFind : public QObject {
     void runBeforeLineReadCallbackForTesting();
     std::function<void( const AtomicFlag& )> beforeLineReadCallbackForTesting_;
 #endif
-    QFuture<QuickFindResult> operationFuture_;
-    QFutureWatcher<QuickFindResult> operationWatcher_;
+    klogg::OwnedTaskFuture<QuickFindResult> operationFuture_;
+    QFutureWatcher<void> operationWatcher_;
 };
 
 #endif

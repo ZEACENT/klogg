@@ -794,18 +794,33 @@ TEST_CASE( "Folder snapshots retain canonical matches through source and layout 
 }
 
 TEST_CASE( "Folder snapshots retain zero-match scanned members for marks",
-           "[folder][folder-snapshot]" )
+           "[folder][folder-snapshot][folder-batch-retention]" )
 {
     QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
     const auto path = writeFile( dir, "marks.log", { "first", "marked original" } );
-    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
-    auto matcher = expression.createMatcher();
     FolderSearchResults results;
     QHash<QString, std::set<uint64_t>> marks;
     marks[ path ].insert( 1 );
     results.setMarksStore( &marks );
-    results.beginSearch( { path } );
-    results.addFileGroup( 0, FolderSearchEngine::scanFile( path, *matcher ) );
+    SECTION( "streaming results retain the marked source" )
+    {
+        RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+        auto matcher = expression.createMatcher();
+        results.beginSearch( { path } );
+        results.addFileGroup( 0, FolderSearchEngine::scanFile( path, *matcher ) );
+    }
+    SECTION( "synchronous batch results retain the marked source" )
+    {
+        FolderSearchEngine engine;
+        engine.scanSynchronously( { path }, RegularExpressionPattern{ "ERROR" } );
+        results.setResults( engine.takeResults() );
+        REQUIRE( engine.matchCount() == 0 );
+    }
+    REQUIRE( results.groupCount() == 0 );
+    const auto matches = results.createReadSnapshot( klogg::SnapshotScope::Matches );
+    REQUIRE( matches );
+    REQUIRE( matches->lineCount() == 0_lcount );
     const auto snapshot = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
     REQUIRE( snapshot );
     REQUIRE( snapshot->lineCount() == 1_lcount );

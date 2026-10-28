@@ -119,8 +119,9 @@ class FolderSearchEngine : public QObject {
     quint64 currentGeneration() const noexcept { return generation_.load( std::memory_order_relaxed ); }
     quint64 matchCount() const noexcept { return matchCount_.load( std::memory_order_relaxed ); }
 
-    // Thread-safe: consume accumulated groups in enumeration order. Successful
-    // zero-match members are omitted; retention failures remain explicit.
+    // Thread-safe: consume accumulated groups in enumeration order. Content-bearing
+    // zero-match members retain source leases for marked rows; retention failures
+    // remain explicit.
     std::vector<klogg::folder::FileGroup> takeResults();
 
     // Thread-safe: move out the per-file streaming group for `fileIndex` (the

@@ -39,11 +39,15 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             with self.subTest(phase=phase):
                 self.assertIn('"' + phase + '"', source)
         self.assertNotIn('qputenv( "KLOGG_TEST_TRACE_SEARCH_STARTS"', source)
+        worker = source.index("opThread_ = std::thread(")
+        entry = source.index('traceSearchStart( "worker.entry"', worker)
+        self.assertLess(source.index("operationStarted.release();", worker), entry)
+        self.assertLess(entry, source.index("ScopedLock operationLock( operationsMutex_ )", worker))
+        self.assertLess(entry, source.index("connectSignalsAndRun( operation.get(), request )", worker))
 
     def test_search_start_writer_is_typed_checked_immediate_and_exception_contained(self):
         source = (ROOT / "src/logdata/src/logfiltereddataworker.cpp").read_text()
-        start = source.index("void traceSearchStart(")
-        trace = source[start:source.index("\nstruct PartialSearchResults", start)]
+        trace = self.cpp_function_body(source, "traceSearchStart", preserve_trivia=True)
         self.assertRegex(trace, r"static const bool enabled\s*=\s*qEnvironmentVariableIsSet")
         self.assertRegex(trace, r"if\s*\(\s*!enabled\s*\)\s*\{\s*return;\s*\}")
         disabled_return = trace.index("return;")
@@ -67,6 +71,16 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         self.assertNotRegex(trace, r"\b(?:fprintf|fflush|printf|fputs|sync_with_stdio)\s*\(")
         self.assertNotRegex(trace, r"std::cerr\s*<<|std::cerr\.(?:flags|imbue|exceptions|tie|setf)\s*\(")
         self.assertNotIn("NOLINT", trace)
+
+    def test_trace_writer_extraction_excludes_neighbors_but_retains_own_suppressions(self):
+        writer = 'void traceSearchStart()\n{\n    write( "}" );\n}\n'
+        neighbor = 'class Drain {\n    // NOLINTNEXTLINE(bugprone-empty-catch)\n};\n'
+        trace = self.cpp_function_body(writer + neighbor, "traceSearchStart", preserve_trivia=True)
+        self.assertEqual(trace, '{\n    write( "}" );\n}')
+        self.assertNotIn("NOLINT", trace)
+        suppressed = writer.replace('    write(', '    // NOLINTNEXTLINE\n    write(')
+        self.assertIn("NOLINT", self.cpp_function_body(
+            suppressed + neighbor, "traceSearchStart", preserve_trivia=True))
 
     def test_search_start_behavior_has_isolated_fresh_process_native_coverage(self):
         units = (ROOT / "tests/unit/CMakeLists.txt").read_text()
@@ -396,7 +410,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         self.assertIn("RemoveVectoredExceptionHandler", source)
         self.assertIn("__finally", source)
 
-    def cpp_function_body(self, source, name):
+    def cpp_function_body(self, source, name, *, preserve_trivia=False):
         code = self.cpp_code(source)
         definitions = list(re.finditer(r"^[ \t]*(?:\[\[noreturn\]\]\s+)?(?:inline\s+)?"
                                        r"(?:void|bool|int|Outcome|DiagnosticObservation)\s+" + re.escape(name)
@@ -408,7 +422,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         for index in range(start, len(code)):
             depth += (code[index] == "{") - (code[index] == "}")
             if depth == 0:
-                return code[start:index + 1]
+                return (source if preserve_trivia else code)[start:index + 1]
         self.fail("unterminated function " + name)
 
     def assert_first_error_contract(self, protocol, collector):

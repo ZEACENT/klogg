@@ -172,8 +172,12 @@ TEST_CASE( "Indexed content leases retain exact bytes with bounded resident stor
         REQUIRE_THROWS_AS( second->lineEnds( 2_lnum, 2_lcount ), IndexedContentError );
         REQUIRE( second->spillFileNamesForTesting() == spillNames );
         qint64 spillBytes = 0;
-        for ( const auto& entry : QDir( temporary.path() ).entryInfoList( QDir::Files ) ) {
-            spillBytes += entry.size();
+        for ( const auto& spillName : spillNames ) {
+            // NTFS directory entries can retain stale sizes while the writer is
+            // open. Query an open handle instead of directory enumeration metadata.
+            QFile spill( spillName );
+            REQUIRE( spill.open( QIODevice::ReadOnly ) );
+            spillBytes += spill.size();
         }
         // Ten byte-exact payload bytes plus two eight-byte real boundaries.
         REQUIRE( spillBytes == 26 );

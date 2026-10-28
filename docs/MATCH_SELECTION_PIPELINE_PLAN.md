@@ -871,3 +871,58 @@ commands, source digest and environment identifiers are recorded here.
   or fails before dispatch.
 - The 33 ms refresh policy is unchanged. The dense-row measurements above are
   observations, not a claim that every 40,000-fragment frame fits a 33 ms budget.
+
+### PR #85 review and CI follow-up (2026-10-28)
+
+- Batch folder-result transfer now preserves retained sources for zero-match files,
+  matching streaming transfer. Marked-row snapshots remain readable after source
+  deletion without adding canonical matches or visible matching groups.
+- Filter presentation contains retained-source read failures at its text/color
+  boundary. Snapshot consumers still receive `SnapshotError`; an unavailable row
+  is not fabricated as warning text. The focused regression covers text, expanded
+  text, length, ANSI colors, batch reads, and strict snapshot failure.
+- Windows retention fixtures query open-file handle sizes instead of potentially
+  stale NTFS directory metadata, and remove temporary files through their owning
+  `QTemporaryFile` before proving retained snapshots survive source deletion.
+  Exact storage bounds and child-destruction assertions remain enforced. Portable
+  source-mutation checks guard these fixture contracts on non-Windows hosts.
+- Restore the worker-entry diagnostic lost during dispatch unification. Update
+  structural tests for shared Quick Find submission and scope the trace-writer
+  assertion to the function rather than a neighboring class.
+- Replace Quick Find's cross-thread notification functor with a receiver-bound
+  named queued slot carrying a built-in Qt string value. The first-party macOS
+  TSan job reported the functor's publication through uninstrumented Qt. Preserve
+  queued owner-thread delivery and cancellation on receiver destruction without
+  adding sanitizer suppressions. Characterization tests cover both owner-side
+  acquisition failures and worker-side read failures.
+- A subsequent native TSan run exposed the same uninstrumented handoff at a
+  `QtConcurrent` task vtable. Quick Find, extraction, and serialization now share
+  an owned-task bridge: the existing bounded Qt pool schedules work, a C++ mutex
+  publishes task construction, and standard futures synchronize results and
+  exceptions. Qt transports only the completion event. Cancellation, pool limits,
+  and owner teardown waits are preserved; no extra unbounded thread pool or
+  sanitizer suppression was introduced.
+- Defer the optional removal of three obsolete cppcheck suppressions: those bytes
+  are part of the authenticated analysis-environment policy. Removing them without
+  genuine requalification rejected Static analysis, Coverage, and CodeQL before
+  execution. No lock, receipt, signature, or integrity check was weakened. The
+  existing compatibility test now runs first in `scripts/run_ci_quality.py`.
+
+The initial local acceptance omitted the complete Python quality gate and used
+analysis tools without the authenticated environment consumer. The required
+follow-up entry point is `python3 scripts/run_ci_quality.py`; direct native tests
+or analyzer runs are not a substitute for that gate. Focused review regressions
+were observed failing before the fixes and passing afterward.
+
+Final follow-up runtime acceptance uses macOS Qt 6.10.1 with the fallback regex
+backend: native, ASan/UBSan, and first-party TSan each passed all 38 CTest entries.
+ASan initially hit an ADB helper startup timeout in an unchanged fixture, without
+an ASan/UBSan report; that case passed 53 assertions alone, then the entire 38-entry
+ASan suite passed again. The initial timeout is not claimed as a passing run.
+The owned-task bridge also compiled and executed with native Qt5 and the locked
+Linux GCC/Qt5 image. Changed-line clang-tidy and locked cppcheck on the new bridge
+passed. Optimized best-of-three performance remained 196 ms for selecting/copying
+40,000 fragments, with dense paint at approximately 22 ms unwrapped and 87 ms
+wrapped. The complete quality gate passed all lint stages and 2,607 Python tests
+(with 10 existing platform/tool-dependent skips). Windows runtime confirmation
+remains a hosted-CI responsibility.

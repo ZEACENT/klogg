@@ -47,7 +47,6 @@
 #endif
 
 #include <QMetaObject>
-#include <QtConcurrent>
 
 #include <exception>
 
@@ -203,7 +202,7 @@ QuickFind::QuickFind( const AbstractLogData& logData )
              Qt::DirectConnection );
 
     qRegisterMetaType<QuickFindResult>();
-    connect( &operationWatcher_, &QFutureWatcher<QuickFindResult>::finished, this,
+    connect( &operationWatcher_, &QFutureWatcher<void>::finished, this,
              &QuickFind::onSearchFutureReady );
 }
 
@@ -239,7 +238,7 @@ Selection QuickFind::incrementalSearchAbort()
 void QuickFind::interruptAndWait()
 {
     interruptRequested_.set();
-    operationWatcher_.waitForFinished();
+    operationFuture_.waitForFinished();
 }
 
 #if defined( KLOGG_ASAN_BUILD )
@@ -368,7 +367,7 @@ void QuickFind::startSearch( QFDirection direction, const FilePosition& startPos
     }
 
     interruptRequested_.clear();
-    operationFuture_ = QtConcurrent::run(
+    operationFuture_ = klogg::runOwnedTask(
         [ this, snapshot = std::move( snapshot ), startPosition, selection = selection,
           matcher = matcher, direction, requestId ] {
             QuickFindResult result;
@@ -389,7 +388,7 @@ void QuickFind::startSearch( QFDirection direction, const FilePosition& startPos
             result.requestId = requestId;
             return result;
         } );
-    operationWatcher_.setFuture( operationFuture_ );
+    operationWatcher_.setFuture( operationFuture_.completion() );
 }
 
 QuickFindResult QuickFind::doSearchForward( const klogg::LogSnapshot& snapshot,
@@ -497,6 +496,13 @@ void QuickFind::resetLimits()
 
 void QuickFind::sendNotification( QFNotification notification )
 {
-    QMetaObject::invokeMethod(
-        this, [ this, notification ] { Q_EMIT notify( notification ); }, Qt::QueuedConnection );
+    // Keep cross-thread ownership in Qt's value-argument queue, not a functor
+    // whose publication through uninstrumented Qt is invisible to first-party TSan.
+    QMetaObject::invokeMethod( this, "deliverNotification", Qt::QueuedConnection,
+                               Q_ARG( QString, notification.message() ) );
+}
+
+void QuickFind::deliverNotification( const QString& message )
+{
+    Q_EMIT notify( QFNotification{ message } );
 }

@@ -19,7 +19,7 @@
 #include <QTest>
 #include <QSemaphore>
 #include <QThreadPool>
-#include <QtConcurrent>
+#include "ownedtaskfuture.h"
 
 #include "abstractlogview.h"
 #include "containers.h"
@@ -241,11 +241,11 @@ struct WorkerGate {
     int previousThreads = pool->maxThreadCount();
     QSemaphore entered;
     QSemaphore release;
-    QFuture<void> worker;
+    klogg::OwnedTaskFuture<void> worker;
     WorkerGate()
     {
         pool->setMaxThreadCount( 1 );
-        worker = QtConcurrent::run( [ this ] {
+        worker = klogg::runOwnedTask( [ this ] {
             entered.release();
             release.acquire();
         } );

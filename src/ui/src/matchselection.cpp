@@ -3,7 +3,6 @@
 #include <QFutureWatcher>
 #include <QProgressDialog>
 #include <QTimer>
-#include <QtConcurrent>
 #include <algorithm>
 #include <exception>
 
@@ -138,11 +137,12 @@ void AbstractLogView::continueMatchSelection( quint64 generation )
     if ( !matchSelection_ || generation != matchSelectionGeneration_ ) {
         return;
     }
+    const auto future = std::make_shared<klogg::OwnedTaskFuture<klogg::MatchSelectionStep>>();
     // QObject parent owns the watcher until its deferred deletion.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
-    auto* watcher = new QFutureWatcher<klogg::MatchSelectionStep>( this );
-    connect( watcher, &QFutureWatcher<klogg::MatchSelectionStep>::finished, this,
-             [ this, watcher, generation ] {
+    auto* watcher = new QFutureWatcher<void>( this );
+    connect( watcher, &QFutureWatcher<void>::finished, this,
+             [ this, watcher, future, generation ] {
         watcher->deleteLater();
         matchSelectionWorkers_.erase(
             std::remove_if( matchSelectionWorkers_.begin(), matchSelectionWorkers_.end(),
@@ -152,7 +152,7 @@ void AbstractLogView::continueMatchSelection( quint64 generation )
             return;
         }
         try {
-            const auto step = watcher->result();
+            const auto step = future->result();
             if ( step.outcome == klogg::MatchSelectionStep::Outcome::Failed ) {
                 LOG_ERROR << "Match selection failed: " << step.error;
                 finishMatchSelection( false );
@@ -198,12 +198,11 @@ void AbstractLogView::continueMatchSelection( quint64 generation )
             finishMatchSelection( false );
         }
     } );
-    QFuture<klogg::MatchSelectionStep> future;
     if ( matchSelection_->serializing ) {
         const auto payload = matchSelection_->result;
         const auto cancelled = matchSelection_->cancelled;
         const auto numbered = matchSelection_->withLineNumbers;
-        future = QtConcurrent::run( [ payload, cancelled, numbered ] {
+        *future = klogg::runOwnedTask( [ payload, cancelled, numbered ] {
             klogg::MatchSelectionStep step;
             step.withLineNumbers = numbered;
             try {
@@ -226,10 +225,10 @@ void AbstractLogView::continueMatchSelection( quint64 generation )
     }
     else {
         const auto job = matchSelection_->job;
-        future = QtConcurrent::run( [ job ] { return job->step(); } );
+        *future = klogg::runOwnedTask( [ job ] { return job->step(); } );
     }
-    matchSelectionWorkers_.push_back( future );
-    watcher->setFuture( future );
+    matchSelectionWorkers_.push_back( *future );
+    watcher->setFuture( future->completion() );
 }
 
 void AbstractLogView::finishMatchSelection( bool completed )

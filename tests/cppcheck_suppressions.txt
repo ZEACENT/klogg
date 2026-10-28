@@ -1,10 +1,13 @@
 redundantInitialization:*/src/settings/src/styles.cpp:719
 shadowFunction:*/src/settings/src/shortcuts.cpp:120
 functionStatic:*/src/regex/src/hsregularexpression.cpp:191
+noExplicitConstructor:*/src/regex/include/hsregularexpression.h:82
 returnByReference:*/src/regex/include/regularexpressionpattern.h:58
 returnByReference:*/src/settings/include/configuration.h:601
 returnByReference:*/src/settings/include/configuration.h:689
 returnByReference:*/src/regex/include/booleanevaluator.h:37
+variableScope:*/src/regex/src/regularexpression.cpp:88
+unreadVariable:*/src/regex/src/regularexpression.cpp:88
 assignBoolToFloat:*/src/regex/src/booleanevaluator.cpp:73
 functionStatic:*/src/logdata/src/encodingdetector.cpp:93
 useStlAlgorithm:*/src/ui/include/devicelistprovider.h:86

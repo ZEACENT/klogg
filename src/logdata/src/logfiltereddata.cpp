@@ -1099,8 +1099,13 @@ QString LogFilteredData::doGetLineString( LineNumber index ) const
 {
     if ( presentedSource_ ) {
         const auto line = getMatchingLineNumber( index );
-        return line < presentedSource_->lineCount()
-            ? presentedSource_->lineString( line ) : QString{};
+        if ( line >= presentedSource_->lineCount() ) return {};
+        try {
+            return presentedSource_->lineString( line );
+        } catch ( const klogg::SnapshotError& error ) {
+            LOG_ERROR << "Cannot read presented row: " << error.what();
+            return {};
+        }
     }
     // Safety check: if sourceLogData_ is null (object being destroyed), return empty string
     if ( !sourceLogData_ ) {
@@ -1163,8 +1168,13 @@ klogg::vector<AnsiColorSpan> LogFilteredData::doGetLineAnsiColors( LineNumber in
     if ( presentedSource_ ) {
         const auto line = getMatchingLineNumber( index );
         if ( line >= presentedSource_->lineCount() ) return {};
-        auto colors = presentedSource_->getLinesRaw( line, 1_lcount ).decodeLineAnsiColors();
-        return colors.empty() ? klogg::vector<AnsiColorSpan>{} : std::move( colors.front() );
+        try {
+            auto colors = presentedSource_->getLinesRaw( line, 1_lcount ).decodeLineAnsiColors();
+            return colors.empty() ? klogg::vector<AnsiColorSpan>{} : std::move( colors.front() );
+        } catch ( const klogg::SnapshotError& error ) {
+            LOG_ERROR << "Cannot read presented row colors: " << error.what();
+            return {};
+        }
     }
     if ( !sourceLogData_ ) {
         return {};

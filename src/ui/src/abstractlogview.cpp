@@ -456,7 +456,7 @@ void AbstractLogView::stopSearchAndWait()
         worker.waitForFinished();
     }
     matchSelectionWorkers_.clear();
-    // Interrupt and join the QuickFind QThreadPool worker (stopSearch ->
+    // Interrupt and join the owned QuickFind task (stopSearch ->
     // interruptAndWait -> waitForFinished). Public so a host can join the worker
     // before the view's AbstractLogData source is destroyed, when the view
     // (deleted later as a Qt child) would otherwise outlive its data.

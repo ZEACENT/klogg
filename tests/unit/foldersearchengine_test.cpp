@@ -315,7 +315,8 @@ TEST_CASE( "FolderSearchEngine aggregates multiple files by file then line", "[f
     REQUIRE( engine.matchCount() == 3 );
 }
 
-TEST_CASE( "FolderSearchEngine drops files with no matches", "[folder]" )
+TEST_CASE( "FolderSearchEngine retains zero-match sources in batch results",
+           "[folder][folder-snapshot][folder-batch-retention]" )
 {
     QTemporaryDir dir;
     REQUIRE( dir.isValid() );
@@ -326,8 +327,17 @@ TEST_CASE( "FolderSearchEngine drops files with no matches", "[folder]" )
     engine.scanSynchronously( QStringList{ aPath, bPath }, RegularExpressionPattern( "MATCH" ) );
     const auto results = engine.takeResults();
 
-    REQUIRE( results.size() == 1 );
+    REQUIRE( results.size() == 2 );
     REQUIRE( results[ 0 ].filePath == aPath );
+    REQUIRE( results[ 0 ].matches.size() == 1 );
+    REQUIRE( results[ 1 ].filePath == bPath );
+    REQUIRE( results[ 1 ].matches.empty() );
+    REQUIRE( results[ 1 ].content );
+    REQUIRE( results[ 1 ].content->readLine( 0_lnum, "UTF-8" ) == "nothing here" );
+    REQUIRE( engine.matchCount() == 1 );
+    REQUIRE( engine.takeResults().empty() );
+    REQUIRE_FALSE( engine.takeCompletedGroup( 0 ) );
+    REQUIRE_FALSE( engine.takeCompletedGroup( 1 ) );
 }
 
 TEST_CASE( "FolderSearchEngine emits searchStarted and searchFinished", "[folder]" )

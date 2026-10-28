@@ -538,7 +538,10 @@ TEST_CASE( "Concatenated snapshots outlive their owner and all child log objects
     source.attached = false;
     source.logData.reset();
     REQUIRE( child.expired() );
-    REQUIRE( QFile::remove( source.filePath ) );
+    // QTemporaryFile::close() retains its native handle, without delete sharing
+    // on Windows. Remove through the owning object to release that handle first.
+    REQUIRE( source.file.remove() );
+    REQUIRE_FALSE( QFileInfo::exists( source.filePath ) );
     REQUIRE( snapshot->lineString( 0_lnum ) == "owned bytes" );
     REQUIRE( snapshot->lineString( 1_lnum ) == "still readable" );
     const auto identity = snapshot->row( 1_lnum ).identity;

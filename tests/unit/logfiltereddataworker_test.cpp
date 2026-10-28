@@ -220,6 +220,7 @@ public:
                  LineNumber{ index.get() + 1 }, true, false };
     }
     qint64 byteSize() const override { return 0; }
+    void failReads() { failRead_ = true; }
     SearchableLogData::RawLines getLinesRaw( LineNumber first, LinesCount count ) const override
     {
         if ( gate_ ) gate_->beforeRead( first );
@@ -683,6 +684,33 @@ private:
                               nullptr };
     }
 };
+
+TEST_CASE( "Filtered presentation contains retained source read failures without weakening snapshots",
+           "[filtered-snapshot][filtered-presentation-failure]" )
+{
+    SnapshotSearchConfiguration configuration;
+    SnapshotSearchSource source;
+    const auto retained = std::make_shared<FrozenSearchRows>(
+        QStringList{ QStringLiteral( "ERROR retained" ) } );
+    source.version = retained;
+    LogFilteredData filtered{ &source };
+    filtered.runSearch( RegularExpressionPattern{ QStringLiteral( "ERROR" ) } );
+    finishFilteredSearch( filtered );
+    LogFilteredData::access_by<LogFilteredDataSnapshotPrivate>::waitForDone( filtered );
+    const auto matches = filtered.createReadSnapshot( klogg::SnapshotScope::Matches );
+    REQUIRE( matches );
+    REQUIRE( filtered.getLineString( 0_lnum ) == QStringLiteral( "ERROR retained" ) );
+
+    // Retained storage can fail after successful search (for example, a truncated spill).
+    retained->failReads();
+    CHECK( filtered.getLineString( 0_lnum ).isEmpty() );
+    CHECK( filtered.getExpandedLineString( 0_lnum ).isEmpty() );
+    CHECK( filtered.getLineLength( 0_lnum ) == 0_length );
+    CHECK( filtered.getLineAnsiColors( 0_lnum ).empty() );
+    CHECK( filtered.getLines( 0_lnum, 1_lcount ) == klogg::vector<QString>{ QString{} } );
+    CHECK( filtered.getExpandedLines( 0_lnum, 1_lcount ) == klogg::vector<QString>{ QString{} } );
+    CHECK_THROWS_AS( matches->lineString( 0_lnum ), klogg::SnapshotError );
+}
 
 TEST_CASE( "Completed filtered snapshots retain source text and canonical matches",
            "[filtered-snapshot]" )

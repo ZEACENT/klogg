@@ -63,6 +63,7 @@
 #include "linetypes.h"
 #include "markprovider.h"
 #include "overviewwidget.h"
+#include "ownedtaskfuture.h"
 #include "quickfind.h"
 #include "matchprojection.h"
 #include "matchselectionjob.h"
@@ -546,7 +547,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     };
     std::unique_ptr<MatchSelection> matchSelection_;
     klogg::LogSnapshot::Ptr matchSelectionPresentation_;
-    std::vector<QFuture<klogg::MatchSelectionStep>> matchSelectionWorkers_;
+    std::vector<klogg::OwnedTaskFuture<klogg::MatchSelectionStep>> matchSelectionWorkers_;
     quint64 matchSelectionGeneration_ = 0;
     bool acceptQuickFindResults_ = true;
 

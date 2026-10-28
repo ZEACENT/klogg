@@ -27,12 +27,15 @@
 #include <atomic>
 #include <memory>
 #include <set>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "abstractlogdata.h"
 #include "containers.h"
 #include "highlighterset.h"
 #include "logsnapshot.h"
+#include "ownedtaskfuture.h"
 #include "quickfind.h"
 #include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
@@ -580,6 +583,49 @@ TEST_CASE( "Shared query options preserve literal escaping and whole-word bounda
     }
 }
 
+TEST_CASE( "Owned tasks synchronize results and exceptions before owner consumption",
+           "[owned-task-future]" )
+{
+    const auto owner = std::this_thread::get_id();
+    const bool fail = GENERATE( false, true );
+    auto task = klogg::runOwnedTask( [ owner, fail ] {
+        if ( fail ) throw std::runtime_error{ "Injected task failure" };
+        return std::this_thread::get_id() != owner;
+    } );
+    QFutureWatcher<void> watcher;
+    SafeQSignalSpy completed{ &watcher, &QFutureWatcher<void>::finished };
+    watcher.setFuture( task.completion() );
+    REQUIRE( completed.safeWait( 5000 ) );
+    task.waitForFinished();
+    REQUIRE( task.isFinished() );
+    if ( fail ) {
+        REQUIRE_THROWS_AS( task.result(), std::runtime_error );
+    }
+    else {
+        REQUIRE( task.result() );
+    }
+}
+
+TEST_CASE( "Quick Find discards queued notifications when their receiver is destroyed",
+           "[quickfind-snapshot][quickfind-notification]" )
+{
+    NavigationData source;
+    source.failAcquisition = true;
+    QuickFindPattern pattern;
+    pattern.changeSearchPattern( QStringLiteral( "accepted" ) );
+    QObject receiver;
+    int delivered = 0;
+    auto finder = std::make_unique<QuickFind>( source );
+    QObject::connect( finder.get(), &QuickFind::notify, &receiver,
+                      [ & ]( const QFNotification& ) { ++delivered; }, Qt::DirectConnection );
+    finder->searchForward( Selection{}, pattern.getMatcher() );
+    finder->stopSearch();
+    REQUIRE( delivered == 0 );
+    finder.reset();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    REQUIRE( delivered == 0 );
+}
+
 TEST_CASE( "Quick Find rejects unavailable snapshots without mutable fallback",
            "[quickfind-snapshot]" )
 {
@@ -592,8 +638,21 @@ TEST_CASE( "Quick Find rejects unavailable snapshots without mutable fallback",
     QuickFind finder{ source };
     SearchCleanup cleanup{ finder, {} };
     SafeQSignalSpy completed{ &finder, &QuickFind::searchDone };
+    QStringList notifications;
+    bool notifiedOnOwnerThread = true;
+    QObject::connect( &finder, &QuickFind::notify, &finder,
+                      [ & ]( const QFNotification& notification ) {
+                          notifiedOnOwnerThread = notifiedOnOwnerThread
+                              && QThread::currentThread() == finder.thread();
+                          notifications.push_back( notification.message() );
+                      }, Qt::DirectConnection );
     REQUIRE_NOTHROW( finder.searchForward( Selection{}, pattern.getMatcher() ) );
+    REQUIRE( notifications.empty() ); // Owner-thread errors are queued too.
     REQUIRE_FALSE( takeResult( completed ).found );
+    QCoreApplication::sendPostedEvents( &finder, QEvent::MetaCall );
+    REQUIRE( notifications.size() == 1 );
+    REQUIRE( notifications.front().startsWith( QStringLiteral( "Quick Find" ) ) );
+    REQUIRE( notifiedOnOwnerThread );
     REQUIRE( source.observations->acquisitions.load() == 1 );
     REQUIRE( source.observations->mutableReads.load() == 0 );
 }

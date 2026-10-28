@@ -165,7 +165,8 @@ std::vector<klogg::folder::FileGroup> FolderSearchEngine::takeResults()
     std::lock_guard<std::mutex> lock( resultsMutex_ );
     std::vector<klogg::folder::FileGroup> out;
     for ( auto& group : pending_ ) {
-        if ( group && ( !group->matches.empty() || !group->retentionError.isEmpty() ) ) {
+        if ( group && ( !group->matches.empty() || group->content
+                        || !group->retentionError.isEmpty() ) ) {
             out.push_back( std::move( *group ) );
         }
         group.reset();

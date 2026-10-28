@@ -32,6 +32,16 @@ class RunCiQualityTest(unittest.TestCase):
         self.assertEqual(
             commands,
             [
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests/scripts",
+                    "-p",
+                    "test_ci_reuse_lock_compatibility.py",
+                ],
                 [sys.executable, "scripts/lint_repo_hygiene.py"],
                 [sys.executable, "scripts/lint_platform_fragile.py"],
                 [sys.executable, "scripts/lint_test_determinism.py"],
@@ -51,6 +61,18 @@ class RunCiQualityTest(unittest.TestCase):
             ],
         )
 
+    def test_incompatible_environment_stops_before_lints_and_full_discovery(self) -> None:
+        def run(command: list[str], **_: object) -> Result:
+            return Result(returncode=1 if command[-1] == "test_ci_reuse_lock_compatibility.py" else 0)
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=run) as runner:
+            result = MODULE.run_quality_checks(ROOT)
+
+        self.assertEqual(result["returncode"], 1)
+        self.assertEqual(len(result["checks"]), 1)
+        runner.assert_called_once()
+        self.assertEqual(runner.call_args.args[0][-1], "test_ci_reuse_lock_compatibility.py")
+
     def test_failure_is_fail_fast_and_propagated(self) -> None:
         calls: list[list[str]] = []
 
@@ -67,12 +89,13 @@ class RunCiQualityTest(unittest.TestCase):
 
     def test_json_output_contains_repository_identity_and_durations(self) -> None:
         completed = Result()
+        command_count = len(MODULE.quality_commands(ROOT))
         with mock.patch.object(
             MODULE, "repository_identity", return_value=("a" * 40, True)
         ), mock.patch.object(
             MODULE.subprocess, "run", return_value=completed
         ), mock.patch.object(
-            MODULE.time, "monotonic", side_effect=[1.0, 1.25] * 7
+            MODULE.time, "monotonic", side_effect=[1.0, 1.25] * command_count
         ), mock.patch.object(sys, "argv", [str(SCRIPT), "--json"]):
             output = io.StringIO()
             with redirect_stdout(output):
@@ -82,7 +105,7 @@ class RunCiQualityTest(unittest.TestCase):
         self.assertEqual(returncode, 0)
         self.assertEqual(payload["commit"], "a" * 40)
         self.assertIs(payload["dirty"], True)
-        self.assertEqual(len(payload["checks"]), 7)
+        self.assertEqual(len(payload["checks"]), command_count)
         self.assertTrue(all(check["durationSeconds"] == 0.25 for check in payload["checks"]))
 
 

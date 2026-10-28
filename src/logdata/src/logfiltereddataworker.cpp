@@ -614,6 +614,8 @@ void LogFilteredDataWorker::dispatchLoop()
             std::lock_guard<std::mutex> opLock( opThreadMutex_ );
             opThread_ = std::thread( [ this, &operationStarted, request ] {
                 operationStarted.release();
+                traceSearchStart( "worker.entry", request.generation, request.operationId,
+                                  static_cast<int>( request.type ) );
                 ScopedLock operationLock( operationsMutex_ );
                 if ( request.generation != operationGeneration_.load()
                      || request.operationId != operationId_.load()
