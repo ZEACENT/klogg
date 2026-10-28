@@ -59,8 +59,8 @@ private:
 class IndexedContentBuilder {
 public:
     struct Options {
-        size_t byteMemoryBudget = 8 * 1024 * 1024;
-        size_t boundaryMemoryBudget = 1024 * 1024;
+        size_t byteMemoryBudget = size_t{ 8 } * 1024 * 1024;
+        size_t boundaryMemoryBudget = size_t{ 1024 } * 1024;
         QString temporaryDirectory;
     };
 

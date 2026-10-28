@@ -10,6 +10,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -55,7 +56,17 @@ auto runOwnedTask( Function function ) -> OwnedTaskFuture<std::invoke_result_t<F
     using Result = std::invoke_result_t<Function>;
     struct Task final : QRunnable {
         Task( Function taskFunction, QFutureInterface<void> notification )
-            : function( std::move( taskFunction ) ), completion( std::move( notification ) ) {}
+            : function( [ callable = std::optional<Function>( std::move( taskFunction ) ) ]() mutable
+                            -> Result {
+                  // Capture teardown belongs to completion, including on failure.
+                  // The shared future may outlive both the work and its receiver.
+                  struct ReleaseCapture {
+                      std::optional<Function>& callable;
+                      ~ReleaseCapture() { callable.reset(); }
+                  } release{ callable };
+                  return ( *callable )();
+              } )
+            , completion( std::move( notification ) ) {}
 
         void run() override
         {

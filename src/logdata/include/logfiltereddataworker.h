@@ -384,7 +384,7 @@ private:
         OperationGeneration generation;
         OperationId operationId;
         std::shared_ptr<RegularExpression> compiled;
-        SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = {};
+        SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = nullptr;
         quint64 requestTicket = 0;
     };
 

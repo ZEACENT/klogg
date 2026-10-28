@@ -583,21 +583,38 @@ TEST_CASE( "Shared query options preserve literal escaping and whole-word bounda
     }
 }
 
-TEST_CASE( "Owned tasks synchronize results and exceptions before owner consumption",
+TEST_CASE( "Owned tasks release captures before publishing results or exceptions",
            "[owned-task-future]" )
 {
     const auto owner = std::this_thread::get_id();
     const bool fail = GENERATE( false, true );
-    auto task = klogg::runOwnedTask( [ owner, fail ] {
+    const auto gate = std::make_shared<ReadGate>();
+    struct CapturedPayload {
+        std::shared_ptr<ReadGate> destruction;
+        ~CapturedPayload() { destruction->pause(); }
+    };
+    auto payload = std::make_shared<CapturedPayload>();
+    payload->destruction = gate;
+    std::weak_ptr<CapturedPayload> retained = payload;
+    auto task = klogg::runOwnedTask( [ owner, fail, payload = std::move( payload ) ] {
         if ( fail ) throw std::runtime_error{ "Injected task failure" };
-        return std::this_thread::get_id() != owner;
+        return payload && std::this_thread::get_id() != owner;
     } );
+    struct Cleanup {
+        std::shared_ptr<ReadGate> gate;
+        klogg::OwnedTaskFuture<bool>& task;
+        ~Cleanup() { gate->resume.release(); task.waitForFinished(); }
+    } cleanup{ gate, task };
     QFutureWatcher<void> watcher;
     SafeQSignalSpy completed{ &watcher, &QFutureWatcher<void>::finished };
     watcher.setFuture( task.completion() );
+    REQUIRE( gate->entered.tryAcquire( 1, 5000 ) );
+    CHECK_FALSE( task.isFinished() );
+    gate->resume.release();
     REQUIRE( completed.safeWait( 5000 ) );
     task.waitForFinished();
     REQUIRE( task.isFinished() );
+    CHECK( retained.expired() );
     if ( fail ) {
         REQUIRE_THROWS_AS( task.result(), std::runtime_error );
     }

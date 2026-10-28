@@ -264,8 +264,9 @@ void AbstractLogView::finishMatchSelection( bool completed )
         operation->progress->deleteLater();
     }
     const QPointer<AbstractLogView> guard{ this };
-    if ( completed && operation->clipboard ) {
-        sendTextToClipboard( std::move( *operation->clipboard ), true );
+    auto& clipboard = operation->clipboard;
+    if ( completed && clipboard.has_value() ) {
+        sendTextToClipboard( std::move( *clipboard ), true );
     }
     if ( guard ) {
         Q_EMIT matchSelectionFinished( completed );

@@ -82,9 +82,10 @@ public:
         : data_( data )
         , guard_( data->dataMutex_ )
     {
-        // The lease is destroyed after guard_, so clearing the last published
-        // snapshot cannot delete a spill file while holding the index mutex.
-        contentLease_ = data_->contentSnapshot_;
+        // Copy the lease only after guard_ locks. The lease is destroyed after
+        // guard_, so clearing the last published snapshot cannot delete a spill
+        // file while holding the index mutex.
+        IndexedContentSnapshot::Ptr{ data_->contentSnapshot_ }.swap( contentLease_ );
     }
 
     ~IndexingDataAccessor() = default;
