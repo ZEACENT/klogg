@@ -202,7 +202,7 @@ class VectorscanParallelMatrixTest(unittest.TestCase):
 
         # The direct exhaustive-vs-avx2 leg keeps an empty sanitizer value,
         # while the direct ASan leg opts into address instrumentation.
-        avx2_block = ci[ci.index("  WindowsPackages:") : ci.index("  WindowsX86:")]
+        avx2_block = ci[ci.index("  WindowsPackages:") : ci.index("  WindowsAsan:")]
         asan_block = ci[ci.index("  WindowsAsan:") : ci.index("  ci-gate:")]
         self.assertIn('KLOGG_SANITIZER: ""', avx2_block)
         self.assertIn("KLOGG_SANITIZER: address", asan_block)

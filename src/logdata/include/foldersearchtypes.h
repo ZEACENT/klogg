@@ -23,6 +23,7 @@
 #include <QString>
 #include <vector>
 
+#include "folderscanarena.h"
 #include "linekind.h"
 #include "linetypes.h"
 
@@ -59,16 +60,14 @@ struct ContextOptions {
 
 // One matched line, as captured by the streaming search engine.
 //
-// Storage is deliberately offset-based rather than holding the line text: the
-// engine streams file bytes and records the byte offset of each match for free,
-// so a result set of N matches costs ~N * sizeof(MatchRecord) bytes (not N line
-// texts). FolderSearchResults fetches the visible line text on demand by
-// seeking to lineStartByte and reading to the next newline.
+// Records remain offset-based rather than retaining decoded strings. The source
+// lease owns the scan's immutable raw bytes in a scan-wide bounded/spilled arena;
+// visible text is decoded on demand from these exact byte ranges.
 struct MatchRecord {
     // 0-based line number within the source file (1-based display adds +1).
     LineNumber localLine = 0_lnum;
     // Byte range of the matched line in the source file: [lineStartByte, lineEndByte).
-    // lineEndByte sits on the trailing newline (or at EOF). Lets the results
+    // lineEndByte sits after the trailing newline (or at EOF). Lets the results
     // model fetch the exact line text by a single bounded seek+read, with no
     // newline scanning at display time.
     OffsetInFile lineStartByte = 0_offset;
@@ -83,8 +82,8 @@ struct MatchRecord {
     RecordRole role = RecordRole::Match;
 };
 
-// All matches from one source file. Files with zero matches are never emitted
-// (they are hidden from results), so every FileGroup has matches.size() >= 1.
+// A scanned source member. Zero-match groups have no result header, but their
+// immutable content is retained by streaming consumers for marked source rows.
 struct FileGroup {
     QString filePath;
     // Flat, sorted by localLine ascending, deduplicated; holds Match AND Context
@@ -97,6 +96,12 @@ struct FileGroup {
     // UTF-8/ASCII (the common fast path). Qt owns codec singletons, so a raw
     // pointer is safe (matches IndexingData in logdataworker.h).
     QTextCodec* sourceCodec = nullptr;
+    // Immutable bytes consumed by this scan, including zero-match members used
+    // by marks. FileId is presentation-only; this lease owns the stable identity.
+    ScannedFileContent::Ptr content;
+    // A storage failure must not turn a scanned member into a successful empty
+    // result. Consumers reject snapshot acquisition even if no match was found.
+    QString retentionError;
 };
 
 // Resolves a visible result row back to its origin (used by the filtered view

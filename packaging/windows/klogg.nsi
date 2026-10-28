@@ -6,7 +6,13 @@
 !endif
 
 !ifndef PLATFORM
-    !define PLATFORM 'unknown'
+    !error "Windows packaging requires PLATFORM=x64."
+!endif
+!if "${PLATFORM}" != "x64"
+    !error "Windows packaging supports only x64."
+!endif
+!ifdef ARCH32
+    !error "ARCH32 is no longer supported. Windows packaging requires x64."
 !endif
 
 !ifndef QT_MAJOR
@@ -25,11 +31,7 @@ XpStyle on
 SetCompressor /SOLID lzma
 
 ; Registry key to keep track of the directory we are installed in
-!ifdef ARCH32
-  InstallDir "$PROGRAMFILES\klogg"
-!else
-  InstallDir "$PROGRAMFILES64\klogg"
-!endif
+InstallDir "$PROGRAMFILES64\klogg"
 InstallDirRegKey HKLM Software\klogg ""
 
 ; klogg icon
@@ -93,9 +95,7 @@ Section "klogg" klogg
     File release\adb-helper-assets\adb-helper-overlay-receipt.json
     File release\adb-helper-assets\adb-helper-overlay-receipt.json.sha256
     SetOutPath $INSTDIR
-!if ${PLATFORM} == "x64"
     File release\klogg_crashpad_handler.exe
-!endif
     File release\tbb12.dll
 
     File COPYING
@@ -172,19 +172,12 @@ Section "MSVC Runtime libraries" vcruntime
     File release\msvcp140_2.dll
     File release\vcruntime140.dll
 
-!if ${PLATFORM} == "x64"
     File release\vcruntime140_1.dll
-!endif
 
     ; Qt5 requires OpenSSL 1.1.x for TLS; Qt6 uses the Schannel backend (built into Windows)
 !if ${QT_MAJOR} == "Qt5"
-!if ${PLATFORM} == "x64"
     File release\libcrypto-1_1-x64.dll
     File release\libssl-1_1-x64.dll
-!else
-    File release\libcrypto-1_1.dll
-    File release\libssl-1_1.dll
-!endif
 !endif
 
 SectionEnd

@@ -61,6 +61,122 @@
 
 #include "logdata.h"
 
+namespace {
+class IndexedReadSnapshot final : public SearchableLogData::ReadSnapshot {
+  public:
+    IndexedReadSnapshot( IndexedContentSnapshot::Ptr content, QTextCodec* codec,
+                         const QString& prefilter, AnsiProcessingMode mode )
+        : content_( std::move( content ) ), codec_( codec ),
+          prefilter_( prefilter, QRegularExpression::CaseInsensitiveOption ), mode_( mode )
+    {}
+
+    LinesCount lineCount() const override { return content_->lineCount(); }
+    qint64 byteSize() const override { return content_->byteSize(); }
+    std::optional<CacheKey> cacheKey() const override
+    {
+        return CacheKey{ klogg::LogRowId::Origin::IndexedFile, content_->incarnation(),
+                         content_->version(), codec_.codec()->name(), prefilter_, mode_ };
+    }
+    bool isAppendOf( const ReadSnapshot& previous ) const override
+    {
+        const auto* old = dynamic_cast<const IndexedReadSnapshot*>( &previous );
+        return old && content_->incarnation() == old->content_->incarnation()
+               && byteSize() >= old->byteSize() && lineCount() >= old->lineCount()
+               && codec_.mibEnum() == old->codec_.mibEnum()
+               && prefilter_ == old->prefilter_ && mode_ == old->mode_;
+    }
+
+    klogg::SnapshotRow row( LineNumber index ) const override
+    {
+        if ( index.get() >= lineCount().get() ) {
+            throw klogg::SnapshotError{ "Snapshot row is out of bounds" };
+        }
+        const bool tail = index.get() + 1 == lineCount().get()
+                          && content_->lineEnd( index ).get() > byteSize();
+        return { { klogg::LogRowId::Origin::IndexedFile, content_->incarnation(),
+                   tail ? content_->version() : 0, index.get() },
+                 index + 1_lcount, true, false };
+    }
+
+    SearchableLogData::RawLines getLinesRaw( LineNumber first, LinesCount count ) const override
+    {
+        SearchableLogData::RawLines lines;
+        lines.startLine = first;
+        if ( first.get() > lineCount().get()
+             || count.get() > lineCount().get() - first.get() ) {
+            throw klogg::SnapshotError{ "Snapshot range is out of bounds" };
+        }
+        if ( count == 0_lcount ) {
+            return lines;
+        }
+        lines.textDecoder = codec_.makeDecoder();
+        lines.prefilterPattern = prefilter_;
+        lines.ansiProcessingMode = mode_;
+        const auto firstByte = first == 0_lnum ? 0 : content_->lineEnd( first - 1_lcount ).get();
+        const auto ends = content_->lineEnds( first, count );
+        const bool syntheticEnd = ends.back().get() > byteSize();
+        const auto lastByte = std::min<qint64>( ends.back().get(), byteSize() );
+        const auto bytes = content_->readBytes( firstByte, lastByte - firstByte );
+        lines.buffer.assign( bytes.constData(), bytes.constData() + bytes.size() );
+        lines.endOfLines.reserve( ends.size() );
+        for ( const auto& end : ends ) {
+            lines.endOfLines.push_back( end.get() - firstByte );
+        }
+        if ( syntheticEnd ) {
+            // The index's EOF+1 marker is not a real source byte. Supply a
+            // codec-sized delimiter to raw matchers without extending the lease.
+            const auto width = lines.textDecoder.encodingParams.lineFeedWidth;
+            const auto newline = codec_.codec()->fromUnicode( QStringLiteral( "\n" ) ).right( width );
+            lines.buffer.insert( lines.buffer.end(), newline.constData(),
+                                 newline.constData() + newline.size() );
+            lines.endOfLines.back() = lastByte - firstByte + width;
+        }
+        return lines;
+    }
+
+  private:
+    IndexedContentSnapshot::Ptr content_;
+    TextCodecHolder codec_;
+    QRegularExpression prefilter_;
+    AnsiProcessingMode mode_;
+};
+} // namespace
+
+SearchableLogData::ReadSnapshot::Ptr LogData::searchableSnapshot() const
+{
+    auto content = indexedContentSnapshot();
+    return content ? std::make_shared<IndexedReadSnapshot>( std::move( content ), codec_.codec(),
+                                                          prefilterPattern_, ansiProcessingMode_ )
+                   : nullptr;
+}
+
+klogg::LogSnapshot::Ptr LogData::createReadSnapshot( klogg::SnapshotScope ) const
+{
+    return searchableSnapshot();
+}
+
+OptionalLineNumber LogData::rowForIdentity( const klogg::LogRowId& identity ) const
+{
+    const auto content = indexedContentSnapshot();
+    if ( !content || identity.origin != klogg::LogRowId::Origin::IndexedFile
+         || identity.incarnation != content->incarnation()
+         || identity.row >= content->lineCount().get() ) {
+        return {};
+    }
+    const LineNumber index{ identity.row };
+    const bool tail = identity.row + 1 == content->lineCount().get()
+                      && content->lineEnd( index ).get() > content->byteSize();
+    if ( identity.member != ( tail ? content->version() : 0 ) ) {
+        return {};
+    }
+    return index;
+}
+
+IndexedContentSnapshot::Ptr LogData::indexedContentSnapshot() const
+{
+    return IndexingData::ConstAccessor{ indexing_data_.get() }.getContentSnapshot();
+}
+
 LogData::LogData()
     : SearchableLogData()
     , indexing_data_( std::make_shared<IndexingData>() )
@@ -143,14 +259,26 @@ LogData::~LogData()
 
 void LogData::setPrefilter( const QString& prefilterPattern )
 {
-    IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
-    prefilterPattern_ = prefilterPattern;
+    {
+        IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
+        if ( prefilterPattern_ == prefilterPattern ) {
+            return;
+        }
+        prefilterPattern_ = prefilterPattern;
+    }
+    notifyInterpretationChanged();
 }
 
 void LogData::setAnsiProcessingMode( AnsiProcessingMode mode )
 {
-    IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
-    ansiProcessingMode_ = mode;
+    {
+        IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
+        if ( ansiProcessingMode_ == mode ) {
+            return;
+        }
+        ansiProcessingMode_ = mode;
+    }
+    notifyInterpretationChanged();
 }
 
 void LogData::attachFile( const QString& fileName )
@@ -405,12 +533,8 @@ klogg::vector<AnsiColorSpan> LogData::doGetLineAnsiColors( LineNumber line ) con
 // indexingFinished).
 klogg::vector<QString> LogData::doGetLines( LineNumber first_line, LinesCount number ) const
 {
-    return getLinesFromFile( first_line, number, []( QString&& lineData ) {
-        if ( lineData.endsWith( QChar::CarriageReturn ) ) {
-            lineData.chop( 1 );
-        }
-        return std::move( lineData );
-    } );
+    return getLinesFromFile( first_line, number,
+                             []( QString&& lineData ) { return std::move( lineData ); } );
 }
 
 klogg::vector<QString> LogData::doGetExpandedLines( LineNumber first_line, LinesCount number ) const
@@ -427,60 +551,23 @@ LineNumber LogData::doGetLineNumber( LineNumber index ) const
 
 LogData::RawLines LogData::getLinesRaw( LineNumber firstLine, LinesCount number ) const
 {
-    RawLines rawLines;
-    rawLines.startLine = firstLine;
-
     try {
-        IndexingData::ConstAccessor scopedAccessor{ indexing_data_.get() };
-        if ( (firstLine + number).get() > scopedAccessor.getNbLines().get() ) {
+        const auto snapshot = searchableSnapshot();
+        if ( !snapshot || number == 0_lcount ) {
+            return {};
+        }
+        const auto count = snapshot->lineCount().get();
+        if ( firstLine.get() > count || number.get() > count - firstLine.get() ) {
             LOG_WARNING << "Lines out of bound asked for";
-            return {}; /* exception? */
+            return {};
         }
-
-        rawLines.endOfLines.reserve( number.get() );
-        rawLines.prefilterPattern
-            = !prefilterPattern_.isEmpty()
-                  ? QRegularExpression( prefilterPattern_,
-                                        QRegularExpression::CaseInsensitiveOption )
-                  : QRegularExpression{};
-        rawLines.ansiProcessingMode = ansiProcessingMode_;
-
-        ScopedFileHolder<FileHolder> fileHolder( attached_file_.get() );
-
-        const auto firstByte
-            = ( firstLine == 0_lnum )
-                  ? 0
-                  : scopedAccessor.getEndOfLineOffset( firstLine - 1_lcount ).get();
-
-        klogg::vector<OffsetInFile> endOfLines
-            = scopedAccessor.getEndOfLineOffsets( firstLine, number );
-
-        const auto lastByte = endOfLines.back().get();
-
-        std::transform(
-            endOfLines.begin(), endOfLines.end(), std::back_inserter( rawLines.endOfLines ),
-            [ firstByte ]( const OffsetInFile& offset ) { return offset.get() - firstByte; } );
-
-        const auto bytesToRead = lastByte - firstByte;
-        LOG_DEBUG << "will try to read:" << bytesToRead << " bytes";
-        rawLines.buffer.resize( static_cast<std::size_t>( bytesToRead ) );
-
-        fileHolder.getFile()->seek( firstByte );
-        const auto bytesRead = fileHolder.getFile()->read( rawLines.buffer.data(), bytesToRead );
-
-        if ( bytesRead != bytesToRead ) {
-            LOG_DEBUG << "failed to read " << bytesToRead << " bytes, got " << bytesRead;
-        }
-
-        LOG_DEBUG << "done reading lines:" << rawLines.buffer.size();
-        rawLines.textDecoder = codec_.makeDecoder();
-        return rawLines;
-
-    } catch ( const std::bad_alloc& ) {
-        LOG_ERROR << "not enough memory";
-        rawLines.endOfLines.clear();
-        rawLines.buffer.clear();
-        return rawLines;
+        return snapshot->getLinesRaw( firstLine, number );
+    }
+    catch ( const std::exception& error ) {
+        // Ordinary presentation retains its warning-row policy. Strict search
+        // and extraction use the snapshot directly and propagate read failures.
+        LOG_ERROR << "Cannot read indexed presentation: " << error.what();
+        return {};
     }
 }
 

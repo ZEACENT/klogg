@@ -22,6 +22,101 @@
 #include "log.h"
 
 #include <algorithm>
+#include <atomic>
+#include <limits>
+
+namespace {
+std::atomic<uint64_t> nextConcatenatedIncarnation{ 1 };
+
+class ConcatenatedReadSnapshot final : public klogg::LogSnapshot {
+  public:
+    struct Source {
+        klogg::LogSnapshot::Ptr snapshot;
+        uint64_t incarnation = 0;
+        klogg::LogRowId childIdentity;
+        LinesCount cumulativeLines = 0_lcount;
+    };
+
+    explicit ConcatenatedReadSnapshot( std::vector<Source> sources )
+        : sources_( std::move( sources ) )
+    {
+        for ( size_t index = 0; index < sources_.size(); ++index ) {
+            auto& source = sources_[ index ];
+            const auto count = source.snapshot->lineCount();
+            if ( count.get() > std::numeric_limits<uint64_t>::max() - totalLines_.get() ) {
+                throw klogg::SnapshotError{ "Concatenated snapshot line count overflows" };
+            }
+            totalLines_ += count;
+            source.cumulativeLines = totalLines_;
+            if ( count != 0_lcount ) {
+                sourceByIncarnation_.emplace( source.incarnation, index );
+            }
+        }
+    }
+
+    LinesCount lineCount() const override { return totalLines_; }
+
+    klogg::SnapshotRow row( LineNumber index ) const override
+    {
+        const auto& source = sourceForRow( index );
+        auto result = source.snapshot->row( localRow( source, index ) );
+        result.identity.origin = klogg::LogRowId::Origin::Concatenated;
+        result.identity.incarnation = source.incarnation;
+        return result;
+    }
+
+    QString lineString( LineNumber index ) const override
+    {
+        const auto& source = sourceForRow( index );
+        return source.snapshot->lineString( localRow( source, index ) );
+    }
+
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override
+    {
+        if ( identity.origin != klogg::LogRowId::Origin::Concatenated ) {
+            return {};
+        }
+        const auto found = sourceByIncarnation_.find( identity.incarnation );
+        if ( found == sourceByIncarnation_.end() ) {
+            return {};
+        }
+        const auto& source = sources_[ found->second ];
+        auto childIdentity = identity;
+        childIdentity.origin = source.childIdentity.origin;
+        childIdentity.incarnation = source.childIdentity.incarnation;
+        const auto local = source.snapshot->rowForIdentity( childIdentity );
+        return local ? OptionalLineNumber{ LineNumber( sourceStart( source ) + local->get() ) }
+                     : OptionalLineNumber{};
+    }
+
+  private:
+    static uint64_t sourceStart( const Source& source )
+    {
+        return source.cumulativeLines.get() - source.snapshot->lineCount().get();
+    }
+
+    static LineNumber localRow( const Source& source, LineNumber index )
+    {
+        // NOLINTNEXTLINE(modernize-return-braced-init-list) -- The strong typedef constructor is explicit.
+        return LineNumber( index.get() - sourceStart( source ) );
+    }
+
+    const Source& sourceForRow( LineNumber index ) const
+    {
+        if ( index.get() >= totalLines_.get() ) {
+            throw klogg::SnapshotError{ "Concatenated snapshot row is out of bounds" };
+        }
+        const auto found = std::upper_bound(
+            sources_.begin(), sources_.end(), index.get(),
+            []( uint64_t line, const Source& source ) { return line < source.cumulativeLines.get(); } );
+        return *found;
+    }
+
+    std::vector<Source> sources_;
+    std::unordered_map<uint64_t, size_t> sourceByIncarnation_;
+    LinesCount totalLines_ = 0_lcount;
+};
+}
 
 ConcatenatedLogData::ConcatenatedLogData()
     : AbstractLogData()
@@ -33,6 +128,7 @@ ConcatenatedLogData::~ConcatenatedLogData()
     for ( auto& info : sources_ ) {
         QObject::disconnect( info.loadingFinishedConnection );
         QObject::disconnect( info.fileChangedConnection );
+        QObject::disconnect( info.interpretationChangedConnection );
     }
     sources_.clear();
     totalLines_ = 0_lcount;
@@ -62,6 +158,10 @@ void ConcatenatedLogData::addSource( std::shared_ptr<LogData> source )
                        rebuildIndex();
                        Q_EMIT fileChanged( status );
                    } );
+
+    sourceInfo.interpretationChangedConnection
+        = connect( sourceInfo.logData.get(), &AbstractLogData::interpretationChanged,
+                   this, [ this ] { notifyInterpretationChanged(); } );
 
     sources_.push_back( std::move( sourceInfo ) );
     rebuildIndex();
@@ -115,6 +215,70 @@ std::shared_ptr<LogData> ConcatenatedLogData::sourceAt( int index ) const
     }
 
     return sources_[ static_cast<size_t>( index ) ].logData;
+}
+
+klogg::LogSnapshot::Ptr
+ConcatenatedLogData::createReadSnapshot( klogg::SnapshotScope scope ) const
+{
+    std::vector<ConcatenatedReadSnapshot::Source> frozen;
+    frozen.reserve( sources_.size() );
+    LinesCount previousEnd = 0_lcount;
+    for ( const auto& source : sources_ ) {
+        auto snapshot = source.logData->createReadSnapshot( scope );
+        // Do not silently omit unready sources or substitute a newer row layout
+        // before rebuildIndex has made it the presented concatenation.
+        if ( !snapshot || snapshot->lineCount() != source.cumulativeLines - previousEnd ) {
+            return {};
+        }
+        previousEnd = source.cumulativeLines;
+        frozen.push_back( { std::move( snapshot ), 0, {}, 0_lcount } );
+    }
+
+    for ( size_t index = 0; index < frozen.size(); ++index ) {
+        auto& target = frozen[ index ];
+        if ( target.snapshot->lineCount() == 0_lcount ) {
+            continue;
+        }
+        const auto identity = target.snapshot->row( 0_lnum ).identity;
+        const auto& source = sources_[ index ];
+        if ( source.snapshotIncarnation == 0
+             || source.snapshotSourceIdentity.origin != identity.origin
+             || source.snapshotSourceIdentity.incarnation != identity.incarnation ) {
+            const auto nextIncarnation
+                = nextConcatenatedIncarnation.fetch_add( 1, std::memory_order_relaxed );
+            // Allocate the inverse entry before committing the cached identity.
+            // An allocation failure must leave the previous mapping usable.
+            snapshotSources_.emplace( nextIncarnation, index );
+            snapshotSources_.erase( source.snapshotIncarnation );
+            source.snapshotIncarnation = nextIncarnation;
+            source.snapshotSourceIdentity = identity;
+        }
+        target.incarnation = source.snapshotIncarnation;
+        target.childIdentity = identity;
+    }
+    return std::make_shared<ConcatenatedReadSnapshot>( std::move( frozen ) );
+}
+
+OptionalLineNumber ConcatenatedLogData::rowForIdentity( const klogg::LogRowId& identity ) const
+{
+    if ( identity.origin != klogg::LogRowId::Origin::Concatenated ) {
+        return {};
+    }
+    const auto found = snapshotSources_.find( identity.incarnation );
+    if ( found == snapshotSources_.end() ) {
+        return {};
+    }
+    const auto index = found->second;
+    const auto& source = sources_[ index ];
+    auto childIdentity = identity;
+    childIdentity.origin = source.snapshotSourceIdentity.origin;
+    childIdentity.incarnation = source.snapshotSourceIdentity.incarnation;
+    const auto local = source.logData->rowForIdentity( childIdentity );
+    const auto start = index > 0 ? sources_[ index - 1 ].cumulativeLines.get() : 0;
+    if ( !local || local->get() >= source.cumulativeLines.get() - start ) {
+        return {};
+    }
+    return LineNumber( start + local->get() );
 }
 
 QString ConcatenatedLogData::doGetLineString( LineNumber line ) const

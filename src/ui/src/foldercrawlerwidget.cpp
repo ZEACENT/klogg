@@ -583,6 +583,8 @@ void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringLis
     // not leave historical panes scoped to the previous folder.
     for ( auto& pane : panes_ ) {
         if ( pane != nullptr && pane->results != nullptr ) {
+            pane->searchComplete = false;
+            pane->view->invalidateMatchSelection();
             pane->results->beginSearch( filePaths_ );
         }
     }
@@ -703,7 +705,9 @@ void FolderCrawlerWidget::changeFilteredViewVisibility( int index )
                 return V::MarksAndMatches;
         }
     }();
-    results->setVisibility( v ); // emits layoutChanged -> active view refreshes
+    if ( results->visibility() != v ) {
+        results->setVisibility( v ); // emits layoutChanged -> active view remaps
+    }
 }
 
 void FolderCrawlerWidget::updateContextFromControls()
@@ -855,6 +859,10 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
                      return;
                  }
                  auto* const sourcePane = paneIt->get();
+                 // The new layout is committed. Remap stable identities now,
+                 // preserving the owned payload and any pending Copy; painting
+                 // still follows the existing coalesced presentation cadence.
+                 sourcePane->view->refreshMatchSelection();
                  if ( sourceResults->getNbLine() == 0_lcount ) {
                      refreshPaneImmediately( sourcePane );
                  }
@@ -1057,6 +1065,9 @@ void FolderCrawlerWidget::onActivePaneChanged( int tabIndex )
         return;
     }
     activePaneIndex_ = tabIndex;
+    if ( qfSavedFocus_ != mainView_ && qfSavedFocus_ != activeFilteredView() ) {
+        qfSavedFocus_.clear();
+    }
     if ( visibilityBox_ != nullptr ) {
         changeFilteredViewVisibility( visibilityBox_->currentIndex() );
     }
@@ -1245,14 +1256,17 @@ void FolderCrawlerWidget::changeTopViewSize( int delta )
 
 AbstractLogView* FolderCrawlerWidget::activeView() const
 {
-    // The focused view if one of ours has focus, else the active results view
-    // (the primary folder surface). Mirrors CrawlerWidget::activeView. Only the
-    // visible tab's view can hold focus, so activeFilteredView() is the only
-    // candidate among panes.
     auto* const fv = activeFilteredView();
-    if ( ( mainView_ != nullptr && mainView_->hasFocus() )
-         || ( fv != nullptr && fv->hasFocus() ) ) {
-        return qobject_cast<AbstractLogView*>( QApplication::focusWidget() );
+    if ( mainView_ != nullptr && mainView_->hasFocus() ) {
+        return mainView_;
+    }
+    if ( fv != nullptr && fv->hasFocus() ) {
+        return fv;
+    }
+    // Only the current Quick Find interaction may retain the main-view origin.
+    // An old results-pane origin must never override the active folder surface.
+    if ( qfSavedFocus_ == mainView_ && mainView_ != nullptr ) {
+        return mainView_;
     }
     return fv;
 }
@@ -1277,10 +1291,10 @@ QString FolderCrawlerWidget::getSelectedText() const
     return view != nullptr ? view->getSelectedText() : QString{};
 }
 
-bool FolderCrawlerWidget::isPartialSelection() const
+bool FolderCrawlerWidget::canUseSelectionAsSearchOperand() const
 {
     auto* view = activeView();
-    return view != nullptr ? view->isPartialSelection() : false;
+    return view != nullptr ? view->canUseSelectionAsSearchOperand() : false;
 }
 
 void FolderCrawlerWidget::selectAll()
@@ -1288,6 +1302,38 @@ void FolderCrawlerWidget::selectAll()
     if ( auto* view = activeView() ) {
         view->selectAll();
     }
+}
+
+bool FolderCrawlerWidget::canSelectAllMatches( bool quickFind ) const
+{
+    if ( quickFind ) {
+        auto* const view = activeView();
+        return view != nullptr && view->canSelectAllMatches( true );
+    }
+    if ( activeResults() == nullptr || activeResults()->groupCount() == 0
+         || ( searchActive_ && searchTargetResults_ == activeResults() ) ) {
+        return false;
+    }
+    return panes_[ static_cast<size_t>( activePaneIndex_ ) ]->searchComplete
+           && activeFilteredView()->canSelectAllMatches();
+}
+
+bool FolderCrawlerWidget::selectAllMatches( bool quickFind, bool copy )
+{
+    if ( !canSelectAllMatches( quickFind ) ) {
+        return false;
+    }
+    // Extraction uses canonical matches from the source snapshot. Folding and
+    // visibility remain presentation choices and must not change at acceptance.
+    auto* const view = quickFind ? activeView() : activeFilteredView();
+    view->setFocus();
+    return view->selectAllMatches( quickFind, copy );
+}
+
+bool FolderCrawlerWidget::deferCopyUntilMatchSelection()
+{
+    auto* const view = activeView();
+    return view != nullptr && view->deferCopyUntilMatchSelection();
 }
 
 void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
@@ -1311,12 +1357,14 @@ void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
     if ( codec == nullptr ) {
         codec = QTextCodec::codecForName( "UTF-8" );
     }
+    mainView_->invalidateMatchSelection();
     currentMainData_->setDisplayEncoding( codec->name() );
     // Apply the override to the RESULTS view too: rows of this file must
     // decode with the same codec (single-file parity, where one codec drives
     // both views). Clearing (auto-detect) drops the row-level override.
     for ( auto& pane : panes_ ) {
         if ( pane != nullptr && pane->results != nullptr ) {
+            pane->view->invalidateMatchSelection();
             if ( mib.has_value() ) {
                 pane->results->setEncodingOverrideForFile( currentMainFilePath_, codec->name() );
             }
@@ -1437,6 +1485,10 @@ void FolderCrawlerWidget::bindMainViewDataSignals()
         = connect( currentMainData_.get(), &SearchableLogData::fileChanged, this,
                    [ this ]( MonitoredFileStatus status ) {
                        if ( status == MonitoredFileStatus::Truncated ) {
+                           mainView_->invalidateMatchSelection();
+                           for ( const auto& pane : panes_ ) {
+                               pane->view->invalidateMatchSelection();
+                           }
                            folderMarks_.remove( currentMainFilePath_ );
                            refreshAllPanesForMarks();
                        }
@@ -1445,27 +1497,20 @@ void FolderCrawlerWidget::bindMainViewDataSignals()
 
 void FolderCrawlerWidget::enteringQuickFind()
 {
-    // Remember who had the focus (only if it is one of our views), mirroring
-    // CrawlerWidget::enteringQuickFind.
     QWidget* const focusWidget = QApplication::focusWidget();
-    if ( focusWidget == mainView_ ) {
-        qfSavedFocus_ = mainView_;
-        return;
-    }
-    qfSavedFocus_ = nullptr;
-    for ( const auto& pane : panes_ ) {
-        if ( pane != nullptr && pane->view == focusWidget ) {
-            qfSavedFocus_ = pane->view;
-            break;
-        }
-    }
+    qfSavedFocus_ = ( focusWidget == mainView_ || focusWidget == activeFilteredView() )
+                       ? focusWidget
+                       : nullptr;
 }
 
 void FolderCrawlerWidget::exitingQuickFind()
 {
-    // Restore the focus once the QFBar has been hidden.
-    if ( qfSavedFocus_ != nullptr ) {
-        qfSavedFocus_->setFocus();
+    // Retire the interaction before restoring focus. Later toolbar commands
+    // must resolve the current pane rather than this saved origin.
+    const auto origin = qfSavedFocus_;
+    qfSavedFocus_.clear();
+    if ( origin != nullptr && ( origin == mainView_ || origin == activeFilteredView() ) ) {
+        origin->setFocus();
     }
 }
 
@@ -1486,6 +1531,7 @@ void FolderCrawlerWidget::applyDetectedEncoding()
     if ( codec == nullptr ) {
         codec = QTextCodec::codecForName( "UTF-8" );
     }
+    mainView_->invalidateMatchSelection();
     currentMainData_->setDisplayEncoding( codec->name() );
 }
 
@@ -1729,6 +1775,8 @@ void FolderCrawlerWidget::startSearch()
         setCurrentSearchPattern( {} );
         lastResultStatusText_.clear();
         if ( auto* const results = activeResults() ) {
+            panes_[ static_cast<size_t>( activePaneIndex_ ) ]->searchComplete = false;
+            activeFilteredView()->invalidateMatchSelection();
             results->beginSearch( filePaths_ );
         }
         updateReadyStatus();
@@ -1764,6 +1812,8 @@ void FolderCrawlerWidget::startSearch()
     // The pane the new search streams into. Set BEFORE engine_->startSearch so
     // the first queued signal cannot arrive before the target is pinned.
     searchTargetResults_ = activeResults();
+    panes_[ static_cast<size_t>( activePaneIndex_ ) ]->searchComplete = false;
+    activeFilteredView()->invalidateMatchSelection();
     // Reset the view for streaming: beginSearch sizes the pending buffer and
     // clears any prior result set so file groups stream into a clean view. This
     // also covers the invalid-pattern path (which never emits searchStarted).
@@ -1867,6 +1917,13 @@ void FolderCrawlerWidget::onSearchFinished( quint64 generation )
     // tabs mid-search).
     if ( searchTargetResults_ != nullptr ) {
         searchTargetResults_->flushPending();
+        for ( auto& pane : panes_ ) {
+            // Stop clears searchActive_ before the worker's terminal signal;
+            // that signal settles partial results, not a completed search.
+            if ( pane->results.get() == searchTargetResults_ && searchActive_ ) {
+                pane->searchComplete = true;
+            }
+        }
     }
     flushFolderPresentation();
     statusRefreshTimer_.cancel();
@@ -1965,7 +2022,7 @@ void FolderCrawlerWidget::onHeaderClicked( LineNumber line )
     if ( fileId < 0 ) {
         return;
     }
-    results->toggleCollapse( fileId ); // emits layoutChanged -> view refreshes
+    results->toggleCollapse( fileId ); // emits layoutChanged -> view remaps
 }
 
 void FolderCrawlerWidget::collapseAll()

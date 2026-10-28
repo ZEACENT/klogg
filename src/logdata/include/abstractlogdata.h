@@ -46,6 +46,7 @@
 
 #include "ansicolorprocessor.h"
 #include "linetypes.h"
+#include "logsnapshot.h"
 
 // Base class representing a set of data.
 // It can be either a full set or a filtered set.
@@ -90,6 +91,16 @@ class AbstractLogData : public QObject {
     void attachReader() const;
     void detachReader() const;
 
+    // Null means this source cannot yet provide immutable row/content ownership.
+    // Never emulate this contract by retaining mutable view indices or file handles.
+    virtual klogg::LogSnapshot::Ptr createReadSnapshot( klogg::SnapshotScope ) const { return {}; }
+    virtual OptionalLineNumber rowForIdentity( const klogg::LogRowId& ) const { return {}; }
+    // Visibility is not existence: composite presentations override this for hidden rows.
+    virtual bool containsRowIdentity( const klogg::LogRowId& identity ) const
+    {
+        return rowForIdentity( identity ).has_value();
+    }
+
     // The "type" of a line, which will appear in the FilteredView
     enum class LineTypeFlags {
         Plain = 0, // 0 can be checked like a proper flag in QFlags
@@ -98,7 +109,14 @@ class AbstractLogData : public QObject {
     };
     Q_DECLARE_FLAGS( LineType, LineTypeFlags )
 
+  Q_SIGNALS:
+    void interpretationChanged();
+
   protected:
+    // Producers and child forwarders use this instead of emitting directly.
+    // setDisplayEncoding coalesces nested notifications at its outermost exit.
+    void notifyInterpretationChanged();
+
     // Internal function called to get a given line
     virtual QString doGetLineString( LineNumber line ) const = 0;
     // Internal function called to get a given line
@@ -129,6 +147,10 @@ class AbstractLogData : public QObject {
 
     virtual void doAttachReader() const = 0;
     virtual void doDetachReader() const = 0;
+
+  private:
+    bool interpretationChangeActive_ = false;
+    bool interpretationChangePending_ = false;
 };
 
 Q_DECLARE_OPERATORS_FOR_FLAGS( AbstractLogData::LineType )

@@ -99,7 +99,7 @@ class Highlighter {
 
     RegularExpressionPattern expressionPattern() const;
 
-    void compile() const;
+    const QRegularExpression& compile() const;
 
   private:
     std::pair<QColor, QColor> vairateColors( const QString& match ) const;

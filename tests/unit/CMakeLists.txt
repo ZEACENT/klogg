@@ -87,6 +87,17 @@ add_test(
 set_tests_properties(klogg_configuration_preapplication_tests PROPERTIES TIMEOUT 120)
 klogg_set_test_isolation(klogg_configuration_preapplication_tests)
 
+# This executable owns its scheduler per case instead of nesting a second
+# lifetime handle inside the unit runner's process-wide owner.
+add_executable(klogg_task_scheduler_lifetime_tests taskschedulerlifetime_test.cpp)
+target_link_libraries(
+  klogg_task_scheduler_lifetime_tests PRIVATE klogg_logdata Catch2
+)
+klogg_configure_test_target(klogg_task_scheduler_lifetime_tests)
+add_test(NAME klogg_task_scheduler_lifetime_tests COMMAND klogg_task_scheduler_lifetime_tests)
+set_tests_properties(klogg_task_scheduler_lifetime_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_task_scheduler_lifetime_tests)
+
 find_package(Threads REQUIRED)
 
 # Native iOS discovery and stream-worker lifecycle are specified against an
@@ -243,6 +254,10 @@ add_executable(klogg_tests
     recentfolders_test.cpp
     highlighter_vectorscan_test.cpp
     linehighlight_compose_test.cpp
+    match_projection_test.cpp
+    match_selection_test.cpp
+    quickfind_snapshot_test.cpp
+    indexedcontent_test.cpp
     linepositionarray_test.cpp
     livecapture_state_test.cpp
     live_data_queue_test.cpp

@@ -26,17 +26,17 @@ MAX_PE_HEADER_OFFSET = pe_identity.MAX_PE_HEADER_OFFSET
 
 def architecture_from_pe(path: pathlib.Path) -> str:
     try:
-        return pe_identity.architecture_from_pe(path)
+        architecture = pe_identity.architecture_from_pe(path)
     except ValueError as error:
         raise ValueError("test helper " + str(error)) from error
+    if architecture != "x64":
+        raise ValueError("test helper PE architecture unsupported: " + architecture)
+    return architecture
 
 
 def exception_from_dump(path: pathlib.Path, process_architecture: str) -> dict:
-    layouts = {"x86": (716, "<I", (184, 196, 180), 0, 0x10000, 1),
-               "x64": (1232, "<Q", (248, 152, 160), 48, 0x100000, 3)}
-    if process_architecture not in layouts:
+    if process_architecture != "x64":
         raise ValueError("test minidump process architecture unsupported")
-    minimum, width, registers, flag_offset, architecture, required_flags = layouts[process_architecture]
     size = path.stat().st_size
     if size == 0:
         raise ValueError("test minidump header missing: empty output")
@@ -64,23 +64,23 @@ def exception_from_dump(path: pathlib.Path, process_architecture: str) -> dict:
             context_size, context_offset = struct.unpack_from("<II", content, offset + 160)
             if not context_size or context_offset + context_size > len(content):
                 raise ValueError("test minidump original context missing")
-            # XSTATE extends the native base by a variable amount. Select its
-            # documented prefix from PE identity, never size or aliasable data;
+            # XSTATE extends the native base by a variable amount. Decode only
+            # the documented x64 prefix after validating the process identity;
             # trailing state stays opaque because this smoke checks PC/SP/FP only.
-            if context_size < minimum:
+            if context_size < 1232:
                 flags0 = (f"0x{struct.unpack_from('<I', content, context_offset)[0]:08x}"
                           if context_size >= 4 else "unavailable")
                 flags48 = (f"0x{struct.unpack_from('<I', content, context_offset + 48)[0]:08x}"
                            if context_size >= 52 else "unavailable")
                 raise ValueError(f"test minidump context layout unsupported: size {context_size} "
                                  f"RVA {context_offset} flags0 {flags0} flags48 {flags48}")
-            flags = struct.unpack_from("<I", content, context_offset + flag_offset)[0]
-            if (flags & 0x00FF0000) != architecture:
+            flags = struct.unpack_from("<I", content, context_offset + 48)[0]
+            if (flags & 0x00FF0000) != 0x100000:
                 raise ValueError("test minidump context architecture missing")
-            if (flags & required_flags) != required_flags:
+            if (flags & 3) != 3:
                 raise ValueError("test minidump context required register flags missing")
-            pc, sp, fp = [struct.unpack_from(width, content, context_offset + register)[0]
-                          for register in registers]
+            pc, sp, fp = [struct.unpack_from("<Q", content, context_offset + register)[0]
+                          for register in (248, 152, 160)]
             return {"thread": thread, "code": code, "address": address,
                     "parameters": parameters, "operation": operation, "accessed": accessed,
                     "pc": pc, "sp": sp, "fp": fp}

@@ -50,6 +50,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QPushButton>
+#include <QPointer>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTimer>
@@ -95,8 +96,8 @@ class CrawlerWidget : public QSplitter,
     LineNumber getTopLine() const;
     // Get the selected text as a string (from the main window)
     QString getSelectedText() const override;
-    // True for partial selection
-    bool isPartialSelection() const override;
+    // True for a selection usable as one search operand.
+    bool canUseSelectionAsSearchOperand() const override;
 
     // Display the QFB at the bottom, remembering where the focus was
     void displayQuickFindBar( QuickFindMux::QFDirection direction );
@@ -104,6 +105,9 @@ class CrawlerWidget : public QSplitter,
     // Instructs the widget to select all the text in the window the user
     // is interacting with
     void selectAll() override;
+    bool canSelectAllMatches( bool quickFind = false ) const override;
+    bool selectAllMatches( bool quickFind = false, bool copy = false ) override;
+    bool deferCopyUntilMatchSelection() override;
 
     std::optional<int> encodingMib() const override;
 
@@ -324,6 +328,7 @@ class CrawlerWidget : public QSplitter,
     void replaceCurrentSearch( const QString& searchText );
     void updateSearchCombo();
     AbstractLogView* activeView() const;
+    void invalidateMatchSelections();
     void printSearchInfoMessage( LinesCount nbMatches = 0_lcount );
     void changeDataStatus( DataStatus status );
     void updateEncoding();
@@ -390,9 +395,9 @@ class CrawlerWidget : public QSplitter,
     // Default palette to be remembered
     QPalette searchInfoLineDefaultPalette_;
 
-    // Reference to the QuickFind Pattern (not owned)
-
-    QWidget* qfSavedFocus_ = nullptr;
+    // Origin of the current Quick Find interaction; cleared on exit or when
+    // its results pane stops being active. Never a general command-routing cache.
+    QPointer<QWidget> qfSavedFocus_;
 
     // Search state (for auto-refresh and truncation)
     SearchState searchState_;

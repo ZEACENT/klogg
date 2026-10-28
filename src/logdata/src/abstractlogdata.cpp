@@ -44,6 +44,9 @@
 
 #include "abstractlogdata.h"
 
+#include <exception>
+#include <utility>
+
 // Simple wrapper in order to use a clean Template Method
 QString AbstractLogData::getLineString( LineNumber line ) const
 {
@@ -112,7 +115,44 @@ LineLength AbstractLogData::getLineLength( LineNumber line ) const
 
 void AbstractLogData::setDisplayEncoding( const char* encoding )
 {
-    doSetDisplayEncoding( encoding );
+    const auto* previous = getDisplayEncoding();
+    const bool wasActive = std::exchange( interpretationChangeActive_, true );
+    std::exception_ptr failure;
+    try {
+        doSetDisplayEncoding( encoding );
+    } catch ( ... ) {
+        failure = std::current_exception();
+    }
+    try {
+        const bool codecChanged = previous != getDisplayEncoding();
+        interpretationChangePending_ = interpretationChangePending_ || codecChanged;
+    } catch ( ... ) {
+        // A failed observation cannot establish that interpretation stayed the
+        // same. Invalidate conservatively, retaining the original setter error.
+        interpretationChangePending_ = true;
+        if ( !failure ) {
+            failure = std::current_exception();
+        }
+    }
+    interpretationChangeActive_ = wasActive;
+    if ( !wasActive && std::exchange( interpretationChangePending_, false ) ) {
+        // State is restored before delivery, so reentrant setters start their
+        // own transaction. No source locks or unrelated QObject signals are held.
+        Q_EMIT interpretationChanged();
+    }
+    if ( failure ) {
+        std::rethrow_exception( failure );
+    }
+}
+
+void AbstractLogData::notifyInterpretationChanged()
+{
+    if ( interpretationChangeActive_ ) {
+        interpretationChangePending_ = true;
+    }
+    else {
+        Q_EMIT interpretationChanged();
+    }
 }
 
 QTextCodec* AbstractLogData::getDisplayEncoding() const

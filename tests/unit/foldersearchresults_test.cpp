@@ -20,6 +20,8 @@
 #include <catch2/catch.hpp>
 
 #include "foldersearchresults.h"
+#include "foldersearchengine.h"
+#include "regularexpression.h"
 #include "foldersearchtypes.h"
 
 #include <QByteArray>
@@ -754,4 +756,471 @@ TEST_CASE( "FolderSearchResults getters are race-free against streaming and conc
     REQUIRE( failures.load() == 0 );
     REQUIRE( results.getNbLine().get()
              == static_cast<uint64_t>( fileCount * groupsPerFile * ( 1 + matchesPerGroup ) ) );
+}
+
+TEST_CASE( "Folder snapshots retain canonical matches through source and layout replacement",
+           "[folder][folder-snapshot]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "snapshot.log", { "before", "ERROR old", "after" } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    auto group = FolderSearchEngine::scanFile( path, *matcher, 5, {}, { 1, 1 } );
+    FolderSearchResults results;
+    results.setResults( { std::move( group ) } );
+    const auto presented = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( presented );
+    REQUIRE( presented->lineCount() == 3_lcount );
+    REQUIRE_FALSE( presented->row( 0_lnum ).match );
+    REQUIRE( presented->row( 1_lnum ).sourceLineNumber == 2_lnum );
+    const auto identity = presented->row( 1_lnum ).identity;
+    REQUIRE( results.rowForIdentity( identity ) == OptionalLineNumber{ 2_lnum } );
+    results.collapseAll();
+    REQUIRE_FALSE( results.rowForIdentity( identity ) );
+    results.setVisibility( FolderSearchResults::Visibility::Marks );
+    const auto canonical = results.createReadSnapshot( klogg::SnapshotScope::Matches );
+    REQUIRE( canonical );
+    REQUIRE( canonical->lineCount() == 1_lcount );
+    REQUIRE( canonical->row( 0_lnum ).identity == identity );
+    REQUIRE( canonical->row( 0_lnum ).match );
+    writeFile( dir, "snapshot.log", { "before", "ERROR new", "after" } );
+    results.setResults( {} );
+    REQUIRE_FALSE( results.rowForIdentity( identity ) );
+    REQUIRE( QFile::remove( path ) );
+    REQUIRE( canonical->lineString( 0_lnum ) == "ERROR old" );
+    REQUIRE( presented->lineString( 0_lnum ) == "before" );
+    REQUIRE( presented->lineString( 2_lnum ) == "after" );
+}
+
+TEST_CASE( "Folder snapshots retain zero-match scanned members for marks",
+           "[folder][folder-snapshot][folder-batch-retention]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "marks.log", { "first", "marked original" } );
+    FolderSearchResults results;
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 1 );
+    results.setMarksStore( &marks );
+    SECTION( "streaming results retain the marked source" )
+    {
+        RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+        auto matcher = expression.createMatcher();
+        results.beginSearch( { path } );
+        results.addFileGroup( 0, FolderSearchEngine::scanFile( path, *matcher ) );
+    }
+    SECTION( "synchronous batch results retain the marked source" )
+    {
+        FolderSearchEngine engine;
+        engine.scanSynchronously( { path }, RegularExpressionPattern{ "ERROR" } );
+        results.setResults( engine.takeResults() );
+        REQUIRE( engine.matchCount() == 0 );
+    }
+    REQUIRE( results.groupCount() == 0 );
+    const auto matches = results.createReadSnapshot( klogg::SnapshotScope::Matches );
+    REQUIRE( matches );
+    REQUIRE( matches->lineCount() == 0_lcount );
+    const auto snapshot = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot );
+    REQUIRE( snapshot->lineCount() == 1_lcount );
+    REQUIRE_FALSE( snapshot->row( 0_lnum ).match );
+    REQUIRE( snapshot->row( 0_lnum ).sourceLineNumber == 2_lnum );
+    REQUIRE( QFile::remove( path ) );
+    REQUIRE( snapshot->lineString( 0_lnum ) == "marked original" );
+    REQUIRE( results.getLineString( 1_lnum ) == "marked original" );
+}
+
+TEST_CASE( "Folder snapshot refuses legacy records without retained source bytes",
+           "[folder][folder-snapshot]" )
+{
+    FolderSearchResults results;
+    klogg::folder::FileGroup group;
+    group.filePath = "/missing/unversioned.log";
+    group.matches.push_back( match( 0, 0, 5, 5, 1 ) );
+    results.setResults( { group } );
+    const auto snapshot = results.createReadSnapshot( klogg::SnapshotScope::Matches );
+    REQUIRE( snapshot );
+    REQUIRE_THROWS_AS( snapshot->lineString( 0_lnum ), klogg::SnapshotError );
+}
+
+TEST_CASE( "Folder snapshot freezes codec interpretation while current rows follow overrides",
+           "[folder][folder-snapshot]" )
+{
+    QTemporaryDir dir;
+    const auto path = writeFile( dir, "codec.log", { QString::fromUtf8( "ERROR \xc3\xa9" ) } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    FolderSearchResults results;
+    results.setResults( { FolderSearchEngine::scanFile( path, *matcher ) } );
+    results.setEncodingOverrideForFile( path, "UTF-8" );
+    const auto frozen = results.createReadSnapshot( klogg::SnapshotScope::Matches );
+    REQUIRE( frozen );
+    results.setEncodingOverrideForFile( path, "ISO-8859-1" );
+    REQUIRE( frozen->lineString( 0_lnum ) == QString::fromUtf8( "ERROR \xc3\xa9" ) );
+    REQUIRE( results.getLineString( 1_lnum ) != frozen->lineString( 0_lnum ) );
+}
+
+TEST_CASE( "Folder snapshot identity survives streaming FileId shifts without aliasing",
+           "[folder][folder-snapshot]" )
+{
+    QTemporaryDir dir;
+    const auto first = writeFile( dir, "a.log", { "ERROR first" } );
+    const auto last = writeFile( dir, "z.log", { "marked last" } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ last ].insert( 0 );
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.beginSearch( { last, first } );
+    results.addFileGroup( 0, FolderSearchEngine::scanFile( last, *matcher ) );
+    const auto snapshot = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot );
+    const auto identity = snapshot->row( 0_lnum ).identity;
+    REQUIRE( results.rowForIdentity( identity ) == OptionalLineNumber{ 1_lnum } );
+    results.addFileGroup( 1, FolderSearchEngine::scanFile( first, *matcher ) );
+    REQUIRE( results.rowForIdentity( identity ) == OptionalLineNumber{ 3_lnum } );
+    results.setVisibility( FolderSearchResults::Visibility::Matches );
+    REQUIRE_FALSE( results.rowForIdentity( identity ) );
+    REQUIRE( snapshot->lineString( 0_lnum ) == "marked last" );
+}
+
+TEST_CASE( "Folder stale marks fail snapshot reads without throwing through presentation",
+           "[folder][folder-snapshot][folder-stale-mark]" )
+{
+    QTemporaryDir dir;
+    const auto path = writeFile( dir, "short.log", { "only line" } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 40 );
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.beginSearch( { path } );
+    results.addFileGroup( 0, FolderSearchEngine::scanFile( path, *matcher ) );
+    REQUIRE_NOTHROW( results.getLineString( 1_lnum ) );
+    REQUIRE_NOTHROW( results.getLineLength( 1_lnum ) );
+    const auto snapshot = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot );
+    REQUIRE_THROWS_AS( snapshot->lineString( 0_lnum ), klogg::SnapshotError );
+}
+
+TEST_CASE( "Folder retention exhaustion rejects snapshots instead of omitting failed members",
+           "[folder][folder-snapshot][folder-retention-failure]" )
+{
+    QTemporaryDir dir;
+    const auto path = writeFile( dir, "source.log", { "no match" } );
+    IndexedContentBuilder::Options options;
+    const bool boundaryFailure = GENERATE( false, true );
+    options.byteMemoryBudget = boundaryFailure ? 1024U : 0U;
+    options.boundaryMemoryBudget = boundaryFailure ? 0U : 1024U;
+    options.temporaryDirectory = dir.path() + "/missing-directory";
+    auto arena = std::make_shared<klogg::folder::ScanArena>( options );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    FolderSearchResults results;
+    results.beginSearch( { path } );
+    results.addFileGroup( 0, FolderSearchEngine::scanFile( path, *matcher, 7, {}, {}, arena ) );
+    REQUIRE_THROWS_AS( results.createReadSnapshot( klogg::SnapshotScope::Matches ),
+                       klogg::SnapshotError );
+}
+
+TEST_CASE( "Folder snapshot inverse separates canonical ordinals from frozen view geometry",
+           "[folder][folder-snapshot][folder-inverse]" )
+{
+    QTemporaryDir dir;
+    const auto first = writeFile( dir, "first.log", { "skip", "ERROR first", "skip", "ERROR last" } );
+    const auto second = writeFile( dir, "second.log", { "ERROR other" } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    FolderSearchResults results;
+    results.setResults( { FolderSearchEngine::scanFile( first, *matcher ),
+                          FolderSearchEngine::scanFile( second, *matcher ) } );
+    const auto canonical = results.createReadSnapshot( klogg::SnapshotScope::Matches );
+    const auto presented = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    const auto firstId = canonical->row( 0_lnum ).identity;
+    const auto lastId = canonical->row( 1_lnum ).identity;
+    const auto otherId = canonical->row( 2_lnum ).identity;
+    REQUIRE( canonical->rowForIdentity( firstId ) == OptionalLineNumber{ 0_lnum } );
+    REQUIRE( canonical->rowForIdentity( lastId ) == OptionalLineNumber{ 1_lnum } );
+    REQUIRE( presented->rowForIdentity( otherId ) == OptionalLineNumber{ 2_lnum } );
+    REQUIRE( presented->presentedRowForIdentity( otherId ) == OptionalLineNumber{ 4_lnum } );
+    auto nonMatch = firstId;
+    nonMatch.row = 2;
+    REQUIRE_FALSE( canonical->rowForIdentity( nonMatch ) );
+    REQUIRE_FALSE( results.rowForIdentity( nonMatch ) );
+    results.setCollapsed( 0, true );
+    const auto collapsed = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE_FALSE( collapsed->rowForIdentity( firstId ) );
+    REQUIRE_FALSE( collapsed->presentedRowForIdentity( firstId ) );
+    REQUIRE( collapsed->presentedRowForIdentity( otherId ) == OptionalLineNumber{ 2_lnum } );
+    results.setResults( {} );
+    REQUIRE( presented->presentedRowForIdentity( otherId ) == OptionalLineNumber{ 4_lnum } );
+    REQUIRE( canonical->rowForIdentity( lastId ) == OptionalLineNumber{ 1_lnum } );
+}
+
+TEST_CASE( "Folder retained mark text follows codec and source revisions without changing snapshots",
+           "[folder][folder-snapshot]" )
+{
+    QTemporaryDir dir;
+    const auto original = QString::fromUtf8( "marked \xc3\xa9" );
+    const auto replacement = QString::fromUtf8( "marked \xc3\xb6" );
+    const auto path = writeFile( dir, "cached.log", { original } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 0 );
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.setResults( { FolderSearchEngine::scanFile( path, *matcher ) } );
+    results.setEncodingOverrideForFile( path, "UTF-8" );
+    const auto frozen = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( results.getLineString( 1_lnum ) == original );
+    REQUIRE( results.getLineLength( 1_lnum ) == LineLength( original.size() ) );
+    results.setEncodingOverrideForFile( path, "ISO-8859-1" );
+    REQUIRE( results.getLineString( 1_lnum ) != original );
+    results.setEncodingOverrideForFile( path, "UTF-8" );
+    REQUIRE( results.getLineString( 1_lnum ) == original );
+    writeFile( dir, "cached.log", { replacement } );
+    results.setResults( { FolderSearchEngine::scanFile( path, *matcher ) } );
+    REQUIRE( results.getLineString( 1_lnum ) == replacement );
+    REQUIRE( frozen->lineString( 0_lnum ) == original );
+}
+
+TEST_CASE( "Folder quiet zero-match commits retain bytes for later bookmarks",
+           "[folder][folder-snapshot]" )
+{
+    QTemporaryDir dir;
+    const auto path = writeFile( dir, "later-mark.log", { "retained for later mark" } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    QHash<QString, std::set<uint64_t>> marks;
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.beginSearch( { path } );
+    results.addFileGroup( 0, FolderSearchEngine::scanFile( path, *matcher ) );
+    REQUIRE( results.getNbLine() == 0_lcount );
+    const auto beforeMarks = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( beforeMarks->lineCount() == 0_lcount );
+    REQUIRE( QFile::remove( path ) );
+    marks[ path ].insert( 0 );
+    results.refreshForMarksChange();
+    REQUIRE( results.getLineString( 1_lnum ) == "retained for later mark" );
+    const auto marked = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( marked->lineString( 0_lnum ) == "retained for later mark" );
+    REQUIRE( beforeMarks->lineCount() == 0_lcount );
+}
+
+TEST_CASE( "Folder source identity existence is independent of presentation membership",
+           "[folder][folder-snapshot][folder-identity-existence]" )
+{
+    QTemporaryDir dir;
+    const auto matchedPath = writeFile( dir, "matched.log", { "plain", "ERROR match" } );
+    const auto marksPath = writeFile( dir, "marks-only.log", { "marked" } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    auto matched = FolderSearchEngine::scanFile( matchedPath, *matcher );
+    auto marksOnly = FolderSearchEngine::scanFile( marksPath, *matcher );
+    REQUIRE( matched.content );
+    REQUIRE( marksOnly.content );
+    const auto matchId = matched.content->identity( 1_lnum );
+    const auto nonmatchId = matched.content->identity( 0_lnum );
+    const auto marksOnlyId = marksOnly.content->identity( 0_lnum );
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ matchedPath ].insert( 0 );
+    marks[ marksPath ].insert( 0 );
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.beginSearch( { matchedPath, marksPath } );
+    results.addFileGroup( 0, std::move( matched ) );
+    results.addFileGroup( 1, std::move( marksOnly ) );
+    REQUIRE( results.containsRowIdentity( matchId ) );
+    results.setVisibility( FolderSearchResults::Visibility::Matches );
+    REQUIRE_FALSE( results.rowForIdentity( nonmatchId ) );
+    REQUIRE_FALSE( results.rowForIdentity( marksOnlyId ) );
+    REQUIRE( results.containsRowIdentity( nonmatchId ) );
+    REQUIRE( results.containsRowIdentity( marksOnlyId ) );
+    results.collapseAll();
+    REQUIRE_FALSE( results.rowForIdentity( matchId ) );
+    REQUIRE( results.containsRowIdentity( matchId ) );
+    marks.clear();
+    results.refreshForMarksChange();
+    REQUIRE( results.containsRowIdentity( marksOnlyId ) );
+    auto nonexistent = marksOnlyId;
+    nonexistent.row = 1;
+    REQUIRE_FALSE( results.containsRowIdentity( nonexistent ) );
+    results.setResults( { FolderSearchEngine::scanFile( matchedPath, *matcher ) } );
+    REQUIRE_FALSE( results.containsRowIdentity( matchId ) );
+    REQUIRE_FALSE( results.containsRowIdentity( marksOnlyId ) );
+}
+
+TEST_CASE( "Folder marked and matched snapshot rows share incomplete UTF8 replacement",
+           "[folder][folder-normalization]" )
+{
+    QTemporaryDir dir;
+    const QString path = QDir( dir.path() ).filePath( "incomplete.log" );
+    QFile file( path );
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    REQUIRE( file.write( "ascii prefix\nBAD \xc3" ) == 18 );
+    file.close();
+    RegularExpression matchedExpression{ RegularExpressionPattern{ "BAD" } };
+    RegularExpression absentExpression{ RegularExpressionPattern{ "absent" } };
+    auto matchedMatcher = matchedExpression.createMatcher();
+    auto absentMatcher = absentExpression.createMatcher();
+    // Context forces streaming; the first ASCII-only block establishes UTF8.
+    auto matchedGroup = FolderSearchEngine::scanFile( path, *matchedMatcher, 13, {}, { 1, 0 } );
+    auto marksGroup = FolderSearchEngine::scanFile( path, *absentMatcher, 13, {}, { 1, 0 } );
+    FolderSearchResults matchedResults;
+    matchedResults.setResults( { std::move( matchedGroup ) } );
+    FolderSearchResults markedResults;
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 1 );
+    markedResults.setMarksStore( &marks );
+    markedResults.setResults( { std::move( marksGroup ) } );
+    const auto matched = matchedResults.createReadSnapshot( klogg::SnapshotScope::Matches );
+    const auto marked = markedResults.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( matched->lineCount() == 1_lcount );
+    REQUIRE( marked->lineCount() == 1_lcount );
+    const auto expected = QStringLiteral( "BAD " ) + QChar( QChar::ReplacementCharacter );
+    REQUIRE( matched->lineString( 0_lnum ) == expected );
+    REQUIRE( marked->lineString( 0_lnum ) == expected );
+}
+
+TEST_CASE( "Folder marked and matched snapshots share row BOM and framing CR policy",
+           "[folder][folder-normalization]" )
+{
+    QTemporaryDir dir;
+    const QString path = QDir( dir.path() ).filePath( "framing.log" );
+    const QByteArray bytes = QByteArray( "prefix\n\xef\xbb\xbf" ) + "ERROR\r\r\n";
+    QFile file( path );
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    REQUIRE( file.write( bytes ) == bytes.size() );
+    file.close();
+    RegularExpression matchedExpression{ RegularExpressionPattern{ "ERROR" } };
+    RegularExpression absentExpression{ RegularExpressionPattern{ "absent" } };
+    auto matchedMatcher = matchedExpression.createMatcher();
+    auto absentMatcher = absentExpression.createMatcher();
+    FolderSearchResults matchedResults;
+    matchedResults.setResults( {
+        FolderSearchEngine::scanFile( path, *matchedMatcher, 7, {}, { 1, 0 } ) } );
+    FolderSearchResults markedResults;
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 1 );
+    markedResults.setMarksStore( &marks );
+    markedResults.setResults( {
+        FolderSearchEngine::scanFile( path, *absentMatcher, 7, {}, { 1, 0 } ) } );
+    const auto matched = matchedResults.createReadSnapshot( klogg::SnapshotScope::Matches );
+    const auto marked = markedResults.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( matched->lineString( 0_lnum ) == "ERROR\r" );
+    REQUIRE( marked->lineString( 0_lnum ) == "ERROR\r" );
+}
+
+TEST_CASE( "Folder encoding overrides notify interpretation changes after releasing model locks",
+           "[folder][folder-interpretation]" )
+{
+    QTemporaryDir dir;
+    const auto original = QString::fromUtf8( "ERROR \xc3\xa9" );
+    const auto path = writeFile( dir, "encoding.log", { original } );
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    FolderSearchResults results;
+    results.setResults( { FolderSearchEngine::scanFile( path, *matcher ) } );
+    QSignalSpy changed( &results, &AbstractLogData::interpretationChanged );
+    std::vector<QString> observed;
+    QObject::connect( &results, &AbstractLogData::interpretationChanged, &results,
+                      [&]() { observed.push_back( results.getLineString( 1_lnum ) ); } );
+    results.setEncodingOverrideForFile( path, "ISO-8859-1" );
+    REQUIRE( changed.count() == 1 );
+    REQUIRE( observed.size() == 1 );
+    REQUIRE( observed.front() != original );
+    results.setEncodingOverrideForFile( path, "ISO-8859-1" );
+    REQUIRE( changed.count() == 1 );
+    results.clearEncodingOverrideForFile( path );
+    REQUIRE( changed.count() == 2 );
+    REQUIRE( observed.back() == original );
+    results.clearEncodingOverrideForFile( path );
+    REQUIRE( changed.count() == 2 );
+}
+
+TEST_CASE( "Folder marked and matched framing remains bound to the scanned codec",
+           "[folder][folder-snapshot][folder-framing]" )
+{
+    QTemporaryDir dir;
+    const auto path = QDir( dir.path() ).filePath( "utf16.log" );
+    QByteArray bytes( "\xff\xfe", 2 );
+    for ( const char character : QByteArray( "prefix\nERROR target\ntail\n" ) ) {
+        bytes.append( character );
+        bytes.append( '\0' );
+    }
+    QFile file( path );
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    REQUIRE( file.write( bytes ) == bytes.size() );
+    file.close();
+    RegularExpression expression{ RegularExpressionPattern{ "ERROR" } };
+    auto matcher = expression.createMatcher();
+    auto group = FolderSearchEngine::scanFile( path, *matcher, 19 );
+    REQUIRE( group.matches.size() == 1 );
+    const auto record = group.matches.front();
+    REQUIRE( record.localLine == 1_lnum );
+    const auto rawContent = group.content->readBytes(
+        record.lineStartByte.get(), record.lineEndByte.get() - record.lineStartByte.get() - 2 );
+    const auto expected = QString::fromLatin1( rawContent.constData(), rawContent.size() );
+    FolderSearchResults matchedResults;
+    matchedResults.setResults( { group } );
+    group.matches.clear();
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 1 );
+    FolderSearchResults markedResults;
+    markedResults.setMarksStore( &marks );
+    markedResults.setResults( { std::move( group ) } );
+    matchedResults.setEncodingOverrideForFile( path, "ISO-8859-1" );
+    markedResults.setEncodingOverrideForFile( path, "ISO-8859-1" );
+    REQUIRE( QFile::remove( path ) );
+    const auto matched = matchedResults.createReadSnapshot( klogg::SnapshotScope::Matches );
+    const auto marked = markedResults.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    const auto matchedText = matched->lineString( 0_lnum );
+    const auto markedText = marked->lineString( 0_lnum );
+    CHECK( matchedText == expected );
+    CHECK( markedText == expected );
+    CHECK( markedText == matchedText );
+}
+
+TEST_CASE( "Folder snapshot marked-row lookup reads requested rows rather than file prefixes",
+           "[folder][folder-snapshot][folder-row-locator]" )
+{
+    QTemporaryDir dir;
+    const auto path = QDir( dir.path() ).filePath( "many-rows.log" );
+    constexpr uint64_t totalRows = 4096;
+    constexpr uint64_t markedRows = 32;
+    const QByteArray record = QByteArray( 127, 'x' ) + '\n';
+    QFile file( path );
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    const auto bytes = record.repeated( static_cast<int>( totalRows ) );
+    REQUIRE( file.write( bytes ) == bytes.size() );
+    file.close();
+    RegularExpression expression{ RegularExpressionPattern{ "not-present" } };
+    auto matcher = expression.createMatcher();
+    auto group = FolderSearchEngine::scanFile( path, *matcher );
+    REQUIRE( group.content );
+    const auto source = group.content;
+    QHash<QString, std::set<uint64_t>> marks;
+    for ( uint64_t row = totalRows - markedRows; row < totalRows; ++row ) {
+        marks[ path ].insert( row );
+    }
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.setResults( { std::move( group ) } );
+    const auto snapshot = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot->lineCount() == LinesCount( markedRows ) );
+    REQUIRE( QFile::remove( path ) );
+    const auto beforeRead = source->bytesReadForTesting();
+    for ( uint64_t row = 0; row < markedRows; ++row ) {
+        REQUIRE( snapshot->lineString( LineNumber( row ) ) == QString( 127, QLatin1Char( 'x' ) ) );
+    }
+    const auto readWork = source->bytesReadForTesting() - beforeRead;
+    const auto maximumReadWork = markedRows
+        * ( static_cast<uint64_t>( record.size() ) + 2U * sizeof( qint64 ) );
+    REQUIRE( readWork > 0 );
+    REQUIRE( readWork <= maximumReadWork );
 }

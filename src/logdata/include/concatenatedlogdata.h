@@ -21,6 +21,7 @@
 #define CONCATENATEDLOGDATA_H
 
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <QMetaObject>
@@ -66,6 +67,9 @@ class ConcatenatedLogData : public AbstractLogData {
     // Get a specific source LogData
     std::shared_ptr<LogData> sourceAt( int index ) const;
 
+    klogg::LogSnapshot::Ptr createReadSnapshot( klogg::SnapshotScope scope ) const override;
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override;
+
   Q_SIGNALS:
     // Emitted after rebuildIndex() completes, to notify views
     void loadingFinished( LoadingStatus status );
@@ -92,9 +96,15 @@ class ConcatenatedLogData : public AbstractLogData {
         LinesCount cumulativeLines = 0_lcount; // total lines from this source and all before it
         QMetaObject::Connection loadingFinishedConnection;
         QMetaObject::Connection fileChangedConnection;
+        QMetaObject::Connection interpretationChangedConnection;
+        // Namespace each occurrence, not each child pointer. Preserve the
+        // child's member field, which identifies an unterminated tail version.
+        mutable uint64_t snapshotIncarnation = 0;
+        mutable klogg::LogRowId snapshotSourceIdentity;
     };
 
     std::vector<SourceInfo> sources_;
+    mutable std::unordered_map<uint64_t, size_t> snapshotSources_;
     LinesCount totalLines_ = 0_lcount;
     LineLength maxLength_ = 0_length;
 };

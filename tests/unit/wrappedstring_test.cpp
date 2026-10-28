@@ -1,5 +1,7 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <QStringView>
 
@@ -171,6 +173,53 @@ TEST_CASE( "WrappedString pixel wrapping prefers word break over char break" )
     WrappedString ws( QStringLiteral( "hello world test" ), 90, fixedWidthFn );
     REQUIRE( ws.wrappedLinesCount() >= 2 );
     REQUIRE( ws.wrappedLine( 0 ).toString() == QStringLiteral( "hello " ) );
+}
+
+TEST_CASE( "WrappedString pixel wrapping bounds measured text for dense long rows",
+           "[wrappedstring][wrap-work]" )
+{
+    // Model the real shaping cost, not merely callback count: measuring a long
+    // suffix is expensive even if the width callback itself is constant-time.
+    // 32 occurrences fit per wrapped row; the complete input must still retain
+    // exactly the same word-boundary partitions at every scale.
+    const auto expectedRow = QStringLiteral( "x " ).repeated( 32 );
+    std::uint64_t previousMeasuredUnits = 0;
+    for ( const int occurrences : { 4096, 8192, 16384, 32768 } ) {
+        CAPTURE( occurrences );
+        const auto text = QStringLiteral( "x " ).repeated( occurrences );
+        std::uint64_t measuredUnits = 0;
+        qsizetype largestProbe = 0;
+        const WrappedString wrapped{ text, 640, [ & ]( QStringView part ) {
+            measuredUnits += static_cast<std::uint64_t>( part.size() );
+            largestProbe = std::max( largestProbe, part.size() );
+            return fixedWidthFn( part );
+        } };
+        REQUIRE( wrapped.wrappedLinesCount() == static_cast<size_t>( occurrences / 32 ) );
+        for ( size_t row = 0; row < wrapped.wrappedLinesCount(); ++row ) {
+            REQUIRE( wrapped.wrappedLine( row ).toString() == expectedRow );
+        }
+        CAPTURE( measuredUnits, largestProbe );
+        const auto textUnits = static_cast<std::uint64_t>( text.size() );
+        REQUIRE( measuredUnits <= 16 * textUnits );
+        REQUIRE( largestProbe <= 128 );
+        if ( previousMeasuredUnits != 0 ) {
+            REQUIRE( measuredUnits <= 2 * previousMeasuredUnits + 1024 );
+        }
+        previousMeasuredUnits = measuredUnits;
+    }
+}
+
+TEST_CASE( "WrappedString pixel wrapping makes progress when one character exceeds the width",
+           "[wrappedstring][wrap-characterization]" )
+{
+    for ( const int availableWidth : { -1, 0, 5 } ) {
+        CAPTURE( availableWidth );
+        const WrappedString wrapped{ QStringLiteral( "abc" ), availableWidth, fixedWidthFn };
+        REQUIRE( wrapped.wrappedLinesCount() == 3 );
+        REQUIRE( wrapped.wrappedLine( 0 ).toString() == QStringLiteral( "a" ) );
+        REQUIRE( wrapped.wrappedLine( 1 ).toString() == QStringLiteral( "b" ) );
+        REQUIRE( wrapped.wrappedLine( 2 ).toString() == QStringLiteral( "c" ) );
+    }
 }
 
 // ---------- Pixel wrapping: each line's pixel width <= available width ----------

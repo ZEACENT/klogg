@@ -149,6 +149,7 @@ class MainWindow : public QMainWindow {
     void closeTab( ActionInitiator initiator );
     void closeAll( ActionInitiator initiator );
     void selectAll();
+    void selectAllMatches( bool copy = false );
     void copy();
     void find();
     void clearLog();
@@ -381,6 +382,8 @@ class MainWindow : public QMainWindow {
     QAction* exitAction;
     QAction* copyAction;
     QAction* selectAllAction;
+    QAction* selectAllMatchesAction;
+    QAction* copyMatchesAction;
     QAction* goToLineAction;
     QAction* findAction;
     QAction* clearLogAction;

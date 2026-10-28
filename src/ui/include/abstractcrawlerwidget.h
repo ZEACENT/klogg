@@ -63,8 +63,16 @@ class AbstractCrawlerWidget : public ViewInterface {
     }
     // Select all text in the active view (Edit -> Select All). Default no-op.
     virtual void selectAll() {}
-    // True if the active view has a partial (non-full-line) selection.
-    virtual bool isPartialSelection() const
+    // Select fragments in the completed Filter results, or the QuickFind origin view.
+    virtual bool canSelectAllMatches( bool /*quickFind*/ = false ) const { return false; }
+    virtual bool selectAllMatches( bool /*quickFind*/ = false, bool /*copy*/ = false )
+    {
+        return false;
+    }
+    // Ordinary Copy can join an in-flight match-selection batch without blocking.
+    virtual bool deferCopyUntilMatchSelection() { return false; }
+    // True only for one contiguous fragment usable as a search operand.
+    virtual bool canUseSelectionAsSearchOperand() const
     {
         return false;
     }

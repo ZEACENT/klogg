@@ -997,12 +997,30 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertRegex(
             method,
             re.compile(
-                r"QMetaObject::invokeMethod\(\s*this,\s*"
-                r"\[ this, notification \]\s*"
-                r"\{\s*Q_EMIT notify\( notification \);\s*\},\s*"
-                r"Qt::QueuedConnection\s*\);"
+                r'QMetaObject::invokeMethod\(\s*this,\s*"deliverNotification",\s*'
+                r"Qt::QueuedConnection,\s*"
+                r"Q_ARG\(\s*QString,\s*notification\.message\(\)\s*\)\s*\);"
             ),
         )
+
+        self.assertNotIn("[", method)
+        delivery = function_body(source, "void QuickFind::deliverNotification")
+        self.assertIn("Q_EMIT notify( QFNotification{ message } );", delivery)
+        self.assertIn("void deliverNotification( const QString& message );", QUICKFIND_HEADER.read_text())
+
+    def test_snapshot_tasks_use_owned_execution_not_uninstrumented_qt_pool_handoffs(self):
+        for relative in ("src/ui/src/quickfind.cpp", "src/ui/src/matchselection.cpp"):
+            with self.subTest(source=relative):
+                source = (ROOT / relative).read_text()
+                self.assertNotIn("QtConcurrent::run", source)
+                self.assertIn("klogg::runOwnedTask(", source)
+        bridge = (ROOT / "src/utils/include/ownedtaskfuture.h").read_text()
+        self.assertIn("std::packaged_task<Result()>", bridge)
+        self.assertIn("std::shared_future<Result>", bridge)
+        self.assertIn("QFutureInterface<void>", bridge)
+        self.assertEqual(bridge.count("lock( detail::ownedTaskPublicationMutex() )"), 2)
+        self.assertIn("QThreadPool::globalInstance()->start( task.release() )", bridge)
+        self.assertLess(bridge.index("function();"), bridge.index("completion.reportFinished();"))
 
     def test_quickfind_clears_interrupt_before_submission_not_worker_entry(self):
         header = QUICKFIND_HEADER.read_text()
@@ -1042,23 +1060,41 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         ):
             method = function_body(source, signature)
             self.assertLess(
-                method.index("interruptRequested_.clear();"),
-                method.index("operationFuture_ ="),
+                method.index("interruptAndWait();"),
+                method.index("startSearch("),
             )
+            self.assertNotIn("QtConcurrent::run", method)
+
+        # All four entry points now share snapshot acceptance and submission.
+        # Clearing in the task would lose a stop requested after submission.
+        submission = function_body(source, "void QuickFind::startSearch")
+        self.assertEqual(source.count("interruptRequested_.clear();"), 1)
+        self.assertLess(
+            submission.index("logData_.createReadSnapshot("),
+            submission.index("interruptRequested_.clear();"),
+        )
+        self.assertLess(
+            submission.index("interruptRequested_.clear();"),
+            submission.index("operationFuture_ = klogg::runOwnedTask("),
+        )
 
         for signature in (
-            "Portion QuickFind::doSearchForward( const FilePosition&",
-            "Portion QuickFind::doSearchBackward( const FilePosition&",
+            "QuickFindResult QuickFind::doSearchForward( const klogg::LogSnapshot&",
+            "QuickFindResult QuickFind::doSearchBackward( const klogg::LogSnapshot&",
         ):
             method = function_body(source, signature)
             self.assertNotIn("interruptRequested_.clear();", method)
             barrier_position = method.index(
                 "runBeforeLineReadCallbackForTesting();"
             )
-            first_read_position = method.index(
-                "logData_.getExpandedLineString", barrier_position
-            )
+            first_read_position = method.index("snapshot.lineString(")
             self.assertLess(barrier_position, first_read_position)
+            self.assertNotIn("logData_", method)
+            self.assertRegex(
+                method,
+                r"#if defined\( KLOGG_ASAN_BUILD \)\s*"
+                r"runBeforeLineReadCallbackForTesting\(\);\s*#endif",
+            )
             self.assertNotIn(
                 "if ( runBeforeLineReadCallbackForTesting", method
             )

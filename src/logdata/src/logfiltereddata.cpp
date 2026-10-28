@@ -48,6 +48,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <exception>
 #include <functional>
 #include <numeric>
 #include <set>
@@ -71,6 +72,61 @@ bool traceSearchTerminals()
 }
 
 namespace {
+
+// The bitmap is compressed, not a per-row GUI copy. Both membership and text
+// are owned independently of the mutable filtered model and its visibility.
+class FilteredReadSnapshot final : public klogg::LogSnapshot {
+public:
+    FilteredReadSnapshot( SearchableLogData::ReadSnapshot::Ptr source,
+                          SearchResultArray rows, SearchResultArray matches )
+        : source_( std::move( source ) ), rows_( std::move( rows ) ),
+          matches_( std::move( matches ) ) {}
+
+    LinesCount lineCount() const override { return LinesCount{ rows_.cardinality() }; }
+    klogg::SnapshotRow row( LineNumber index ) const override
+    {
+        const auto line = sourceLine( index );
+        auto result = source_->row( line );
+        result.match = matches_.contains( line.get() );
+        return result;
+    }
+    QString lineString( LineNumber index ) const override
+    {
+        return source_->lineString( sourceLine( index ) );
+    }
+    bool preservesPresentationOf( const klogg::LogSnapshot& previous ) const override
+    {
+        if ( this == &previous ) return true;
+        const auto* old = dynamic_cast<const FilteredReadSnapshot*>( &previous );
+        if ( !old || !source_->preservesPresentationOf( *old->source_ )
+             || !old->rows_.isSubset( rows_ ) ) return false;
+        const auto oldCutoff = old->source_->lineCount().get();
+        // Rank at the SOURCE cutoff also detects formerly hidden rows after
+        // the old last visible row. A last-visible-row test would miss them.
+        const auto retainedCount = oldCutoff == 0 ? uint64_t{ 0 } : rows_.rank( oldCutoff - 1 );
+        return retainedCount == old->rows_.cardinality();
+    }
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override
+    {
+        const auto line = source_->rowForIdentity( identity );
+        if ( !line || !rows_.contains( line->get() ) ) {
+            return {};
+        }
+        return LineNumber{ rows_.rank( line->get() ) - 1 };
+    }
+private:
+    LineNumber sourceLine( LineNumber index ) const
+    {
+        uint64_t line = 0;
+        if ( !rows_.select( index.get(), &line ) ) {
+            throw klogg::SnapshotError{ "Filtered snapshot row is out of bounds" };
+        }
+        return LineNumber{ line };
+    }
+    SearchableLogData::ReadSnapshot::Ptr source_;
+    SearchResultArray rows_;
+    SearchResultArray matches_;
+};
 
 uint64_t countBitmapValuesInHalfOpenRange( const SearchResultArray& values,
                                            LineNumber first, LineNumber end )
@@ -113,7 +169,20 @@ LogFilteredData::LogFilteredData( const SearchableLogData* logData )
 
     // Forward the update signal
     connect( &workerThread_, &LogFilteredDataWorker::searchProgressed, this,
-             &LogFilteredData::handleSearchProgressed, Qt::QueuedConnection );
+             &LogFilteredData::handleSearchProgressed, Qt::DirectConnection );
+    connect( sourceLogData_, &AbstractLogData::interpretationChanged, this, [ this ] {
+        // Retained leases remain readable, but their membership no longer
+        // describes the source's current interpretation. Retire queued work
+        // before notifying selection/presentation consumers.
+        interruptSearch();
+        bumpSearchGeneration();
+        searchResultsCache_.clear();
+        contextLinesListValid_ = false;
+        refreshPresentedSourceForDisplay();
+        notifyInterpretationChanged();
+    } );
+    connect( sourceLogData_, &SearchableLogData::loadingFinished, this,
+             [ this ]( LoadingStatus ) { refreshPresentedSourceForDisplay(); } );
 }
 
 LogFilteredData::~LogFilteredData()
@@ -142,6 +211,99 @@ LogFilteredData::~LogFilteredData()
     sourceLogData_ = nullptr;
 }
 
+void LogFilteredData::setPresentedSource( SearchableLogData::ReadSnapshot::Ptr source ) const
+{
+    if ( completedResult_ && completedResult_->source && source
+         && !source->preservesPresentationOf( *completedResult_->source ) ) {
+        // Never silently attach accepted match membership to replacement text.
+        // The presentation can advance independently; canonical readiness cannot.
+        completedSourceInvalid_ = true;
+    }
+    if ( source == presentedSource_ ) return;
+    if ( source && presentedSource_ ) {
+        const auto key = source->cacheKey();
+        if ( key && key == presentedSource_->cacheKey() ) return;
+    }
+    presentedSource_ = std::move( source );
+    contextLinesListValid_ = false;
+}
+
+void LogFilteredData::refreshPresentedSourceForDisplay()
+{
+    try {
+        setPresentedSource( sourceLogData_->searchableSnapshot() );
+    } catch ( const klogg::SnapshotError& error ) {
+        completedSourceInvalid_ = true;
+        presentedSource_.reset();
+        LOG_ERROR << "Cannot refresh presented source snapshot: " << error.what();
+    }
+}
+
+CompletedSearchResult::Ptr LogFilteredData::completedSearchResult() const
+{
+    if ( completedSourceInvalid_ ) return {};
+    const auto current = workerThread_.completedSearchResult();
+    return current && current == completedResult_ ? current : CompletedSearchResult::Ptr{};
+}
+
+bool LogFilteredData::isSearchComplete() const
+{
+    const auto result = completedSearchResult();
+    return result && result->source;
+}
+
+SearchResultArray LogFilteredData::presentedRows( const SearchableLogData::ReadSnapshot& source ) const
+{
+    SearchResultArray rows;
+    const auto count = source.lineCount().get();
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
+        rows.addRange( uint64_t{ 0 }, count );
+        return rows;
+    }
+    SearchResultArray seeds;
+    if ( visibility_.testFlag( VisibilityFlags::Matches ) ) seeds |= matching_lines_;
+    if ( visibility_.testFlag( VisibilityFlags::Marks ) ) seeds |= marks_;
+    if ( !seeds.isEmpty() && seeds.maximum() >= count ) {
+        throw klogg::SnapshotError{ "Filtered layout exceeds its retained source version" };
+    }
+    if ( contextLinesBefore_ == 0 && contextLinesAfter_ == 0 ) return seeds;
+    const auto before = static_cast<uint64_t>( contextLinesBefore_ );
+    const auto after = static_cast<uint64_t>( contextLinesAfter_ );
+    for ( const auto line : seeds ) {
+        const auto first = line > before ? line - before : 0;
+        const auto remaining = count - line - 1;
+        rows.addRange( first, line + 1 + std::min( after, remaining ) );
+    }
+    return rows;
+}
+
+klogg::LogSnapshot::Ptr LogFilteredData::createReadSnapshot( klogg::SnapshotScope scope ) const
+{
+    const auto result = completedSearchResult();
+    if ( scope == klogg::SnapshotScope::Matches ) {
+        if ( !result || !result->source ) return {};
+        return std::make_shared<FilteredReadSnapshot>( result->source, result->matches,
+                                                       result->matches );
+    }
+    // Presented rows are a separate scope: partial/stopped searches and marks
+    // beyond an accepted search cutoff still have a current immutable source.
+    const auto source = sourceLogData_->searchableSnapshot();
+    if ( !source ) return {};
+    setPresentedSource( source );
+    return std::make_shared<FilteredReadSnapshot>( source, presentedRows( *source ), matching_lines_ );
+}
+
+OptionalLineNumber LogFilteredData::rowForIdentity( const klogg::LogRowId& identity ) const
+{
+    const auto snapshot = createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    return snapshot ? snapshot->rowForIdentity( identity ) : OptionalLineNumber{};
+}
+
+bool LogFilteredData::containsRowIdentity( const klogg::LogRowId& identity ) const
+{
+    return sourceLogData_ && sourceLogData_->containsRowIdentity( identity );
+}
+
 void LogFilteredData::runSearch( const RegularExpressionPattern& regExp )
 {
     runSearch( regExp, 0_lnum, LineNumber( getNbTotalLines().get() ) );
@@ -159,6 +321,27 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
     setAllLinesVisible( false );
     currentRegExp_ = regExp;
     currentSearchKey_ = makeCacheKey( regExp, startLine, endLine );
+    SearchableLogData::ReadSnapshot::Ptr snapshot;
+    try {
+        snapshot = sourceLogData_->searchableSnapshot();
+    } catch ( const klogg::SnapshotError& error ) {
+        searchResultsCache_.clear();
+        LOG_ERROR << "Cannot acquire filtered search snapshot: " << error.what();
+        publishTerminal( 0_lcount, startLine, currentSearchGeneration() );
+        return;
+    }
+    setPresentedSource( snapshot );
+    const auto sourceKey = snapshot ? snapshot->cacheKey() : std::nullopt;
+    for ( auto entry = searchResultsCache_.begin(); entry != searchResultsCache_.end(); ) {
+        const auto& completed = entry->second.completed;
+        if ( !sourceKey || !completed || !completed->source
+             || completed->source->cacheKey() != sourceKey ) {
+            entry = searchResultsCache_.erase( entry );
+        }
+        else {
+            ++entry;
+        }
+    }
     LOG_INFO << "Search cache key: " << regExp.pattern << "_" << startLine.get() << "_"
              << endLine.get();
 
@@ -179,6 +362,9 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
             // staleness gate in the receiver, corrupting the just-displayed
             // cached result.
             const auto cachedGeneration = workerThread_.bumpGeneration();
+            workerThread_.restoreCompletedResult( *cachedResults->second.completed );
+            completedResult_ = workerThread_.completedSearchResult();
+            nbLinesProcessed_ = completedResult_->processedLines;
             publishTerminal( LinesCount( matching_lines_.cardinality() ), startLine,
                              cachedGeneration );
         }
@@ -186,7 +372,7 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
 
     if ( shouldRunSearch ) {
         attachReaderIfNeeded();
-        workerThread_.search( currentRegExp_, startLine, endLine );
+        workerThread_.search( currentRegExp_, startLine, endLine, std::move( snapshot ) );
     }
 }
 
@@ -195,12 +381,13 @@ void LogFilteredData::updateSearch( LineNumber startLine, LineNumber endLine )
     LOG_DEBUG << "Entering updateSearch";
 
     cancelPendingPublications();
+    completedResult_.reset();
     setAllLinesVisible( false );
     currentSearchKey_ = {};
 
     attachReaderIfNeeded();
-    workerThread_.updateSearch( currentRegExp_, startLine, endLine,
-                                LineNumber( nbLinesProcessed_.get() ) );
+    setPresentedSource( workerThread_.updateSearch(
+        currentRegExp_, startLine, endLine, LineNumber( nbLinesProcessed_.get() ) ) );
 }
 
 void LogFilteredData::interruptSearch()
@@ -213,6 +400,8 @@ void LogFilteredData::interruptSearch()
 void LogFilteredData::bumpSearchGeneration()
 {
     cancelPendingPublications();
+    completedResult_.reset();
+    completedSourceInvalid_ = false;
     workerThread_.bumpGeneration();
 }
 
@@ -393,6 +582,7 @@ void LogFilteredData::toggleMark( LineNumber line )
     if ( !sourceLogData_ ) {
         return;
     }
+    refreshPresentedSourceForDisplay();
     if ( ( line >= 0_lnum ) && line < sourceLogData_->getNbLine() ) {
         if ( !marks_.addChecked( line.get() ) ) {
             marks_.remove( line.get() );
@@ -415,6 +605,7 @@ void LogFilteredData::addMark( LineNumber line )
     if ( !sourceLogData_ ) {
         return;
     }
+    refreshPresentedSourceForDisplay();
     if ( ( line >= 0_lnum ) && line < sourceLogData_->getNbLine() ) {
         marks_.add( line.get() );
         updateMaxLengthMarks( line, {} );
@@ -587,7 +778,8 @@ void LogFilteredData::rebuildContextLinesList() const
     if ( !sourceLogData_ ) {
         return;
     }
-    const LinesCount totalLines = sourceLogData_->getNbLine();
+    const LinesCount totalLines = presentedSource_ ? presentedSource_->lineCount()
+                                                  : sourceLogData_->getNbLine();
 
     // Structure to pass data to lambda via context pointer
     struct ContextData {
@@ -652,7 +844,8 @@ void LogFilteredData::rebuildContextLinesList() const
 void LogFilteredData::updateSearchResultsCache()
 {
     const auto& config = Configuration::get();
-    if ( !config.useSearchResultsCache() ) {
+    if ( !config.useSearchResultsCache() || !completedResult_ || !completedResult_->source
+         || !completedResult_->source->cacheKey() ) {
         return;
     }
 
@@ -670,7 +863,7 @@ void LogFilteredData::updateSearchResultsCache()
                  << std::get<0>( currentSearchKey_ ).pattern << "_"
                  << std::get<1>( currentSearchKey_ ) << "_" << std::get<2>( currentSearchKey_ );
 
-        searchResultsCache_[ currentSearchKey_ ] = { matching_lines_, maxLength_ };
+        searchResultsCache_[ currentSearchKey_ ] = { matching_lines_, maxLength_, completedResult_ };
         auto cacheSize = std::accumulate( searchResultsCache_.cbegin(), searchResultsCache_.cend(),
                                           uint64_t{ 0 }, []( const auto& acc, const auto& next ) {
                                               return acc + next.second.matching_lines.cardinality();
@@ -730,7 +923,21 @@ void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress
     nbLinesProcessed_ = searchResults.processedLines;
     contextLinesListValid_ = false;
 
-    if ( progress == 100
+    if ( progress == 100 ) {
+        completedResult_ = workerThread_.completedSearchResult();
+        completedSourceInvalid_ = false;
+        if ( completedResult_ ) {
+            setPresentedSource( presentedSource_ ? presentedSource_ : completedResult_->source );
+            // A delta cannot represent removal of a re-searched final row.
+            matching_lines_ = completedResult_->matches;
+            marks_and_matches_ = matching_lines_ | marks_;
+            maxLength_ = completedResult_->maxLength;
+            nbLinesProcessed_ = completedResult_->processedLines;
+            nbMatches = LinesCount{ matching_lines_.cardinality() };
+        }
+    }
+
+    if ( progress == 100 && completedResult_
          && nbLinesProcessed_.get() == getExpectedSearchEnd( currentSearchKey_ ).get() ) {
         updateSearchResultsCache();
     }
@@ -891,6 +1098,18 @@ LineNumber LogFilteredData::findFilteredLine( LineNumber lineNum ) const
 // Implementation of the virtual function.
 QString LogFilteredData::doGetLineString( LineNumber index ) const
 {
+    if ( presentedSource_ ) {
+        const auto line = getMatchingLineNumber( index );
+        if ( line >= presentedSource_->lineCount() ) return {};
+        try {
+            return presentedSource_->lineString( line );
+        } catch ( const std::exception& error ) {
+            // Retained storage and strict decoding can also throw standard
+            // exceptions. Contain them only at the presentation boundary.
+            LOG_ERROR << "Cannot read presented row: " << error.what();
+            return {};
+        }
+    }
     // Safety check: if sourceLogData_ is null (object being destroyed), return empty string
     if ( !sourceLogData_ ) {
         return QString();
@@ -919,6 +1138,9 @@ QString LogFilteredData::doGetLineString( LineNumber index ) const
 // Implementation of the virtual function.
 QString LogFilteredData::doGetExpandedLineString( LineNumber index ) const
 {
+    if ( presentedSource_ ) {
+        return untabify( doGetLineString( index ) );
+    }
     // Safety check: if sourceLogData_ is null (object being destroyed), return empty string
     if ( !sourceLogData_ ) {
         return QString();
@@ -946,6 +1168,17 @@ QString LogFilteredData::doGetExpandedLineString( LineNumber index ) const
 
 klogg::vector<AnsiColorSpan> LogFilteredData::doGetLineAnsiColors( LineNumber index ) const
 {
+    if ( presentedSource_ ) {
+        const auto line = getMatchingLineNumber( index );
+        if ( line >= presentedSource_->lineCount() ) return {};
+        try {
+            auto colors = presentedSource_->getLinesRaw( line, 1_lcount ).decodeLineAnsiColors();
+            return colors.empty() ? klogg::vector<AnsiColorSpan>{} : std::move( colors.front() );
+        } catch ( const std::exception& error ) {
+            LOG_ERROR << "Cannot read presented row colors: " << error.what();
+            return {};
+        }
+    }
     if ( !sourceLogData_ ) {
         return {};
     }
@@ -1068,6 +1301,9 @@ LineLength LogFilteredData::doGetMaxLength() const
 // Implementation of the virtual function.
 LineLength LogFilteredData::doGetLineLength( LineNumber lineNum ) const
 {
+    if ( presentedSource_ ) {
+        return LineLength{ doGetExpandedLineString( lineNum ).size() };
+    }
     // Safety check: if sourceLogData_ is null (object being destroyed), return 0
     if ( !sourceLogData_ ) {
         return 0_length;

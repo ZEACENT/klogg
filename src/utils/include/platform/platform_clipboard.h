@@ -21,8 +21,19 @@
 #define KLOGG_PLATFORM_CLIPBOARD_H
 
 #include <QChar>
+#include <QString>
 
 namespace klogg::platform {
+
+// Selection text uses native separators before it reaches a clipboard sink.
+inline QString nativeTextLineSeparator()
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral( "\r\n" );
+#else
+    return QStringLiteral( "\n" );
+#endif
+}
 
 // On Windows, Qt inserts CR before LF in clipboard text natively, so we do not
 // prepend one ourselves. On other platforms we emit it explicitly.

@@ -79,7 +79,7 @@ using HsDatabase = SharedResource<hs_database_t>;
 
 struct HsMatcherContext {
 
-    HsMatcherContext( std::size_t numberOfPatterns = 1 );
+    explicit HsMatcherContext( std::size_t numberOfPatterns = 1 );
 
     void reset();
 

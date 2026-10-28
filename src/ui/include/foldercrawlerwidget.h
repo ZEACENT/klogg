@@ -199,8 +199,11 @@ class FolderCrawlerWidget : public QWidget,
     // focused view, so MainWindow::copy/selectAll work on folder tabs instead of
     // being enabled no-ops (currentCrawlerWidget() is null for a folder tab).
     QString getSelectedText() const override;
-    bool isPartialSelection() const override;
+    bool canUseSelectionAsSearchOperand() const override;
     void selectAll() override;
+    bool canSelectAllMatches( bool quickFind = false ) const override;
+    bool selectAllMatches( bool quickFind = false, bool copy = false ) override;
+    bool deferCopyUntilMatchSelection() override;
     // Apply the chosen encoding to the file currently open in the main view
     // (no-op until a file is opened). Overrides AbstractCrawlerWidget.
     void setEncoding( std::optional<int> mib ) override;
@@ -291,9 +294,8 @@ class FolderCrawlerWidget : public QWidget,
     void onHeaderClicked( LineNumber line );
 
   private:
-    // The view that should receive copy/selectAll/quickfind: the focused view if
-    // one of ours has focus, else the results view (the primary folder surface).
-    // Mirrors CrawlerWidget::activeView (crawlerwidget.cpp:1017).
+    // Copy/selectAll/quickfind use the focused view, then the saved QuickFind
+    // origin, then the active results view (the primary folder surface).
     AbstractLogView* activeView() const;
     void openFileInMainView( const QString& filePath, LineNumber localLine,
                              LinesCount nLines = LinesCount( 1 ),
@@ -389,6 +391,7 @@ class FolderCrawlerWidget : public QWidget,
         std::unique_ptr<FolderFilteredMarkProvider> markProvider;
         QString title;
         bool presentationRefreshPending = false;
+        bool searchComplete = false;
     };
     std::vector<std::unique_ptr<ResultPane>> panes_;
     int activePaneIndex_ = -1;
@@ -447,8 +450,8 @@ class FolderCrawlerWidget : public QWidget,
     // whole load window, and canceling that open must find its override still
     // pinned.
     std::optional<int> encodingMibOverride_;
-    // View that had focus when the QuickFind bar opened (enteringQuickFind);
-    // restored on exitingQuickFind. Mirrors CrawlerWidget::qfSavedFocus_.
+    // Origin of the current Quick Find interaction; restored once on exit and
+    // retired when its pane stops being active. Never a command-routing cache.
     QPointer<QWidget> qfSavedFocus_;
     // Last finished search's result text ("No matches" / "N match(es)");
     // re-shown with the stale hint when an option toggle invalidates it.

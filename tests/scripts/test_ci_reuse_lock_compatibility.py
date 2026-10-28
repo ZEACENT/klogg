@@ -34,7 +34,8 @@ class ProductionEnvironmentCompatibilityTest(unittest.TestCase):
                 receipt = read(evidence["receipt"])
                 policy_digest = CONSUMER.core.policy_identity(policy)
                 self.assertEqual(policy_digest, receipt["policy_digest"],
-                                 "do not change locked verifier bytes in an unrelated performance change")
+                                 f"{family}: changed qualification policy requires genuine "
+                                 "environment requalification or restoration of the locked policy inputs")
                 CONSUMER._validate_receipt(receipt, catalog, family, locked, policy_digest)
                 for field in ("recipe_digest", "input_digest"):
                     with self.subTest(binding=field):

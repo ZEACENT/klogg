@@ -154,6 +154,9 @@ class StreamingLogData : public SearchableLogData {
     void setPrefilter( const QString& prefilterPattern ) override;
     void setAnsiProcessingMode( AnsiProcessingMode mode ) override;
     RawLines getLinesRaw( LineNumber first, LinesCount number ) const override;
+    ReadSnapshot::Ptr searchableSnapshot() const override;
+    klogg::LogSnapshot::Ptr createReadSnapshot( klogg::SnapshotScope scope ) const override;
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override;
     bool isLiveSource() const override;
 
   Q_SIGNALS:

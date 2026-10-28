@@ -561,7 +561,6 @@ def verify_manifest_v1(
         path.name
         for path in assets_root.iterdir()
         if path.is_file()
-        and "-x86-" not in path.name.lower()
         and (
             path.suffix.lower() in (".dmg", ".deb", ".appimage", ".exe")
             or path.name.lower().endswith("-portable.zip")

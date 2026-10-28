@@ -48,8 +48,382 @@
 #include "configuration.h"
 #include "livelogexportservice.h"
 #include "logfiltereddata.h"
+#include "platform/platform_clipboard.h"
+#include "selection.h"
 #include "streaminglogdata.h"
 #include "test_utils.h"
+
+TEST_CASE( "Live snapshot labels and numbered captured copy are one based",
+           "[streaming][live-snapshot-labels]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "first\nsecond\n" );
+    const auto snapshot = data.searchableSnapshot();
+    REQUIRE( snapshot );
+    const auto first = snapshot->row( 0_lnum );
+    const auto second = snapshot->row( 1_lnum );
+    CHECK( first.sourceLineNumber == 1_lnum );
+    CHECK( second.sourceLineNumber == 2_lnum );
+    CHECK( first.identity.row == 0u );
+    CHECK( second.identity.row == 1u );
+    Selection selection;
+    selection.selectCapturedPortions(
+        { { Portion( 0_lnum, 0_lcol, 4_lcol ), first.sourceLineNumber,
+            snapshot->lineString( 0_lnum ), first.identity, 0_lnum },
+          { Portion( 1_lnum, 0_lcol, 5_lcol ), second.sourceLineNumber,
+            snapshot->lineString( 1_lnum ), second.identity, 1_lnum } } );
+    const auto numbered = selection.serializeCapturedText( true, {} );
+    REQUIRE( numbered );
+    CHECK( *numbered == QStringLiteral( "1: first" )
+                           + klogg::platform::nativeTextLineSeparator()
+                           + QStringLiteral( "2: second" ) );
+}
+
+TEST_CASE( "Live readers preserve payload CR after ingress has normalized record framing",
+           "[streaming][live-normalized-cr]" )
+{
+    const bool terminated = GENERATE( false, true );
+    const bool reloadFromDisk = GENERATE( false, true );
+    const auto codec = GENERATE( "UTF-8", "ISO-8859-1" );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    auto data = std::make_unique<StreamingLogData>( captureId, root.path() );
+    data->setDisplayEncoding( codec );
+    data->appendUtf8( terminated ? QByteArray( "ERROR\r\r\n" ) : QByteArray( "ERROR\r\r" ) );
+    if ( !terminated ) {
+        REQUIRE( data->finishInput().committedLines == 1_lcount );
+    }
+    if ( reloadFromDisk ) {
+        REQUIRE( data->persistCapture().complete() );
+        data.reset();
+        data = std::make_unique<StreamingLogData>( captureId, root.path() );
+        data->setDisplayEncoding( codec );
+    }
+    REQUIRE( data->getNbLine() == 1_lcount );
+    const auto expected = QStringLiteral( "ERROR\r" );
+    CHECK( data->getLineString( 0_lnum ) == expected );
+    const auto raw = data->getLinesRaw( 0_lnum, 1_lcount );
+    REQUIRE( raw.decodeLinesStrict().size() == 1u );
+    CHECK( raw.decodeLinesStrict().front() == expected );
+    const auto rawBlock = raw.buildUtf8Block();
+    REQUIRE( rawBlock.lines.size() == 1u );
+    CHECK( rawBlock.lines.front() == std::string_view( "ERROR\r" ) );
+    const auto snapshot = data->searchableSnapshot();
+    REQUIRE( snapshot );
+    CHECK( snapshot->lineString( 0_lnum ) == expected );
+    const auto snapshotRaw = snapshot->getLinesRaw( 0_lnum, 1_lcount );
+    const auto snapshotBlock = snapshotRaw.buildUtf8Block();
+    REQUIRE( snapshotBlock.lines.size() == 1u );
+    CHECK( snapshotBlock.lines.front() == std::string_view( "ERROR\r" ) );
+    CaptureStore::Snapshot::Cursor cursor;
+    const auto retained = data->captureSnapshot().readChunk( cursor );
+    REQUIRE_FALSE( retained.readFailed );
+    CHECK( retained.bytes == ( terminated ? QByteArray( "ERROR\r\n" )
+                                          : QByteArray( "ERROR\r" ) ) );
+}
+
+TEST_CASE( "Live read snapshots freeze committed rows without finalizing ingress",
+           "[streaming][live-read-snapshot]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "first\n" );
+    data.appendUtf8( QByteArray::fromHex( "e282" ) );
+    const auto snapshot = data.searchableSnapshot();
+    REQUIRE( snapshot );
+    CHECK_FALSE( data.hasPendingOutputExport() );
+    REQUIRE( snapshot->lineCount() == 1_lcount );
+    CHECK( snapshot->lineString( 0_lnum ) == QStringLiteral( "first" ) );
+    const auto identity = snapshot->row( 0_lnum ).identity;
+    data.appendUtf8( QByteArray::fromHex( "ac0a" ) );
+    REQUIRE( data.getNbLine() == 2_lcount );
+    CHECK( data.getLineString( 1_lnum ) == QString::fromUtf8( "\xe2\x82\xac" ) );
+    CHECK( snapshot->lineCount() == 1_lcount );
+    CHECK( snapshot->row( 0_lnum ).identity == identity );
+    CHECK( data.rowForIdentity( identity ) == OptionalLineNumber( 0_lnum ) );
+    CHECK_THROWS_AS( snapshot->lineString( 1_lnum ), klogg::SnapshotError );
+    CHECK_THROWS_AS( snapshot->getLinesRaw( 0_lnum, 2_lcount ), klogg::SnapshotError );
+}
+
+TEST_CASE( "Live read snapshots retain empty sealed records and old leases across clear",
+           "[streaming][live-read-snapshot]" )
+{
+    const bool disk = GENERATE( false, true );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "\r" );
+    REQUIRE( data.finishInput().committedLines == 1_lcount );
+    data.appendUtf8( "sealed" );
+    data.finishInput();
+    data.appendUtf8( "tail\n" );
+    if ( disk ) {
+        REQUIRE( data.persistCapture().complete() );
+    }
+    const auto snapshot = data.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot );
+    REQUIRE( snapshot->lineCount() == 3_lcount );
+    const auto oldId = snapshot->row( 0_lnum ).identity;
+    data.clearCapture();
+    data.appendUtf8( "replacement\n" );
+    const auto replacement = data.searchableSnapshot();
+    REQUIRE( replacement );
+    CHECK( replacement->row( 0_lnum ).identity != oldId );
+    CHECK_FALSE( data.rowForIdentity( oldId ) );
+    CHECK( snapshot->lineString( 0_lnum ).isEmpty() );
+    CHECK( snapshot->lineString( 1_lnum ) == QStringLiteral( "sealed" ) );
+    CHECK( snapshot->lineString( 2_lnum ) == QStringLiteral( "tail" ) );
+}
+
+TEST_CASE( "Live snapshot identities follow surviving rows through retention",
+           "[streaming][live-read-snapshot]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    limits.maxTotalLines = 2;
+    data.setCaptureLimits( limits );
+    data.appendUtf8( "a\nb\n" );
+    const auto snapshot = data.searchableSnapshot();
+    REQUIRE( snapshot );
+    const auto evicted = snapshot->row( 0_lnum ).identity;
+    const auto survivor = snapshot->row( 1_lnum ).identity;
+    data.appendUtf8( "c\n" );
+    REQUIRE( data.getNbLine() == 2_lcount );
+    CHECK_FALSE( data.rowForIdentity( evicted ) );
+    CHECK( data.rowForIdentity( survivor ) == OptionalLineNumber( 0_lnum ) );
+    CHECK( snapshot->lineString( 0_lnum ) == QStringLiteral( "a" ) );
+    CHECK( snapshot->lineString( 1_lnum ) == QStringLiteral( "b" ) );
+}
+
+TEST_CASE( "Live snapshot text settings are frozen and tabs remain matcher input",
+           "[streaming][live-read-snapshot]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.setDisplayEncoding( "UTF-8" );
+    data.setAnsiProcessingMode( AnsiProcessingMode::Strip );
+    data.setPrefilter( QStringLiteral( "prefix:" ) );
+    data.appendUtf8( QByteArray( "prefix:\033[31m\xc3\xa9\tX\033[0m\n" ) );
+    const auto snapshot = data.searchableSnapshot();
+    REQUIRE( snapshot );
+    const auto text = QString::fromUtf8( "\xc3\xa9\tX" );
+    CHECK( snapshot->lineString( 0_lnum ) == text );
+    CHECK( data.getExpandedLineString( 0_lnum ) == QString::fromUtf8( "\xc3\xa9       X" ) );
+    REQUIRE( data.getExpandedLines( 0_lnum, 1_lcount ).size() == 1u );
+    CHECK( data.getExpandedLines( 0_lnum, 1_lcount ).front()
+           == data.getExpandedLineString( 0_lnum ) );
+    data.setDisplayEncoding( "ISO-8859-1" );
+    data.setAnsiProcessingMode( AnsiProcessingMode::Plain );
+    data.setPrefilter( QString{} );
+    CHECK( snapshot->lineString( 0_lnum ) == text );
+    CHECK( data.searchableSnapshot()->lineString( 0_lnum ) != text );
+}
+
+TEST_CASE( "Live disk snapshot read failures are typed and never warning rows",
+           "[streaming][live-read-snapshot]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "disk row\n" );
+    REQUIRE( data.persistCapture().complete() );
+    const auto snapshot = data.searchableSnapshot();
+    REQUIRE( snapshot );
+    const auto files = QDir( data.capturePath() ).entryList(
+        QStringList{ QStringLiteral( "segment_*.log" ) }, QDir::Files );
+    REQUIRE( files.size() == 1 );
+    QFile damaged( QDir( data.capturePath() ).filePath( files.front() ) );
+    REQUIRE( damaged.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    damaged.close();
+    CHECK_THROWS_AS( snapshot->lineString( 0_lnum ), klogg::SnapshotError );
+}
+
+TEST_CASE( "Live snapshots read mixed disk and resident ranges after the owner is gone",
+           "[streaming][live-read-snapshot]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    SearchableLogData::ReadSnapshot::Ptr snapshot;
+    const QByteArray wideRecord = QByteArray( 64 * 1024 - 1, 'x' )
+                                  + QByteArray::fromHex( "e282ac" ) + "\n";
+    {
+        StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+        data.appendUtf8( "disk\n" );
+        REQUIRE( data.persistCapture().complete() );
+        data.appendUtf8( wideRecord );
+        data.appendUtf8( "resident" );
+        data.finishInput();
+        snapshot = data.searchableSnapshot();
+        REQUIRE( snapshot );
+        CHECK( snapshot->byteSize() == 5 + wideRecord.size() + 8 );
+        data.appendUtf8( "outside cutoff\n" );
+        data.deleteCaptureFiles();
+    }
+    REQUIRE( snapshot->lineCount() == 3_lcount );
+    CHECK( snapshot->lineString( 2_lnum ) == QStringLiteral( "resident" ) );
+    CHECK( snapshot->lineString( 0_lnum ) == QStringLiteral( "disk" ) );
+    CHECK( snapshot->lineString( 1_lnum )
+           == QString::fromUtf8( wideRecord.constData(), wideRecord.size() - 1 ) );
+    const auto range = snapshot->getLinesRaw( 0_lnum, 3_lcount ).decodeLinesStrict();
+    REQUIRE( range.size() == 3u );
+    CHECK( range[ 0 ] == QStringLiteral( "disk" ) );
+    CHECK( range[ 2 ] == QStringLiteral( "resident" ) );
+    CHECK( snapshot->getLinesRaw( 3_lnum, 0_lcount ).endOfLines.empty() );
+    CHECK_THROWS_AS( snapshot->row( 3_lnum ), klogg::SnapshotError );
+}
+
+TEST_CASE( "Live snapshot cache keys follow visible content rather than acquisition",
+           "[streaming][live-read-snapshot-integration]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "first\n" );
+    const auto initial = data.searchableSnapshot();
+    REQUIRE( initial->cacheKey() );
+    CHECK( data.searchableSnapshot()->cacheKey() == initial->cacheKey() );
+    data.appendUtf8( "pending" );
+    CHECK( data.searchableSnapshot()->cacheKey() == initial->cacheKey() );
+    REQUIRE( data.persistCapture().pendingPartialBytes > 0 );
+    CHECK( data.searchableSnapshot()->cacheKey() == initial->cacheKey() );
+    data.finishInput();
+    const auto appended = data.searchableSnapshot();
+    REQUIRE( appended->cacheKey() );
+    CHECK( appended->cacheKey() != initial->cacheKey() );
+    CHECK( appended->isAppendOf( *initial ) );
+    CHECK_FALSE( initial->isAppendOf( *appended ) );
+    data.setPrefilter( QStringLiteral( "first" ) );
+    const auto normalized = data.searchableSnapshot();
+    CHECK( normalized->cacheKey() != appended->cacheKey() );
+    CHECK_FALSE( normalized->isAppendOf( *appended ) );
+    data.setPrefilter( QStringLiteral( "first" ) );
+    CHECK( data.searchableSnapshot()->cacheKey() == normalized->cacheKey() );
+}
+
+TEST_CASE( "Live snapshot inverse identities are frozen and append proofs reject trimming",
+           "[streaming][live-read-snapshot-integration]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    limits.maxTotalLines = 2;
+    data.setCaptureLimits( limits );
+    const auto empty = data.searchableSnapshot();
+    data.appendUtf8( "a\nb\n" );
+    const auto old = data.searchableSnapshot();
+    const auto survivor = old->row( 1_lnum ).identity;
+    CHECK( old->rowForIdentity( survivor ) == OptionalLineNumber( 1_lnum ) );
+    CHECK( old->isAppendOf( *empty ) );
+    data.appendUtf8( "c\n" );
+    const auto trimmed = data.searchableSnapshot();
+    CHECK_FALSE( trimmed->isAppendOf( *old ) );
+    CHECK_FALSE( trimmed->isAppendOf( *empty ) );
+    CHECK( trimmed->cacheKey() != old->cacheKey() );
+    CHECK( trimmed->rowForIdentity( survivor ) == OptionalLineNumber( 0_lnum ) );
+    CHECK( old->rowForIdentity( survivor ) == OptionalLineNumber( 1_lnum ) );
+    data.clearCapture();
+    data.appendUtf8( "b\nc\n" );
+    const auto replacement = data.searchableSnapshot();
+    CHECK_FALSE( replacement->isAppendOf( *trimmed ) );
+    CHECK_FALSE( replacement->rowForIdentity( survivor ) );
+    CHECK( old->rowForIdentity( survivor ) == OptionalLineNumber( 1_lnum ) );
+}
+
+TEST_CASE( "Live display and snapshot normalization strip ANSI before filtering exactly once",
+           "[streaming][live-read-snapshot-integration]" )
+{
+    const auto mode = GENERATE( AnsiProcessingMode::Strip, AnsiProcessingMode::Render );
+    const auto codec = GENERATE( "UTF-8", "ISO-8859-1" );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.setDisplayEncoding( codec );
+    data.setAnsiProcessingMode( mode );
+    data.setPrefilter( QStringLiteral( "^aa" ) );
+    data.appendUtf8( "\033[31maaaa\033[0m\naaaa\n" );
+    REQUIRE( data.persistCapture().complete() );
+    const auto snapshot = data.searchableSnapshot();
+    REQUIRE( snapshot );
+    for ( const auto line : { 0_lnum, 1_lnum } ) {
+        CHECK( snapshot->lineString( line ) == QStringLiteral( "aa" ) );
+        CHECK( data.getLineString( line ) == snapshot->lineString( line ) );
+        CHECK( data.getLineLength( line )
+               == LineLength( data.getExpandedLineString( line ).size() ) );
+        const auto raw = data.getLinesRaw( line, 1_lcount ).decodeLinesStrict();
+        REQUIRE( raw.size() == 1u );
+        CHECK( raw.front() == snapshot->lineString( line ) );
+    }
+    if ( mode == AnsiProcessingMode::Render ) {
+        const auto colors = data.getLineAnsiColors( 0_lnum );
+        REQUIRE( colors.size() == 1u );
+        CHECK( colors.front().startColumn == 0_lcol );
+        CHECK( colors.front().length == 2_length );
+    }
+    const auto output = QDir( root.path() ).filePath( QStringLiteral( "normalized.log" ) );
+    REQUIRE( data.bindOutputFile( output, LiveLogSaveAnsiMode::Strip ) );
+    data.appendUtf8( "\033[31maaaa\033[0m\n" );
+    data.finishInput();
+    QFile saved( output );
+    REQUIRE( saved.open( QIODevice::ReadOnly ) );
+    CHECK( saved.readAll() == QByteArray( "aa\naa\naa\n" ) );
+}
+
+TEST_CASE( "Live raw normalization preserves a committed empty record with a legacy codec",
+           "[streaming][live-read-snapshot-integration]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.setDisplayEncoding( "ISO-8859-1" );
+    data.appendUtf8( "\r" );
+    REQUIRE( data.finishInput().committedLines == 1_lcount );
+    const auto raw = data.getLinesRaw( 0_lnum, 1_lcount ).decodeLinesStrict();
+    REQUIRE( raw.size() == 1u );
+    CHECK( raw.front().isEmpty() );
+    CHECK( data.searchableSnapshot()->lineString( 0_lnum ).isEmpty() );
+}
+
+TEST_CASE( "Live aggregate width includes tab expansion across reload and retention",
+           "[streaming][live-expanded-max]" )
+{
+    const bool reloadFromDisk = GENERATE( false, true );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    auto data = std::make_unique<StreamingLogData>( captureId, root.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 4;
+    data->setCaptureLimits( limits );
+    data->appendUtf8( "\t\tZ\nshort\n" );
+    if ( reloadFromDisk ) {
+        REQUIRE( data->persistCapture().complete() );
+        data.reset();
+        data = std::make_unique<StreamingLogData>( captureId, root.path() );
+    }
+    CHECK( data->getExpandedLineString( 0_lnum ).size() == 17 );
+    CHECK( data->getMaxLength() == 17_length );
+    limits.maxTotalLines = 1;
+    data->setCaptureLimits( limits );
+    REQUIRE( data->getNbLine() == 1_lcount );
+    CHECK( data->getLineString( 0_lnum ) == QStringLiteral( "short" ) );
+    CHECK( data->getMaxLength() == 5_length );
+    data->appendUtf8( "\tQ\n" );
+    REQUIRE( data->getNbLine() == 1_lcount );
+    CHECK( data->getMaxLength() == 9_length );
+    CHECK( data->getLineLength( 0_lnum ) == 9_length );
+    data->clearCapture();
+    CHECK( data->getMaxLength() == 0_length );
+}
 
 TEST_CASE( "Streaming output receives the complete accepted batch before capture retention",
            "[streaming][storage-integrity]" )
@@ -164,6 +538,19 @@ struct LiveLogExportServiceTestAccess {
 } // namespace klogg::livelog
 
 struct StreamingLogDataTimerTestAccess {
+    static bool orderingLockAvailableOnWorker( StreamingLogData& data )
+    {
+        bool available = false;
+        std::thread probe( [ & ] {
+            available = data.appendOrderingMutex_.try_lock();
+            if ( available ) {
+                data.appendOrderingMutex_.unlock();
+            }
+        } );
+        probe.join();
+        return available;
+    }
+
     static void spillFault( StreamingLogData& data, qint64& now,
                             std::optional<CaptureStore::PersistenceFailure>& failure )
     {
@@ -250,6 +637,102 @@ struct StreamingLogDataTimerTestAccess {
         REQUIRE_FALSE( data.loadingFinishedQueued_ );
     }
 };
+
+TEST_CASE( "Live interpretation changes publish one unlocked notification per actual change",
+           "[streaming][live-interpretation-signal]" )
+{
+    const bool changeAnsi = GENERATE( false, true );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "prefix:\033[31mvalue\033[0m\n" );
+    const auto initial = data.searchableSnapshot();
+    REQUIRE( initial->cacheKey() );
+    std::vector<SearchableLogData::ReadSnapshot::CacheKey> observedKeys;
+    std::vector<bool> unlockedAtNotification;
+    int notifications = 0;
+    QObject::connect( &data, &AbstractLogData::interpretationChanged, &data, [ & ] {
+        ++notifications;
+        // A recursive mutex would hide a same-thread locked emission. Probe it
+        // from another thread without blocking before taking the callback snapshot.
+        unlockedAtNotification.push_back(
+            StreamingLogDataTimerTestAccess::orderingLockAvailableOnWorker( data ) );
+        const auto snapshot = data.searchableSnapshot();
+        const auto key = snapshot->cacheKey();
+        if ( key ) {
+            observedKeys.push_back( *key );
+        }
+    } );
+    const auto setChanged = [ & ]( bool changed ) {
+        if ( changeAnsi ) {
+            data.setAnsiProcessingMode( changed ? AnsiProcessingMode::Strip
+                                               : AnsiProcessingMode::Plain );
+        }
+        else {
+            data.setPrefilter( changed ? QStringLiteral( "prefix:" ) : QString{} );
+        }
+    };
+    setChanged( false );
+    CHECK( notifications == 0 );
+    setChanged( true );
+    REQUIRE( notifications == 1 );
+    REQUIRE( observedKeys.size() == 1u );
+    CHECK( unlockedAtNotification.front() );
+    CHECK( observedKeys.front() != *initial->cacheKey() );
+    CHECK( observedKeys.front() == *data.searchableSnapshot()->cacheKey() );
+    setChanged( true );
+    CHECK( notifications == 1 );
+    setChanged( false );
+    REQUIRE( notifications == 2 );
+    REQUIRE( observedKeys.size() == 2u );
+    CHECK( unlockedAtNotification.back() );
+    CHECK( observedKeys.back() == *initial->cacheKey() );
+}
+
+TEST_CASE( "Live forced-encoding reload publishes only actual unlocked interpretation changes",
+           "[streaming][live-reload-interpretation-signal]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "record\n" );
+    auto* const initialCodec = data.getDisplayEncoding();
+    auto* const latin1 = QTextCodec::codecForName( "ISO-8859-1" );
+    REQUIRE( latin1 );
+    REQUIRE( latin1 != initialCodec );
+    const auto initial = data.searchableSnapshot();
+    REQUIRE( initial->cacheKey() );
+    std::vector<SearchableLogData::ReadSnapshot::CacheKey> observedKeys;
+    std::vector<bool> unlockedAtNotification;
+    int notifications = 0;
+    QObject::connect( &data, &AbstractLogData::interpretationChanged, &data, [ & ] {
+        ++notifications;
+        unlockedAtNotification.push_back(
+            StreamingLogDataTimerTestAccess::orderingLockAvailableOnWorker( data ) );
+        const auto snapshot = data.searchableSnapshot();
+        const auto key = snapshot->cacheKey();
+        if ( key ) {
+            observedKeys.push_back( *key );
+        }
+    } );
+    data.reload();
+    data.reload( initialCodec );
+    CHECK( notifications == 0 );
+    data.reload( latin1 );
+    REQUIRE( notifications == 1 );
+    REQUIRE( observedKeys.size() == 1u );
+    CHECK( unlockedAtNotification.front() );
+    CHECK( observedKeys.front() != *initial->cacheKey() );
+    CHECK( observedKeys.front() == *data.searchableSnapshot()->cacheKey() );
+    data.reload( latin1 );
+    data.reload();
+    CHECK( notifications == 1 );
+    data.reload( initialCodec );
+    REQUIRE( notifications == 2 );
+    REQUIRE( observedKeys.size() == 2u );
+    CHECK( unlockedAtNotification.back() );
+    CHECK( observedKeys.back() == *initial->cacheKey() );
+}
 
 namespace {
 QString makeCaptureId()

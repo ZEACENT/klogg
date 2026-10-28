@@ -2,7 +2,7 @@ name: Setup MSVC environment
 description: Initialize a pinned GitHub-hosted Visual Studio toolchain without a Node action runtime
 inputs:
   arch:
-    description: Target architecture (x64 or x86)
+    description: Target architecture (x64)
     required: true
 runs:
   using: composite
@@ -12,7 +12,7 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
         $target = "${{ inputs.arch }}"
-        if ($target -notin @("x64", "x86")) {
+        if ($target -ne "x64") {
           throw "Unsupported MSVC target architecture: $target"
         }
 
@@ -29,10 +29,9 @@ runs:
           throw "Visual Studio developer-shell launcher is missing: $launcher"
         }
 
-        $developerShellArch = if ($target -eq "x64") { "amd64" } else { "x86" }
         $before = @{}
         Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
-        & $launcher -Arch $developerShellArch -HostArch amd64 -SkipAutomaticLocation
+        & $launcher -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
         Get-ChildItem Env: | ForEach-Object {
           if (!$before.ContainsKey($_.Name) -or $before[$_.Name] -ne $_.Value) {

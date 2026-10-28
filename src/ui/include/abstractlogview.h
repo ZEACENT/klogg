@@ -55,6 +55,7 @@
 #include <QColor>
 #include <QEvent>
 #include <QFontMetrics>
+#include <QPointer>
 
 #include "abstractlogdata.h"
 #include "linekind.h"
@@ -62,7 +63,10 @@
 #include "linetypes.h"
 #include "markprovider.h"
 #include "overviewwidget.h"
+#include "ownedtaskfuture.h"
 #include "quickfind.h"
+#include "matchprojection.h"
+#include "matchselectionjob.h"
 #include "quickfindmux.h"
 #include "regularexpressionpattern.h"
 #include "selection.h"
@@ -72,6 +76,7 @@
 class QMenu;
 class QAction;
 class QShortcut;
+class QProgressDialog;
 class HighlightersMenu;
 
 // Utility class representing a buffer for number entered on the keyboard
@@ -190,10 +195,20 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // labels) must use it, as a label entry containing a line feed can never
     // match a single line.
     QStringList getSelectedLinesText() const;
-    // True for partial selection
-    bool isPartialSelection() const;
+    // True for one contiguous search operand, not an arbitrary fragment batch.
+    bool canUseSelectionAsSearchOperand() const;
     // Instructs the widget to select the whole text.
     void selectAll();
+    // Match selection is batched and published atomically. Hosts validate filter
+    // completion; layout-only changes remap identities rather than clearing text.
+    bool canSelectAllMatches( bool quickFind = false ) const;
+    bool selectAllMatches( bool quickFind = false, bool copy = false );
+    void cancelMatchSelection();
+    void invalidateMatchSelection();
+    bool hasMatchSelection() const;
+    void refreshMatchSelection();
+    // Ordinary Copy can arrive before the batched selection is published.
+    bool deferCopyUntilMatchSelection();
     // Inject a read-only mark source (for views without LogFilteredData, e.g.
     // the folder main view and folder results view). Subclass lineType()
     // overrides OR in LineTypeFlags::Mark from it; the LogViewNextMark/PrevMark
@@ -294,6 +309,8 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     virtual void selectPrevMark();
 
   Q_SIGNALS:
+    void matchSelectionFinished( bool completed );
+    void matchSelectionProgress( quint64 processed, quint64 total );
     // Sent up to the MainWindow to enable/disable the follow mode
     void followModeChanged( bool enabled );
     // Sent when the view wants the QuickFind widget pattern to change.
@@ -452,7 +469,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void setSearchEnd();
     void setSelectionStart();
     void setSelectionEnd();
-    void setQuickFindResult( bool hasMatch, const Portion& selection );
+    void setQuickFindResult( const QuickFindResult& result );
     void setColorLabel( QAction* action );
 
   private:
@@ -514,6 +531,37 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     OptionalLineNumber markingClickLine_;
 
     Selection selection_;
+
+    struct MatchSelection {
+        std::shared_ptr<std::atomic<bool>> cancelled = std::make_shared<std::atomic<bool>>( false );
+        std::shared_ptr<klogg::MatchSelectionJob> job;
+        std::shared_ptr<Selection> result;
+        klogg::LogSnapshot::Ptr presentation;
+        std::optional<QString> clipboard;
+        QPointer<QProgressDialog> progress;
+        LinesCount totalRows = 0_lcount;
+        bool copyWhenFinished = false;
+        bool withLineNumbers = false;
+        bool serializing = false;
+        bool publishSelection = true;
+    };
+    std::unique_ptr<MatchSelection> matchSelection_;
+    klogg::LogSnapshot::Ptr matchSelectionPresentation_;
+    std::vector<klogg::OwnedTaskFuture<klogg::MatchSelectionStep>> matchSelectionWorkers_;
+    quint64 matchSelectionGeneration_ = 0;
+    bool acceptQuickFindResults_ = true;
+
+    QRegularExpression matchSelectionExpression( bool quickFind ) const;
+    void connectQuickFindSource();
+    void bindSourceInterpretation();
+    void clearCurrentMatchSelection();
+    klogg::LogSnapshot::Ptr remapMatchSelection(
+        Selection& selection, const klogg::LogSnapshot::Ptr& previous = {} ) const;
+    QMetaObject::Connection interpretationConnection_;
+    void showMatchSelectionProgress();
+    bool serializeMatchSelection( bool withLineNumbers );
+    void continueMatchSelection( quint64 generation );
+    void finishMatchSelection( bool completed );
     RegularExpressionPattern searchPattern_;
 
     std::vector<QuickHighlighters> quickHighlighters_ = std::vector<QuickHighlighters>{ 9 };
@@ -537,6 +585,17 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
       std::shared_ptr<const WrappedString> wrappedString;
     };
     klogg::vector<WrappedLineData> wrappedLinesInfo_;
+    std::optional<QFontMetrics> wrappedLayoutFont_;
+    int wrappedLayoutWidth_ = 0;
+    struct FrameLine {
+        LineNumber lineNumber;
+        QString text;
+        std::shared_ptr<const WrappedString> layout;
+    };
+    std::shared_ptr<const WrappedString> layoutLine( LineNumber line, const QString& text ) const;
+    klogg::vector<FrameLine> layoutFrame() const;
+    void publishLineMap( const klogg::vector<FrameLine>& frame );
+    int drawingOffsetForHeight( int height ) const;
 
     LineNumber searchStart_;
     LineNumber searchEnd_;
@@ -604,13 +663,15 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
         LineNumber first_line_;
         LineNumber last_line_;
         LineColumn first_column_;
-        int actual_height_; // Actual pixel height of drawn content (for text wrap)
+        int actual_height_; // Full logical frame height, independent of cached pixels.
+        int origin_y_; // Logical pixel represented by cache row zero.
+        bool bottom_aligned_;
     };
     struct PullToFollowCache {
         QPixmap pixmap_;
         LineLength nb_columns_;
     };
-    TextAreaCache textAreaCache_ = { {}, true, 0_lnum, 0_lnum, 0_lcol, 0 };
+    TextAreaCache textAreaCache_ = { {}, true, 0_lnum, 0_lnum, 0_lcol, 0, 0, false };
     PullToFollowCache pullToFollowCache_ = { {}, 0_length };
     QFontMetrics pixmapFontMetrics_;
 
@@ -652,6 +713,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     int visibleLineMapBuildCount_ = 0;
     int updateDataCountForTest_ = 0;
     int forceRefreshCountForTest_ = 0;
+    uint64_t paintedTextUnitsForTest_ = 0;
     quint64 presentedLineCountForTest_ = 0;
 
     LinesCount getNbVisibleLines() const;

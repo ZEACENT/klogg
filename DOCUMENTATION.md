@@ -150,6 +150,46 @@ fast, but it doesn't support some patterns, most notably any lookahead is not su
 *klogg* will switch to Qt regular expression engine with full PCRE syntax support if
 Vectorscan can't handle the search pattern. However, in this case search will be significantly slower.
 
+### Selecting and copying match fragments
+
+**Edit > Select All Matches** selects matched text instead of whole log lines.
+Use `Alt+Enter` on Windows/Linux or `Option+Enter` on macOS, then the normal
+Copy command (`Ctrl+C` / `Command+C`). **Edit > Copy Matches** performs both
+steps. The shortcuts are configurable in Options > Shortcuts.
+
+Filter and Quick Find share the same projection: participating, non-empty
+capturing groups determine the fragments when captures are present; otherwise
+the whole regex match is used. For example:
+
+```regex
+(?<=\[plt-installed\] )[^:]*
+```
+
+On `[plt-installed] /vendor/lib64/example.so:dlsym`, this copies only
+`/vendor/lib64/example.so`. Alternatively, use
+`(?:\[plt-installed\] )([^:]+)(?=:)` to capture the path explicitly.
+Non-capturing groups retain their normal regex meaning; they do not create a
+capture, but remain part of the full match.
+
+Filter commands use the completed result set, excluding mark-only rows, context
+rows and folder headers. Matching rows remain eligible in Marks-only views and
+collapsed folder groups; selection does not change visibility or expand groups.
+Boolean and inverse filters do not define extractable fragments for this operation.
+
+When the Quick Find input has focus, these commands instead use its current
+pattern and originating view's presented data rows, excluding headers. The
+matching and capture-projection rules are the same as Filter; only the candidate
+scope differs. Initial command routing may focus the log view for ordinary Copy,
+but asynchronous completion does not steal focus from another input.
+
+Each fragment is copied on its own line, in result order. Duplicate text is
+preserved. Escape clears a match selection or cancels selection in progress.
+Selections own a fixed snapshot of the projected text and do not automatically
+grow when new logs arrive. Folding, visibility and layout changes preserve that
+text; replacing the query or changing source identity or interpretation retires
+it. Copy does not reread mutable source text, and Copy issued during extraction
+waits for the same accepted selection.
+
 <a name="opening-files"></a>
 
 ### Opening files
@@ -680,6 +720,7 @@ Shortcuts apply when the corresponding log view or control has focus.
 |Ctrl+Home       |jump to the first line of the file                                |
 |Shift+G / Ctrl+End|jump to the last line of the file                               |
 |Ctrl+G          |show jump to line dialog                                          |
+|Alt+Enter       |select all match fragments (Option+Enter on macOS)                |
 |' or "          |start a quickfind search in the current screen                    |
 |                |(forward and backward)                                            |
 |F3 / Shift+N    |repeat the previous quickfind search forward/backward             |

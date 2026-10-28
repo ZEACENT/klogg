@@ -67,6 +67,10 @@ may follow the upstream project instead.
 - **[Installation notes](https://github.com/ZEACENT/klogg#download):** architecture,
   CPU, operating-system, and package requirements. Check the selected release's notes.
 
+**Windows x86 (32-bit) support has ended.** The last Windows x86 release is
+[v26.08.08.1096](https://github.com/ZEACENT/klogg/releases/tag/v26.08.08.1096).
+It will receive no further fixes or updates. Current Windows builds require x64.
+
 **macOS DMGs are unsigned CI validation artifacts, not signed or notarized
 releases.** They may require explicit local Gatekeeper approval. Stable
 promotion reuses verified Continuous package payloads; it does not add signing.

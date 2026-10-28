@@ -395,74 +395,6 @@ jobs:
           path: prefetch_artifacts/boost_1_86_0.tar.bz2
           if-no-files-found: error
 
-  PrefetchOpenSsl:
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
-    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch Windows Qt 5 OpenSSL"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Restore OpenSSL prefetch cache
-        id: cache-openssl-prefetch
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
-          key: openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}
-
-      - name: Validate restored OpenSSL archive or genuine absence
-        id: verify-openssl-cache
-        shell: bash
-        env:
-          KLOGG_OPENSSL_CACHE_HIT: ${{ steps.cache-openssl-prefetch.outputs.cache-hit }}
-        run: |
-          set -euo pipefail
-          archive="$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip"
-          case "$KLOGG_OPENSSL_CACHE_HIT" in
-            true|false|"") ;;
-            *) echo "::error::Unexpected OpenSSL cache-hit value"; exit 1 ;;
-          esac
-          if [[ "$KLOGG_OPENSSL_CACHE_HIT" == "true" || -e "$archive" || -L "$archive" ]]; then
-            python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$archive" --verify-only
-            echo "missing=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "missing=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Acquire locked OpenSSL archive on genuine miss
-        if: ${{ steps.verify-openssl-cache.outputs.missing == 'true' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/prefetch_artifacts"
-          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --acquire
-
-      - name: Verify complete OpenSSL archive before publication
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/prefetch_artifacts/openssl.zip" --verify-only
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: openssl-archive
-          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
-          if-no-files-found: error
-
-      - name: Save verified OpenSSL prefetch cache
-        if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
-          key: openssl-qt5-verified-v1-${{ hashFiles('ci/tools/openssl-qt5.json') }}
-
   PrefetchLinuxDeployQt:
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Prefetch linuxdeployqt"
@@ -2585,7 +2517,6 @@ jobs:
       KLOGG_QT_ARCHIVES: qtbase icu qtsvg qttools qttranslations
       KLOGG_QT_ARCH: win64_msvc2022_64
       KLOGG_CONFIG_ARCH: x64
-      KLOGG_SSL_ARCH: -x64
       KLOGG_CONFIG_PACKAGE_TAG: vs-avx2
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_VECTORSCAN=ON
       KLOGG_LABEL: x64-qt6
@@ -2602,19 +2533,6 @@ jobs:
           persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
-        with:
-          name: openssl-archive
-          path: ${{ github.workspace }}
-
-      - name: Verify and materialize locked Qt 5 OpenSSL
-        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/materialize_openssl.py --lock ci/tools/openssl-qt5.json --archive "$GITHUB_WORKSPACE/openssl.zip" --materialize --architecture "${{ env.KLOGG_CONFIG_ARCH }}" --destination "$GITHUB_WORKSPACE/openssl-1.1"
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msys2-tools
           path: ${{ github.workspace }}
@@ -2628,13 +2546,6 @@ jobs:
             --extract-artifact --require-prefetched \
             --archive "$GITHUB_WORKSPACE/msys2-tools.zip" \
             --destination "$GITHUB_WORKSPACE/msys2-tools"
-
-      - name: Set openssl paths
-        if: ${{ startsWith(env.KLOGG_QT_VERSION, '5') }}
-        shell: bash
-        run: |
-          echo "SSL_DIR=${{ github.workspace }}\openssl-1.1\${{ env.KLOGG_CONFIG_ARCH }}\bin" >> $GITHUB_ENV
-          echo "SSL_ARCH=${{ env.KLOGG_SSL_ARCH }}" >> $GITHUB_ENV
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -2881,28 +2792,10 @@ jobs:
             exit 1
           }
 
-      - name: Verify vectorscan disabled in CMake cache (x86)
-        if: ${{ env.KLOGG_CONFIG_ARCH == 'x86' }}
-        shell: pwsh
-        run: |
-          $cachePath = Join-Path $env:GITHUB_WORKSPACE "build_root\CMakeCache.txt"
-          if ( !(Test-Path $cachePath) ) {
-            Write-Error "CMake cache not found at $cachePath"
-            exit 1
-          }
-
-          $vectorscan = Select-String -Path $cachePath -Pattern '^KLOGG_USE_VECTORSCAN:BOOL=OFF$'
-          if ( !$vectorscan ) {
-            Write-Host "Current regex backend values:"
-            Select-String -Path $cachePath -Pattern '^KLOGG_USE_VECTORSCAN:BOOL=|^KLOGG_GENERIC_CPU:BOOL=' | ForEach-Object { $_.Line }
-            Write-Error "Vectorscan must stay disabled on Windows x86"
-            exit 1
-          }
-
       - name: Configure crash dumps for Windows test binaries
         shell: pwsh
         run: |
-          # Every Windows leg (x86 and x64) gets WER LocalDumps so a hard crash
+          # Every Windows leg gets WER LocalDumps so a hard crash
           # in either test binary leaves an analyzable dump. DumpType=2 (full)
           # with DumpCount=10 bounds the retained set to the 10 most recent
           # dumps; the dump directory is only uploaded on test failure below.
@@ -3229,7 +3122,7 @@ jobs:
           except Exception as error:
               problem("offline compiler identity", error)
           known_modules = {"dbghelp.dll", "dbgcore.dll", "clang_rt.asan_dynamic-x86_64.dll",
-                           "clang_rt.asan_dynamic-i386.dll", "cl_asan_x64.dll"}
+                           "cl_asan_x64.dll"}
           stderr_files = sorted((build / "crash_dumps").glob("windows-crash-smoke-*/helper-stderr.txt"))[:2]
           for stderr in stderr_files:
               try:
@@ -3475,30 +3368,6 @@ jobs:
           retention-days: 90
           compression-level: 0
 
-  WindowsX86:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools, ReleaseQualificationPreflight]
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
-    name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}Windows x86-qt5 [QTRegex]"
-    env:
-      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
-      KLOGG_CONFIG_OS: windows
-      KLOGG_OS_VERSION: 2022
-      KLOGG_QT_VERSION: 5.15.2
-      KLOGG_QT_MODULES: ""
-      KLOGG_QT_ARCHIVES: qtbase qtimageformats qttools qttranslations icu qtsvg
-      KLOGG_QT_ARCH: win32_msvc2019
-      KLOGG_CONFIG_ARCH: x86
-      KLOGG_SSL_ARCH: ""
-      KLOGG_CONFIG_PACKAGE_TAG: QTRegex
-      KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_USE_SENTRY=OFF -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_VECTORSCAN=OFF
-      KLOGG_LABEL: x86-qt5
-      KLOGG_CACHE_PRODUCER_JOB: Windows x86-qt5 [QTRegex]
-      KLOGG_PACKAGE_ENABLED: false
-      KLOGG_SANITIZER: ""
-    runs-on: windows-2022
-    timeout-minutes: 60
-    steps: *windows_steps
-
   WindowsAsan:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, ReleaseQualificationPreflight]
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]') }}
@@ -3512,7 +3381,6 @@ jobs:
       KLOGG_QT_ARCHIVES: qtbase icu qtsvg qttools qttranslations
       KLOGG_QT_ARCH: win64_msvc2022_64
       KLOGG_CONFIG_ARCH: x64
-      KLOGG_SSL_ARCH: -x64
       KLOGG_CONFIG_PACKAGE_TAG: asan
       KLOGG_CONFIG_CMAKE_OPTS: -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON
       KLOGG_LABEL: x64-qt6-asan
@@ -3526,7 +3394,7 @@ jobs:
   ci-gate:
     name: "${{ github.event_name == 'workflow_dispatch' && (inputs.environment-mode != 'off' || inputs.dependency-mode != 'off') && '[producer-mode skipped] ' || '' }}ci-gate"
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) }}
-    needs: [BuildAdbLinuxArm64, BuildAdbWindowsX64, BuildAdbMacX64, BuildAdbMacArm64, BuildIosNativeX64, BuildIosNativeArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsX86, WindowsAsan]
+    needs: [BuildAdbLinuxArm64, BuildAdbWindowsX64, BuildAdbMacX64, BuildAdbMacArm64, BuildIosNativeX64, BuildIosNativeArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsAsan]
     runs-on: ubuntu-22.04
     steps:
       - name: Check CI results

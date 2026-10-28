@@ -39,6 +39,74 @@
 
 namespace {
 
+// A multi-line block is equivalent to independent records only when every
+// consuming atom excludes LF and anchors keep record-local semantics. This is
+// a deliberately bounded capability proof, not another regex implementation:
+// constructs we cannot prove safe keep the existing per-record matcher.
+bool supportsRecordLocalBlockScan( const QString& pattern )
+{
+    for ( klogg::ContainerIndex i = 0; i < pattern.size(); ) {
+        const auto current = pattern.at( i );
+        if ( current == QLatin1Char( '\n' ) ) return false;
+        if ( current == QLatin1Char( '[' ) ) {
+            auto end = i + 1;
+            if ( end < pattern.size() && pattern.at( end ) == QLatin1Char( '^' ) ) ++end;
+            if ( end < pattern.size() && pattern.at( end ) == QLatin1Char( ']' ) ) ++end;
+            for ( ; end < pattern.size(); ++end ) {
+                if ( pattern.at( end ) == QLatin1Char( '\\' ) ) {
+                    ++end;
+                    continue;
+                }
+                // Nested/POSIX classes need a different lexer; no speculative fast path.
+                if ( pattern.at( end ) == QLatin1Char( '[' ) ) return false;
+                if ( pattern.at( end ) == QLatin1Char( ']' ) ) break;
+            }
+            if ( end >= pattern.size() ) return false;
+            const QRegularExpression atom{
+                QStringLiteral( "\\A(?:" ) + pattern.mid( i, end - i + 1 ) + QStringLiteral( ")\\z" ),
+                QRegularExpression::UseUnicodePropertiesOption };
+            if ( !atom.isValid() || atom.match( QStringLiteral( "\n" ) ).hasMatch() ) return false;
+            i = end + 1;
+            continue;
+        }
+        if ( current == QLatin1Char( '\\' ) ) {
+            if ( i + 1 >= pattern.size() ) return false;
+            const auto escaped = pattern.at( i + 1 );
+            if ( escaped == QLatin1Char( 'Q' ) ) {
+                const auto end = pattern.indexOf( QStringLiteral( "\\E" ), i + 2 );
+                const auto quotedEnd = end < 0 ? pattern.size() : end;
+                if ( pattern.mid( i + 2, quotedEnd - i - 2 ).contains( QLatin1Char( '\n' ) ) ) return false;
+                i = end < 0 ? pattern.size() : end + 2;
+                continue;
+            }
+            // These atoms either cannot consume LF or are local zero-width
+            // boundaries. Absolute anchors, LF-capable escapes (including \s),
+            // backreferences, and other unproven escapes must not scan blocks.
+            if ( escaped == QLatin1Char( '\n' ) || escaped.isDigit()
+                 || ( escaped.isLetter()
+                      && !QStringLiteral( "dwhSbBtrfae" ).contains( escaped ) ) ) return false;
+            i += 2;
+            continue;
+        }
+        if ( current == QLatin1Char( '(' ) && i + 1 < pattern.size()
+             && pattern.at( i + 1 ) == QLatin1Char( '?' ) ) {
+            bool knownHeader = false;
+            for ( const auto* header : { "(?:", "(?i)", "(?i:", "(?-i)", "(?-i:", "(?m)", "(?m:" } ) {
+                const auto text = QString::fromLatin1( header );
+                if ( pattern.mid( i, text.size() ) == text ) {
+                    i += text.size();
+                    knownHeader = true;
+                    break;
+                }
+            }
+            if ( !knownHeader ) return false; // Includes dotall, lookarounds, and absolute-mode changes.
+            continue;
+        }
+        ++i;
+    }
+    return true;
+}
+
 // Wire Vectorscan to use mimalloc for internal allocations (once per process).
 struct HsAllocatorInit {
     HsAllocatorInit()
@@ -86,6 +154,8 @@ int matchMultiCallback( unsigned int id, unsigned long long from, unsigned long 
 // The context carries endOfLines offsets for binary-search mapping.
 struct BufferScanContext {
     const klogg::vector<qint64>* endOfLines;
+    qint64 bufferSize = 0;
+    bool endsWithSeparator = false;
     // For multi-pattern boolean mode:
     std::vector<MatchedPatterns>* perLinePatterns;
     // Occupancy bitset (one byte per line) for O(1) dedup with zero per-match
@@ -104,11 +174,15 @@ int bufferScanSingleCallback( unsigned int id, unsigned long long from, unsigned
     Q_UNUSED( flags );
 
     auto* ctx = static_cast<BufferScanContext*>( context );
-    // Attribute the match to the line containing its last byte (to - 1). For a
-    // ZERO-WIDTH match (from == to, e.g. ^, ^$, \b, a* matching empty) at a line
-    // boundary, to - 1 lands on the previous line's terminator and would
-    // mis-attribute; use `to` so the empty match maps to the line starting there.
-    const auto matchByte = static_cast<qint64>( ( from < to && to > 0 ) ? to - 1 : to );
+    // Block compilation requests SOM, so `from` is an actual start offset.
+    // Without SOM, Vectorscan reports zero here even for later zero-width
+    // matches, incorrectly attributing those matches to the preceding row.
+    // An empty match at EOF belongs to an unterminated final record, but not
+    // to an imaginary record after the final LF.
+    const bool finalRecordEnd = !ctx->endsWithSeparator
+        && to == static_cast<unsigned long long>( ctx->bufferSize );
+    const auto matchByte = static_cast<qint64>(
+        to > 0 && ( from < to || finalRecordEnd ) ? to - 1 : to );
     auto it = std::upper_bound( ctx->endOfLines->cbegin(), ctx->endOfLines->cend(), matchByte );
     const auto lineIndex = static_cast<uint64_t>( std::distance( ctx->endOfLines->cbegin(), it ) );
 
@@ -124,11 +198,13 @@ int bufferScanSingleCallback( unsigned int id, unsigned long long from, unsigned
 int bufferScanMultiCallback( unsigned int id, unsigned long long from, unsigned long long to,
                               unsigned int flags, void* context )
 {
-    Q_UNUSED( from );
     Q_UNUSED( flags );
 
     auto* ctx = static_cast<BufferScanContext*>( context );
-    const auto matchByte = static_cast<qint64>( to > 0 ? to - 1 : to );
+    const bool finalRecordEnd = !ctx->endsWithSeparator
+        && to == static_cast<unsigned long long>( ctx->bufferSize );
+    const auto matchByte = static_cast<qint64>(
+        to > 0 && ( from < to || finalRecordEnd ) ? to - 1 : to );
     auto it = std::upper_bound( ctx->endOfLines->cbegin(), ctx->endOfLines->cend(), matchByte );
     const auto lineIndex = static_cast<size_t>( std::distance( ctx->endOfLines->cbegin(), it ) );
 
@@ -240,6 +316,8 @@ void HsBufferScanner::scan( const char* data, unsigned int size,
     std::vector<unsigned char> seenLines( endOfLines.size(), 0 );
     BufferScanContext ctx{};
     ctx.endOfLines = &endOfLines;
+    ctx.bufferSize = static_cast<qint64>( size );
+    ctx.endsWithSeparator = data[ size - 1 ] == '\n';
     ctx.perLinePatterns = nullptr;
     ctx.seenLines = &seenLines;
 
@@ -267,6 +345,8 @@ void HsBufferScanner::scanMulti( const char* data, unsigned int size,
 
     BufferScanContext ctx{};
     ctx.endOfLines = &endOfLines;
+    ctx.bufferSize = static_cast<qint64>( size );
+    ctx.endsWithSeparator = data[ size - 1 ] == '\n';
     ctx.perLinePatterns = &perLinePatterns;
     ctx.seenLines = nullptr; // multi callback doesn't need dedup (idempotent set)
 
@@ -390,6 +470,15 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
         auto compileBlockDatabase
             = []( const klogg::vector<RegularExpressionPattern>& expressions,
                   QString& errorMessage ) -> hs_database_t* {
+            for ( const auto& expression : expressions ) {
+                const auto pattern = expression.isPlainText
+                    ? QRegularExpression::escape( expression.pattern ) : expression.pattern;
+                if ( !supportsRecordLocalBlockScan( pattern ) ) {
+                    errorMessage = QStringLiteral( "Pattern requires independent record matching" );
+                    LOG_DEBUG << "Block scan fallback: " << errorMessage;
+                    return nullptr;
+                }
+            }
             hs_database_t* db = nullptr;
             hs_compile_error_t* error = nullptr;
 
@@ -404,8 +493,13 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
                                 // silently undercount. (Does not affect '.' matching
                                 // '\n' -- that is HS_FLAG_DOTALL, intentionally off,
                                 // so .* still stops at line ends.)
+                                // Accurate zero-width attribution requires start
+                                // offsets. SOM-incompatible patterns intentionally
+                                // retain their existing per-record matcher; do not
+                                // combine ALLOWEMPTY with SOM (unsupported by HS).
                                 auto expressionFlags
-                                    = HS_FLAG_UTF8 | HS_FLAG_UCP | HS_FLAG_MULTILINE;
+                                    = HS_FLAG_UTF8 | HS_FLAG_UCP | HS_FLAG_MULTILINE
+                                      | HS_FLAG_SOM_LEFTMOST;
                                 if ( !expression.isCaseSensitive ) {
                                     expressionFlags |= HS_FLAG_CASELESS;
                                 }

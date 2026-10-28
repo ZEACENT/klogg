@@ -103,7 +103,7 @@ class CaptureStoreTestAccess {
           std::vector<int> maxima;
           maxima.reserve( store.segments_.size() );
           for ( const auto& segment : store.segments_ ) {
-              maxima.push_back( segment.maxLineLength );
+              maxima.push_back( type_safe::narrow_cast<int>( segment.maxLineLength ) );
           }
           return maxima;
       }

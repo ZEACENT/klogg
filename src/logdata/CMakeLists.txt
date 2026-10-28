@@ -1,15 +1,22 @@
 add_library(
   klogg_logdata STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractlogdata.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/taskschedulerlifetime.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/taskschedulerlifetime.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/ansicolorprocessor.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/capturestore.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/concatenatedlogdata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/compressedlinestorage.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingdetector.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingutils.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/logsnapshot.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/folderscanarena.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/folderscanarena.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchengine.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchresults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchtypes.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/indexedcontent.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/indexedcontent.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linekind.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linepositionarray.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/loadingstatus.h

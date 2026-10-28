@@ -207,25 +207,46 @@ LineNumber CrawlerWidget::getTopLine() const
 
 QString CrawlerWidget::getSelectedText() const
 {
-    // filteredView_ is nulled when its tab is closed (filteredViewDestroyed);
-    // when the filtered view is gone the focus can only be on the main view.
-    if ( filteredView_ != nullptr && filteredView_->hasFocus() )
-        return filteredView_->getSelectedText();
-    else
-        return logMainView_->getSelectedText();
+    return activeView()->getSelectedText();
 }
 
-bool CrawlerWidget::isPartialSelection() const
+bool CrawlerWidget::canUseSelectionAsSearchOperand() const
 {
-    if ( filteredView_ != nullptr && filteredView_->hasFocus() )
-        return filteredView_->isPartialSelection();
-    else
-        return logMainView_->isPartialSelection();
+    return activeView()->canUseSelectionAsSearchOperand();
 }
 
 void CrawlerWidget::selectAll()
 {
     activeView()->selectAll();
+}
+
+bool CrawlerWidget::canSelectAllMatches( bool quickFind ) const
+{
+    if ( quickFind ) {
+        auto* const view = activeView();
+        return view != nullptr && view->canSelectAllMatches( true );
+    }
+    if ( filteredView_ == nullptr || logFilteredData_ == nullptr
+         || logFilteredData_->getNbMatches() == 0_lcount ) {
+        return false;
+    }
+    return logFilteredData_->isSearchComplete() && filteredView_->canSelectAllMatches();
+}
+
+bool CrawlerWidget::selectAllMatches( bool quickFind, bool copy )
+{
+    if ( !canSelectAllMatches( quickFind ) ) {
+        return false;
+    }
+    auto* const view = quickFind ? activeView() : filteredView_;
+    view->setFocus();
+    return view->selectAllMatches( quickFind, copy );
+}
+
+bool CrawlerWidget::deferCopyUntilMatchSelection()
+{
+    auto* const view = activeView();
+    return view != nullptr && view->deferCopyUntilMatchSelection();
 }
 
 std::optional<int> CrawlerWidget::encodingMib() const
@@ -299,6 +320,7 @@ void CrawlerWidget::stopLoading()
 
 void CrawlerWidget::reload()
 {
+    invalidateMatchSelections();
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
     presentationSelectionRestorePending_ = false;
@@ -408,7 +430,7 @@ bool CrawlerWidget::refreshAuthoritativePresentation()
     logMainView_->updateData( searchStartLine_, searchEndLine_ );
     filteredView_->updateData( searchStartLine_, searchEndLine_ );
     if ( presentationSelectionRestorePending_ && !isFollowEnabled()
-         && logFilteredData_->getNbLine() > 0_lcount ) {
+         && !filteredView_->hasMatchSelection() && logFilteredData_->getNbLine() > 0_lcount ) {
         const auto currentLineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
         filteredView_->selectAndDisplayLine( currentLineIndex );
     }
@@ -730,7 +752,8 @@ void CrawlerWidget::updateFilteredResults( LogFilteredData* source, LinesCount n
     }
     lastPublishedMatchCount_ = nbMatches;
     const bool restoreSelection = terminal && initialPosition == searchStartLine_
-                                  && !isFollowEnabled() && logFilteredData_->getNbLine() > 0_lcount;
+                                  && !isFollowEnabled() && !filteredView_->hasMatchSelection()
+                                  && logFilteredData_->getNbLine() > 0_lcount;
 
     if ( !presentationActive_ ) {
         presentationSelectionRestorePending_
@@ -789,6 +812,7 @@ void CrawlerWidget::markLinesFromMain( const klogg::vector<LineNumber>& lines )
         update();
     }
     else {
+        filteredView_->refreshMatchSelection();
         queuePresentationRefresh( false );
     }
 }
@@ -829,6 +853,7 @@ void CrawlerWidget::deleteMarkLinesFromMain( const klogg::vector<LineNumber>& li
         update();
     }
     else {
+        filteredView_->refreshMatchSelection();
         queuePresentationRefresh( false );
     }
 }
@@ -943,9 +968,13 @@ void CrawlerWidget::enteringQuickFind()
 
 void CrawlerWidget::exitingQuickFind()
 {
-    // Restore the focus once the QFBar has been hidden
-    if ( qfSavedFocus_ )
-        qfSavedFocus_->setFocus();
+    // The origin belongs to this interaction only. Retire it before restoring
+    // focus so later toolbar commands cannot reuse an old or hidden pane.
+    const auto origin = qfSavedFocus_;
+    qfSavedFocus_.clear();
+    if ( origin != nullptr && ( origin == logMainView_ || origin == filteredView_ ) ) {
+        origin->setFocus();
+    }
 }
 
 void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
@@ -1068,6 +1097,7 @@ void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
 {
     // Handle the case where the file has been truncated
     if ( status == MonitoredFileStatus::Truncated ) {
+        invalidateMatchSelections();
         // Clear all marks (TODO offer the option to keep them)
         logFilteredData_->clearMarks();
         searchUpdateThrottleTimer_.stop();
@@ -1091,26 +1121,29 @@ void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
     }
 }
 
+void CrawlerWidget::invalidateMatchSelections()
+{
+    logMainView_->invalidateMatchSelection();
+    for ( const auto& entry : filteredViewsData_ ) {
+        entry.first->invalidateMatchSelection();
+    }
+}
+
 // Returns a pointer to the window in which the search should be done
 AbstractLogView* CrawlerWidget::activeView() const
 {
-    QWidget* activeView;
-
-    // Search in the window that has focus, or the window where 'Find' was
-    // called from, or the main window.
-    if ( filteredView_->hasFocus() || logMainView_->hasFocus() )
-        activeView = QApplication::focusWidget();
-    else
-        activeView = qfSavedFocus_;
-
-    if ( activeView ) {
-        auto* view = qobject_cast<AbstractLogView*>( activeView );
-        return view;
+    if ( filteredView_ != nullptr && filteredView_->hasFocus() ) {
+        return filteredView_;
     }
-    else {
-        LOG_WARNING << "No active view, defaulting to logMainView";
+    if ( logMainView_->hasFocus() ) {
         return logMainView_;
     }
+    // A saved Quick Find origin is usable only during that interaction and
+    // while it still names a current view, never a hidden results pane.
+    if ( qfSavedFocus_ == filteredView_ && filteredView_ != nullptr ) {
+        return filteredView_;
+    }
+    return logMainView_;
 }
 
 void CrawlerWidget::searchForward()
@@ -1145,16 +1178,21 @@ void CrawlerWidget::changeFilteredViewVisibility( int index )
 {
     QStandardItem* item = visibilityModel_->item( index );
     auto visibility = item->data().value<FilteredView::Visibility>();
+    // Whole-row selection restoration must not replace an accepted operation
+    // or its immutable payload when only the displayed row set changes.
+    const bool preserveMatchSelection = filteredView_->hasMatchSelection();
 
     if ( !presentationActive_ ) {
         logFilteredData_->setVisibility( visibility );
-        presentationSelectionRestorePending_ = logFilteredData_->getNbLine() > 0_lcount;
+        filteredView_->refreshMatchSelection();
+        presentationSelectionRestorePending_
+            = !preserveMatchSelection && logFilteredData_->getNbLine() > 0_lcount;
         queuePresentationRefresh( false );
         return;
     }
 
     filteredView_->setVisibility( visibility );
-    if ( logFilteredData_->getNbLine() > 0_lcount ) {
+    if ( !preserveMatchSelection && logFilteredData_->getNbLine() > 0_lcount ) {
         const auto lineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
         filteredView_->selectAndDisplayLine( lineIndex );
     }
@@ -1182,6 +1220,10 @@ void CrawlerWidget::activityDetected()
 
 void CrawlerWidget::setSearchLimits( LineNumber startLine, LineNumber endLine )
 {
+    // Explicit user range changes replace the snapshot. Automatic append-only
+    // end extensions in loadingFinishedHandler bypass this path.
+    logMainView_->invalidateMatchSelection();
+    filteredView_->invalidateMatchSelection();
     searchStartLine_ = startLine;
     searchEndLine_ = endLine;
 
@@ -1527,6 +1569,9 @@ void CrawlerWidget::changeFilteredView( int tabIndex )
             = qobject_cast<FilteredView*>( tabbedFilteredView_->widget( tabIndex ) );
 
         filteredView_ = tabFilteredView;
+        if ( qfSavedFocus_ != logMainView_ && qfSavedFocus_ != filteredView_ ) {
+            qfSavedFocus_.clear();
+        }
         logFilteredData_ = filteredViewsData_.at( tabFilteredView );
         lastPublishedMatchCount_ = logFilteredData_->getNbMatches();
 
@@ -1670,6 +1715,8 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
     // CrawlerWidget::stopSearch also calls interruptSearch() and depends
     // on the final status signal reaching updateSearchStatus() to run the
     // Stop-button UI cleanup.
+    logMainView_->invalidateMatchSelection();
+    filteredView_->invalidateMatchSelection();
     logFilteredData_->bumpSearchGeneration();
     logFilteredData_->interruptSearch();
 
@@ -1866,6 +1913,7 @@ void CrawlerWidget::updateEncoding()
         return;
     }
 
+    invalidateMatchSelections();
     if ( sourceEncodingChanged ) {
         // Repeated live append notifications normally retain the same decoder;
         // interrupt loading only for a real encoding transition.
@@ -2093,6 +2141,7 @@ void CrawlerWidget::contextLinesModeChanged( int index )
             filteredView_->updateData();
         }
         else {
+            filteredView_->refreshMatchSelection();
             queuePresentationRefresh( false );
         }
     }
@@ -2113,6 +2162,7 @@ void CrawlerWidget::contextLinesValueChanged( int value )
             filteredView_->updateData();
         }
         else {
+            filteredView_->refreshMatchSelection();
             queuePresentationRefresh( false );
         }
     }
@@ -2138,6 +2188,9 @@ void CrawlerWidget::updateContextLinesModel()
         default:
             logFilteredData_->setContextLines( 0, 0 );
             break;
+    }
+    if ( !presentationActive_ ) {
+        filteredView_->refreshMatchSelection();
     }
 }
 

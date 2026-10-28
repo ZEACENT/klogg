@@ -39,6 +39,7 @@ promises. Source files and regression tests are authoritative when details chang
 | --- | --- |
 | [Architecture overview](TECHNICAL_DOCUMENTATION.md) | UI, data sources, search, storage, platform boundaries, and links to deeper references. |
 | [Incremental search](INCREMENTAL_SEARCH_ARCHITECTURE.md) | Appended-data searches, scheduling, cancellation, and presentation. |
+| [Match-selection contract](MATCH_SELECTION.md) | Shared Filter/Quick Find projection, accepted scopes, immutable content, selection lifetime, and copying. |
 | [ADB and live-capture architecture](ADB_LOGCAT_ARCHITECTURE.md) | Managed device transport, temporary capture storage, live saving, and restore boundaries. |
 
 ## Performance: methodology and recorded evidence
@@ -64,6 +65,7 @@ budgets are opt-in local checks.
 | Document | Status |
 | --- | --- |
 | [Backlog](BACKLOG.md) | Planning record; an entry is not a delivery commitment. |
+| [Unified match pipeline execution record](MATCH_SELECTION_PIPELINE_PLAN.md) | Defect inventory, snapshot architecture, phased tasks, verified checkpoints, and remaining acceptance gates. |
 | [Chart and filters panel specification](SPEC_CHART_AND_FILTERS_PANEL.md) | Proposal. The proposed dock panels are not shipped features. |
 | [Text-wrapping analysis](WRAP_TEXT_ANALYSIS.md) | Historical implementation investigation; not a current testing recipe. |
 | [Test-pollution audit](audit_pollution_report.md) | Point-in-time audit, not a statement about the current source tree. |

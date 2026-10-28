@@ -60,6 +60,7 @@
 #include "matchercache.h"
 #include "regularexpression.h"
 #include "synchronization.h"
+#include "searchablelogdata.h"
 
 class SearchableLogData;
 
@@ -96,6 +97,18 @@ struct SearchResults {
     SearchResultArray newMatches;
     LineLength maxLength;
     LinesCount processedLines;
+    quint64 generation = 0;
+};
+
+struct CompletedSearchResult {
+    using Ptr = std::shared_ptr<const CompletedSearchResult>;
+    SearchResultArray matches;
+    LineLength maxLength;
+    LinesCount processedLines;
+    SearchableLogData::ReadSnapshot::Ptr source;
+    quint64 generation = 0;
+    quint64 operationId = 0;
+    quint64 requestTicket = 0;
 };
 
 struct SearchPerformanceCounters {
@@ -111,6 +124,9 @@ class SearchData {
 public:
     // will clear new matches
     SearchResults takeCurrentResults() const;
+    // Unlike the publication delta, this includes every matching source row.
+    SearchResults copyAllResults() const;
+    void beginGeneration( quint64 generation );
 
     // Atomically add to all the existing search data.
     void addAll( LineLength length, const SearchResultArray& matches, LinesCount nbMatches,
@@ -139,6 +155,7 @@ private:
     LinesCount nbLinesProcessed_{ 0 };
     LinesCount nbMatches_{ 0 };
     bool lastProcessedLineMatched_ = false;
+    quint64 generation_ = 0;
 };
 
 class SearchOperation : public QObject {
@@ -150,11 +167,13 @@ public:
                      std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
                      std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine = nullptr,
                      std::atomic<quint64>* matcherCreations = nullptr,
-                     MatcherCache* matcherCache = nullptr );
+                     MatcherCache* matcherCache = nullptr,
+                     SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = {} );
 
     // Run the search operation, returns true if it has been done
     // and false if it has been cancelled (results not copied)
     virtual void run( SearchData& result ) = 0;
+    bool completed() const { return completed_; }
 
 Q_SIGNALS:
     // Operations are unaware of search generations -- the worker assigns and
@@ -166,6 +185,7 @@ protected:
     // Implement the common part of the search, passing
     // the shared results and the line to begin the search from.
     void doSearch( SearchData& result, LineNumber initialLine );
+    void failSearch( SearchData& searchData, LineNumber initialLine, const char* message );
 
     AtomicFlag& interruptRequested_;
     const RegularExpressionPattern regexp_;
@@ -176,6 +196,11 @@ protected:
     std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine_;
     std::atomic<quint64>* matcherCreations_;
     MatcherCache* matcherCache_;
+    SearchableLogData::ReadSnapshot::Ptr sourceSnapshot_;
+    bool completed_ = false;
+
+    LinesCount sourceLineCount() const;
+    SearchableLogData::RawLines readLines( LineNumber first, LinesCount count ) const;
 };
 
 class FullSearchOperation : public SearchOperation {
@@ -186,9 +211,11 @@ public:
                          LineNumber endLine,
                          std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
                          std::atomic<quint64>* matcherCreations = nullptr,
-                         MatcherCache* matcherCache = nullptr )
+                         MatcherCache* matcherCache = nullptr,
+                         SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = {} )
         : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine,
-                           std::move( compiledRegExp ), nullptr, matcherCreations, matcherCache )
+                           std::move( compiledRegExp ), nullptr, matcherCreations, matcherCache,
+                           std::move( sourceSnapshot ) )
     {
     }
 
@@ -204,9 +231,11 @@ public:
                            std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
                            std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine = nullptr,
                            std::atomic<quint64>* matcherCreations = nullptr,
-                           MatcherCache* matcherCache = nullptr )
+                           MatcherCache* matcherCache = nullptr,
+                           SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = {} )
         : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine,
-                           std::move( compiledRegExp ), liveTargetEndLine, matcherCreations, matcherCache )
+                           std::move( compiledRegExp ), liveTargetEndLine, matcherCreations, matcherCache,
+                           std::move( sourceSnapshot ) )
         , initialPosition_( position )
     {
     }
@@ -237,11 +266,13 @@ public:
     // The actual search is started on an internal dispatch thread,
     // so the caller (typically the main/UI thread) is never blocked
     // waiting for a previous search to release the operations mutex.
-    void search( const RegularExpressionPattern& regExp, LineNumber startLine, LineNumber endLine );
+    void search( const RegularExpressionPattern& regExp, LineNumber startLine, LineNumber endLine,
+                 SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = {} );
     // Continue the previous search starting at the passed position
     // in the source file (line number).  Also non-blocking.
-    void updateSearch( const RegularExpressionPattern& regExp, LineNumber startLine,
-                       LineNumber endLine, LineNumber position );
+    SearchableLogData::ReadSnapshot::Ptr updateSearch(
+        const RegularExpressionPattern& regExp, LineNumber startLine,
+        LineNumber endLine, LineNumber position );
 
     // Interrupts the search if one is in progress
     void interrupt();
@@ -258,6 +289,8 @@ public:
 
     // get the current indexing data
     SearchResults getSearchResults() const;
+    CompletedSearchResult::Ptr completedSearchResult() const;
+    void restoreCompletedResult( const CompletedSearchResult& result );
 
     // Alias kept for callers that prefer a self-documenting name; the wire
     // type used in signals is plain quint64 because moc / QSignalSpy treat
@@ -290,14 +323,24 @@ public:
     // generation value.
     OperationGeneration bumpGeneration()
     {
-        operationId_.fetch_add( 1 );
-        liveUpdateRunning_.store( false );
+        OperationGeneration generation;
         {
             std::lock_guard<std::mutex> lock( requestMutex_ );
+            interruptRequested_.set();
+            requestPending_ = false;
+            operationId_.fetch_add( 1 );
+            requestedTicket_.fetch_add( 1 );
+            liveUpdateRunning_.store( false );
             pendingRequest_.reset();
             deferredLiveRequest_.reset();
+            followupLiveRequest_.reset();
+            generation = operationGeneration_.fetch_add( 1 ) + 1;
         }
-        return operationGeneration_.fetch_add( 1 ) + 1;
+        {
+            std::lock_guard<std::mutex> lock( completedMutex_ );
+            completedResult_.reset();
+        }
+        return generation;
     }
 
 Q_SIGNALS:
@@ -320,8 +363,8 @@ private Q_SLOTS:
 private:
     using OperationId = quint64;
 
-    void connectSignalsAndRun( SearchOperation* operationRequested, OperationGeneration generation,
-                               OperationId operationId );
+    struct SearchRequest;
+    void connectSignalsAndRun( SearchOperation* operationRequested, const SearchRequest& request );
     void emitSearchProgressedOnOwnerThread( LinesCount nbMatches, int percent,
                                             LineNumber initialLine,
                                             OperationGeneration generation, OperationId operationId );
@@ -341,6 +384,8 @@ private:
         OperationGeneration generation;
         OperationId operationId;
         std::shared_ptr<RegularExpression> compiled;
+        SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = nullptr;
+        quint64 requestTicket = 0;
     };
 
     void dispatchLoop();
@@ -356,8 +401,11 @@ private:
     std::condition_variable requestCv_;
     std::optional<SearchRequest> pendingRequest_;
     std::optional<SearchRequest> deferredLiveRequest_;
+    std::optional<SearchRequest> followupLiveRequest_;
     std::chrono::steady_clock::time_point deferredLiveDeadline_{};
     bool dispatchShutdown_ = false;
+    // Protected by requestMutex_: completed/idle results are not cancellable work.
+    bool requestPending_ = false;
 
 private:
     // sourceLogData_, interruptRequested_, operationsMutex_, and searchData_ must all
@@ -373,6 +421,14 @@ private:
 
     std::atomic<OperationGeneration> operationGeneration_{ 0 };
     std::atomic<OperationId> operationId_{ 0 };
+    std::atomic<OperationId> cancelledThroughOperation_{ 0 };
+    std::atomic<quint64> requestedTicket_{ 0 };
+    std::atomic<quint64> activeRequestTicket_{ 0 };
+    mutable std::mutex completedMutex_;
+    CompletedSearchResult::Ptr completedResult_;
+    // Accessed only by serialized operation threads.
+    bool searchDataComplete_ = false;
+    OperationGeneration searchDataGeneration_ = 0;
     std::atomic<bool> liveUpdateRunning_{ false };
     std::atomic<LineNumber::UnderlyingType> liveTargetEndLine_{ 0 };
 

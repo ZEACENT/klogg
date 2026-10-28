@@ -8,7 +8,7 @@ links its binaries, runs the existing tests and performs enabled package checks.
 ## Pinned executable
 
 `ci/tools/sccache-windows.json` pins sccache **0.18.0**, the upstream x64 Windows
-MSVC executable (the host is x64 for both x64 and x86 target compilers):
+MSVC executable (both the host and supported target are x64):
 
 - Archive: <https://github.com/mozilla/sccache/releases/download/v0.18.0/sccache-v0.18.0-x86_64-pc-windows-msvc.zip>
 - SHA-256: `8965c74d5e8a225244f741e18ad2f3f504f48228dc1bac948fc22761a348363d`
@@ -63,7 +63,7 @@ ref visibility. Fork PRs and dispatches do not participate in this bridge.
 state, selected configuration/dependencies, producer policy and existing budget.
 The compatibility key is independent of the application SHA: sccache still checks
 each compilation's source, headers and flags. Explicit producer display names
-cover x64 release, x86 Qt5 and x64 ASan, including the ASan job's display name
+cover x64 release and x64 ASan, including the ASan job's display name
 which differs from its cache label.
 
 `restore-compiler-object-artifact` validates the immutable artifact digest,
@@ -108,7 +108,7 @@ artifact metadata but no imported `artifact_id`, so build metrics keep the backe
 restore key/source. A real small ccache regression exercises repeated A-to-B
 acquisition without losing B's hit; it is not a native Windows sccache performance
 cohort. Hosted acceptance must still confirm warm-backend preservation, refresh
-and cross-ref transfer on all three Windows labels.
+and cross-ref transfer on both Windows labels.
 
 These artifacts are an accelerator, not environment qualification or full native
 binary-core reuse. Related macOS prepare/rendezvous/finalize and ADB/iOS object
@@ -130,7 +130,7 @@ Embedded debug-information property covers dependencies choosing CMP0141 NEW.
 which otherwise makes `/Zi` compilation unsuitable for reliable caching.
 
 Linker `/DEBUG` settings and final executable PDB generation are unchanged;
-symbol collection and packaging remain enabled. Release/x86 LTO remains enabled,
+symbol collection and packaging remain enabled. Release LTO remains enabled,
 and the ASan leg still disables LTO. Upstream sccache's MSVC parser supports the
 existing `/GL` and ASan flags; this is not a substitute for Windows runtime
 qualification. ASM/RC commands do not use the C/C++ launchers and are excluded
@@ -149,7 +149,6 @@ The lock declares initial per-label uncompressed object-cache limits:
 | Label | Initial limit |
 | --- | ---: |
 | `x64-qt6` | 1 GiB |
-| `x86-qt5` | 512 MiB |
 | `x64-qt6-asan` | 2 GiB |
 
 These are **unmeasured initial working-set allowances**, not evidence that the
@@ -187,7 +186,7 @@ with warmth, or claim an unmeasured performance target.
 
 Before accepting the Windows performance target, on native Windows 2022:
 
-1. For **x64 Qt6, x86 Qt5 and x64 Qt6 ASan**, record one cold and at least three
+1. For **x64 Qt6 and x64 Qt6 ASan**, record one cold and at least three
    warm runs of the same source/configuration. Preserve compatible object data,
    not build directories; confirm unchanged compiler/SDK identity for comparison.
 2. Record actual compile wall time, object hit/miss deltas, non-cacheable reasons,
@@ -205,7 +204,7 @@ Before accepting the Windows performance target, on native Windows 2022:
 5. Check own-PR backend reuse, compatible master fallback and dispatch read-only
    behavior, plus same-repository PR-to-master compiler-artifact transfer. Exercise
    a warm exact own-PR backend alongside an older shared artifact, partial reruns,
-   refresh/retention and all three producer display names. Prove failed producing
+   refresh/retention and both producer display names. Prove failed producing
    tests/package qualification do not authorize object-data reuse; unrelated
    aggregate failures are not a substitute for checking the producing lane.
 6. Measure artifact bytes/transfer time and retained storage separately from the
@@ -215,7 +214,7 @@ Before accepting the Windows performance target, on native Windows 2022:
 Local offline tests and a CMake preload probe cover implementation contracts.
 Historical first-master activation and stored sizes are retained in
 [master cache migration](ci/MASTER_CACHE_MIGRATION.md); they are not a controlled
-warm cohort for the expanded artifact bridge. **Native MSVC/x86/ASan/installer
+warm cohort for the expanded artifact bridge. **Native MSVC/x64/ASan/installer
 acceptance and hosted cold/three-warm validation of this expanded change remain
 pending. The requested >=90% hit-rate and 15-minute targets are not measured or
 claimed achieved.**

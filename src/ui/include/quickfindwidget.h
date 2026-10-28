@@ -67,6 +67,10 @@ class QuickFindWidget : public QWidget
     // when requested by the user (the widget won't timeout)
     void userActivate();
 
+    bool inputHasFocus() const;
+    // Commit the current input without navigating, also for non-incremental search.
+    void confirmCurrentPattern();
+
   protected:
     void changeEvent( QEvent* event ) override;
 

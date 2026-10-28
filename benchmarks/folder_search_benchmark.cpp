@@ -48,6 +48,7 @@
 #include "linetypes.h"
 #include "persistentinfo.h"
 #include "regularexpressionpattern.h"
+#include "taskschedulerlifetime.h"
 
 const bool PersistentInfo::ForcePortable = true;
 
@@ -98,6 +99,7 @@ quint64 countMatches( const std::vector<klogg::folder::FileGroup>& groups )
 
 int main( int argc, char* argv[] )
 {
+    klogg::TaskSchedulerLifetime taskScheduler;
     QCoreApplication app( argc, argv );
     QCoreApplication::setApplicationName( "folder_search_benchmark" );
 

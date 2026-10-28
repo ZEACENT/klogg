@@ -48,6 +48,7 @@
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalSpy>
+#include <QStatusBar>
 #include <QTabBar>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -4020,6 +4021,111 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close", "[ui][
             }
         }
     }
+}
+
+TEST_CASE( "MainWindow match actions route Filter and unconfirmed QuickFind input",
+           "[ui][folder][match-selection]" )
+{
+    TabGroupCleanupGuard cleanup;
+    auto session = std::make_shared<Session>();
+    WindowSession windowSession{ session,
+        QStringLiteral( "match-actions-%1" ).arg( QUuid::createUuid().toString() ), 0 };
+    MainWindow window{ windowSession };
+    window.show();
+    auto* select = window.findChild<QAction*>( QStringLiteral( "selectAllMatchesAction" ) );
+    auto* copy = window.findChild<QAction*>( QStringLiteral( "copyMatchesAction" ) );
+    REQUIRE( select != nullptr );
+    REQUIRE( copy != nullptr );
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    QFile file{ QDir{ dir.path() }.filePath( "a.log" ) };
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    file.write( "ERROR alpha\nERROR beta\nplain gamma\n" );
+    file.close();
+    window.openFolderByPath( dir.path() );
+    auto* tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    auto* folder = qobject_cast<FolderCrawlerWidget*>( tabs->currentWidget() );
+    REQUIRE( folder != nullptr );
+    folder->searchFor( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitUiState( [ & ] { return !folder->isSearchActive(); } ) );
+    SafeQSignalSpy filtered( folder->filteredView(), SIGNAL( matchSelectionFinished( bool ) ) );
+    folder->searchToolbar()->searchLineEdit()->lineEdit()->setFocus();
+    pressConfiguredShortcut( &window, ShortcutAction::MainWindowSelectAllMatches );
+    REQUIRE( filtered.safeWait( 5000 ) );
+    REQUIRE( folder->getSelectedText().replace( "\r\n", "\n" ) == QStringLiteral( "ERROR\nERROR" ) );
+
+    folder->filteredView()->selectAll();
+    QApplication::clipboard()->setText( QStringLiteral( "prior clipboard" ) );
+    SafeQSignalSpy copiedAfterSelect( folder->filteredView(),
+                                     SIGNAL( matchSelectionFinished( bool ) ) );
+    select->trigger();
+    // Invoke the same slot as the ordinary Copy action, without pumping events
+    // between the two commands. Copy must join the pending match selection.
+    REQUIRE( QMetaObject::invokeMethod( &window, "copy", Qt::DirectConnection ) );
+    REQUIRE( copiedAfterSelect.safeWait( 5000 ) );
+    REQUIRE( QApplication::clipboard()->text().replace( "\r\n", "\n" )
+             == QStringLiteral( "ERROR\nERROR" ) );
+
+    QApplication::clipboard()->setText( QStringLiteral( "cancelled copy stays unchanged" ) );
+    SafeQSignalSpy cancelledCopy( folder->filteredView(),
+                                 SIGNAL( matchSelectionFinished( bool ) ) );
+    select->trigger();
+    REQUIRE( QMetaObject::invokeMethod( &window, "copy", Qt::DirectConnection ) );
+    folder->filteredView()->cancelMatchSelection();
+    REQUIRE( cancelledCopy.safeWait( 5000 ) );
+    REQUIRE_FALSE( cancelledCopy.at( 0 ).at( 0 ).toBool() );
+    QCoreApplication::processEvents();
+    REQUIRE( QApplication::clipboard()->text()
+             == QStringLiteral( "cancelled copy stays unchanged" ) );
+
+    // Disable incremental search: the command must commit the text currently
+    // typed in the bar, rather than reuse the old session pattern.
+    const auto incremental = Configuration::get().isQuickfindIncremental();
+    Configuration::get().setQuickfindIncremental( false );
+    struct RestoreIncremental {
+        bool value;
+        ~RestoreIncremental() { Configuration::get().setQuickfindIncremental( value ); }
+    } restore{ incremental };
+    pressConfiguredShortcut( &window, ShortcutAction::MainWindowOpenQf );
+    auto* bar = window.findChild<QuickFindWidget*>();
+    REQUIRE( bar != nullptr );
+    auto* input = bar->findChild<QComboBox*>();
+    REQUIRE( input != nullptr );
+    input->setEditText( QStringLiteral( "alpha|beta" ) );
+    bar->changeDisplayedPattern( QStringLiteral( "alpha|beta" ), false, true, false );
+    input->lineEdit()->setFocus();
+    REQUIRE( input->lineEdit()->hasFocus() );
+    SafeQSignalSpy quickFound( folder->filteredView(), SIGNAL( matchSelectionFinished( bool ) ) );
+    copy->trigger();
+    REQUIRE( quickFound.safeWait( 5000 ) );
+    REQUIRE( QApplication::clipboard()->text().replace( "\r\n", "\n" )
+             == QStringLiteral( "alpha\nbeta" ) );
+    REQUIRE( folder->filteredView()->hasFocus() );
+
+    Q_EMIT folder->filteredView()->newSelection( 1_lnum, 1_lcount, 0_lcol, 0_length );
+    REQUIRE( waitUiState( [ & ] { return !folder->currentMainFilePath().isEmpty(); } ) );
+    folder->mainView()->setFocus();
+    pressConfiguredShortcut( &window, ShortcutAction::MainWindowOpenQf );
+    bar->changeDisplayedPattern( QStringLiteral( "gamma" ), false, false, false );
+    input->lineEdit()->setFocus();
+    SafeQSignalSpy mainFound( folder->mainView(), SIGNAL( matchSelectionFinished( bool ) ) );
+    copy->trigger();
+    REQUIRE( mainFound.safeWait( 5000 ) );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "gamma" ) );
+    REQUIRE( folder->mainView()->hasFocus() );
+
+    folder->searchToolbar()->setInverse( true );
+    folder->searchFor( QStringLiteral( "alpha" ) );
+    REQUIRE( waitUiState( [ & ] { return !folder->isSearchActive(); } ) );
+    folder->filteredView()->selectAll();
+    const auto priorSelection = folder->filteredView()->getSelectedText();
+    QApplication::clipboard()->setText( QStringLiteral( "keep clipboard" ) );
+    window.statusBar()->clearMessage();
+    copy->trigger();
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "keep clipboard" ) );
+    REQUIRE( folder->filteredView()->getSelectedText() == priorSelection );
+    REQUIRE_FALSE( window.statusBar()->currentMessage().isEmpty() );
 }
 
 // F5: MainWindow dispatches focus-search / wrap / go-to-line / QuickFind

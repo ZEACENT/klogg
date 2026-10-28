@@ -108,6 +108,12 @@ class LogData : public SearchableLogData {
 
     RawLines getLinesRaw( LineNumber first, LinesCount number ) const override;
 
+    // Immutable indexed bytes, leased independently of this LogData and its path.
+    IndexedContentSnapshot::Ptr indexedContentSnapshot() const;
+    ReadSnapshot::Ptr searchableSnapshot() const override;
+    klogg::LogSnapshot::Ptr createReadSnapshot( klogg::SnapshotScope scope ) const override;
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override;
+
   private Q_SLOTS:
     // Consider reloading the file when it changes on disk updated
     void fileChangedOnDisk( const QString& filename );

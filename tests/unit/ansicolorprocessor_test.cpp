@@ -1,6 +1,57 @@
 #include <catch2/catch.hpp>
 
 #include "ansicolorprocessor.h"
+#include "searchablelogdata.h"
+
+TEST_CASE( "Raw text colors and UTF8 search share per-row normalization",
+           "[text-normalization][normalized-backends]" )
+{
+    SearchableLogData::RawLines lines;
+    const QByteArray bytes{ "\x1b[31mprefix ERROR\x1b[0m\r\nprefix NEXT\r\n" };
+    lines.buffer.assign( bytes.begin(), bytes.end() );
+    lines.endOfLines = { bytes.indexOf( '\n' ) + 1, bytes.size() };
+    lines.textDecoder = TextCodecHolder{ QTextCodec::codecForName( "UTF-8" ) }.makeDecoder();
+    lines.prefilterPattern = QRegularExpression{ QStringLiteral( "^prefix " ) };
+    lines.ansiProcessingMode = AnsiProcessingMode::Render;
+    SECTION( "Color coordinates follow removed prefixes" )
+    {
+        const auto colors = lines.decodeLineAnsiColors();
+        REQUIRE( colors.size() == 2 );
+        REQUIRE( colors.front().size() == 1 );
+        REQUIRE( colors.front().front().length == 5_length );
+    }
+    SECTION( "Optimized search normalizes each record instead of the whole block" )
+    {
+        const auto decoded = lines.buildUtf8View();
+        REQUIRE( decoded.size() == 2 );
+        REQUIRE( decoded.front() == "ERROR" );
+        REQUIRE( decoded.back() == "NEXT" );
+    }
+}
+
+TEST_CASE( "Shared normalization remaps ANSI colors after prefix removal", "[text-normalization]" )
+{
+    const auto processed = processLogLine(
+        QStringLiteral( "\x1b[31mprefix ERROR\x1b[0m" ), AnsiProcessingMode::Render,
+        QRegularExpression{ QStringLiteral( "^prefix " ) } );
+    REQUIRE( processed.text == QStringLiteral( "ERROR" ) );
+    REQUIRE( processed.colorSpans.size() == 1 );
+    REQUIRE( processed.colorSpans.front().startColumn == 0_lcol );
+    REQUIRE( processed.colorSpans.front().length == 5_length );
+    REQUIRE( processed.colorSpans.front().foreground == 0xde382b );
+}
+
+TEST_CASE( "Shared normalization drops removed colors and preserves surviving coordinates",
+           "[text-normalization]" )
+{
+    const auto processed = processLogLine(
+        QStringLiteral( "a\x1b[31mred\x1b[0m-\x1b[32mgreen\x1b[0m" ),
+        AnsiProcessingMode::Render, QRegularExpression{ QStringLiteral( "red-|re" ) } );
+    REQUIRE( processed.text == QStringLiteral( "agen" ) );
+    REQUIRE( processed.colorSpans.size() == 1 );
+    REQUIRE( processed.colorSpans.front().startColumn == 1_lcol );
+    REQUIRE( processed.colorSpans.front().length == 3_length );
+}
 
 TEST_CASE( "ANSI processor strips CSI sequences without rendering colors" )
 {

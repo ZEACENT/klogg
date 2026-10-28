@@ -45,13 +45,13 @@
 #include <random>
 #include <utility>
 
+#include <QApplication>
 #include <QSettings>
 
 #include "simdutf_wrapper.h"
 
 #include "containers.h"
 #include "crc32.h"
-#include "highlightersetedit.h"
 #include "linetypes.h"
 #include "log.h"
 #include "regularexpression.h"
@@ -59,20 +59,11 @@
 #include "uuid.h"
 
 #include "highlighterset.h"
-
-QRegularExpression::PatternOptions getPatternOptions( bool ignoreCase )
-{
-    QRegularExpression::PatternOptions options = QRegularExpression::UseUnicodePropertiesOption;
-
-    if ( ignoreCase ) {
-        options |= QRegularExpression::CaseInsensitiveOption;
-    }
-    return options;
-}
+#include "matchprojection.h"
 
 Highlighter::Highlighter( const QString& pattern, bool ignoreCase, bool onlyMatch,
                           const QColor& foreColor, const QColor& backColor )
-    : regexp_( pattern, getPatternOptions( ignoreCase ) )
+    : regexp_( pattern, RegularExpressionPattern::qtPatternOptions( !ignoreCase ) )
     , highlightOnlyMatch_( onlyMatch )
     , color_{ foreColor, backColor }
 {
@@ -97,7 +88,7 @@ bool Highlighter::ignoreCase() const
 
 void Highlighter::setIgnoreCase( bool ignoreCase )
 {
-    regexp_.setPatternOptions( getPatternOptions( ignoreCase ) );
+    regexp_.setPatternOptions( RegularExpressionPattern::qtPatternOptions( !ignoreCase ) );
 }
 
 bool Highlighter::useRegex() const
@@ -185,48 +176,29 @@ RegularExpressionPattern Highlighter::expressionPattern() const
     return result;
 }
 
-void Highlighter::compile() const
+const QRegularExpression& Highlighter::compile() const
 {
     const auto pattern
         = useRegex_ ? regexp_.pattern() : QRegularExpression::escape( regexp_.pattern() );
 
-    optimizedRegexp_ = QRegularExpression( pattern, regexp_.patternOptions() );
-    optimizedRegexp_->optimize();
+    auto& expression = optimizedRegexp_.emplace( pattern, regexp_.patternOptions() );
+    expression.optimize();
+    return expression;
 }
 
 bool Highlighter::matchLine( const QString& line, klogg::vector<HighlightedMatch>& matches ) const
 {
     matches.clear();
 
-    if ( !optimizedRegexp_ ) {
-        compile();
-    }
+    const auto& expression = optimizedRegexp_ ? *optimizedRegexp_ : compile();
+    const bool matched = klogg::visitLineMatchFragments(
+        expression, line, klogg::MatchProjection::CapturesOrFullMatch,
+        [ & ]( LineColumn start, LineLength length ) {
+            const auto colors = vairateColors( line.mid( start.get(), length.get() ) );
+            matches.emplace_back( start, length, colors.first, colors.second );
+        } );
 
-    QRegularExpressionMatchIterator matchIterator = optimizedRegexp_->globalMatch( line );
-
-    while ( matchIterator.hasNext() ) {
-        QRegularExpressionMatch match = matchIterator.next();
-        if ( optimizedRegexp_->captureCount() > 0 ) {
-            matches.reserve( static_cast<size_t>( match.lastCapturedIndex() ) );
-            for ( int i = 1; i <= match.lastCapturedIndex(); ++i ) {
-
-                const auto colors = vairateColors( match.captured( i ) );
-
-                matches.emplace_back( LineColumn{ match.capturedStart( i ) },
-                                      LineLength{ match.capturedLength( i ) }, colors.first,
-                                      colors.second );
-            }
-        }
-        else {
-            const auto colors = vairateColors( match.captured( 0 ) );
-
-            matches.emplace_back( LineColumn{ match.capturedStart( 0 ) },
-                                  LineLength{ match.capturedLength( 0 ) }, colors.first,
-                                  colors.second );
-        }
-    }
-
-    return ( !matches.empty() );
+    return highlightOnlyMatch_ ? !matches.empty() : matched;
 }
 
 HighlighterSet HighlighterSet::createNewSet( const QString& name )
@@ -341,7 +313,8 @@ void Highlighter::retrieveFromStorage( QSettings& settings )
 
     regexp_ = QRegularExpression(
         settings.value( "regexp" ).toString(),
-        getPatternOptions( settings.value( "ignore_case", false ).toBool() ) );
+        RegularExpressionPattern::qtPatternOptions(
+            !settings.value( "ignore_case", false ).toBool() ) );
     highlightOnlyMatch_ = settings.value( "match_only", false ).toBool();
     useRegex_ = settings.value( "use_regex", true ).toBool();
     variateColors_ = settings.value( "variate_colors", false ).toBool();

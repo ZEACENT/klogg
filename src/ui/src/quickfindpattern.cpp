@@ -45,6 +45,8 @@
 
 #include "linetypes.h"
 #include "quickfindpattern.h"
+#include "matchprojection.h"
+#include "regularexpressionpattern.h"
 
 #include "configuration.h"
 
@@ -57,15 +59,8 @@ bool QuickFindMatcher::isLineMatching( const QString& line, LineColumn column ) 
     if ( !isActive_ )
         return false;
 
-    QRegularExpressionMatch match = regexp_.match( line, column.get() );
-    if ( match.hasMatch() ) {
-        lastMatchStart_ = LineColumn{ match.capturedStart() };
-        lastMatchEnd_ = LineColumn{ match.capturedEnd() - 1 };
-        return true;
-    }
-    else {
-        return false;
-    }
+    lastOccurrence_ = regexp_.match( line, column.get() );
+    return lastOccurrence_.hasMatch();
 }
 
 bool QuickFindMatcher::isLineMatchingBackward( const QString& line, LineColumn column ) const
@@ -73,30 +68,24 @@ bool QuickFindMatcher::isLineMatchingBackward( const QString& line, LineColumn c
     if ( !isActive_ )
         return false;
 
-    QRegularExpressionMatchIterator matches = regexp_.globalMatch( line );
-    QRegularExpressionMatch lastMatch;
+    auto matches = regexp_.globalMatch( line );
+    lastOccurrence_ = {};
     while ( matches.hasNext() ) {
-        QRegularExpressionMatch nextMatch = matches.peekNext();
-        if ( column.get() >= 0 && column.get() < nextMatch.capturedEnd() ) {
+        const auto nextMatch = matches.next();
+        if ( column.get() >= 0
+             && ( nextMatch.capturedStart() >= column.get()
+                  || nextMatch.capturedEnd() > column.get() ) ) {
             break;
         }
-
-        lastMatch = matches.next();
+        lastOccurrence_ = nextMatch;
     }
-
-    if ( lastMatch.hasMatch() ) {
-        lastMatchStart_ = LineColumn{ lastMatch.capturedStart() };
-        lastMatchEnd_ = LineColumn{ lastMatch.capturedEnd() - 1 };
-        return true;
-    }
-    else {
-        return false;
-    }
+    return lastOccurrence_.hasMatch();
 }
 
 std::pair<LineColumn, LineColumn> QuickFindMatcher::getLastMatch() const
 {
-    return std::make_pair( lastMatchStart_, lastMatchEnd_ );
+    return { LineColumn{ lastOccurrence_.capturedStart() },
+             LineColumn{ lastOccurrence_.capturedEnd() - 1 } };
 }
 
 void QuickFindPattern::changeSearchPattern( const QString& pattern, bool isRegex, bool isWholeWord )
@@ -105,18 +94,11 @@ void QuickFindPattern::changeSearchPattern( const QString& pattern, bool isRegex
     isRegex_ = isRegex;
     isWholeWord_ = isWholeWord;
 
-    QString regexPattern;
-    if ( isRegex ) {
-        regexPattern = pattern;
-    } else {
-        regexPattern = QRegularExpression::escape( pattern );
-    }
-
+    const RegularExpressionPattern query{ pattern, isCaseSensitive_, false, false, !isRegex };
+    regexp_ = query.toRegularExpression();
     if ( isWholeWord ) {
-        regexPattern = "\\b" + regexPattern + "\\b";
+        regexp_.setPattern( "\\b" + regexp_.pattern() + "\\b" );
     }
-
-    regexp_.setPattern( regexPattern );
 
     if ( regexp_.isValid() && ( !pattern_.isEmpty() ) )
         active_ = true;
@@ -128,14 +110,7 @@ void QuickFindPattern::changeSearchPattern( const QString& pattern, bool isRegex
 
 void QuickFindPattern::changeSearchPattern( const QString& pattern, bool ignoreCase, bool isRegex, bool isWholeWord )
 {
-    QRegularExpression::PatternOptions options = QRegularExpression::UseUnicodePropertiesOption;
-
-    if ( ignoreCase )
-        options |= QRegularExpression::CaseInsensitiveOption;
-
     isCaseSensitive_ = !ignoreCase;
-
-    regexp_.setPatternOptions( options );
     changeSearchPattern( pattern, isRegex, isWholeWord );
 }
 
@@ -145,14 +120,12 @@ bool QuickFindPattern::matchLine( const QString& line,
     matches.clear();
 
     if ( active_ ) {
-        QRegularExpressionMatchIterator matchIterator = regexp_.globalMatch( line );
-        const auto& config = Configuration::get();
-        const auto backColor = config.qfBackColor();
-        while ( matchIterator.hasNext() ) {
-            QRegularExpressionMatch match = matchIterator.next();
-            matches.emplace_back( LineColumn{ match.capturedStart() },
-                                  LineLength{ match.capturedLength() }, QfForeColor, backColor );
-        }
+        const auto backColor = Configuration::get().qfBackColor();
+        klogg::visitLineMatchFragments(
+            regexp_, line, klogg::MatchProjection::CapturesOrFullMatch,
+            [ & ]( LineColumn start, LineLength length ) {
+                matches.emplace_back( start, length, QfForeColor, backColor );
+            } );
     }
 
     return ( !matches.empty() );

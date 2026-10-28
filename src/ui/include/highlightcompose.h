@@ -26,6 +26,9 @@
 
 #include <QColor>
 
+#include <cstddef>
+#include <optional>
+
 // Logical highlight layers for a single rendered line, in ASCENDING priority:
 // a higher layer wins the fill on an overlap. Encoding the priority explicitly
 // (rather than as the implicit order of addMatches() calls in drawTextArea) makes
@@ -60,6 +63,15 @@ constexpr double kSearchMatchBlendAlpha = 0.35;
 QColor blendSearchMatchOverHighlighter( const QColor& highlighterBack,
                                         const QColor& searchMatchBack );
 
+// Optional per-call observations for deterministic composition scaling tests.
+// Counts input/candidate span inspections, boundary events and interval
+// resolutions, not elapsed time or ordering comparisons.
+struct HighlightCompositionWork {
+    std::size_t spanVisits = 0;
+    std::size_t eventVisits = 0;
+    std::size_t segmentResolutions = 0;
+};
+
 // Compose per-source highlight matches into a single non-overlapping
 // HighlightedMatchRanges for one line, applying the documented priority and the
 // search-match/highlighter blend rule:
@@ -71,8 +83,18 @@ QColor blendSearchMatchOverHighlighter( const QColor& highlighterBack,
 //     the other. foreColor is taken from the highest layer.
 //   - All other overlaps: the higher layer wins at full opacity (e.g. Selection
 //     and QuickFind still fully cover a search match).
+// Within one layer, later sources win; within a source, later matches win.
 // Sources must already be in the same (untabified) column space. The result is
-// sorted by start column with adjacent same-color segments merged.
-HighlightedMatchRanges composeLineHighlights( const klogg::vector<HighlightSource>& sources );
+// sorted by start column with adjacent same-color segments merged. If provided,
+// work is reset at entry and records only this call's work. An optional viewport
+// clips paint spans before sweep-event allocation without changing source fragments.
+struct HighlightViewport {
+    LineColumn first;
+    LineColumn last; // inclusive; last < first is empty
+};
+
+HighlightedMatchRanges composeLineHighlights( const klogg::vector<HighlightSource>& sources,
+                                              HighlightCompositionWork* work = nullptr,
+                                              std::optional<HighlightViewport> viewport = std::nullopt );
 
 #endif // KLOGG_HIGHLIGHTCOMPOSE_H

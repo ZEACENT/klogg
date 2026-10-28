@@ -139,6 +139,7 @@ void kloggUncaughtNSExceptionHandler( NSException* exception )
 #endif // Q_OS_MAC
 
 #include <mimalloc.h>
+#include "taskschedulerlifetime.h"
 #include <roaring.hh>
 
 
@@ -249,6 +250,8 @@ int main( int argc, char* argv[] )
 #endif
 
     mi_process_init();
+    // Outlive QApplication and every producer before joining allocator-using workers.
+    klogg::TaskSchedulerLifetime taskScheduler;
 
     const auto& config = Configuration::getSynced();
     setApplicationAttributes( config.enableQtHighDpi(), config.scaleFactorRounding() );

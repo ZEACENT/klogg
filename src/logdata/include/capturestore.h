@@ -52,9 +52,14 @@ public:
         QString filePath;
         qint64 byteSize = 0;
         qint64 cumulativeEndLine = 0;
-        klogg::vector<qint64> lineOffsets;
+        // Published index versions are immutable. Publication and detachment
+        // share the store mutex; reader releases never grant mutation permission.
+        std::shared_ptr<klogg::vector<qint64>> lineOffsets
+            = std::make_shared<klogg::vector<qint64>>();
+        mutable bool lineOffsetsPublished = false;
         klogg::vector<int> lineLengths;
-        int maxLineLength = 0;
+        // Tab-expanded byte-column bound, separate from byte-addressing lengths.
+        LineLength::UnderlyingType maxLineLength = 0;
         std::shared_ptr<QByteArray> memoryData;
         std::shared_ptr<SpilledSegmentFile> spilledFile;
         bool spilled = false;
@@ -66,7 +71,7 @@ public:
         qint64 fileSize = 0;
         qint64 memoryBytes = 0;
         qint64 totalLines = 0;
-        int maxLineLength = 0;
+        LineLength::UnderlyingType maxLineLength = 0;
         QDateTime lastModified;
     };
 
@@ -78,10 +83,18 @@ public:
         struct Part {
             QByteArray memory;
             std::shared_ptr<SpilledSegmentFile> file;
+            std::shared_ptr<const klogg::vector<qint64>> lineOffsets;
+            uint64_t segmentId = 0;
+            uint64_t endLine = 0;
             qint64 bytes = 0;
             bool unterminated = false;
         };
         std::vector<Part> parts_;
+        uint64_t incarnation_ = 0;
+        uint64_t visibleRevision_ = 0;
+        uint64_t prefixRevision_ = 0;
+        LinesCount lineCount_ = 0_lcount;
+        qint64 byteSize_ = 0;
 
     public:
         struct Cursor {
@@ -98,8 +111,20 @@ public:
         // maxBytes is clamped to 64 KiB. Bytes include separators BETWEEN sealed
         // records, never a synthetic newline at final EOF. readFailed is terminal.
         Chunk readChunk( Cursor& cursor, int maxBytes = 64 * 1024 ) const;
+        LinesCount lineCount() const { return lineCount_; }
+        qint64 byteSize() const { return byteSize_; }
+        uint64_t incarnation() const { return incarnation_; }
+        uint64_t version() const { return visibleRevision_; }
+        klogg::SnapshotRow row( LineNumber index ) const;
+        OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const;
+        bool isAppendOf( const Snapshot& previous ) const;
+        // Exact committed rows, including zero-byte sealed records. Reads only
+        // requested byte ranges; caller installs its frozen decoder/settings.
+        // Invalid extents and short/unavailable reads throw SnapshotError.
+        SearchableLogData::RawLines readRawLines( LineNumber first, LinesCount count ) const;
     };
     Snapshot snapshot() const;
+    OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const;
 
     // PartialKnown permits only the unaccepted suffix to be retried. PartialUnknown
     // carries a confirmed lower-bound prefix; NEVER replay the whole input batch.
@@ -353,6 +378,11 @@ public:
     QString boundOutputFile_;
     RollingFileManager rollingOutput_;
     Limits limits_;
+    uint64_t incarnation_ = 0;
+    // Committed content changes invalidate caches; ingress and spilling do not.
+    uint64_t visibleRevision_ = 0;
+    // Retention/reset breaks prefix ancestry without renaming surviving rows.
+    uint64_t prefixRevision_ = 0;
 
     klogg::vector<Segment> segments_;
     QByteArray partialLine_;
@@ -362,7 +392,7 @@ public:
     qint64 pendingPersistenceSegments_ = 0;
     size_t firstResidentSegment_ = 0;
     qint64 totalLines_ = 0;
-    int maxLineLength_ = 0;
+    LineLength::UnderlyingType maxLineLength_ = 0;
     std::deque<qint64> reservedSegmentIds_;
     QSet<QString> inheritedCaptureFiles_;
     QDateTime lastModified_;

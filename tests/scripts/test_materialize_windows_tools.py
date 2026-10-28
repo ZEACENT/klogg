@@ -441,7 +441,7 @@ class WindowsToolsTests(unittest.TestCase):
         })
         tools.load_lock(ROOT / "ci/tools/msys2-tools.json")
 
-    def test_workflow_event_projections_have_one_pinned_producer_and_three_verified_consumers(self):
+    def test_workflow_event_projections_have_one_pinned_producer_and_two_verified_consumers(self):
         text = (ROOT / ".github/workflows/ci-build.yml").read_text()
         producer = text.split("  PrefetchWindowsTools:", 1)[1].split("  PrefetchAdbHelperSources:", 1)[0]
         consumers = text.split("  WindowsPackages:", 1)[1].split("  ci-gate:", 1)[0]
@@ -455,7 +455,7 @@ class WindowsToolsTests(unittest.TestCase):
         self.assertNotIn("C:\\msys64", consumers)
         gate = "(github.event_name != 'workflow_dispatch' || (inputs.environment-mode == 'off' && inputs.dependency-mode == 'off')) && !contains(github.event.head_commit.message, '[skip ci]')"
         self.assertEqual(producer.count("if: ${{ " + gate + " }}"), 1)
-        self.assertEqual(consumers.count("if: ${{ " + gate + " }}"), 3)
+        self.assertEqual(consumers.count("if: ${{ " + gate + " }}"), 2)
         for event, environment_mode, dependency_mode, expected in (
                 ("pull_request", "off", "off", True),
                 ("push", "off", "off", True),
@@ -467,7 +467,7 @@ class WindowsToolsTests(unittest.TestCase):
                 environment_mode == "off" and dependency_mode == "off"
             ), expected, (event, environment_mode, dependency_mode))
         self.assertIn("steps: *windows_steps", consumers)
-        self.assertEqual(consumers.count("steps: *windows_steps"), 2)
+        self.assertEqual(consumers.count("steps: *windows_steps"), 1)
 
 
 if __name__ == "__main__":

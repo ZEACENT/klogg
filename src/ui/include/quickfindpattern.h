@@ -77,13 +77,13 @@ class QuickFindMatcher {
     // Must be called when isLineMatching returns 'true', returns
     // the position of the first match found.
     std::pair<LineColumn, LineColumn> getLastMatch() const;
+    const QRegularExpressionMatch& lastOccurrence() const { return lastOccurrence_; }
 
   private:
     bool isActive_ = false;
     QRegularExpression regexp_;
 
-    mutable LineColumn lastMatchStart_;
-    mutable LineColumn lastMatchEnd_;
+    mutable QRegularExpressionMatch lastOccurrence_;
 };
 
 // Represents a search pattern for QuickFind (without its results)
@@ -134,6 +134,7 @@ class QuickFindPattern : public QObject {
     bool matchLine( const QString& line, klogg::vector<HighlightedMatch>& matches ) const;
 
     QuickFindMatcher getMatcher() const;
+    QRegularExpression regularExpression() const { return regexp_; }
 
   Q_SIGNALS:
     // Sent when the pattern is changed

@@ -48,6 +48,29 @@ _CI_SPEC.loader.exec_module(CI_MODULE)
 
 
 class SanitizerConfigurationTest(unittest.TestCase):
+    def test_process_entrypoints_own_scheduler_until_application_teardown(self):
+        # Worker allocator TLS must finish before mimalloc's atexit callback.
+        # A raw scheduler handle only releases references; the shared owner
+        # performs blocking finalization after producer/application destruction.
+        entrypoints = {
+            "src/app/main.cpp": "KloggApp app(",
+            "src/app/klogg_grep.cpp": "QCoreApplication app(",
+            "tests/unit/tests_main.cpp": "QApplication a(",
+            "tests/ui/qtests_main.cpp": "QApplication a(",
+            "benchmarks/regex_search_benchmark.cpp": "QCoreApplication app(",
+            "benchmarks/folder_search_benchmark.cpp": "QCoreApplication app(",
+            "benchmarks/live_capture_process_integrated_benchmark.cpp": "QCoreApplication application(",
+            "tests/unit/live_capture_benchmark_main.cpp": "QCoreApplication application(",
+        }
+        for relative, application in entrypoints.items():
+            with self.subTest(entrypoint=relative):
+                source = (ROOT / relative).read_text()
+                main = source[source.index("int main("):]
+                owner = "klogg::TaskSchedulerLifetime taskScheduler;"
+                self.assertIn(owner, main)
+                self.assertLess(main.index(owner), main.index(application))
+                self.assertNotRegex(main, r"(?<![.:\w])(?:std::)?exit\s*\(")
+
     def test_project_minimum_matches_cpm_and_restores_policy_after_ucm(self):
         version_pattern = r"cmake_minimum_required\(VERSION\s+([0-9.]+)"
         versions = []

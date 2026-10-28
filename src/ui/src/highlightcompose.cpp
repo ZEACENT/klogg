@@ -19,9 +19,10 @@
 
 #include "highlightcompose.h"
 
-#include <cmath>
 #include <algorithm>
-#include <optional>
+#include <cmath>
+#include <set>
+#include <utility>
 
 QColor blendSearchMatchOverHighlighter( const QColor& highlighterBack,
                                         const QColor& searchMatchBack )
@@ -41,8 +42,16 @@ QColor blendSearchMatchOverHighlighter( const QColor& highlighterBack,
                    blend( searchMatchBack.blue(), highlighterBack.blue() ) };
 }
 
-HighlightedMatchRanges composeLineHighlights( const klogg::vector<HighlightSource>& sources )
+HighlightedMatchRanges composeLineHighlights( const klogg::vector<HighlightSource>& sources,
+                                              HighlightCompositionWork* work,
+                                              std::optional<HighlightViewport> viewport )
 {
+    if ( work != nullptr ) {
+        *work = {};
+    }
+    if ( viewport && viewport->last < viewport->first ) {
+        return {};
+    }
     // Flatten the per-source matches into spans tagged with layer + colors.
     struct Span {
         LineColumn start;
@@ -54,66 +63,105 @@ HighlightedMatchRanges composeLineHighlights( const klogg::vector<HighlightSourc
     klogg::vector<Span> spans;
     for ( const auto& src : sources ) {
         for ( const auto& m : src.matches ) {
+            if ( work != nullptr ) {
+                ++work->spanVisits;
+            }
             if ( m.size() <= 0_length ) {
                 continue;
             }
-            spans.push_back( Span{ m.startColumn(), m.endColumn(), src.layer, m.foreColor(),
-                                   m.backColor() } );
+            const auto first = viewport ? std::max( m.startColumn(), viewport->first ) : m.startColumn();
+            const auto last = viewport ? std::min( m.endColumn(), viewport->last ) : m.endColumn();
+            if ( last >= first ) {
+                spans.push_back( Span{ first, last, src.layer, m.foreColor(), m.backColor() } );
+            }
         }
     }
     if ( spans.empty() ) {
         return HighlightedMatchRanges{};
     }
 
-    // Sweep over all match boundaries to form non-overlapping segments, then
-    // resolve each segment's (fore, back) by priority + the blend rule. This is
-    // the single place that owns the z-order contract.
-    klogg::vector<LineColumn::UnderlyingType> bounds;
-    bounds.reserve( spans.size() * 2 );
-    for ( const auto& s : spans ) {
-        bounds.push_back( s.start.get() );
-        bounds.push_back( s.end.get() + 1 );
-    }
-    std::sort( bounds.begin(), bounds.end() );
-    bounds.erase( std::unique( bounds.begin(), bounds.end() ), bounds.end() );
-
-    const auto layerPriority = []( HighlightLayer layer ) {
-        return static_cast<int>( layer );
+    // Events use half-open spans. Apply every event at one column before
+    // resolving the interval to the next column, so simultaneous ends/starts
+    // have no transient effect on colors or output merging.
+    struct Event {
+        LineColumn::UnderlyingType column;
+        size_t spanIndex;
+        bool entering;
     };
+    klogg::vector<Event> events;
+    events.reserve( spans.size() * 2 );
+    for ( size_t index = 0; index < spans.size(); ++index ) {
+        events.push_back( Event{ spans[ index ].start.get(), index, true } );
+        events.push_back( Event{ spans[ index ].end.get() + 1, index, false } );
+    }
+    std::sort( events.begin(), events.end(), []( const Event& lhs, const Event& rhs ) {
+        return lhs.column < rhs.column;
+    } );
 
+    // Input ordinals preserve both source and match order: the last active
+    // span in the highest layer wins, exactly as in the previous >= scan.
+    // SearchMatch has its own ordered set because blending needs its last
+    // active background even when a higher layer wins. Invalid colors must
+    // remain entries too: their presence is different from no search match.
+    using ActiveKey = std::pair<HighlightLayer, size_t>;
+    std::set<ActiveKey> active;
+    std::set<size_t> activeSearchMatches;
     klogg::vector<HighlightedMatch> result;
-    for ( size_t i = 0; i + 1 < bounds.size(); ++i ) {
-        const LineColumn segStart{ bounds[ i ] };
-        const LineColumn segLast{ bounds[ i + 1 ] - 1 }; // inclusive end
-
-        const Span* top = nullptr;
-        std::optional<QColor> searchMatchBack;
-        for ( const auto& s : spans ) {
-            if ( s.start <= segStart && s.end >= segLast ) {
-                if ( s.layer == HighlightLayer::SearchMatch ) {
-                    searchMatchBack = s.back;
-                }
-                if ( top == nullptr
-                     || layerPriority( s.layer ) >= layerPriority( top->layer ) ) {
-                    top = &s;
+    size_t eventIndex = 0;
+    while ( eventIndex < events.size() ) {
+        const auto column = events[ eventIndex ].column;
+        while ( eventIndex < events.size() && events[ eventIndex ].column == column ) {
+            const auto& event = events[ eventIndex ];
+            const auto layer = spans[ event.spanIndex ].layer;
+            const ActiveKey key{ layer, event.spanIndex };
+            if ( event.entering ) {
+                active.insert( key );
+                if ( layer == HighlightLayer::SearchMatch ) {
+                    activeSearchMatches.insert( event.spanIndex );
                 }
             }
+            else {
+                active.erase( key );
+                if ( layer == HighlightLayer::SearchMatch ) {
+                    activeSearchMatches.erase( event.spanIndex );
+                }
+            }
+            if ( work != nullptr ) {
+                ++work->eventVisits;
+            }
+            ++eventIndex;
         }
-        if ( top == nullptr ) {
+
+        if ( eventIndex == events.size() ) {
+            break;
+        }
+        if ( work != nullptr ) {
+            ++work->segmentResolutions;
+        }
+        if ( active.empty() ) {
             continue;
         }
 
-        QColor back = top->back;
-        // Blend rule: where the search-match gray sits UNDER a configured
-        // Highlighter or QuickHighlighter, keep both visible instead of letting
-        // one mask the other. Selection/QuickFind (higher layers) still fully
-        // cover a search match; ANSI (lower) is covered by the search match.
-        if ( searchMatchBack.has_value()
-             && ( top->layer == HighlightLayer::Highlighter
-                  || top->layer == HighlightLayer::QuickHighlighter ) ) {
-            back = blendSearchMatchOverHighlighter( top->back, *searchMatchBack );
+        const LineColumn segStart{ column };
+        const LineColumn segLast{ events[ eventIndex ].column - 1 }; // inclusive end
+        const auto& top = spans[ active.rbegin()->second ];
+        if ( work != nullptr ) {
+            ++work->spanVisits;
         }
-        const QColor fore = top->fore;
+        QColor back = top.back;
+        // Only the highest active span and (when blending) the last active
+        // SearchMatch are inspected per segment. Sorting and active-set updates
+        // cost O(N log N) overall; resolution is O(N), not boundaries times N.
+        if ( !activeSearchMatches.empty()
+             && ( top.layer == HighlightLayer::Highlighter
+                  || top.layer == HighlightLayer::QuickHighlighter ) ) {
+            if ( work != nullptr ) {
+                ++work->spanVisits;
+            }
+            back = blendSearchMatchOverHighlighter(
+                top.back, spans[ *activeSearchMatches.rbegin() ].back );
+        }
+        const QColor fore = top.fore;
 
         // Merge with the previous segment if it is adjacent and identical in
         // fore/back, so the output stays minimal.

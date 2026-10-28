@@ -25,7 +25,11 @@
 
 #include <QColor>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <optional>
+#include <random>
 
 namespace {
 HighlightedMatch makeMatch( int start, int size, QColor fore, QColor back )
@@ -46,7 +50,125 @@ std::optional<HighlightedMatch> matchCovering( const HighlightedMatchRanges& ran
     }
     return std::nullopt;
 }
+// Deliberately slow, column-by-column characterization oracle. It does not use
+// compositor boundaries or its blend helper, so sweep/rounding regressions cannot
+// hide behind shared implementation. Fixtures keep the coordinate range small.
+HighlightedMatchRanges referenceComposition( const klogg::vector<HighlightSource>& sources )
+{
+    LineColumn::UnderlyingType first = 0;
+    LineColumn::UnderlyingType last = -1;
+    for ( const auto& source : sources ) {
+        for ( const auto& match : source.matches ) {
+            if ( match.size() > 0_length ) {
+                first = std::min( first, match.startColumn().get() );
+                last = std::max( last, match.endColumn().get() );
+            }
+        }
+    }
+
+    klogg::vector<HighlightedMatch> result;
+    for ( auto column = first; column <= last; ++column ) {
+        const HighlightedMatch* winner = nullptr;
+        auto winningLayer = HighlightLayer::Ansi;
+        std::optional<QColor> searchBack;
+        for ( const auto& source : sources ) {
+            for ( const auto& match : source.matches ) {
+                if ( match.size() <= 0_length || match.startColumn().get() > column
+                     || match.endColumn().get() < column ) {
+                    continue;
+                }
+                if ( source.layer == HighlightLayer::SearchMatch ) {
+                    searchBack = match.backColor();
+                }
+                if ( winner == nullptr || source.layer >= winningLayer ) {
+                    winner = &match;
+                    winningLayer = source.layer;
+                }
+            }
+        }
+        if ( winner == nullptr ) {
+            continue;
+        }
+        auto back = winner->backColor();
+        if ( searchBack.has_value()
+             && ( winningLayer == HighlightLayer::Highlighter
+                  || winningLayer == HighlightLayer::QuickHighlighter ) ) {
+            if ( !back.isValid() ) {
+                back = *searchBack;
+            }
+            else if ( searchBack->isValid() ) {
+                const auto blend = []( int highlighter, int search ) {
+                    return static_cast<int>( std::lround( 0.65 * highlighter + 0.35 * search ) );
+                };
+                back = QColor{ blend( back.red(), searchBack->red() ),
+                               blend( back.green(), searchBack->green() ),
+                               blend( back.blue(), searchBack->blue() ) };
+            }
+        }
+        if ( !result.empty() && result.back().endColumn().get() + 1 == column
+             && result.back().foreColor() == winner->foreColor()
+             && result.back().backColor() == back ) {
+            const auto& previous = result.back();
+            result.back() = HighlightedMatch{ previous.startColumn(), previous.size() + 1_length,
+                                              previous.foreColor(), back };
+        }
+        else {
+            result.push_back( HighlightedMatch{ LineColumn{ column }, 1_length,
+                                                winner->foreColor(), back } );
+        }
+    }
+    return HighlightedMatchRanges{ std::move( result ) };
+}
+
+void requireSameComposition( const HighlightedMatchRanges& actual,
+                             const HighlightedMatchRanges& expected )
+{
+    const auto actualMatches = actual.matches();
+    const auto expectedMatches = expected.matches();
+    REQUIRE( actualMatches.size() == expectedMatches.size() );
+    for ( size_t index = 0; index < actualMatches.size(); ++index ) {
+        CAPTURE( index );
+        REQUIRE( actualMatches[ index ].startColumn() == expectedMatches[ index ].startColumn() );
+        REQUIRE( actualMatches[ index ].size() == expectedMatches[ index ].size() );
+        REQUIRE( actualMatches[ index ].foreColor() == expectedMatches[ index ].foreColor() );
+        REQUIRE( actualMatches[ index ].backColor() == expectedMatches[ index ].backColor() );
+    }
+}
 } // namespace
+
+TEST_CASE( "Compositor clips before constructing sweep events", "[highlight-viewport]" )
+{
+    HighlightSource source{ HighlightLayer::Selection, {} };
+    for ( int column = 0; column < 4000; column += 2 ) {
+        source.matches.push_back( makeMatch( column, 1, Qt::white, Qt::blue ) );
+    }
+    HighlightCompositionWork work;
+    const auto composed = composeLineHighlights( { source }, &work,
+                                                 HighlightViewport{ 40_lcol, 60_lcol } );
+    CHECK( work.eventVisits == 22 );
+    CHECK( composed.matches().size() == 11 );
+    REQUIRE_FALSE( matchCovering( composed, 38 ) );
+    REQUIRE( matchCovering( composed, 40 ) );
+    REQUIRE( matchCovering( composed, 60 ) );
+    REQUIRE_FALSE( matchCovering( composed, 62 ) );
+}
+
+TEST_CASE( "Viewport clipping preserves boundary winners and blends", "[highlight-viewport]" )
+{
+    const klogg::vector<HighlightSource> sources{
+        { HighlightLayer::Ansi, { makeMatch( 0, 100, Qt::white, Qt::red ) } },
+        { HighlightLayer::Highlighter, { makeMatch( 10, 70, Qt::black, Qt::yellow ) } },
+        { HighlightLayer::SearchMatch, { makeMatch( 40, 20, Qt::black, Qt::gray ) } },
+        { HighlightLayer::Selection, { makeMatch( 50, 2, Qt::white, Qt::blue ) } }
+    };
+    auto expected = referenceComposition( sources );
+    expected.clamp( 35_lcol, 55_lcol );
+    const auto actual = composeLineHighlights( sources, nullptr,
+                                               HighlightViewport{ 35_lcol, 55_lcol } );
+    requireSameComposition( actual, expected );
+    REQUIRE( composeLineHighlights( sources, nullptr,
+                HighlightViewport{ 5_lcol, 4_lcol } ).empty() );
+}
 
 TEST_CASE( "composeLineHighlights blends search-match gray under a configured Highlighter",
            "[highlighter][coexistence]" )
@@ -172,4 +294,161 @@ TEST_CASE( "composeLineHighlights: Selection fully covers a search match (no ble
     // opacity, so the search match is covered (current behavior preserved).
     REQUIRE( m->backColor() == selBack );
     REQUIRE( m->backColor() != blendSearchMatchOverHighlighter( selBack, gray ) );
+}
+
+TEST_CASE( "composeLineHighlights preserves layer and source order at shared boundaries",
+           "[highlighter][compose][characterization]" )
+{
+    const QColor black{ Qt::black };
+    const QColor white{ Qt::white };
+    const QColor red{ Qt::red };
+    const QColor blue{ Qt::blue };
+    const QColor green{ Qt::green };
+    const std::array<HighlightLayer, 6> layers{
+        HighlightLayer::Ansi, HighlightLayer::SearchMatch, HighlightLayer::Highlighter,
+        HighlightLayer::QuickHighlighter, HighlightLayer::QuickFind, HighlightLayer::Selection };
+
+    for ( const auto first : layers ) {
+        for ( const auto second : layers ) {
+            CAPTURE( static_cast<int>( first ), static_cast<int>( second ) );
+            const klogg::vector<HighlightSource> sources{
+                { first, { makeMatch( 0, 10, white, red ), makeMatch( 2, 3, black, blue ) } },
+                { second, { makeMatch( 4, 4, white, green ), makeMatch( 8, 2, black, blue ) } } };
+            requireSameComposition( composeLineHighlights( sources ), referenceComposition( sources ) );
+        }
+    }
+}
+
+TEST_CASE( "composeLineHighlights restores earlier ties and the last active search blend",
+           "[highlighter][compose][characterization]" )
+{
+    const QColor black{ Qt::black };
+    const QColor white{ Qt::white };
+    const QColor red{ Qt::red };
+    const QColor green{ Qt::green };
+    const QColor gray{ Qt::lightGray };
+    const QColor darkGray{ Qt::darkGray };
+    const klogg::vector<HighlightSource> sources{
+        { HighlightLayer::Highlighter, { makeMatch( 0, 14, white, red ) } },
+        { HighlightLayer::SearchMatch,
+          { makeMatch( 0, 14, black, gray ), makeMatch( 2, 10, black, darkGray ) } },
+        { HighlightLayer::Highlighter,
+          { makeMatch( 3, 8, black, green ), makeMatch( 5, 2, white, red ) } },
+        { HighlightLayer::SearchMatch, { makeMatch( 4, 4, black, QColor{} ) } },
+        { HighlightLayer::QuickFind, { makeMatch( 6, 3, QColor{}, QColor{} ) } } };
+    requireSameComposition( composeLineHighlights( sources ), referenceComposition( sources ) );
+}
+
+TEST_CASE( "composeLineHighlights ignores empty spans and merges only adjacent identical styles",
+           "[highlighter][compose][characterization]" )
+{
+    const QColor black{ Qt::black };
+    const QColor red{ Qt::red };
+    const klogg::vector<HighlightSource> sources{
+        { HighlightLayer::Selection,
+          { makeMatch( 2, 0, black, red ), makeMatch( 4, -1, black, red ) } },
+        { HighlightLayer::Ansi, { makeMatch( 0, 2, black, red ), makeMatch( 5, 1, black, red ) } },
+        { HighlightLayer::QuickFind, { makeMatch( 2, 2, black, red ) } } };
+    const HighlightedMatchRanges expected{ { makeMatch( 0, 4, black, red ),
+                                             makeMatch( 5, 1, black, red ) } };
+    requireSameComposition( composeLineHighlights( sources ), expected );
+    REQUIRE( composeLineHighlights( {} ).empty() );
+    REQUIRE( composeLineHighlights( { sources.front() } ).empty() );
+}
+
+TEST_CASE( "composeLineHighlights matches a deterministic column rasterizer",
+           "[highlighter][compose][characterization][differential]" )
+{
+    std::mt19937 random{ 0x43c06f21U };
+    const std::array<QColor, 7> colors{ QColor{}, QColor{ Qt::black }, QColor{ Qt::white },
+                                      QColor{ Qt::lightGray }, QColor{ 43, 107, 191 },
+                                      QColor{ 211, 60, 20, 96 }, QColor{ 0, 201, 77, 0 } };
+    for ( int fixture = 0; fixture < 160; ++fixture ) {
+        CAPTURE( fixture );
+        klogg::vector<HighlightSource> sources;
+        const auto sourceCount = random() % 13U;
+        for ( std::mt19937::result_type sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex ) {
+            HighlightSource source{ static_cast<HighlightLayer>( random() % 6U ), {} };
+            const auto matchCount = random() % 10U;
+            for ( std::mt19937::result_type index = 0; index < matchCount; ++index ) {
+                const auto start = static_cast<int>( random() % 28U );
+                const auto length = static_cast<int>( random() % 12U ) - 1;
+                const auto fore = colors[ random() % colors.size() ];
+                const auto back = colors[ random() % colors.size() ];
+                source.matches.push_back( makeMatch( start, length, fore, back ) );
+            }
+            sources.push_back( std::move( source ) );
+        }
+        requireSameComposition( composeLineHighlights( sources ), referenceComposition( sources ) );
+    }
+}
+
+TEST_CASE( "composeLineHighlights dense span inspections scale linearly with boundaries",
+           "[highlighter][compose][work]" )
+{
+    const QColor black{ Qt::black };
+    const QColor red{ Qt::red };
+    const QColor blue{ Qt::blue };
+    for ( const bool nested : { false, true } ) {
+        CAPTURE( nested );
+        std::size_t previousVisits = 0;
+        for ( const int count : { 128, 256, 512, 1024 } ) {
+            CAPTURE( count );
+            klogg::vector<HighlightSource> sources{ { HighlightLayer::Selection, {} } };
+            for ( int index = 0; index < count; ++index ) {
+                // Disjoint short matches and a dense nest exercise both small and
+                // large active sets. Alternating styles prevent output merging
+                // from hiding the number of necessary segment resolutions.
+                const int start = nested ? index : 2 * index;
+                const int length = nested ? 2 * ( count - index ) : 1;
+                sources.front().matches.push_back(
+                    makeMatch( start, length, black, index % 2 == 0 ? red : blue ) );
+            }
+            HighlightCompositionWork work;
+            const auto actual = composeLineHighlights( sources, &work );
+            const auto spanCount = static_cast<std::size_t>( count );
+            REQUIRE( actual.matches().size() == ( nested ? 2 * spanCount - 1 : spanCount ) );
+            REQUIRE( work.segmentResolutions == 2 * spanCount - 1 );
+            REQUIRE( work.spanVisits <= 5 * spanCount );
+            REQUIRE( work.eventVisits == 2 * spanCount );
+            if ( previousVisits != 0 ) {
+                REQUIRE( work.spanVisits <= 2 * previousVisits + 2 );
+            }
+            previousVisits = work.spanVisits;
+        }
+    }
+}
+
+TEST_CASE( "composeLineHighlights dense blending inspects only the active winners",
+           "[highlighter][compose][work]" )
+{
+    const QColor black{ Qt::black };
+    const QColor red{ Qt::red };
+    const QColor gray{ Qt::lightGray };
+    const QColor darkGray{ Qt::darkGray };
+    constexpr int count = 512;
+    klogg::vector<HighlightSource> sources{
+        { HighlightLayer::Highlighter, { makeMatch( 0, 2 * count, black, red ) } },
+        { HighlightLayer::SearchMatch, {} } };
+    for ( int index = 0; index < count; ++index ) {
+        sources.back().matches.push_back(
+            makeMatch( index, 2 * ( count - index ), black, index % 2 == 0 ? gray : darkGray ) );
+    }
+    HighlightCompositionWork work;
+    const auto actual = composeLineHighlights( sources, &work );
+    REQUIRE( actual.matches().size() == 2 * count - 1 );
+    requireSameComposition( actual, referenceComposition( sources ) );
+    REQUIRE( work.segmentResolutions == 2 * count - 1 );
+    REQUIRE( work.spanVisits <= 5 * ( count + 1 ) );
+    REQUIRE( work.eventVisits == 2 * ( count + 1 ) );
+}
+
+TEST_CASE( "composeLineHighlights work observations reset for each call",
+           "[highlighter][compose][work]" )
+{
+    HighlightCompositionWork work{ 99, 99, 99 };
+    REQUIRE( composeLineHighlights( {}, &work ).empty() );
+    REQUIRE( work.spanVisits == 0 );
+    REQUIRE( work.eventVisits == 0 );
+    REQUIRE( work.segmentResolutions == 0 );
 }

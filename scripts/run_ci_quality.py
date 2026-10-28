@@ -15,6 +15,17 @@ from typing import Any
 def quality_commands(root: pathlib.Path) -> list[list[str]]:
     del root
     return [
+        # Reject stale authenticated environment policy before the slower lint suite.
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests/scripts",
+            "-p",
+            "test_ci_reuse_lock_compatibility.py",
+        ],
         [sys.executable, "scripts/lint_repo_hygiene.py"],
         [sys.executable, "scripts/lint_platform_fragile.py"],
         [sys.executable, "scripts/lint_test_determinism.py"],

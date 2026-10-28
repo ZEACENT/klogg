@@ -142,7 +142,8 @@ class WindowsObjectCacheTest(unittest.TestCase):
                 changed = {**self.env, key: value}
                 self.assertNotEqual(CACHE.cache_identity(changed, self.lock, self.compiler)[0], original)
         changed = {**self.env, "KLOGG_CONFIG_ARCH": "x86", "VSCMD_ARG_TGT_ARCH": "x86"}
-        self.assertNotEqual(CACHE.cache_identity(changed, self.lock, self.compiler)[0], original)
+        with self.assertRaisesRegex(ValueError, "architecture mismatch"):
+            CACHE.cache_identity(changed, self.lock, self.compiler)
         self.compiler.write_bytes(b"new compiler")
         self.assertNotEqual(CACHE.cache_identity(self.env, self.lock, self.compiler)[0], original)
         with self.assertRaisesRegex(ValueError, "RelWithDebInfo"):
@@ -158,7 +159,7 @@ class WindowsObjectCacheTest(unittest.TestCase):
         action = (ROOT / ".github/actions/prepare-workspace-env/action.yml").read_text()
         options = re.findall(r'echo "KLOGG_CMAKE_OPTS=(.*)" >> \$GITHUB_ENV', action)
         self.assertEqual(len(options), 1)
-        for name in ("WindowsPackages", "WindowsX86", "WindowsAsan"):
+        for name in ("WindowsPackages", "WindowsAsan"):
             with self.subTest(job=name):
                 # A job's direct fields/child env mapping share the step parser's
                 # grammar; substitute only its header, keeping real env values.
