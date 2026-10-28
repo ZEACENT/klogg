@@ -926,3 +926,39 @@ passed. Optimized best-of-three performance remained 196 ms for selecting/copyin
 wrapped. The complete quality gate passed all lint stages and 2,607 Python tests
 (with 10 existing platform/tool-dependent skips). Windows runtime confirmation
 remains a hosted-CI responsibility.
+
+### Integrated retirement acceptance (2026-10-29)
+
+The runtime/analysis freeze is `d70d3c78`, including `bc294a25` and the semantic
+merge of `e00976f8`. Windows x86 configuration, CI, package feeds, and release
+paths are retired; Windows x64 validation and non-Windows Qt5 coverage remain.
+Overlapping folder and diagnostic tests retain the match-selection contracts.
+Historical disabled source-material entries remain unchanged to preserve their
+authenticated identity, not to advertise active x86 support.
+
+The follow-up review's capture-lifetime concern was independently reproduced:
+a blocked captured-object destructor could coexist with an already-ready result.
+The callable is now reset before either result or exception publication. The
+same defect explained the Linux/MSVC retained-snapshot assertion, which libc++
+cleanup timing had hidden. The deterministic regression covers both outcomes.
+Locked clang-tidy-18 findings were fixed without suppressions, preserving index
+lock/lease destruction order and aggregate defaults.
+
+| Integrated check | Result |
+| --- | --- |
+| Complete repository quality gate | All lint stages passed; 2,568 Python tests, 12 platform/tool-dependent skips |
+| macOS Qt6 native, ASan/UBSan, first-party TSan | Each CTest suite passed 38/38 |
+| Locked Linux GCC/Qt5 ASan/LSan | CTest 40/40 with CI sanitizer options and existing suppressions |
+| Locked GCC13/Qt6.9.3 coverage profile | CTest 39/39; line 81.6%, branch 46.5%; unchanged floors 61.1%/32.6% passed |
+| Locked clang-tidy-18 | Full PR diff against `306afd95`, affected-header fan-out, and standalone headers clean |
+| Locked strict cppcheck | 156 first-party compilation entries passed |
+| Optimized best-of-three 40,000-fragment performance | Selection/copy 233 ms; dense paint about 28 ms unwrapped / 102 ms wrapped |
+
+Source bytes were verified when synchronizing an isolated clone of the retained
+Linux build volume; changed files received fresh timestamps, and retired tracked
+files were removed. Original acceptance volumes were not modified. Native suites
+and Linux runtime suites ran serially with respect to one another, with two CTest
+jobs per suite. The unchanged macOS ASan ADB-helper startup timeout recurred once;
+its isolated 53 assertions and complete ASan rerun passed, without a sanitizer
+report. That failed attempt is retained as such. Hosted Windows x64 validation
+and the updated-head GitHub checks remain required after publication.
