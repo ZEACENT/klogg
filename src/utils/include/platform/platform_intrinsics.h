@@ -39,19 +39,11 @@ inline int countLeadingZeroes( uint64_t value )
         return 64;
     }
 #ifdef Q_OS_WIN
-#if _WIN64
     unsigned long leading_zero = 0;
     if ( _BitScanReverse64( &leading_zero, value ) ) {
         return 63 - static_cast<int>( leading_zero );
     }
     return 64;
-#else
-    unsigned long leading_zero = 0;
-    if ( _BitScanReverse( &leading_zero, static_cast<uint32_t>( value ) ) ) {
-        return 63 - static_cast<int>( leading_zero );
-    }
-    return 64;
-#endif
 #else
     return __builtin_clzll( value );
 #endif

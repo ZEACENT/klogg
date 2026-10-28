@@ -7,11 +7,12 @@ from pathlib import Path
 import sys
 
 
-COMMON_RUNTIME = (
+REQUIRED_RUNTIME = (
     "msvcp140.dll",
     "msvcp140_1.dll",
     "msvcp140_2.dll",
     "vcruntime140.dll",
+    "vcruntime140_1.dll",
 )
 
 
@@ -26,15 +27,14 @@ def runtime_digest(path: Path) -> bytes:
 
 
 def verify_runtime(package_root: Path, staged_root: Path, arch: str) -> None:
-    if arch not in ("x64", "x86"):
+    if arch != "x64":
         raise ValueError(f"unsupported Windows runtime architecture: {arch}")
     if package_root.resolve() == staged_root.resolve():
         raise ValueError("final package and staging directories must be distinct")
 
-    required = COMMON_RUNTIME + (("vcruntime140_1.dll",) if arch == "x64" else ())
     # Inspect only the final application directory, never PATH or system runtimes.
     # A fixed required set also catches omissions shared by staging and packaging.
-    for name in required:
+    for name in REQUIRED_RUNTIME:
         packaged = package_root / name
         staged = staged_root / name
         if runtime_digest(packaged) != runtime_digest(staged):
@@ -45,7 +45,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package-root", type=Path, required=True)
     parser.add_argument("--staged-root", type=Path, required=True)
-    parser.add_argument("--arch", choices=("x64", "x86"), required=True)
+    parser.add_argument("--arch", choices=("x64",), required=True)
     args = parser.parse_args(argv)
     try:
         verify_runtime(args.package_root, args.staged_root, args.arch)

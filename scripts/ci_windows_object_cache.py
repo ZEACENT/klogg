@@ -98,7 +98,7 @@ def cache_identity(env, lock, compiler, preload=PRELOAD):
     if missing:
         raise ValueError("missing Windows compiler/toolchain identity: " + ", ".join(missing))
     arch = windows_env["KLOGG_CONFIG_ARCH"]
-    if arch not in {"x64", "x86"} or windows_env["VSCMD_ARG_TGT_ARCH"] != arch:
+    if arch != "x64" or windows_env["VSCMD_ARG_TGT_ARCH"] != arch:
         raise ValueError("MSVC target architecture mismatch")
     if "-DCMAKE_BUILD_TYPE=RelWithDebInfo" not in windows_env.get("KLOGG_CMAKE_OPTS", "").split():
         raise ValueError("Windows object cache requires RelWithDebInfo")

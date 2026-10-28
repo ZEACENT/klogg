@@ -251,9 +251,9 @@ TEST_CASE( "scanFile fast path honors shouldStop before scanning", "[folder]" )
     // cached vectorscan buffer scanner) is decided at construction time.
     auto matcher = matcherFor( "MATCH" );
     if ( !matcher->hasBufferScan() ) {
-        // No buffer scanner in this build (KLOGG_USE_VECTORSCAN=OFF, e.g. the
-        // Windows x86-qt5 [QTRegex] CI job): the fast path cannot run, so pass
-        // vacuously -- same contract as patternmatcher_test's block-scan tests.
+        // No buffer scanner in Qt-regex-only builds (KLOGG_USE_VECTORSCAN=OFF):
+        // the fast path cannot run, so pass vacuously -- same contract as
+        // patternmatcher_test's block-scan tests.
         return;
     }
 

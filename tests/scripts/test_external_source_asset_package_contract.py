@@ -1363,6 +1363,13 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
                     (result.stdout + result.stderr).lower(), r"url|repository|source|archive"
                 )
 
+    def test_manifest_verifier_does_not_exempt_retired_x86_packages(self):
+        manifest, _ = self.make_manifest()
+        self.write_asset("klogg-26.08.27-x86-Qt5-QTRegex-portable.zip", b"unqualified package\n")
+        result = self.run_verifier(manifest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unreferenced or unqualified package", result.stdout + result.stderr)
+
     def test_manifest_verifier_rejects_tampered_support_sidecar_and_extra_package(self):
         scenarios = ("support", "support-sidecar", "sidecar", "extra-package")
         for mismatch in scenarios:
@@ -2808,7 +2815,7 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
         job_sections = (
             section(workflow, "  LinuxPackages:", "  LinuxSanitizers:"),
             section(workflow, "  MacPackages:", "  MacArmPackages:"),
-            section(workflow, "  WindowsPackages:", "  WindowsX86:"),
+            section(workflow, "  WindowsPackages:", "  WindowsAsan:"),
         )
         upload_name = "name: packages-${{ env.KLOGG_ARTIFACTS_ID }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}"
         for job in job_sections:

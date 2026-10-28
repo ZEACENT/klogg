@@ -291,7 +291,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         self.assertEqual(len(re.findall(r"\.ExceptionPointers\s*=(?!=)", code)), 1)
         self.assertRegex(code, call + r"\s*;\s*const auto error\s*=\s*captured\s*!=\s*FALSE"
                          r"\s*\?\s*ERROR_SUCCESS\s*:\s*GetLastError\s*\(\s*\)\s*;")
-        fields = r"(?:ContextFlags|Rip|Eip|Rsp|Esp|Rbp|Ebp)"
+        fields = r"(?:ContextFlags|Rip|Rsp|Rbp)"
         field = r"(?:\.|->)\s*" + fields
         self.assertNotRegex(code, field + r"\s*(?:[+\-*/&|^%]?=(?!=)|<<=|>>=|\+\+|--)")
         self.assertNotRegex(code, r"(?:\+\+|--)\s*[\w.>\-]+" + field)
@@ -703,10 +703,8 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         self.assertIn("set(_klogg_debug_option /DEBUG:NONE)", helper)
 
     def test_dump_decoder_checks_original_exception_and_context_bounds(self):
-        layouts = (("x64", 1232), ("x64", 1663), ("x64", 3263),
-                   ("x86", 716), ("x86", 1147), ("x86", 1663))
-        for architecture, size in layouts:
-            with self.subTest(architecture=architecture, size=size), tempfile.TemporaryDirectory() as directory:
+        for size in (1232, 1663, 3263):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as directory:
                 content = bytearray(4096)
                 struct.pack_into("<4sI", content, 0, b"MDMP", 0xA793)
                 struct.pack_into("<II", content, 8, 1, 32)
@@ -716,34 +714,32 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                 struct.pack_into("<I", content, 76, 2)
                 struct.pack_into("<QQ", content, 84, 0, 0x1234)
                 struct.pack_into("<II", content, 204, size, 220)
-                flag_offset, flags = (48, 0x100003) if architecture == "x64" else (0, 0x10003)
-                struct.pack_into("<I", content, 220 + flag_offset, flags)
-                alias_offset, alias_value = (0, 0x10003) if architecture == "x64" else (48, 0x100000)
-                struct.pack_into("<I", content, 220 + alias_offset, alias_value)
-                register_offsets = (248, 152, 160) if architecture == "x64" else (184, 196, 180)
-                width = "<Q" if architecture == "x64" else "<I"
-                for offset, value in zip(register_offsets, (0xABC, 0xDEF, 0xAAA)):
-                    struct.pack_into(width, content, 220 + offset, value)
+                struct.pack_into("<I", content, 220 + 48, 0x100003)
+                # Foreign-looking data at offset zero must not select a different layout.
+                struct.pack_into("<I", content, 220, 0x10003)
+                for offset, value in zip((248, 152, 160), (0x100000ABC, 0x100000DEF, 0x100000AAA)):
+                    struct.pack_into("<Q", content, 220 + offset, value)
                 dump = pathlib.Path(directory) / "synthetic.dmp"
                 dump.write_bytes(content)
-                self.assertEqual(exception_from_dump(dump, architecture), {
+                self.assertEqual(exception_from_dump(dump, "x64"), {
                     "thread": 42, "code": 0xC0000005, "address": 0xABC,
                     "parameters": 2, "operation": 0, "accessed": 0x1234,
-                    "pc": 0xABC, "sp": 0xDEF, "fp": 0xAAA})
-                for unsupported_size in (204, 256, 512):
+                    "pc": 0x100000ABC, "sp": 0x100000DEF, "fp": 0x100000AAA})
+                for unsupported_size in (0, 3, 51, 204, 256, 512, 716, 1231):
                     struct.pack_into("<II", content, 204, unsupported_size, 220)
                     dump.write_bytes(content)
                     with self.assertRaisesRegex(ValueError, "context"):
-                        exception_from_dump(dump, architecture)
+                        exception_from_dump(dump, "x64")
                 struct.pack_into("<II", content, 204, size, 220)
-                struct.pack_into("<I", content, 220 + flag_offset, 0x200003)
-                dump.write_bytes(content)
-                with self.assertRaisesRegex(ValueError, "context"):
-                    exception_from_dump(dump, architecture)
+                for foreign_flags in (0, 0x10003, 0x200003):
+                    struct.pack_into("<I", content, 220 + 48, foreign_flags)
+                    dump.write_bytes(content)
+                    with self.assertRaisesRegex(ValueError, "context architecture"):
+                        exception_from_dump(dump, "x64")
                 struct.pack_into("<II", content, 204, 16, len(content) - 10)
                 dump.write_bytes(content)
                 with self.assertRaisesRegex(ValueError, "context"):
-                    exception_from_dump(dump, architecture)
+                    exception_from_dump(dump, "x64")
 
     def write_pe(self, path, architecture="x64"):
         machine, magic = (0x8664, 0x20B) if architecture == "x64" else (0x14C, 0x10B)
@@ -762,8 +758,13 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             helper = pathlib.Path(directory) / "helper.exe"
             for architecture in ("x86", "x64"):
                 content = self.write_pe(helper, architecture)
-                self.assertEqual(crash_smoke.architecture_from_pe(helper), architecture)
+                # The general parser identifies foreign binaries for rejection and provenance.
                 self.assertEqual(crash_smoke.pe_identity.architecture_from_pe(helper), architecture)
+                if architecture == "x64":
+                    self.assertEqual(crash_smoke.architecture_from_pe(helper), architecture)
+                else:
+                    with self.assertRaisesRegex(ValueError, "test helper PE architecture unsupported: x86"):
+                        crash_smoke.architecture_from_pe(helper)
                 mutations = ("short", "dos", "offset", "signature", "machine", "magic")
                 for mutation in mutations:
                     changed = bytearray(content)
@@ -786,22 +787,40 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "^PE"):
                             crash_smoke.pe_identity.architecture_from_pe(helper)
 
+    def test_dump_decoder_rejects_unsupported_process_architectures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dump = pathlib.Path(directory) / "synthetic.dmp"
+            self.write_extended_context_dump(dump)
+            for architecture in ("x86", "arm64", "unknown"):
+                with self.subTest(architecture=architecture), self.assertRaisesRegex(
+                        ValueError, "process architecture unsupported"):
+                    exception_from_dump(dump, architecture)
+
+    def test_smoke_rejects_foreign_helper_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = pathlib.Path(directory) / "helper.exe"
+            self.write_pe(helper, "x86")
+            result = subprocess.CompletedProcess([], 67, "", "")
+            with mock.patch("windows_crash_trace_smoke.subprocess.run", return_value=result) as launch:
+                with self.assertRaisesRegex(ValueError, "test helper PE architecture unsupported: x86"):
+                    run_smoke(helper)
+                launch.assert_not_called()
+
     def test_native_context_requires_control_and_x64_integer_register_flags(self):
-        for architecture, size, flag_offset, flags in (("x86", 716, 0, 0x10000),
-                                                       ("x64", 1232, 48, 0x100001)):
-            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as directory:
+        for flags in (0x100000, 0x100001, 0x100002):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
                 content = bytearray(2048)
                 struct.pack_into("<4sI", content, 0, b"MDMP", 0xA793)
                 struct.pack_into("<II", content, 8, 1, 32)
                 struct.pack_into("<III", content, 32, 6, 168, 44)
-                struct.pack_into("<II", content, 204, size, 220)
-                struct.pack_into("<I", content, 220 + flag_offset, flags)
+                struct.pack_into("<II", content, 204, 1232, 220)
+                struct.pack_into("<I", content, 220 + 48, flags)
                 dump = pathlib.Path(directory) / "synthetic.dmp"
                 dump.write_bytes(content)
                 with self.assertRaisesRegex(ValueError, "register flags"):
-                    exception_from_dump(dump, architecture)
+                    exception_from_dump(dump, "x64")
 
-    def write_extended_context_dump(self, path, architecture):
+    def write_extended_context_dump(self, path):
         content = bytearray(4096)
         struct.pack_into("<4sI", content, 0, b"MDMP", 0xA793)
         struct.pack_into("<II", content, 8, 1, 32)
@@ -810,41 +829,38 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         struct.pack_into("<Q", content, 68, 0xABC)
         struct.pack_into("<I", content, 76, 2)
         struct.pack_into("<QQ", content, 84, 0, 0x1234)
-        size, flags, flag_offset = (3263, 0x10004F, 48) if architecture == "x64" else (1147, 0x1007F, 0)
-        struct.pack_into("<II", content, 204, size, 220)
-        struct.pack_into("<I", content, 220 + flag_offset, flags)
-        width, offsets = ("<Q", (248, 152, 160)) if architecture == "x64" else ("<I", (184, 196, 180))
-        for offset, value in zip(offsets, (0xABC, 0xDEF, 0x123)):
-            struct.pack_into(width, content, 220 + offset, value)
+        struct.pack_into("<II", content, 204, 3263, 220)
+        struct.pack_into("<I", content, 220 + 48, 0x10004F)
+        for offset, value in zip((248, 152, 160), (0xABC, 0xDEF, 0x123)):
+            struct.pack_into("<Q", content, 220 + offset, value)
         path.write_bytes(content)
 
     def test_complete_smoke_checks_extended_context_and_all_disabled_cases(self):
-        for architecture in ("x86", "x64"):
-            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as directory:
-                helper = pathlib.Path(directory) / "helper.exe"
-                self.write_pe(helper, architecture)
-                cases = []
+        with tempfile.TemporaryDirectory() as directory:
+            helper = pathlib.Path(directory) / "helper.exe"
+            self.write_pe(helper)
+            cases = []
 
-                def capture(command, **kwargs):
-                    output = pathlib.Path(kwargs["cwd"])
-                    cases.append(output.name)
-                    if output.name == "idle":
-                        self.assertEqual(command, [str(helper), "--idle"])
-                        self.assertEqual(kwargs["env"]["KLOGG_TEST_MINIDUMP_DIR"], str(output))
-                        return subprocess.CompletedProcess(command, 0, "", "Test minidump collector ready\nTest minidump collector stopped\n")
-                    self.assertEqual(command, [str(helper)])
-                    if output.name == "non-directory":
-                        self.assertTrue(pathlib.Path(kwargs["env"]["KLOGG_TEST_MINIDUMP_DIR"]).is_file())
-                    stderr = ("Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n" * 2)
-                    if output.name == "enabled":
-                        self.write_extended_context_dump(output / "synthetic.dmp", architecture)
-                        stderr += "Test minidump collector ready\nTest minidump captured 1 error 0\n"
-                    return subprocess.CompletedProcess(command, 67, "", stderr)
+            def capture(command, **kwargs):
+                output = pathlib.Path(kwargs["cwd"])
+                cases.append(output.name)
+                if output.name == "idle":
+                    self.assertEqual(command, [str(helper), "--idle"])
+                    self.assertEqual(kwargs["env"]["KLOGG_TEST_MINIDUMP_DIR"], str(output))
+                    return subprocess.CompletedProcess(command, 0, "", "Test minidump collector ready\nTest minidump collector stopped\n")
+                self.assertEqual(command, [str(helper)])
+                if output.name == "non-directory":
+                    self.assertTrue(pathlib.Path(kwargs["env"]["KLOGG_TEST_MINIDUMP_DIR"]).is_file())
+                stderr = ("Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n" * 2)
+                if output.name == "enabled":
+                    self.write_extended_context_dump(output / "synthetic.dmp")
+                    stderr += "Test minidump collector ready\nTest minidump captured 1 error 0\n"
+                return subprocess.CompletedProcess(command, 67, "", stderr)
 
-                with mock.patch.dict(os.environ, {}, clear=True), \
-                        mock.patch("windows_crash_trace_smoke.subprocess.run", side_effect=capture):
-                    run_smoke(helper)
-                self.assertEqual(cases, ["enabled", "absent", "invalid", "non-directory", "idle"])
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch("windows_crash_trace_smoke.subprocess.run", side_effect=capture):
+                run_smoke(helper)
+            self.assertEqual(cases, ["enabled", "absent", "invalid", "non-directory", "idle"])
 
     def test_disabled_capture_rejects_collector_launch_without_a_dump(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -875,7 +891,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
     def test_capture_rejects_duplicate_success_reports(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory)
-            self.write_extended_context_dump(output / "synthetic.dmp", "x64")
+            self.write_extended_context_dump(output / "synthetic.dmp")
             stderr = "Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n" * 2
             stderr += "Test minidump collector ready\n" + "Test minidump captured 1 error 0\n" * 2
             result = subprocess.CompletedProcess([], 67, "", stderr)
@@ -889,7 +905,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
             output = root / "enabled"
             output.mkdir()
             external = root / "not-owned.dmp"
-            self.write_extended_context_dump(external, "x64")
+            self.write_extended_context_dump(external)
             (output / "synthetic.dmp").symlink_to(external)
             stderr = "Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n" * 2
             stderr += "Test minidump collector ready\nTest minidump captured 1 error 0\n"
@@ -911,7 +927,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         for stderr in cases:
             with self.subTest(stderr=stderr), tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory)
-                self.write_extended_context_dump(output / "synthetic.dmp", "x64")
+                self.write_extended_context_dump(output / "synthetic.dmp")
                 result = subprocess.CompletedProcess([], 67, "", "Test minidump collector ready\n" + stderr)
                 with mock.patch("windows_crash_trace_smoke.subprocess.run", return_value=result):
                     with self.assertRaises(ValueError):
@@ -920,7 +936,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
     def test_opaque_diagnostic_marker_strings_do_not_change_valid_capture_outcome(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory)
-            self.write_extended_context_dump(output / "synthetic.dmp", "x64")
+            self.write_extended_context_dump(output / "synthetic.dmp")
             stderr = "Exception address abc thread 42\nOriginal PC 0xabc SP 0xdef FP 0x123\n" * 2
             stderr += "Test minidump collector ready\nTest minidump captured 1 error 0\n"
             stderr += 'Test minidump diagnostic {"path":"Exception address Test minidump captured "}\n'
@@ -938,7 +954,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
                 self.write_pe(helper)
 
                 def capture(command, **kwargs):
-                    self.write_extended_context_dump(pathlib.Path(kwargs["cwd"]) / "synthetic.dmp", "x64")
+                    self.write_extended_context_dump(pathlib.Path(kwargs["cwd"]) / "synthetic.dmp")
                     stderr = valid.replace(original, altered) + valid + "Test minidump collector ready\nTest minidump captured 1 error 0\n"
                     return subprocess.CompletedProcess(command, 67, "", stderr)
 
@@ -1147,7 +1163,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
     def test_dump_decoder_bounds_the_actual_read_and_rejects_oversize_before_open(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "synthetic.dmp"
-            self.write_extended_context_dump(path, "x64")
+            self.write_extended_context_dump(path)
             original_open = pathlib.Path.open
             sizes = []
 
@@ -1430,7 +1446,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
 
     def test_windows_helper_staging_contract_runs_natively_before_build(self):
         source = (ROOT / ".github/workflows/ci-build.yml").read_text()
-        windows = source.split("  WindowsPackages:", 1)[1].split("  WindowsX86:", 1)[0]
+        windows = source.split("  WindowsPackages:", 1)[1].split("  WindowsAsan:", 1)[0]
         marker = "      - name: Verify Windows helper staging\n"
         self.assertEqual(windows.count(marker), 1)
         step = windows.split(marker, 1)[1].split("      - ", 1)[0]
@@ -1444,9 +1460,8 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         ])
         self.assertLess(windows.index(marker), windows.index("      - name: Build Windows application"))
         self.assertLess(windows.index(marker), windows.index("      - name: Verify Windows tests"))
-        for job in ("WindowsX86", "WindowsAsan"):
-            inherited = re.split(r"\n  \S", source.split("  " + job + ":", 1)[1], maxsplit=1)[0]
-            self.assertIn("steps: *windows_steps", inherited)
+        inherited = re.split(r"\n  \S", source.split("  WindowsAsan:", 1)[1], maxsplit=1)[0]
+        self.assertIn("steps: *windows_steps", inherited)
 
     def test_ci_exports_explicit_dump_and_collects_both_exe_symbol_pairs(self):
         source = (ROOT / ".github/workflows/ci-build.yml").read_text()

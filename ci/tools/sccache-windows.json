@@ -7,7 +7,6 @@
   "license": "Apache-2.0",
   "cache_budget_bytes": {
     "x64-qt6": 1073741824,
-    "x86-qt5": 536870912,
     "x64-qt6-asan": 2147483648
   }
 }

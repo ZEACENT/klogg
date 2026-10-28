@@ -89,6 +89,13 @@ set(KLOGG_RUNTIME_INSTALL_COMPONENT klogg-runtime)
 set(KLOGG_TSAN_QT_PREFIX "" CACHE PATH "Required TSan-instrumented Qt installation prefix")
 set(KLOGG_TSAN_QT_VERSION "" CACHE STRING "Required TSan-instrumented Qt version")
 
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+  message(FATAL_ERROR
+          "Windows x86 (32-bit) support has ended. The last x86 release is v26.08.08.1096. "
+          "Use a 64-bit Windows toolchain."
+  )
+endif()
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
   set(KLOGG_ARCH 32)
 else()

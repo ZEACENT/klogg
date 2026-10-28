@@ -80,11 +80,7 @@ void prepareDiagnosticIdentity() noexcept
         static_assert( sizeof( procedure ) == sizeof( currentThreadStackLimits ) );
         std::memcpy( &currentThreadStackLimits, &procedure, sizeof( procedure ) );
     }
-#ifdef _WIN64
     constexpr const wchar_t* asanName = L"clang_rt.asan_dynamic-x86_64.dll";
-#else
-    constexpr const wchar_t* asanName = L"clang_rt.asan_dynamic-i386.dll";
-#endif
     const std::array<const wchar_t*, diagnosticModulesPerProcess> names{
         L"dbghelp.dll", L"dbgcore.dll", asanName };
     for ( std::size_t index = 0; index < names.size(); ++index ) {
@@ -150,11 +146,7 @@ bool appendDiagnosticText( std::size_t& used, std::string_view text ) noexcept
 
 void reportDiagnosticModule( const DiagnosticModuleRecord& module ) noexcept
 {
-#ifdef _WIN64
     constexpr const char* asanName = "clang_rt.asan_dynamic-x86_64.dll";
-#else
-    constexpr const char* asanName = "clang_rt.asan_dynamic-i386.dll";
-#endif
     const std::array<const char*, diagnosticModulesPerProcess> names{
         "dbghelp.dll", "dbgcore.dll", asanName };
     const auto target = module.process == static_cast<std::uint32_t>( DiagnosticProcess::Target );
@@ -206,15 +198,9 @@ void publishDiagnosticInput( EXCEPTION_POINTERS* info ) noexcept
     data.input.exceptionPointers = static_cast<std::uint64_t>( reinterpret_cast<std::uintptr_t>( info ) );
     data.input.exceptionRecord = static_cast<std::uint64_t>( reinterpret_cast<std::uintptr_t>( info->ExceptionRecord ) );
     data.input.contextRecord = static_cast<std::uint64_t>( reinterpret_cast<std::uintptr_t>( info->ContextRecord ) );
-#ifdef _WIN64
     data.input.pc = info->ContextRecord->Rip;
     data.input.sp = info->ContextRecord->Rsp;
     data.input.fp = info->ContextRecord->Rbp;
-#else
-    data.input.pc = info->ContextRecord->Eip;
-    data.input.sp = info->ContextRecord->Esp;
-    data.input.fp = info->ContextRecord->Ebp;
-#endif
     if ( currentThreadStackLimits != nullptr ) {
         ULONG_PTR low = 0;
         ULONG_PTR high = 0;
@@ -721,17 +707,10 @@ void reportFirstChance( EXCEPTION_POINTERS* info ) noexcept
     std::fprintf( stderr, "Exception address %p thread %lu\n",
                   info->ExceptionRecord->ExceptionAddress,
                   static_cast<unsigned long>( GetCurrentThreadId() ) );
-#ifdef _WIN64
     std::fprintf( stderr, "Original PC 0x%llx SP 0x%llx FP 0x%llx\n",
                   static_cast<unsigned long long>( info->ContextRecord->Rip ),
                   static_cast<unsigned long long>( info->ContextRecord->Rsp ),
                   static_cast<unsigned long long>( info->ContextRecord->Rbp ) );
-#else
-    std::fprintf( stderr, "Original PC 0x%llx SP 0x%llx FP 0x%llx\n",
-                  static_cast<unsigned long long>( info->ContextRecord->Eip ),
-                  static_cast<unsigned long long>( info->ContextRecord->Esp ),
-                  static_cast<unsigned long long>( info->ContextRecord->Ebp ) );
-#endif
     if ( code == EXCEPTION_ACCESS_VIOLATION && info->ExceptionRecord->NumberParameters >= 2 ) {
         std::fprintf(
             stderr, "Access operation %llu address 0x%llx\n",
@@ -769,17 +748,10 @@ void reportFirstChance( EXCEPTION_POINTERS* info ) noexcept
     symbol->MaxNameLen = 255;
     auto context = *info->ContextRecord;
     STACKFRAME64 frame{};
-#ifdef _WIN64
     constexpr DWORD machineType = IMAGE_FILE_MACHINE_AMD64;
     frame.AddrPC.Offset = context.Rip;
     frame.AddrStack.Offset = context.Rsp;
     frame.AddrFrame.Offset = context.Rbp;
-#else
-    constexpr DWORD machineType = IMAGE_FILE_MACHINE_I386;
-    frame.AddrPC.Offset = context.Eip;
-    frame.AddrStack.Offset = context.Esp;
-    frame.AddrFrame.Offset = context.Ebp;
-#endif
     frame.AddrPC.Mode = AddrModeFlat;
     frame.AddrStack.Mode = AddrModeFlat;
     frame.AddrFrame.Mode = AddrModeFlat;

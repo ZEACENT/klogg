@@ -852,24 +852,15 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
 
         self.assertEqual(failures, [], "\n".join(failures))
 
-    def test_windows_x86_package_never_consumes_the_x64_helper(self):
-        windows_matrix = section(
-            self.ci_build, "  WindowsX86:\n", "  WindowsAsan:\n"
-        )
-        x86_entry = windows_matrix
-        matching_helper = re.search(r"^\s*KLOGG_ADB_HELPER_TARGET:\s*windows-x86\s*$", x86_entry, re.MULTILINE)
-        fail_closed = re.search(r"^\s*KLOGG_PACKAGE_ENABLED:\s*false\s*$", x86_entry, re.MULTILINE)
-        self.assertTrue(
-            matching_helper or fail_closed,
-            "Windows x86 packaging must be disabled or declare a matching windows-x86 helper",
-        )
-        if fail_closed:
-            self.assertNotIn(
-                "x86-Qt5-QTRegex",
-                self.ci_build,
-                "continuous release notes must not advertise disabled Windows x86 packages",
-            )
+    def test_enabled_windows_package_targets_only_include_x64(self):
+        # The authenticated Linux environment policy binds the entire lock file,
+        # including its historical, disabled x86 entry. Do not rewrite that evidence.
+        for targets in (self.lock["package_targets"], self.fixture["package_targets"]):
+            self.assertEqual({name for name, plan in targets.items()
+                              if name.startswith("windows-") and plan.get("packaging_enabled", True)},
+                             {"windows-x86_64"})
 
+    def test_windows_package_verification_uses_its_declared_helper_target(self):
         active_package = active_lines(read_text(WIN_PACKAGE))
         self.assertNotIn("--expected-target windows-x86_64", active_package)
         self.assertIn("--expected-target", active_package)
@@ -924,7 +915,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         helper_job = section(self.ci_build, "  BuildAdbLinuxX64:\n", "  LinuxPackages:\n")
         linux_job = section(self.ci_build, "  LinuxPackages:\n", "  PrefetchIosNativeSources:\n")
         mac_job = section(self.ci_build, "  MacPackages:\n", "  MacSanitizers:\n")
-        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsX86:\n")
+        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsAsan:\n")
 
         self.assertIn("actions/attest-build-provenance", helper_job)
         self.assertNotIn("${{ matrix.target }}", helper_job)
@@ -956,7 +947,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         )
 
     def test_windows_uses_shared_verified_tar_extractor_for_native_paths(self):
-        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsX86:\n")
+        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsAsan:\n")
         extract = section(
             windows_job,
             "      - name: Extract mode-preserving ADB helper artifact\n",
@@ -1029,7 +1020,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         linux_job = section(self.ci_build, "  LinuxPackages:\n", "  PrefetchIosNativeSources:\n")
         mac_job = section(self.ci_build, "  MacPackages:\n", "  MacArmPackages:\n")
         mac_arm_job = section(self.ci_build, "  MacArmPackages:\n", "  MacSanitizers:\n")
-        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsX86:\n")
+        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsAsan:\n")
         combined_build = "\n".join((helper_job, self.build_action, self.superbuild))
         failures = []
 
