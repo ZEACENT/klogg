@@ -1024,4 +1024,40 @@ Hosted checks at `6b8545eb` exposed gaps not covered by the preceding acceptance
 These corrections do not change the Windows x86 retirement, the strict required
 checks, authenticated receipts, or sanitizer suppression policy. The arm64 job
 cancellation at this head was a hosted-runner acquisition failure, not a source
-failure. Final updated-head CI and approval remain required.
+failure. The ordinary Intel macOS runner lost communication during dependency
+setup, before compilation; its job log was unavailable. Neither infrastructure
+failure was converted into a skipped requirement.
+
+### Follow-up acceptance at `336ec85a` (2026-10-29)
+
+All production fixes were frozen at `336ec85a`. The final locked analyzer found
+only two unchecked C stdio return values in the unsuccessful-shutdown diagnostic.
+Their deliberate best-effort handling is now explicit: failure to print cannot
+change the unsuccessful exit. This behavior-preserving cleanup was rebuilt and
+rechecked in all three native lifecycle configurations and in the complete locked
+Linux suite. No warning suppressions or policy changes were used.
+
+| Check | Verified result |
+| --- | --- |
+| Complete quality gate at clean `336ec85a` | 2,579 Python tests, 12 platform/tool-dependent skips; all lint stages passed |
+| Native Qt6, including search benchmark contracts | CTest 40/40 |
+| Native ASan/UBSan | CTest 39/39 |
+| Native first-party TSan with the actual CI project profile | CTest 39/39; 549 C/C++ commands verified; first-party 139/139 and required dependency 54/54 instrumentation retained |
+| Final diagnostic cleanup characterization | Five lifecycle cases passed in native, ASan/UBSan, and TSan executables |
+| Locked Linux GCC/Qt5 ASan/LSan, final synchronized source | CTest 41/41, including lifecycle and benchmark contracts |
+| Locked clang-tidy-18 | Full PR sources, affected-header fan-out, and standalone headers inspected against `306afd95`; the only two remaining diagnostics were fixed and the entire follow-up diff against `6b8545eb` passed the source/standalone-header recheck |
+| Locked strict cppcheck | All 158 selected first-party compilation entries passed |
+| Scope/provenance preflight | 193 actual first-party headers included, dependency examples excluded; all 1,413 tracked source files byte-verified in the isolated clone |
+| Process-exit smokes | Native, ASan, and TSan grep produced only the matching row and exited successfully; one 50 MB regex case, bounded folder search, and synthetic process/integrated live-capture runs exited successfully |
+
+Runtime suites ran serially across native/sanitizer/container trees, with two
+CTest jobs within each suite. Native acceptance used Qt 6.10.1 and the fallback
+regex backend; locked Linux used Qt 5.15.3 with Vectorscan. The TSan profile guard
+verified effective `-O1`, retained debug information, sanitizer scope, and no LTO
+before testing. The earlier missing-profile and header-filter claims remain
+explicitly invalidated above rather than being relabeled as passing acceptance.
+
+Windows runtime, coverage, CodeQL, and all required updated-head hosted checks
+remain publication gates. The earlier coverage result is historical, not a rerun
+of this final follow-up. A repository-required approving review remains separate
+from fixing actionable comments. Do not merge or bypass that requirement.
