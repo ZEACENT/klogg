@@ -65,6 +65,25 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual(MODULE.build_provenance(self.build, {"KLOGG_CI_CACHE_RESTORE_KEY": "legacy"})["cache_transport"], "actions-cache")
         self.assertEqual(MODULE.build_provenance(self.build, {})["cache_transport"], "none")
 
+    def test_acquisition_diagnostics_follow_current_attempt_without_claiming_cache_hits(self):
+        path = self.build / "acquisition.json"
+        acquisition = {"acquisition": "artifact-miss", "discovery_status": "page-budget-exhausted",
+                       "consumer": {"run_id": 123, "run_attempt": 2, "checkout_sha": "a" * 40},
+                       "discovery": {"candidates": [{"reason": "newer-producer-not-successful"}]}}
+        path.write_text(json.dumps(acquisition))
+        env = {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+               "KLOGG_CI_CACHE_ACQUISITION_REPORT": str(path), "KLOGG_CI_CACHE_RESTORE_KEY": "legacy"}
+        provenance = MODULE.build_provenance(self.build, env)
+        self.assertEqual(provenance["cache_acquisition"], acquisition)
+        self.assertEqual(provenance["cache_transport"], "actions-cache")
+        self.assertEqual(provenance["cache_state"], "unknown")
+        for changed in ({"GITHUB_RUN_ID": "124"}, {"GITHUB_RUN_ATTEMPT": "3"}, {"GITHUB_SHA": "b" * 40}):
+            with self.subTest(changed=changed), self.assertRaisesRegex(MODULE.MetricsError, "acquisition.*identity"):
+                MODULE.build_provenance(self.build, {**env, **changed})
+        path.write_text("[]")
+        with self.assertRaisesRegex(MODULE.MetricsError, "acquisition"):
+            MODULE.build_provenance(self.build, env)
+
     def test_source_root_comes_from_generated_cmake_cache(self):
         (self.build / "CMakeCache.txt").write_text("CMAKE_HOME_DIRECTORY:INTERNAL=/verified/source\n")
         self.assertEqual(MODULE.build_provenance(self.build, {})["source_root"], "/verified/source")

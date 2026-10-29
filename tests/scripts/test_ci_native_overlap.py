@@ -133,17 +133,33 @@ class NativeOverlapTests(unittest.TestCase):
             self.module.object_targets(build, {"../outside.o"})
 
     def test_real_cmake_two_phase_retains_objects_and_requires_finalization_receipt(self):
+        self.assert_native_two_phase()
+
+    @unittest.skipUnless(sys.platform == "darwin", "local macOS sanitizer parity")
+    def test_macos_asan_two_phase_retains_benchmark_links_with_populated_artifacts(self):
+        self.assert_native_two_phase(sanitizer=True)
+
+    def assert_native_two_phase(self, *, sanitizer=False):
         (self.root / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.20)\nproject(Overlap C CXX)\n"
             "option(KLOGG_ADB_HELPER_REQUIRED \"Native ADB\" OFF)\n"
             "option(KLOGG_ENABLE_IOS_NATIVE_STACK \"Native iOS\" OFF)\n"
+            'if(KLOGG_ADB_HELPER_REQUIRED AND NOT EXISTS "${KLOGG_ADB_HELPER_ARTIFACT_ROOT}/verified")\n'
+            '  message(FATAL_ERROR "verified ADB helper missing")\nendif()\n'
+            'if(KLOGG_ENABLE_IOS_NATIVE_STACK AND NOT EXISTS "${KLOGG_IOS_NATIVE_STACK_ROOT}/verified")\n'
+            '  message(FATAL_ERROR "verified iOS stack missing")\nendif()\n'
             "configure_file(config.h.in config.h)\n"
             "add_library(core STATIC core.c)\n"
             "target_include_directories(core PRIVATE ${CMAKE_CURRENT_BINARY_DIR})\n"
             "add_executable(app main.cpp)\ntarget_link_libraries(app PRIVATE core)\n"
             "add_executable(core_tests main.cpp)\ntarget_link_libraries(core_tests PRIVATE core)\n"
             "add_custom_target(klogg_test_build DEPENDS core_tests)\n"
-            "add_custom_target(ci_build DEPENDS app klogg_test_build)\n"
+            "add_executable(core_benchmark main.cpp)\ntarget_link_libraries(core_benchmark PRIVATE core)\n"
+            "add_custom_target(klogg_benchmark_build DEPENDS core_benchmark)\n"
+            "if(KLOGG_ADB_HELPER_REQUIRED OR KLOGG_ENABLE_IOS_NATIVE_STACK)\n"
+            "  add_custom_target(native_stage COMMAND ${CMAKE_COMMAND} -E touch native-ready)\n"
+            "  add_dependencies(app native_stage)\nendif()\n"
+            "add_custom_target(ci_build DEPENDS app klogg_test_build klogg_benchmark_build)\n"
             "include(CheckFunctionExists)\nCHECK_FUNCTION_EXISTS(mmap HAVE_MMAP)\n")
         (self.root / "config.h.in").write_text("#cmakedefine HAVE_MMAP\n")
         (self.root / "core.c").write_text('#include "config.h"\nint core(void) { return 7; }\n')
@@ -154,18 +170,26 @@ class NativeOverlapTests(unittest.TestCase):
                "KLOGG_IOS_ARCHITECTURE": "x86_64", "KLOGG_CONFIG_ARCH": "x64",
                "KLOGG_LABEL": "fixture", "KLOGG_CONFIG_PACKAGE_TAG": "native",
                "KLOGG_CI_ENVIRONMENT_IDENTITY": "fixture-toolchain"}
-        options = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo"]
+        options = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                   "-DCMAKE_C_COMPILER_LAUNCHER=", "-DCMAKE_CXX_COMPILER_LAUNCHER="]
+        if sanitizer:
+            options += ["-DCMAKE_" + language + "_FLAGS=-fsanitize=address -fno-omit-frame-pointer"
+                        for language in ("C", "CXX")]
+        adb, ios = self.root / "verified adb", self.root / "verified ios"
         native = ["-DKLOGG_ADB_HELPER_REQUIRED=ON", "-DKLOGG_ENABLE_IOS_NATIVE_STACK=ON",
-                  "-DKLOGG_ADB_HELPER_ARTIFACT_ROOT=/adb", "-DKLOGG_IOS_NATIVE_STACK_ROOT=/ios"]
+                  "-DKLOGG_ADB_HELPER_ARTIFACT_ROOT=" + str(adb), "-DKLOGG_IOS_NATIVE_STACK_ROOT=" + str(ios)]
         with mock.patch.dict("os.environ", env):
             with mock.patch.object(self.module.subprocess, "run", wraps=subprocess.run) as commands:
                 self.module.execute("prepare", self.root, build, options + native)
             configure_calls = [call.args[0] for call in commands.call_args_list
                                if call.args[0][0] == "cmake" and "-S" in call.args[0]]
             self.assertFalse((build / "app").exists())
+            self.assertFalse((build / "native-ready").exists())
+            self.assertFalse(adb.exists() or ios.exists())
             obj = build / "CMakeFiles/app.dir/main.cpp.o"
             stamp = obj.stat().st_mtime_ns
-            retained = [build / "CMakeFiles/core.dir/core.c.o", build / "libcore.a", build / "core_tests"]
+            retained = [build / "CMakeFiles/core.dir/core.c.o", build / "libcore.a",
+                        build / "core_tests", build / "core_benchmark"]
             retained_stamps = [path.stat().st_mtime_ns for path in retained]
             with self.assertRaisesRegex(ValueError, "receipt"):
                 self.module.execute("finalize", self.root, build, options + native)
@@ -178,10 +202,21 @@ class NativeOverlapTests(unittest.TestCase):
                          for index, (name, producer) in enumerate(names.items())}
             receipt.write_text(json.dumps({"schema_version": 1,
                 "identity": self.module.rendezvous.identity(), "artifacts": artifacts}))
+            for artifact in (adb, ios):
+                artifact.mkdir()
+                (artifact / "verified").write_bytes(b"populated native artifact fixture")
             self.module.execute("finalize", self.root, build, options + native, receipt)
             self.assertTrue((build / "app").exists())
+            self.assertTrue((build / "native-ready").is_file())
             self.assertEqual(obj.stat().st_mtime_ns, stamp)
             self.assertEqual([path.stat().st_mtime_ns for path in retained], retained_stamps)
+            rows = [line.split("\t") for line in (build / ".ninja_log").read_text().splitlines()[1:]]
+            for executable in ("core_tests", "core_benchmark", "app"):
+                self.assertEqual(sum(row[3] == executable for row in rows), 1, executable)
+                subprocess.run([str(build / executable)], check=True, capture_output=True)
+            if sanitizer:
+                database = json.loads((build / "compile_commands.json").read_text())
+                self.assertTrue(all("-fsanitize=address" in entry["command"] for entry in database))
             self.assertEqual(len(configure_calls), 2)
             self.assertEqual(configure_calls[0], configure_calls[1])
             state = json.loads((build / self.module.STATE).read_text())
@@ -295,6 +330,72 @@ class WindowsNativeOverlapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside build root"):
             self.module.object_targets(build, {"../outside.obj"}, windows=True)
 
+    def test_benchmark_aggregate_rejects_package_app_links(self):
+        build = self.root / "build"
+        build.mkdir()
+        for windows, package in ((False, "output/klogg.app/Contents/MacOS/klogg"),
+                                 (True, "output/klogg.exe"),
+                                 (True, "output/klogg_portable.exe"),
+                                 (True, "output/klogg_grep.exe")):
+            for aggregate in ("klogg_benchmark_build", "benchmarks/klogg_benchmark_build"):
+                with self.subTest(windows=windows, package=package, aggregate=aggregate):
+                    (build / "build.ninja").write_text(
+                        "rule touch\n  command = unused\n"
+                        "build a.o: touch\nbuild " + package + ": touch a.o\n"
+                        "build " + aggregate + ": phony " + package + "\n"
+                        "build ci_build: phony " + aggregate + "\n")
+                    (build / "compile_commands.json").write_text(json.dumps([
+                        {"directory": str(build), "file": "a.cpp", "output": "a.o"}]))
+                    with self.assertRaisesRegex(ValueError, "package app link"):
+                        self.module.object_command(build, windows=windows)
+
+    def test_real_benchmark_aggregate_preserves_ci_scope_and_defers_native_app(self):
+        benchmarks = self.root / "benchmarks"
+        benchmarks.mkdir()
+        shutil.copyfile(ROOT / "benchmarks/CMakeLists.txt", benchmarks / "CMakeLists.txt")
+        for source in (ROOT / "benchmarks").glob("*.cpp"):
+            (benchmarks / source.name).write_text("int main() { return 0; }\n")
+        (self.root / "main.cpp").write_text("int main() { return 0; }\n")
+        (self.root / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\nproject(BenchmarkOverlap CXX)\n"
+            "set(CMAKE_EXPORT_COMPILE_COMMANDS ON)\nset(QT_VERSION_MAJOR 6)\n"
+            "set(KLOGG_USE_LTO OFF)\n"
+            "foreach(target project_options project_warnings klogg_logdata klogg_logging "
+            "klogg_settings klogg_livecapture klogg_ui)\n"
+            "  add_library(${target} INTERFACE)\nendforeach()\n"
+            "add_library(Qt6::Core INTERFACE IMPORTED)\n"
+            "add_custom_target(native_artifacts COMMAND ${CMAKE_COMMAND} -E touch native-ready)\n"
+            "add_executable(klogg main.cpp)\n"
+            'option(KLOGG_ADB_HELPER_REQUIRED "Native package gate" OFF)\n'
+            "if(KLOGG_ADB_HELPER_REQUIRED)\n  add_dependencies(klogg native_artifacts)\nendif()\n"
+            "add_custom_target(ci_build DEPENDS klogg)\nadd_subdirectory(benchmarks)\n"
+            'file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fixture-paths.txt" CONTENT '
+            '"$<TARGET_FILE:regex_search_benchmark>\\n$<TARGET_FILE:folder_search_benchmark>\\n'
+            '$<TARGET_FILE:ios_ostrace_protocol_benchmark>\\n$<TARGET_FILE:klogg>\\n'
+            '$<TARGET_FILE:live_capture_process_integrated_benchmark>\\n")\n')
+        build = self.root / "build"
+        configure = ["cmake", "-S", str(self.root), "-B", str(build), "-G", "Ninja",
+                     "-DCMAKE_CXX_COMPILER_LAUNCHER="]
+        subprocess.run(configure, check=True, capture_output=True)
+        paths = [Path(path) for path in (build / "fixture-paths.txt").read_text().splitlines()]
+        subprocess.run(self.module.object_command(build, windows=os.name == "nt"),
+                       check=True, capture_output=True)
+        self.assertTrue(all(path.is_file() for path in paths[:3]),
+                        "all existing CI benchmarks must link during preparation")
+        self.assertFalse(any(path.exists() for path in paths[3:]))
+        self.assertFalse((build / "native-ready").exists())
+        # Enabling native packaging must retain all three benchmark links.
+        subprocess.run(configure + ["-DKLOGG_ADB_HELPER_REQUIRED=ON"], check=True, capture_output=True)
+        subprocess.run(["cmake", "--build", str(build), "--target", "ci_build"],
+                       check=True, capture_output=True)
+        self.assertTrue(paths[3].is_file())
+        self.assertTrue((build / "native-ready").is_file())
+        self.assertFalse(paths[4].exists(), "do not expand the benchmark CI scope")
+        rows = [line.split("\t") for line in (build / ".ninja_log").read_text().splitlines()[1:]]
+        for path in paths[:3]:
+            relative = path.resolve().relative_to(build.resolve()).as_posix()
+            self.assertEqual(sum(row[3].replace("\\", "/") == relative for row in rows), 1, relative)
+
     def test_native_windows_two_phase_keeps_test_links_and_defers_app_resources(self):
         (self.root / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.20)\nproject(Overlap C CXX)\n"
@@ -309,13 +410,16 @@ class WindowsNativeOverlapTests(unittest.TestCase):
             "add_executable(klogg main.cpp $<TARGET_OBJECTS:resources>)\n"
             "add_executable(klogg_portable main.cpp $<TARGET_OBJECTS:resources>)\n"
             "add_executable(stable_tests main.cpp)\n"
-            "foreach(target klogg klogg_portable stable_tests)\n"
+            "add_executable(stable_benchmark main.cpp)\n"
+            "foreach(target klogg klogg_portable stable_tests stable_benchmark)\n"
             '  set_target_properties(${target} PROPERTIES SUFFIX ".exe")\n'
             "  target_link_libraries(${target} PRIVATE core)\nendforeach()\n"
             "add_custom_target(klogg_test_build DEPENDS stable_tests)\n"
-            "add_custom_target(ci_build DEPENDS klogg klogg_portable klogg_test_build)\n"
+            "add_custom_target(klogg_benchmark_build DEPENDS stable_benchmark)\n"
+            "add_custom_target(ci_build DEPENDS klogg klogg_portable klogg_test_build klogg_benchmark_build)\n"
             'file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fixture-paths.txt" CONTENT '
-            '"$<TARGET_FILE:core>\\n$<TARGET_FILE:stable_tests>\\n$<TARGET_FILE:klogg>\\n$<TARGET_FILE:klogg_portable>\\n")\n')
+            '"$<TARGET_FILE:core>\\n$<TARGET_FILE:stable_tests>\\n$<TARGET_FILE:stable_benchmark>\\n'
+            '$<TARGET_FILE:klogg>\\n$<TARGET_FILE:klogg_portable>\\n")\n')
         (self.root / "core.c").write_text("int core(void) { return 7; }\n")
         (self.root / "main.cpp").write_text('extern "C" int core(void);\nint main() { return core() == 7 ? 0 : 1; }\n')
         (self.root / "qrc_app_translations.cpp").write_text("int resource(void) { return 1; }\n")
@@ -362,8 +466,10 @@ class WindowsNativeOverlapTests(unittest.TestCase):
             for language in ("C", "CXX"):
                 self.assertRegex(cache, "(?m)^CMAKE_" + language + "_COMPILER_LAUNCHER:[^=]+=\\s*$")
             paths = [Path(path) for path in (build / "fixture-paths.txt").read_text().splitlines()]
-            retained = [path.stat().st_mtime_ns for path in paths[:2]]
-            self.assertFalse(any(path.exists() for path in paths[2:]))
+            self.assertTrue(all(path.is_file() for path in paths[:3]),
+                            "preparation must retain both test and benchmark links")
+            retained = [path.stat().st_mtime_ns for path in paths[:3]]
+            self.assertFalse(any(path.exists() for path in paths[3:]))
             database = json.loads((build / "compile_commands.json").read_text())
             resource = next(entry for entry in database if "qrc_app_translations.cpp" in entry["file"])
             resource_object = build / self.module.metrics.command_output(resource, os.name == "nt")
@@ -386,7 +492,7 @@ class WindowsNativeOverlapTests(unittest.TestCase):
             final_cache = (build / "CMakeCache.txt").read_text()
             self.assertIn("KLOGG_ADB_HELPER_TARGET:STRING=windows-x86_64", final_cache)
             assert_cache_directory(self, final_cache, "KLOGG_ADB_HELPER_ARTIFACT_ROOT", artifact)
-            self.assertEqual([path.stat().st_mtime_ns for path in paths[:2]], retained)
+            self.assertEqual([path.stat().st_mtime_ns for path in paths[:3]], retained)
             self.assertTrue(all(path.is_file() for path in paths))
             rows = [line.split("\t") for line in (build / ".ninja_log").read_text().splitlines()[1:]]
             for path in paths:

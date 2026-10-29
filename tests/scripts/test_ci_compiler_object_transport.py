@@ -308,6 +308,22 @@ class CompilerObjectTransportTests(unittest.TestCase):
         self.assertNotIn("artifact-id=101", output.read_text())
         self.assertEqual(json.loads(report.read_text())["available_artifact_id"], 101)
 
+    def test_restore_cli_binds_report_to_consumer_and_publishes_requested_summary(self):
+        descriptor = self.root / "descriptor.json"
+        descriptor.write_text(json.dumps(self.descriptor))
+        output, report, summary = (self.root / name for name in ("action-output", "report.json", "summary.md"))
+        with mock.patch.object(transport, "identity", return_value=self.origin), \
+                mock.patch.object(transport.actions, "metadata", side_effect=self.api), \
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}, clear=True):
+            # The origin's current run cannot import its own artifact.
+            self.assertEqual(transport.main(["restore", "--descriptor", str(descriptor),
+                "--cache", str(self.cache), "--repo-root", str(self.repo),
+                "--output", str(report), "--summary", str(summary)]), 0)
+        observed = json.loads(report.read_text())
+        self.assertEqual(observed["consumer"], {"run_id": 201, "run_attempt": 1, "checkout_sha": "b" * 40})
+        self.assertIn("artifact-miss", summary.read_text())
+        self.assertIn("origin-ineligible", summary.read_text())
+
     def test_native_backend_hint_ignores_unrelated_application_tree(self):
         transport.mark_backend(self.cache, self.context, self.origin)
         self.assertTrue(transport.backend_matches(self.cache, self.context, 12, "e" * 40))
@@ -433,6 +449,69 @@ class CompilerObjectTransportTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "policy"):
                     transport.context(self.descriptor, self.repo)
 
+    def test_acquisition_reports_candidate_rejection_without_hiding_it_as_absence(self):
+        for reason in ("producer-not-successful", "checkout-proof-missing"):
+            with self.subTest(reason=reason):
+                self.job["conclusion"] = "failure" if reason == "producer-not-successful" else "success"
+                self.attempt["referenced_workflows"] = []
+                result = self.restore()
+                self.assertFalse(result["restored"])
+                self.assertEqual(result["discovery_status"], "complete")
+                self.assertEqual(result["discovery"]["candidates"], [
+                    {"artifact_id": 101, "run_id": 201, "run_attempt": 1, "reason": reason}])
+                self.assertEqual(self.downloads, [])
+
+    def test_acquisition_reports_snapshot_age_and_refresh_without_extending_retention(self):
+        self.application_artifact()
+        result = self.restore(current_tree=self.origin["tree"])
+        self.assertFalse(result["export_needed"])
+        self.assertEqual(result["snapshot_age_seconds"], 3300)
+        self.assertEqual(result["refresh_after_seconds"], transport.REFRESH_SECONDS - 3300)
+        self.assertEqual(result["retention_remaining_seconds"], transport.RETENTION_DAYS * 86400 - 3300)
+        self.assertEqual(result["discovery"]["candidates"][0]["reason"], "accepted")
+
+    def test_expired_matching_snapshot_is_distinguished_from_no_matching_key(self):
+        self.artifact["expired"] = True
+        result = self.restore()
+        self.assertFalse(result["restored"])
+        self.assertEqual(result["discovery"]["excluded"], {"expired": 1})
+        self.assertEqual(self.downloads, [])
+
+    def test_missing_effective_lane_has_bounded_metadata_work_and_no_partial_import(self):
+        self.run.update(run_attempt=100)
+        def missing(endpoint):
+            if "/attempts/" in endpoint and endpoint.split("/attempts/", 1)[1].split("/", 1)[0] != "1":
+                if "/jobs?" in endpoint:
+                    return {"total_count": 0, "jobs": []}
+                number = int(endpoint.rsplit("/", 1)[1])
+                return {**self.run, "run_attempt": number, "run_started_at": "2026-10-18T10:10:00Z"}
+            return self.api(endpoint)
+        with mock.patch.object(transport, "MAX_METADATA_REQUESTS", 12):
+            result = self.restore(metadata=missing)
+        self.assertFalse(result["restored"])
+        self.assertTrue(result["export_needed"])
+        self.assertEqual(result["discovery_status"], "metadata-budget-exhausted")
+        self.assertEqual(result["discovery"]["metadata_requests"], 12)
+        self.assertEqual(self.downloads, [])
+
+    def test_metadata_budget_keeps_fully_authenticated_fallback_not_partial_candidate(self):
+        self.application_artifact()
+        older = {**self.artifact, "id": 102, "created_at": "2026-10-18T10:04:00Z",
+                 "workflow_run": {**self.artifact["workflow_run"], "id": 202}}
+        def metadata(endpoint):
+            if "/artifacts?" in endpoint:
+                return {"total_count": 2, "artifacts": [self.artifact, older]}
+            return self.api(endpoint)
+        # Finish the newest candidate's complete producer/policy proof, then
+        # exhaust discovery before inspecting another run for the current tree.
+        with mock.patch.object(transport, "MAX_METADATA_REQUESTS", 6 + len(self.context["policy_files"])):
+            result = self.restore(metadata=metadata, current_tree="e" * 40)
+        self.assertTrue(result["restored"])
+        self.assertTrue(result["export_needed"])
+        self.assertEqual(result["artifact_id"], 101)
+        self.assertEqual(result["discovery_status"], "metadata-budget-exhausted")
+        self.assertEqual(self.downloads, [101])
+
     def test_failed_unrelated_workflow_does_not_discard_successful_validated_lane(self):
         self.run["conclusion"] = self.attempt["conclusion"] = "failure"
         self.assertTrue(self.restore()["restored"])
@@ -459,6 +538,49 @@ class CompilerObjectTransportTests(unittest.TestCase):
         self.assertEqual(result["aggregate_conclusion"], "cancelled")
         self.assertEqual(result["producer_attempt_conclusion"], "cancelled")
         self.assertEqual(result["producer_job_conclusion"], "success")
+
+    def test_partial_reruns_preserve_successful_original_lane_without_walking_attempt_gap(self):
+        # Run 40765051993 kept Intel's attempt-1 execution in attempt 5, with a
+        # new job ID/run_attempt but the original execution timestamps/steps.
+        for number in (5, 10, 100):
+            with self.subTest(latest_attempt=number):
+                self.run.update(run_attempt=number)
+                inherited = {**self.job, "id": 301 + number, "run_attempt": number}
+                observed = []
+                def latest(endpoint):
+                    observed.append(endpoint)
+                    if endpoint.endswith(f"/attempts/{number}"):
+                        return {**self.run, "run_started_at": "2026-10-18T10:10:00Z"}
+                    if f"/attempts/{number}/jobs?" in endpoint:
+                        return {"total_count": 1, "jobs": [inherited]}
+                    return self.api(endpoint)
+                result = transport.restore(self.context, self.root / f"restored-{number}",
+                    repository_id=12, current_run=999, metadata=latest,
+                    download=self.download, now=self.now)
+                self.assertTrue(result["restored"])
+                self.assertEqual(result["producer"]["run_attempt"], 1)
+                self.assertEqual(result["aggregate_run_attempt"], number)
+                attempts = [path for path in observed if "/attempts/" in path]
+                self.assertEqual(len(attempts), 4, "inspect the original and effective latest lane only")
+
+    def test_many_partial_reruns_cannot_hide_latest_failed_lane_or_incomplete_validation(self):
+        self.run.update(run_attempt=10, conclusion="failure")
+        for failure in ("job", "step"):
+            with self.subTest(failure=failure):
+                inherited = copy.deepcopy(self.job)
+                inherited.update(id=401, run_attempt=10)
+                if failure == "job":
+                    inherited["conclusion"] = "failure"
+                else:
+                    inherited["steps"][0]["conclusion"] = "skipped"
+                def latest(endpoint):
+                    if endpoint.endswith("/attempts/10"):
+                        return {**self.run, "run_started_at": "2026-10-18T10:10:00Z"}
+                    if "/attempts/10/jobs?" in endpoint:
+                        return {"total_count": 1, "jobs": [inherited]}
+                    return self.api(endpoint)
+                self.assertFalse(self.restore(metadata=latest)["restored"])
+                self.assertEqual(self.downloads, [])
 
     def test_newer_failed_producer_attempt_disqualifies_stale_successful_snapshot(self):
         self.run.update(run_attempt=2, conclusion="failure")
@@ -1097,6 +1219,8 @@ class CompilerObjectTransportTests(unittest.TestCase):
         self.assertFalse(result["restored"])
         self.assertTrue(result["discovery_exhausted"])
         self.assertEqual(len(pages), transport.MAX_PAGES)
+        self.assertEqual(result["discovery_status"], "page-budget-exhausted")
+        self.assertEqual(result["discovery"]["pages"], transport.MAX_PAGES)
         self.assertEqual(self.downloads, [])
 
     def test_discovery_paginates_past_unrelated_newer_artifacts_and_is_bounded(self):

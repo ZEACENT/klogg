@@ -60,7 +60,7 @@ BACKEND_MARKER = ".klogg-compiler-backend.json"
 MAX_BACKEND_MARKER = 4096
 MAX_PAGES = 3
 MAX_CANDIDATES = 12
-MAX_NEWER_ATTEMPTS = 3
+MAX_METADATA_REQUESTS = 128
 MAX_SECONDS = 300
 RETENTION_DAYS = 2
 REFRESH_SECONDS = 86400
@@ -621,6 +621,14 @@ def _checkout_proof(run, attempt, ctx, get):
     return {"checkout_sha": checkout, "tree": tree["sha"]}, kind
 
 
+class CandidateUnavailable(Exception):
+    """Valid metadata explains why an optional snapshot cannot be admitted."""
+
+
+class DiscoveryBudgetExhausted(Exception):
+    """Stop optional metadata work without importing partially verified objects."""
+
+
 def _producer(artifact, attempt_number, ctx, repository_id, get):
     origin = artifact["workflow_run"]
     run_id, sha = origin["id"], origin["head_sha"]
@@ -636,40 +644,40 @@ def _producer(artifact, attempt_number, ctx, repository_id, get):
                 and repository.get("full_name") == REPOSITORY, "foreign compiler artifact producer")
     event = run.get("event")
     if event not in ("pull_request", "push") or (event == "push" and run.get("head_branch") != "master"):
-        return None
+        raise CandidateUnavailable("producer-event-ineligible")
     if run.get("status") != "completed" or run.get("conclusion") not in TERMINAL_CONCLUSIONS:
-        return None
+        raise CandidateUnavailable("run-not-terminal")
     attempt = get(prefix + f"/attempts/{attempt_number}")
     require(attempt.get("id") == run_id and attempt.get("run_attempt") == attempt_number
             and attempt.get("head_sha") == sha, "producer attempt provenance mismatch")
     if attempt.get("status") != "completed" or attempt.get("conclusion") not in TERMINAL_CONCLUSIONS:
-        return None
+        raise CandidateUnavailable("attempt-not-terminal")
     job = _attempt_job(prefix, attempt_number, ctx, get)
     if job is None or not _successful_job(job, run_id, attempt_number, sha, ctx):
-        return None
-    # Retain completed lane objects when only unrelated jobs were rerun, but do
-    # not hide a newer failed producer behind an older green snapshot. Search
-    # newest-first for this producer, not merely the latest aggregate attempt.
-    if run["run_attempt"] - attempt_number > MAX_NEWER_ATTEMPTS:
-        return None
+        raise CandidateUnavailable("producer-not-successful")
+    # GitHub carries completed lanes into partial reruns with new job IDs and
+    # run_attempt values but their original execution timestamps. Inspect the
+    # newest effective lane, not the number of unrelated aggregate reruns. The
+    # original attempt still owns artifact timing and checkout proof below.
+    # If a listing omits this lane, walk backward under the discovery budget so
+    # an intermediate failed execution cannot hide behind an unrelated rerun.
     for latest_number in range(run["run_attempt"], attempt_number, -1):
         latest = get(prefix + f"/attempts/{latest_number}")
         require(latest.get("id") == run_id and latest.get("run_attempt") == latest_number
                 and latest.get("head_sha") == sha, "latest producer attempt provenance mismatch")
         if latest.get("status") != "completed" or latest.get("conclusion") not in TERMINAL_CONCLUSIONS:
-            return None
+            raise CandidateUnavailable("newer-attempt-not-terminal")
         latest_job = _attempt_job(prefix, latest_number, ctx, get)
         if latest_job is not None:
             if not _successful_job(latest_job, run_id, latest_number, sha, ctx):
-                return None
+                raise CandidateUnavailable("newer-producer-not-successful")
             break
     require(timestamp(attempt["run_started_at"]) <= timestamp(job["started_at"])
             <= timestamp(artifact["created_at"]) <= timestamp(job["completed_at"]),
             "artifact is outside successful producer job execution")
     proof = _checkout_proof(run, attempt, ctx, get)
     if proof is None:
-        print(f"compiler artifact run {run_id} attempt {attempt_number} lacks authenticated checkout proof", file=sys.stderr)
-        return None
+        raise CandidateUnavailable("checkout-proof-missing")
     checkout, proof_kind = proof
     for name, blob in ctx["policy_files"].items():
         metadata = get(f"repos/{REPOSITORY}/contents/{quote(name, safe='/')}?ref={checkout['checkout_sha']}")
@@ -785,13 +793,17 @@ def download_artifact_windows(identifier, archive, *, limit, timeout):
             process.stdout.close()
 
 
-def _discover(ctx, *, repository_id, current_run, current_tree, get, now):
+def _discover(ctx, *, repository_id, current_run, current_tree, get, now, report):
     """Read and authenticate candidates without downloading or mutating a cache."""
+    def exclude(reason):
+        report["excluded"][reason] = report["excluded"].get(reason, 0) + 1
+
     prefix = f"repos/{REPOSITORY}/actions/"
     name_prefix = artifact_name(ctx, 1).rsplit("-", 1)[0] + "-"
     candidates, seen, exhausted = [], {}, True
     for page in range(1, MAX_PAGES + 1):
         listing = get(prefix + f"artifacts?per_page=100&page={page}")
+        report["pages"] = page
         artifacts = listing.get("artifacts")
         require(isinstance(artifacts, list) and len(artifacts) <= 100
                 and type(listing.get("total_count")) is int and listing["total_count"] >= len(artifacts),
@@ -815,7 +827,10 @@ def _discover(ctx, *, repository_id, current_run, current_tree, get, now):
                 continue
             seen[identifier] = observed
             name = item.get("name")
-            if not isinstance(name, str) or not name.startswith(name_prefix) or item.get("expired") is True:
+            if not isinstance(name, str) or not name.startswith(name_prefix):
+                continue
+            if item.get("expired") is True:
+                exclude("expired")
                 continue
             suffix = name[len(name_prefix):]
             require(re.fullmatch(r"[1-9][0-9]{0,5}", suffix) and item.get("expired") is False,
@@ -826,27 +841,43 @@ def _discover(ctx, *, repository_id, current_run, current_tree, get, now):
                     "missing compiler artifact origin")
             if (origin["id"] == current_run or origin.get("repository_id") != repository_id
                     or origin.get("head_repository_id") != repository_id):
+                exclude("origin-ineligible")
                 continue
             age = (now - timestamp(item.get("created_at"))).total_seconds()
             if age < 0 or age > RETENTION_DAYS * 86400:
+                exclude("outside-retention")
                 continue
             candidates.append((timestamp(item["created_at"]), item["id"], int(suffix), item))
         if len(artifacts) < 100 or page * 100 >= listing["total_count"]:
             exhausted = False
             break
+    report["matching_candidates"] = len(candidates)
+    report["candidate_budget_exhausted"] = len(candidates) > MAX_CANDIDATES
     selected = None
     for _, identifier, attempt_number, listed in sorted(candidates, key=lambda item: item[:2], reverse=True)[:MAX_CANDIDATES]:
-        artifact = get(prefix + f"artifacts/{identifier}")
-        require(artifact_identity(artifact) == artifact_identity(listed),
-                "selected artifact metadata changed after discovery")
-        require(isinstance(artifact.get("digest"), str)
-                and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"])
-                and type(artifact.get("size_in_bytes")) is int
-                and 0 < artifact["size_in_bytes"] <= archive_limit(ctx) + MAX_MANIFEST,
-                "artifact has no bounded immutable digest")
-        producer = _producer(artifact, attempt_number, ctx, repository_id, get)
-        if producer is None:
+        candidate = {"artifact_id": identifier, "run_id": listed["workflow_run"]["id"],
+                     "run_attempt": attempt_number, "reason": "verification-incomplete"}
+        report["candidates"].append(candidate)
+        try:
+            artifact = get(prefix + f"artifacts/{identifier}")
+            require(artifact_identity(artifact) == artifact_identity(listed),
+                    "selected artifact metadata changed after discovery")
+            require(isinstance(artifact.get("digest"), str)
+                    and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"])
+                    and type(artifact.get("size_in_bytes")) is int
+                    and 0 < artifact["size_in_bytes"] <= archive_limit(ctx) + MAX_MANIFEST,
+                    "artifact has no bounded immutable digest")
+            producer = _producer(artifact, attempt_number, ctx, repository_id, get)
+        except CandidateUnavailable as error:
+            candidate["reason"] = str(error)
             continue
+        except DiscoveryBudgetExhausted:
+            # Earlier candidates completed every producer/policy check. Keep
+            # that fallback, but never admit the interrupted current candidate.
+            candidate["reason"] = "metadata-budget-exhausted"
+            report["metadata_budget_exhausted"] = True
+            break
+        candidate["reason"] = "accepted"
         origin, terminal = producer
         covered = source_covered(ctx, origin["tree"], current_tree)
         if selected is None or covered:
@@ -868,18 +899,26 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
     get_raw, download = metadata or actions.metadata, download or download_artifact
     now = now or datetime.datetime.now(datetime.timezone.utc)
     started = time.monotonic()
+    discovery = {"metadata_requests": 0, "pages": 0, "excluded": {}, "candidates": []}
     def get(endpoint):
         require(time.monotonic() - started < MAX_SECONDS, "compiler artifact discovery exceeded deadline")
+        if discovery["metadata_requests"] >= MAX_METADATA_REQUESTS:
+            raise DiscoveryBudgetExhausted("compiler artifact metadata request budget exhausted")
+        discovery["metadata_requests"] += 1
         result = get_raw(endpoint)
         require(isinstance(result, dict), "invalid Actions metadata")
         return result
     result = {"restored": False, "export_needed": True, "discovery_exhausted": False,
-              "compatibility_key": ctx["key"], "backend_retained": retained,
+              "discovery": discovery, "compatibility_key": ctx["key"], "backend_retained": retained,
               "transport": "actions-cache" if retained else "actions-artifact",
               "acquisition": "compatible-backend-retained" if retained else "artifact-miss"}
     try:
         selected, result["discovery_exhausted"] = _discover(ctx, repository_id=repository_id,
-            current_run=current_run, current_tree=current_tree, get=get, now=now)
+            current_run=current_run, current_tree=current_tree, get=get, now=now, report=discovery)
+    except DiscoveryBudgetExhausted as error:
+        result.update(discovery_status="metadata-budget-exhausted", discovery_error=str(error),
+                      discovery_exhausted=True, acquisition="metadata-unavailable")
+        return result
     except actions.TransportError as error:
         # The shared transport is qualification-locked. Its direct exception
         # cause identifies request timeouts without changing authenticated bytes
@@ -894,12 +933,22 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
                       acquisition="metadata-unavailable")
         print(f"notice: optional compiler artifact metadata unavailable: {error}", file=sys.stderr)
         return result
+    result["discovery_status"] = ("metadata-budget-exhausted" if discovery.get("metadata_budget_exhausted") else
+                                  "page-budget-exhausted" if result["discovery_exhausted"] else
+                                  "candidate-budget-exhausted" if discovery["candidate_budget_exhausted"] else
+                                  "complete")
+    if discovery.get("metadata_budget_exhausted"):
+        result["discovery_exhausted"] = True
+        if selected is None:
+            result["acquisition"] = "metadata-unavailable"
     if selected is None:
         return result
     artifact, origin, terminal = selected
     identifier = artifact["id"]
-    result["export_needed"] = (not source_covered(ctx, origin["tree"], current_tree)
-                               or (now - timestamp(artifact["created_at"])).total_seconds() >= REFRESH_SECONDS)
+    age = int((now - timestamp(artifact["created_at"])).total_seconds())
+    result.update(snapshot_age_seconds=age, refresh_after_seconds=max(0, REFRESH_SECONDS - age),
+                  retention_remaining_seconds=max(0, RETENTION_DAYS * 86400 - age))
+    result["export_needed"] = not source_covered(ctx, origin["tree"], current_tree) or age >= REFRESH_SECONDS
     if retained:
         # Discovery is useful for export suppression, but it is not an import.
         # Keep artifact_id absent so build metrics retain the backend source.
@@ -954,6 +1003,7 @@ def main(argv=None):
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--cache", required=True, type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--summary", type=Path)
     args = parser.parse_args(argv)
     if args.command != "mark-backend" and args.output is None:
         parser.error("--output is required for restore and pack")
@@ -989,7 +1039,12 @@ def main(argv=None):
                     install(accepted, args.cache)
             require(not args.output.exists() and not args.output.is_symlink(), "report destination already exists")
             args.output.parent.mkdir(parents=True, exist_ok=True)
+            result["consumer"] = {key: origin[key] for key in ("run_id", "run_attempt", "checkout_sha")}
             args.output.write_bytes(canonical(result))
+            if args.summary:
+                with args.summary.open("a", encoding="utf-8") as summary:
+                    summary.write(f"\n### Compiler object acquisition: {ctx['label']}\n\n")
+                    summary.write("```json\n" + json.dumps(result, indent=2, sort_keys=True) + "\n```\n")
             emit({"restored": result["restored"], "export-needed": result["export_needed"],
                   "artifact-id": result.get("artifact_id", ""), "compatibility-key": ctx["key"], "report": args.output})
             print(json.dumps(result, sort_keys=True))

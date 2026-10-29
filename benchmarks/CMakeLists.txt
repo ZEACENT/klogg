@@ -97,6 +97,10 @@ if(KLOGG_USE_LTO)
   set_property(TARGET ios_ostrace_protocol_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
+# These existing CI benchmarks need no verified native package artifacts. Keep
+# their build scope explicit so native preparation can overlap their links too.
+add_custom_target(klogg_benchmark_build)
 add_dependencies(
-  ci_build regex_search_benchmark folder_search_benchmark ios_ostrace_protocol_benchmark
+  klogg_benchmark_build regex_search_benchmark folder_search_benchmark ios_ostrace_protocol_benchmark
 )
+add_dependencies(ci_build klogg_benchmark_build)
