@@ -111,9 +111,56 @@ prepare plus finalize and complete job time, not finalization alone.
    and whole-workflow critical path. Do not treat a lucky backend hit as proof
    that rerun admission was exercised.
 5. Check review comments and successful-check annotations as well as failures.
-   Record measured results here before declaring the latency goal achieved.
+   Record final measured results in the linked PR acceptance report before
+   declaring the latency goal achieved. Updating documentation after every run
+   would itself trigger another run and change the consumer revision.
 
 The incident's unaffected Windows lane completed at workflow +31m25s. Repairing
 both cold Intel lanes alone cannot promise a sub-30-minute workflow with the
 other timings held fixed. Hosted measurements, rather than a lower timeout or
 reduced validation scope, determine acceptance.
+
+## Hosted evidence and acceptance record
+
+The complete, current acceptance result is maintained in
+[PR #86](https://github.com/ZEACENT/klogg/pull/86). This documentation-only update
+also supplies a new ordinary PR consumer run without changing the compiler
+policy or application source inputs, so cross-run admission can be tested after
+partial reruns of the producer.
+
+Initial run [40901901224](https://github.com/ZEACENT/klogg/actions/runs/40901901224),
+on `8937a393`, finished in 35m06s but **failed** and is not an accepted green
+sample. Its current-build counters and measured build-invocation times were:
+
+| Lane | Compiler hits / calls | Build time | Job time |
+| --- | ---: | ---: | ---: |
+| Intel macOS ordinary | 729 / 734 | 735.000 s | 1578 s |
+| Windows ordinary | 972 / 977 | 807.376 s | 1465 s |
+| Intel macOS TSan | 727 / 732 | 82.648 s | 904 s (failed test) |
+
+These gains used backend objects; shared acquisition correctly reported no
+candidate for the changed policy identity. They do not by themselves prove the
+partial-rerun recovery path.
+
+The initial failure set was fully inspected:
+
+- ARM64 iOS and ADB producers executed no steps and were cancelled by GitHub:
+  "The job was not acquired by Runner of type hosted even after multiple
+  attempts." Capacity annotations explicitly identified macOS ARM64 runners.
+- The ARM64 application prepared successfully, then correctly refused the
+  cancelled same-run iOS producer at the native rendezvous.
+- Intel TSan failed one existing CaptureStore child-readiness assertion at
+  `tests/unit/capturestore_test.cpp:3429`. The child had reported process start
+  but no main-entry phase at the readiness deadline, then exited normally with
+  code zero during cleanup without being killed. No TSan race report was
+  emitted. This is recorded as a failed sample, not waived as a passing flake.
+- Windows, Linux, Intel ASan/UBSan, CodeQL, static analysis, coverage and lint
+  passed. Inspection found no additional actionable successful-check warning.
+
+Review follow-up `2128922a` addresses optional metadata-deadline handling and adds
+successful restore/metrics integration coverage. Its clean-tree local quality
+receipt passed all lint gates and 2,594 script tests (12 platform-dependent
+skips). Run [40910224083](https://github.com/ZEACENT/klogg/actions/runs/40910224083)
+starts the final-policy producer sequence; final green, rerun-admission and warm
+sample receipts belong in the PR acceptance report rather than being inferred
+from the failed initial sample.
