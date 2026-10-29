@@ -77,6 +77,7 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual(provenance["cache_acquisition"], acquisition)
         self.assertEqual(provenance["cache_transport"], "actions-cache")
         self.assertEqual(provenance["cache_state"], "unknown")
+        self.assertEqual(self.run_build(environment=env)["provenance"]["cache_acquisition"], acquisition)
         for changed in ({"GITHUB_RUN_ID": "124"}, {"GITHUB_RUN_ATTEMPT": "3"}, {"GITHUB_SHA": "b" * 40}):
             with self.subTest(changed=changed), self.assertRaisesRegex(MODULE.MetricsError, "acquisition.*identity"):
                 MODULE.build_provenance(self.build, {**env, **changed})

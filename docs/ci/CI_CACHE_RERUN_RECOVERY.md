@@ -40,8 +40,10 @@ steps. An aggregate rerun count is therefore not an execution failure signal.
   candidates and the existing 300-second deadline. Request-budget exhaustion
   retains an already fully authenticated fallback, if one exists, without
   admitting the interrupted candidate. Otherwise it leaves backend objects
-  intact, imports nothing and requests a fresh export. Integrity failures
-  remain fatal; they are not optional cache misses.
+  intact, imports nothing and requests a fresh export. The metadata deadline
+  is optional unavailability too: a verified fallback cannot start a download
+  after the transport time budget is spent. Download overruns and integrity
+  failures remain fatal; they are not optional cache misses.
 
 Regression coverage models the observed inherited-job response at attempts 5,
 10 and 100, and verifies that a present effective lane needs only the original

@@ -209,15 +209,47 @@ class CompilerObjectTransportTests(unittest.TestCase):
         self.assertEqual(self.downloads, [])
         self.assertFalse((self.root / "restored").exists())
 
-    def test_discovery_deadline_remains_fatal_before_metadata_or_download(self):
+    def test_discovery_deadline_is_optional_before_metadata_or_download(self):
         metadata = mock.Mock()
         before = self.cache_bytes()
-        with mock.patch.object(transport.time, "monotonic", side_effect=[0, transport.MAX_SECONDS + 1]), \
-                self.assertRaisesRegex(ValueError, "discovery exceeded deadline"):
-            self.restore(metadata=metadata, backend_cache=self.cache)
+        with mock.patch.object(transport.time, "monotonic", side_effect=[0, transport.MAX_SECONDS + 1]):
+            result = self.restore(metadata=metadata, backend_cache=self.cache)
+        self.assertFalse(result["restored"])
+        self.assertTrue(result["export_needed"])
+        self.assertEqual(result["discovery_status"], "metadata-deadline-exhausted")
         metadata.assert_not_called()
         self.assertEqual(self.downloads, [])
         self.assertEqual(self.cache_bytes(), before)
+
+    def test_discovery_deadline_after_successful_proof_never_starts_an_unbudgeted_download(self):
+        elapsed = 0
+        def metadata(endpoint):
+            nonlocal elapsed
+            result = self.api(endpoint)
+            if "/contents/" + list(self.context["policy_files"])[-1] + "?" in endpoint:
+                elapsed = transport.MAX_SECONDS + 1
+            return result
+        before = self.cache_bytes()
+        with mock.patch.object(transport.time, "monotonic", side_effect=lambda: elapsed):
+            result = self.restore(metadata=metadata)
+        self.assertFalse(result["restored"])
+        self.assertTrue(result["export_needed"])
+        self.assertEqual(result["discovery_status"], "metadata-deadline-exhausted")
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(self.cache_bytes(), before)
+
+    def test_download_exceeding_transport_deadline_is_still_fatal(self):
+        elapsed = 0
+        original = self.download
+        def download(*args, **kwargs):
+            nonlocal elapsed
+            original(*args, **kwargs)
+            elapsed = transport.MAX_SECONDS + 1
+        with mock.patch.object(self, "download", side_effect=download), \
+                mock.patch.object(transport.time, "monotonic", side_effect=lambda: elapsed), \
+                self.assertRaisesRegex(ValueError, "transport exceeded deadline"):
+            self.restore()
+        self.assertFalse((self.root / "restored").exists())
 
     def test_timeout_cli_retains_backend_and_emits_unavailable_report_without_install(self):
         transport.mark_backend(self.cache, self.context, self.origin)
@@ -323,6 +355,26 @@ class CompilerObjectTransportTests(unittest.TestCase):
         self.assertEqual(observed["consumer"], {"run_id": 201, "run_attempt": 1, "checkout_sha": "b" * 40})
         self.assertIn("artifact-miss", summary.read_text())
         self.assertIn("origin-ineligible", summary.read_text())
+
+    def test_restored_cli_report_binds_consumer_after_real_download_and_install(self):
+        descriptor = self.root / "descriptor.json"
+        descriptor.write_text(json.dumps(self.descriptor))
+        report = self.root / "restored-report.json"
+        consumer = {**self.origin, "run_id": 999, "checkout_sha": "e" * 40}
+        restore = transport.restore
+        def restore_at_fixture_time(*args, **kwargs):
+            return restore(*args, now=self.now, metadata=self.api, download=self.download, **kwargs)
+        with mock.patch.object(transport, "identity", return_value=consumer), \
+                mock.patch.object(transport, "restore", side_effect=restore_at_fixture_time), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(transport.main(["restore", "--descriptor", str(descriptor),
+                "--cache", str(self.cache), "--repo-root", str(self.repo), "--output", str(report)]), 0)
+        observed = json.loads(report.read_text())
+        self.assertTrue(observed["restored"])
+        self.assertEqual(observed["consumer"], {"run_id": 999, "run_attempt": 1, "checkout_sha": "e" * 40})
+        self.assertEqual(observed["producer"]["run_id"], 201)
+        self.assertEqual(self.downloads, [101])
+        self.assertEqual((self.cache / "a/b/entryR").read_bytes(), b"compiled objects")
 
     def test_native_backend_hint_ignores_unrelated_application_tree(self):
         transport.mark_backend(self.cache, self.context, self.origin)

@@ -628,6 +628,10 @@ class CandidateUnavailable(Exception):
 class DiscoveryBudgetExhausted(Exception):
     """Stop optional metadata work without importing partially verified objects."""
 
+    def __init__(self, reason="metadata-budget-exhausted"):
+        self.reason = reason
+        super().__init__("compiler artifact discovery: " + reason)
+
 
 def _producer(artifact, attempt_number, ctx, repository_id, get):
     origin = artifact["workflow_run"]
@@ -871,11 +875,11 @@ def _discover(ctx, *, repository_id, current_run, current_tree, get, now, report
         except CandidateUnavailable as error:
             candidate["reason"] = str(error)
             continue
-        except DiscoveryBudgetExhausted:
+        except DiscoveryBudgetExhausted as error:
             # Earlier candidates completed every producer/policy check. Keep
             # that fallback, but never admit the interrupted current candidate.
-            candidate["reason"] = "metadata-budget-exhausted"
-            report["metadata_budget_exhausted"] = True
+            candidate["reason"] = error.reason
+            report["budget_exhausted"] = error.reason
             break
         candidate["reason"] = "accepted"
         origin, terminal = producer
@@ -901,9 +905,10 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
     started = time.monotonic()
     discovery = {"metadata_requests": 0, "pages": 0, "excluded": {}, "candidates": []}
     def get(endpoint):
-        require(time.monotonic() - started < MAX_SECONDS, "compiler artifact discovery exceeded deadline")
+        if time.monotonic() - started >= MAX_SECONDS:
+            raise DiscoveryBudgetExhausted("metadata-deadline-exhausted")
         if discovery["metadata_requests"] >= MAX_METADATA_REQUESTS:
-            raise DiscoveryBudgetExhausted("compiler artifact metadata request budget exhausted")
+            raise DiscoveryBudgetExhausted()
         discovery["metadata_requests"] += 1
         result = get_raw(endpoint)
         require(isinstance(result, dict), "invalid Actions metadata")
@@ -916,7 +921,7 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
         selected, result["discovery_exhausted"] = _discover(ctx, repository_id=repository_id,
             current_run=current_run, current_tree=current_tree, get=get, now=now, report=discovery)
     except DiscoveryBudgetExhausted as error:
-        result.update(discovery_status="metadata-budget-exhausted", discovery_error=str(error),
+        result.update(discovery_status=error.reason, discovery_error=str(error),
                       discovery_exhausted=True, acquisition="metadata-unavailable")
         return result
     except actions.TransportError as error:
@@ -933,11 +938,11 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
                       acquisition="metadata-unavailable")
         print(f"notice: optional compiler artifact metadata unavailable: {error}", file=sys.stderr)
         return result
-    result["discovery_status"] = ("metadata-budget-exhausted" if discovery.get("metadata_budget_exhausted") else
-                                  "page-budget-exhausted" if result["discovery_exhausted"] else
-                                  "candidate-budget-exhausted" if discovery["candidate_budget_exhausted"] else
-                                  "complete")
-    if discovery.get("metadata_budget_exhausted"):
+    result["discovery_status"] = (discovery.get("budget_exhausted") or
+                                  ("page-budget-exhausted" if result["discovery_exhausted"] else
+                                   "candidate-budget-exhausted" if discovery["candidate_budget_exhausted"] else
+                                   "complete"))
+    if discovery.get("budget_exhausted"):
         result["discovery_exhausted"] = True
         if selected is None:
             result["acquisition"] = "metadata-unavailable"
@@ -959,7 +964,10 @@ def restore(ctx, destination, *, repository_id, current_run, metadata=None, down
     with tempfile.TemporaryDirectory(prefix=".compiler-download-", dir=destination.parent) as directory:
         archive = Path(directory) / "archive.zip"
         remaining = int(MAX_SECONDS - (time.monotonic() - started))
-        require(remaining > 0, "compiler artifact transport exceeded deadline")
+        if remaining <= 0:
+            result.update(discovery_status="metadata-deadline-exhausted", discovery_exhausted=True,
+                          acquisition="metadata-unavailable", export_needed=True)
+            return result
         download(identifier, archive, limit=archive_limit(ctx) + MAX_MANIFEST, timeout=remaining)
         require(time.monotonic() - started <= MAX_SECONDS, "compiler artifact transport exceeded deadline")
         source = _unpack(archive, destination, artifact, ctx, origin)
