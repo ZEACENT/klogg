@@ -930,6 +930,41 @@ class RendezvousTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.evaluate([dict(self.job, run_attempt=3)])
 
+    def test_many_partial_reruns_use_effective_attempt_jobs_without_history_enumeration(self):
+        # Run 40919941215 attempt 6: the 216-job history endpoint repeatedly
+        # returned HTTP 502, while the attempt endpoint returned 36 effective
+        # jobs, including inherited successes with original execution times.
+        self.identity["run_attempt"] = self.run["run_attempt"] = 6
+        carried = dict(self.job, id=26, run_attempt=6)
+        prefix = "repos/owner/repo/actions/runs/17"
+        calls, sleeps = [], []
+        def api(path):
+            calls.append(path)
+            if path == prefix:
+                return self.run
+            if path == prefix + "/jobs?filter=all&per_page=100":
+                raise subprocess.CalledProcessError(1, ["gh", "api", path], stderr="HTTP 502")
+            if path == prefix + "/attempts/6/jobs?per_page=100":
+                return {"jobs": [carried]}
+            if path == prefix + "/artifacts?per_page=100":
+                return {"artifacts": [self.artifact]}
+            self.fail("unexpected endpoint: " + path)
+        ticks = iter([0, 0, 31])
+        result = self.module.wait(self.identity, {"Producer": ["native"]}, api=api,
+                                  timeout=30, clock=lambda: next(ticks), sleep=sleeps.append)
+        self.assertEqual(result["native"]["artifact_id"], 30)
+        self.assertEqual(result["native"]["producer_attempt"], 6)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(calls, [prefix, prefix + "/attempts/6/jobs?per_page=100",
+                                 prefix + "/artifacts?per_page=100", prefix])
+
+    def test_attempt_snapshot_cannot_outlive_a_concurrent_rerun(self):
+        values = iter([self.run, {"jobs": [self.job]}, {"artifacts": [self.artifact]},
+                       dict(self.run, run_attempt=3)])
+        with self.assertRaisesRegex(ValueError, "run identity"):
+            self.module.wait(self.identity, {"Producer": ["native"]}, api=lambda _: next(values),
+                             clock=lambda: 0, sleep=lambda _: self.fail("unexpected sleep"))
+
     def test_poll_has_deadline_and_rechecks_run_after_artifact_snapshot(self):
         calls = []
         values = iter([self.run, {"jobs": [self.job]}, {"artifacts": [self.artifact]}, self.run])
@@ -954,6 +989,17 @@ class RendezvousTests(unittest.TestCase):
                              api=mock.Mock(side_effect=subprocess.CalledProcessError(1, ["gh", "api"])),
                              clock=lambda: next(ticks), sleep=lambda _: None)
         self.assertTrue(stderr.write.called)
+
+    def test_api_failure_reports_http_status_without_dumping_stderr(self):
+        ticks = iter([0, 0, 31])
+        error = subprocess.CalledProcessError(1, ["gh", "api"],
+                                             stderr="VERY_SECRET_BODY gh: Server Error (HTTP 502)")
+        with self.assertRaises(TimeoutError), mock.patch("sys.stderr") as stderr:
+            self.module.wait(self.identity, {"Producer": ["native"]}, timeout=30,
+                             api=mock.Mock(side_effect=error), clock=lambda: next(ticks), sleep=lambda _: None)
+        diagnostic = "".join(str(call.args[0]) for call in stderr.write.call_args_list)
+        self.assertIn("HTTP 502", diagnostic)
+        self.assertNotIn("VERY_SECRET", diagnostic)
 
     def test_merge_sha_is_separate_from_run_head_sha(self):
         with tempfile.TemporaryDirectory() as temporary:

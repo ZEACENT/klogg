@@ -187,7 +187,10 @@ def wait(expected, producers, *, api=github_api, timeout=1800, clock=time.monoto
         try:
             run = api(prefix)
             check_run(expected, run)
-            jobs = api(prefix + "/jobs?filter=all&per_page=100")["jobs"]
+            # The attempt snapshot includes inherited producer successes and
+            # their original execution intervals. Enumerating every historical
+            # attempt grows with reruns and can repeatedly fail server-side.
+            jobs = api(prefix + f"/attempts/{expected['run_attempt']}/jobs?per_page=100")["jobs"]
             artifacts = api(prefix + "/artifacts?per_page=100")["artifacts"]
             ready = evaluate(expected, run, jobs, artifacts, producers)
             if ready is not None:
@@ -196,7 +199,9 @@ def wait(expected, producers, *, api=github_api, timeout=1800, clock=time.monoto
                 return ready
             print("Waiting for native producers/artifacts: " + ", ".join(producers), flush=True)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            print(f"Native rendezvous API request failed; retrying within deadline: {error}",
+            status = re.search(r"\bHTTP\s+([0-9]{3})\b", str(error.stderr or ""))
+            detail = f" [HTTP {status[1]}]" if status else ""
+            print(f"Native rendezvous API request failed; retrying within deadline: {error}{detail}",
                   file=sys.stderr, flush=True)
         sleep(POLL_SECONDS)
     raise TimeoutError("native producer rendezvous deadline exceeded")

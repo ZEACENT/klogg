@@ -161,6 +161,42 @@ Review follow-up `2128922a` addresses optional metadata-deadline handling and ad
 successful restore/metrics integration coverage. Its clean-tree local quality
 receipt passed all lint gates and 2,594 script tests (12 platform-dependent
 skips). Run [40910224083](https://github.com/ZEACENT/klogg/actions/runs/40910224083)
-starts the final-policy producer sequence; final green, rerun-admission and warm
-sample receipts belong in the PR acceptance report rather than being inferred
-from the failed initial sample.
+starts the cache-admission producer sequence; final green, rerun-admission and
+warm sample receipts belong in the PR acceptance report rather than being
+inferred from the failed initial sample.
+
+## Native rendezvous after many partial reruns
+
+The delayed ARM64 recovery exposed a second history-dependent failure in consumer
+run 40919941215, attempt 6. The ADB producer finally succeeded in attempt 5, and
+the application prepared successfully in attempt 6, but its rendezvous spent
+30 minutes retrying the historical jobs endpoint before timing out.
+
+The exact `jobs?filter=all&per_page=100` paginated request reproduced HTTP 502
+locally after 19.36 seconds. That history contained 216 job records. In contrast,
+`attempts/6/jobs?per_page=100` returned the complete 36-job effective snapshot,
+including inherited successful producers with their original execution intervals.
+
+Rendezvous now reads that attempt-scoped snapshot. Pagination completeness,
+repository/run/head identity, newest producer success, artifact ancestry/expiry
+and upload-window checks remain unchanged. The run identity is checked again
+after the artifact snapshot, so a concurrent rerun cannot authorize a stale
+receipt. API retry diagnostics expose only a parsed HTTP status, not raw stderr.
+The timeout is not increased.
+
+A live replay of the fixed rendezvous against the same failed attempt resolved
+all three required ARM64 artifacts in 7.83 seconds: iOS artifact 12921058724,
+ADB artifact 12926829196 and support artifact 12920033497. This validates the
+actual inherited-job shape rather than assuming that an aggregate rerun means
+a producer rebuild. The shared path covers both macOS and Windows.
+
+The fast deterministic guard is:
+
+```sh
+python3 -I tests/scripts/test_ci_native_overlap.py RendezvousTests
+```
+
+It rejects historical enumeration in the six-attempt scenario, retains failure
+and artifact-window rejection tests, and rejects a changed run identity before
+returning a receipt. The complete native-overlap module additionally exercises
+real CMake/Ninja preparation and populated-artifact macOS ASan finalization.
