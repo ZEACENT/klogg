@@ -25,6 +25,7 @@
 
 #include <catch2/catch.hpp>
 
+#include <QAction>
 #include <QApplication>
 #include <QBoxLayout>
 #include <QByteArray>
@@ -2974,6 +2975,307 @@ TEST_CASE( "Folder log-view context menu uses app Title Case and semantic ellips
         CAPTURE( expectedText );
         CHECK( actionTexts.contains( expectedText ) );
     }
+}
+
+namespace {
+struct CopyMatchesMenu {
+    QMenu* menu;
+    QAction* action;
+};
+
+CopyMatchesMenu copyMatchesMenuFor( AbstractLogView* view )
+{
+    auto* const action = view->findChild<QAction*>( QStringLiteral( "copyMatchesAction" ) );
+    REQUIRE( action != nullptr );
+    auto* const menu = view->findChild<QMenu*>( QString{}, Qt::FindDirectChildrenOnly );
+    REQUIRE( menu != nullptr );
+    REQUIRE( menu->actions().contains( action ) );
+    return { menu, action };
+}
+} // namespace
+
+TEST_CASE( "Folder Copy Matches menu copies the completed filter rather than the clicked row",
+           "[folder][menu][clipboard][context-copy-matches]" )
+{
+    const bool fromMainView = GENERATE( false, true );
+    CAPTURE( fromMainView );
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "padding\nprefix ERRORone ERRORtwo suffix\ncontext\n" );
+    const auto b = writeFile( dir, "b.log", "prefix ERRORthree suffix\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b } );
+    widget.resize( 800, 600 );
+    widget.show();
+    widget.searchToolbar()->setBoolean( false );
+    widget.searchToolbar()->setInverse( false );
+    widget.searchToolbar()->setUseRegexp( true );
+    widget.contextLinesComboBox()->setCurrentIndex( 2 ); // After (-A)
+    widget.contextLinesSpinBox()->setValue( 1 );
+    widget.searchFor( QStringLiteral( "ERROR\\w+" ) );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
+
+    auto quickFind = std::make_shared<QuickFindPattern>();
+    quickFind->changeSearchPattern( QStringLiteral( "padding|context" ), false, true, false );
+    widget.setQuickFindPattern( quickFind );
+    auto* const filtered = widget.filteredView();
+    AbstractLogView* const view = fromMainView ? static_cast<AbstractLogView*>( widget.mainView() )
+                                               : static_cast<AbstractLogView*>( filtered );
+    const auto clickedRow = fromMainView ? 0_lnum : 2_lnum;
+    view->selectAndDisplayLine( clickedRow );
+    REQUIRE( view->getSelectedText()
+             == ( fromMainView ? QStringLiteral( "padding" ) : QStringLiteral( "context" ) ) );
+    view->ensureLineMapFresh();
+    // Resolve the row through the view's public mapping, not host font metrics.
+    QPoint menuPoint{ view->viewport()->rect().center().x(), -1 };
+    for ( int y = 0; y < view->viewport()->height(); ++y ) {
+        if ( view->lineAtYForTest( y ) == clickedRow ) {
+            menuPoint.setY( y );
+            break;
+        }
+    }
+    REQUIRE( menuPoint.y() >= 0 );
+    const auto contextMenu = copyMatchesMenuFor( view );
+    auto* const menu = contextMenu.menu;
+    auto* const action = contextMenu.action;
+    REQUIRE( action->text() == QStringLiteral( "Copy Matches" ) );
+    // Force stale disabled state: opening the actual menu must ask the document again.
+    action->setEnabled( false );
+    bool popupObserved = false;
+    bool enabledOnShow = false;
+    bool inCopyGroup = false;
+    QTimer::singleShot( 0, Qt::PreciseTimer, view, [ & ] {
+        popupObserved = menu->isVisible();
+        enabledOnShow = action->isEnabled() && action->isVisible();
+        int group = 0;
+        int copyGroup = -1;
+        int matchesGroup = -2;
+        for ( auto* entry : menu->actions() ) {
+            if ( entry->isSeparator() ) {
+                ++group;
+            }
+            auto text = entry->text();
+            text.remove( QLatin1Char( '&' ) );
+            if ( text == QStringLiteral( "Copy This Line" ) || text == QStringLiteral( "Copy" ) ) {
+                copyGroup = group;
+            }
+            if ( entry == action ) {
+                matchesGroup = group;
+            }
+        }
+        inCopyGroup = copyGroup == matchesGroup;
+        menu->close();
+    } );
+    QTest::mouseClick( view->viewport(), Qt::RightButton, Qt::NoModifier, menuPoint );
+    REQUIRE( popupObserved );
+    REQUIRE( enabledOnShow );
+    REQUIRE( inCopyGroup );
+
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ filtered, &AbstractLogView::matchSelectionFinished };
+    SafeQSignalSpy mainCopied{ widget.mainView(), &AbstractLogView::matchSelectionFinished };
+    action->trigger();
+    REQUIRE( copied.safeWait( 5000 ) );
+    REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
+    REQUIRE( mainCopied.count() == 0 );
+    REQUIRE( QApplication::clipboard()->text().replace( "\r\n", "\n" )
+             == QStringLiteral( "ERRORone\nERRORtwo\nERRORthree" ) );
+}
+
+TEST_CASE( "Folder Copy Matches keeps canonical scope under folding and Marks-only visibility",
+           "[folder][clipboard][context-copy-matches]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "marked only\nERROR one ERROR\ncontext\n" );
+    const auto b = writeFile( dir, "b.log", "ERROR two\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b } );
+    widget.show();
+    widget.searchToolbar()->setBoolean( false );
+    widget.searchToolbar()->setInverse( false );
+    widget.contextLinesComboBox()->setCurrentIndex( 2 );
+    widget.contextLinesSpinBox()->setValue( 1 );
+    widget.searchFor( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
+    widget.markMainViewLine( 0_lnum );
+    SECTION( "folded groups still contribute every match" )
+    {
+        widget.collapseAll();
+        REQUIRE( widget.folderResults()->isCollapsed( 0 ) );
+        REQUIRE( widget.folderResults()->isCollapsed( 1 ) );
+    }
+    SECTION( "Marks-only display does not replace the filter scope" )
+    {
+        widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+        widget.filteredView()->selectAll();
+        REQUIRE( widget.filteredView()->getSelectedText() == QStringLiteral( "marked only" ) );
+    }
+    auto* const view = widget.filteredView();
+    const auto [ menu, action ] = copyMatchesMenuFor( view );
+    const auto visibility = widget.folderResults()->visibility();
+    const auto rows = widget.folderResults()->getNbLine();
+    const bool firstCollapsed = widget.folderResults()->isCollapsed( 0 );
+    const bool secondCollapsed = widget.folderResults()->isCollapsed( 1 );
+    REQUIRE( QMetaObject::invokeMethod( menu, "aboutToShow", Qt::DirectConnection ) );
+    REQUIRE( action->isEnabled() );
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ view, &AbstractLogView::matchSelectionFinished };
+    action->trigger();
+    REQUIRE( copied.safeWait( 5000 ) );
+    REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
+    REQUIRE( QApplication::clipboard()->text().replace( "\r\n", "\n" )
+             == QStringLiteral( "ERROR\nERROR\nERROR" ) );
+    REQUIRE( widget.folderResults()->visibility() == visibility );
+    REQUIRE( widget.folderResults()->getNbLine() == rows );
+    REQUIRE( widget.folderResults()->isCollapsed( 0 ) == firstCollapsed );
+    REQUIRE( widget.folderResults()->isCollapsed( 1 ) == secondCollapsed );
+}
+
+TEST_CASE( "Folder Copy Matches routes active kept panes and rejects a hidden pane action",
+           "[folder][keep][clipboard][context-copy-matches]" )
+{
+    const bool fromMainView = GENERATE( false, true );
+    CAPTURE( fromMainView );
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", "ERROR alpha ERROR\nWARN beta\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { path } );
+    widget.show();
+    widget.searchToolbar()->setBoolean( false );
+    widget.searchToolbar()->setInverse( false );
+    widget.searchFor( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, path );
+    auto* const first = widget.filteredView();
+    const auto [ firstMenu, staleAction ] = copyMatchesMenuFor( first );
+    REQUIRE( QMetaObject::invokeMethod( firstMenu, "aboutToShow", Qt::DirectConnection ) );
+    REQUIRE( staleAction->isEnabled() );
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( QStringLiteral( "WARN" ) );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    auto* const second = widget.filteredView();
+    REQUIRE( first != second );
+    REQUIRE( first->isHidden() );
+    SafeQSignalSpy firstCopied{ first, &AbstractLogView::matchSelectionFinished };
+    SafeQSignalSpy secondCopied{ second, &AbstractLogView::matchSelectionFinished };
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    // A previously enabled QAction can outlive its pane's activation. Trigger must
+    // recheck ownership instead of copying the hidden pane or rerouting to WARN.
+    staleAction->setEnabled( true );
+    staleAction->trigger();
+    REQUIRE_FALSE( first->hasMatchSelection() );
+    REQUIRE_FALSE( second->hasMatchSelection() );
+    REQUIRE( firstCopied.count() == 0 );
+    REQUIRE( secondCopied.count() == 0 );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "unchanged" ) );
+    REQUIRE( QMetaObject::invokeMethod( firstMenu, "aboutToShow", Qt::DirectConnection ) );
+    REQUIRE_FALSE( staleAction->isEnabled() );
+
+    for ( const int paneIndex : { 1, 0 } ) {
+        CAPTURE( paneIndex );
+        widget.resultsTabs()->setCurrentIndex( paneIndex );
+        auto* const active = widget.filteredView();
+        AbstractLogView* const origin = fromMainView
+                                            ? static_cast<AbstractLogView*>( widget.mainView() )
+                                            : static_cast<AbstractLogView*>( active );
+        origin->setFocus();
+        REQUIRE( waitFor( [ & ] { return origin->hasFocus(); } ) );
+        origin->selectAll();
+        const auto [ menu, action ] = copyMatchesMenuFor( origin );
+        REQUIRE( QMetaObject::invokeMethod( menu, "aboutToShow", Qt::DirectConnection ) );
+        REQUIRE( action->isEnabled() );
+        SafeQSignalSpy copied{ active, &AbstractLogView::matchSelectionFinished };
+        action->trigger();
+        REQUIRE( copied.safeWait( 5000 ) );
+        REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
+        REQUIRE(
+            QApplication::clipboard()->text().replace( "\r\n", "\n" )
+            == ( paneIndex == 0 ? QStringLiteral( "ERROR\nERROR" ) : QStringLiteral( "WARN" ) ) );
+    }
+}
+
+TEST_CASE( "Folder Copy Matches refreshes and rechecks filter eligibility",
+           "[folder][menu][clipboard][context-copy-matches]" )
+{
+    const bool fromMainView = GENERATE( false, true );
+    const auto state = GENERATE( QStringLiteral( "empty" ), QStringLiteral( "incomplete" ),
+                                 QStringLiteral( "stopped" ), QStringLiteral( "boolean" ),
+                                 QStringLiteral( "inverse" ) );
+    CAPTURE( fromMainView, state );
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", "ERROR alpha\nWARN beta\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { path } );
+    widget.searchToolbar()->setBoolean( false );
+    widget.searchToolbar()->setInverse( false );
+    auto* const filtered = widget.filteredView();
+    AbstractLogView* const origin = fromMainView
+                                        ? static_cast<AbstractLogView*>( widget.mainView() )
+                                        : static_cast<AbstractLogView*>( filtered );
+    const auto [ menu, action ] = copyMatchesMenuFor( origin );
+    REQUIRE( QMetaObject::invokeMethod( menu, "aboutToShow", Qt::DirectConnection ) );
+    REQUIRE_FALSE( action->isEnabled() );
+    widget.searchFor( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    REQUIRE( QMetaObject::invokeMethod( menu, "aboutToShow", Qt::DirectConnection ) );
+    REQUIRE( action->isEnabled() );
+
+    if ( state == QStringLiteral( "empty" ) ) {
+        widget.searchFor( QStringLiteral( "absent" ) );
+    }
+    else if ( state == QStringLiteral( "boolean" ) ) {
+        widget.searchToolbar()->setBoolean( true );
+        widget.searchFor( QStringLiteral( "\"ERROR\" or \"WARN\"" ) );
+    }
+    else if ( state == QStringLiteral( "inverse" ) ) {
+        widget.searchToolbar()->setInverse( true );
+        widget.searchFor( QStringLiteral( "ERROR" ) );
+    }
+    else {
+        widget.searchFor( QStringLiteral( "ERROR" ) );
+        // No event-loop turn: completion remains queued while a partial result
+        // is present. The document, not just the row model, must gate copying.
+        klogg::folder::FileGroup group;
+        group.filePath = path;
+        group.matches.push_back(
+            klogg::folder::MatchRecord{ 0_lnum, 0_offset, 5_offset, 5_length, 5_length } );
+        widget.folderResults()->addFileGroup( 0, std::move( group ) );
+        REQUIRE( widget.isSearchActive() );
+        REQUIRE( widget.folderResults()->groupCount() == 1 );
+        REQUIRE( filtered->canSelectAllMatches() );
+        if ( state == QStringLiteral( "stopped" ) ) {
+            static_cast<AbstractCrawlerWidget*>( &widget )->stopSearch();
+        }
+    }
+    if ( state != QStringLiteral( "incomplete" ) ) {
+        REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+    }
+    if ( state == QStringLiteral( "empty" ) ) {
+        REQUIRE( widget.folderResults()->groupCount() == 0 );
+    }
+    else {
+        REQUIRE( widget.folderResults()->groupCount() > 0 );
+    }
+    REQUIRE_FALSE( widget.canSelectAllMatches() );
+    REQUIRE( QMetaObject::invokeMethod( menu, "aboutToShow", Qt::DirectConnection ) );
+    REQUIRE_FALSE( action->isEnabled() );
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ filtered, &AbstractLogView::matchSelectionFinished };
+    SafeQSignalSpy mainCopied{ widget.mainView(), &AbstractLogView::matchSelectionFinished };
+    // Simulate an already-open menu's stale enabled state. The trigger must
+    // repeat the eligibility check even without another aboutToShow emission.
+    action->setEnabled( true );
+    action->trigger();
+    REQUIRE_FALSE( filtered->hasMatchSelection() );
+    REQUIRE_FALSE( widget.mainView()->hasMatchSelection() );
+    REQUIRE( copied.count() == 0 );
+    REQUIRE( mainCopied.count() == 0 );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "unchanged" ) );
 }
 
 TEST_CASE( "FolderCrawlerWidget mirrors a portion selection into the main view",

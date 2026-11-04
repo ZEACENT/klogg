@@ -225,6 +225,11 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
             = [ this ]( const QString& text ) { Q_EMIT sendToScratchpad( text ); };
         hooks.replaceScratchpad
             = [ this ]( const QString& text ) { Q_EMIT replaceDataInScratchpad( text ); };
+        hooks.canCopyMatches = [ this ]( AbstractLogView* fromView ) {
+            return ( fromView == mainView_ || fromView == activeFilteredView() )
+                   && canSelectAllMatches();
+        };
+        hooks.copyMatches = [ this ] { selectAllMatches( false, true ); };
         hooks.saveSplitterSizes = [ this ]() {
             auto& splitterConfig = Configuration::get();
             splitterConfig.setSplitterSizes( splitter_->sizes() );

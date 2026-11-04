@@ -4,6 +4,16 @@
 <context>
     <name>AbstractLogView</name>
     <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="2744"/>
+        <source>Copy Matches</source>
+        <translation>Copy Matches</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="2747"/>
+        <source>Copy all match fragments from the current filter results</source>
+        <translation>Copy all match fragments from the current filter results</translation>
+    </message>
+    <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="583"/>
         <source>Copy the selection</source>
         <translation>Copy the selection</translation>
