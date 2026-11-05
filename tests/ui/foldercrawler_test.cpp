@@ -3012,7 +3012,8 @@ TEST_CASE( "Folder Copy Matches menu copies the completed filter rather than the
     widget.searchToolbar()->setUseRegexp( true );
     widget.contextLinesComboBox()->setCurrentIndex( 2 ); // After (-A)
     widget.contextLinesSpinBox()->setValue( 1 );
-    widget.searchFor( QStringLiteral( "ERROR\\w+" ) );
+    // Exercise menu routing, not Unicode regex compilation under sanitizers.
+    widget.searchFor( QStringLiteral( "ERROR[a-z]+" ) );
     REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
     selectResultRowAndWaitForFile( widget, 1_lnum, a );
 

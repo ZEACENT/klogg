@@ -217,6 +217,7 @@ class CompilerObjectTransportTests(unittest.TestCase):
         self.assertFalse(result["restored"])
         self.assertTrue(result["export_needed"])
         self.assertEqual(result["discovery_status"], "metadata-deadline-exhausted")
+        self.assertEqual(result["acquisition"], "metadata-unavailable")
         metadata.assert_not_called()
         self.assertEqual(self.downloads, [])
         self.assertEqual(self.cache_bytes(), before)
@@ -235,6 +236,7 @@ class CompilerObjectTransportTests(unittest.TestCase):
         self.assertFalse(result["restored"])
         self.assertTrue(result["export_needed"])
         self.assertEqual(result["discovery_status"], "metadata-deadline-exhausted")
+        self.assertEqual(result["acquisition"], "metadata-unavailable")
         self.assertEqual(self.downloads, [])
         self.assertEqual(self.cache_bytes(), before)
 
@@ -360,6 +362,7 @@ class CompilerObjectTransportTests(unittest.TestCase):
         descriptor = self.root / "descriptor.json"
         descriptor.write_text(json.dumps(self.descriptor))
         report = self.root / "restored-report.json"
+        summary = self.root / "restored-summary.md"
         consumer = {**self.origin, "run_id": 999, "checkout_sha": "e" * 40}
         restore = transport.restore
         def restore_at_fixture_time(*args, **kwargs):
@@ -368,8 +371,12 @@ class CompilerObjectTransportTests(unittest.TestCase):
                 mock.patch.object(transport, "restore", side_effect=restore_at_fixture_time), \
                 mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(transport.main(["restore", "--descriptor", str(descriptor),
-                "--cache", str(self.cache), "--repo-root", str(self.repo), "--output", str(report)]), 0)
+                "--cache", str(self.cache), "--repo-root", str(self.repo), "--output", str(report),
+                "--summary", str(summary)]), 0)
         observed = json.loads(report.read_text())
+        summary_text = summary.read_text()
+        self.assertIn("### Compiler object acquisition:", summary_text)
+        self.assertEqual(json.loads(summary_text.split("```json\n", 1)[1].split("\n```", 1)[0]), observed)
         self.assertTrue(observed["restored"])
         self.assertEqual(observed["consumer"], {"run_id": 999, "run_attempt": 1, "checkout_sha": "e" * 40})
         self.assertEqual(observed["producer"]["run_id"], 201)

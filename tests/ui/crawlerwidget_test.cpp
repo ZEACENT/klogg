@@ -4091,7 +4091,7 @@ TEST_CASE( "Crawler context Copy Matches extracts all Filter captures from eithe
     REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
     visitor.crawler->show();
     visitor.setUseRegexp( true );
-    visitor.replaceSearch( QStringLiteral( "ERROR (\\w+)" ) );
+    visitor.replaceSearch( QStringLiteral( "ERROR ([a-z]+)" ) );
     REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
     Q_EMIT visitor.mainView()->markLines( { 1_lnum } );
     visitor.changeContextLinesMode( 3 );
