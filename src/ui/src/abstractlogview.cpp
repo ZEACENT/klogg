@@ -2720,6 +2720,11 @@ void AbstractLogView::selectAndDisplayRange( FilePosition pos )
                          0_length );
 }
 
+void AbstractLogView::setCopyMatchesEnabled( bool enabled )
+{
+    copyMatchesAction_->setEnabled( enabled );
+}
+
 // Create the pop-up menu
 void AbstractLogView::createMenu()
 {
@@ -2733,6 +2738,16 @@ void AbstractLogView::createMenu()
     // No text as this action title depends on the type of selection
     connect( copyWithLineNumbersAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->copyWithLineNumbers(); } );
+
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    copyMatchesAction_ = new QAction( tr( "Copy Matches" ), this );
+    copyMatchesAction_->setObjectName( QStringLiteral( "copyMatchesAction" ) );
+    copyMatchesAction_->setStatusTip(
+        tr( "Copy all match fragments from the current filter results" ) );
+    copyMatchesAction_->setEnabled( false );
+    connect( copyMatchesAction_, &QAction::triggered, this,
+             &AbstractLogView::copyMatchesRequested );
 
     // QObject parentage owns this action.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
@@ -2849,6 +2864,7 @@ void AbstractLogView::createMenu()
              [ this ]( auto ) { Q_EMIT replaceScratchpadWithSelection(); } );
 
     popupMenu_ = new QMenu( this );
+    connect( popupMenu_, &QMenu::aboutToShow, this, &AbstractLogView::contextMenuAboutToShow );
     // popupMenu_ owns the submenu through QObject parentage.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     highlightersMenu_ = new HighlightersMenu( tr( "Highlighters" ), popupMenu_ );
@@ -2861,6 +2877,7 @@ void AbstractLogView::createMenu()
     popupMenu_->addSeparator();
     popupMenu_->addAction( copyAction_ );
     popupMenu_->addAction( copyWithLineNumbersAction_ );
+    popupMenu_->addAction( copyMatchesAction_ );
     popupMenu_->addAction( sendToScratchpadAction_ );
     popupMenu_->addAction( replaceInScratchpadAction_ );
     popupMenu_->addSeparator();

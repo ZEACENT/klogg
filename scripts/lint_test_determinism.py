@@ -23,6 +23,13 @@ repository:
   true; a torn re-read (e.g. a heartbeat file mid-rewrite) flips the result
   and flakes the test (macOS arm64 CI leg, PR #76). Evaluate once per
   iteration and return the observed value.
+* Unbounded Unicode word classes in literal ``searchFor`` / ``replaceSearch``
+  fixtures turn unrelated UI tests into Vectorscan compilation benchmarks.
+  PR #86 exceeded its search-completion deadline on Linux/Windows ASan with
+  an ASCII-only ``ERROR\\\\w+`` fixture. Use explicit ASCII classes instead;
+  tests of Unicode Filter semantics must carry a reasoned
+  ``// lint-allow: unicode-filter-regex -- <reason>`` comment on the call.
+  Quick Find and direct Qt regex tests do not use this compilation path.
 * Wall-clock budget assertions (``CHECK( elapsed < N )``, including the
   ``timer.elapsed() < N`` call form, ``now() - start`` chrono diffs, and
   line-wrapped assertions) are performance
@@ -111,6 +118,29 @@ PERF_TAG = "[.perf]"
 
 TEST_SOURCE_SUFFIXES = {".cpp", ".h", ".hpp", ".mm"}
 
+FILTER_CALL_RE = re.compile(r"(?:\.|->)\s*(?:searchFor|replaceSearch)\s*\(")
+FILTER_ARGUMENT_PREFIX_RE = re.compile(r"\s*(?:QStringLiteral\s*\(\s*)?")
+CPP_STRING_RE = re.compile(
+    r'(?:u8|u|U|L)?(?:R"(?P<delimiter>[^\s()\\]{0,16})\((?P<raw>.*?)\)(?P=delimiter)"'
+    r'|"(?P<quoted>(?:\\.|[^"\\])*)")', re.DOTALL
+)
+# Distinguish a quantifier after a character class from a literal inside it:
+# [\w]+ repeats a Unicode class, whereas [\w+] does not.
+REGEX_QUOTED = r"\\Q.*?(?:\\E|$)"
+REGEX_UNBOUNDED_REPEAT = r"(?:[+*]|\{\d+,\})"
+REGEX_WORD_ESCAPE_RE = re.compile(
+    REGEX_QUOTED + r"|(?P<word>\\[wW])|\\.", re.DOTALL
+)
+REGEX_WORD_TOKEN_RE = re.compile(
+    REGEX_QUOTED
+    + r"|\[(?P<characters>\^?\]?(?:" + REGEX_QUOTED + r"|\\.|[^\\\]])*)\]"
+    + r"(?P<class_repeat>" + REGEX_UNBOUNDED_REPEAT + r")?"
+    + r"|(?P<repeat>\\[wW]" + REGEX_UNBOUNDED_REPEAT + r")|\\.", re.DOTALL
+)
+UNICODE_FILTER_MARKER_RE = re.compile(
+    r"//[ \t]*lint-allow: unicode-filter-regex[ \t]+--[ \t]+\S"
+)
+
 
 def _is_test_source(path: Path) -> bool:
     parts = path.as_posix()
@@ -188,6 +218,62 @@ def _span_has_perf_marker(
     )
 
 
+def _has_unbounded_word_class(pattern: str) -> bool:
+    for token in REGEX_WORD_TOKEN_RE.finditer(pattern):
+        if token.group("repeat"):
+            return True
+        if token.group("class_repeat") and any(
+            escape.group("word")
+            for escape in REGEX_WORD_ESCAPE_RE.finditer(token.group("characters"))
+        ):
+            return True
+    return False
+
+
+def _unicode_filter_findings(
+    text: str, code: str, comment_lines: list[str], path: Path
+) -> list[Finding]:
+    findings: list[Finding] = []
+    # Find calls in literal-masked code, then inspect only their literal first
+    # argument in comment-masked text. Example strings cannot impersonate calls.
+    for call in FILTER_CALL_RE.finditer(code):
+        position = FILTER_ARGUMENT_PREFIX_RE.match(text, call.end()).end()
+        parts: list[str] = []
+        while literal := CPP_STRING_RE.match(text, position):
+            raw = literal.group("raw")
+            parts.append(raw if raw is not None else re.sub(
+                r"\\(.)", r"\1", literal.group("quoted"), flags=re.DOTALL
+            ))
+            position = literal.end()
+            while position < len(text) and text[position].isspace():
+                position += 1
+        if not _has_unbounded_word_class("".join(parts)):
+            continue
+
+        start_line = text.count("\n", 0, call.start())
+        depth = 1
+        end = None
+        for index in range(call.end(), len(code)):
+            depth += (code[index] == "(") - (code[index] == ")")
+            if depth == 0:
+                end = index
+                break
+        # An unclosed call cannot borrow an allowance from a later statement.
+        if end is not None:
+            end_line = text.count("\n", 0, end)
+            if any(UNICODE_FILTER_MARKER_RE.search(line)
+                   for line in comment_lines[start_line:end_line + 1]):
+                continue
+        findings.append(Finding(
+            "unicode-filter-fixture", path, start_line + 1,
+            "Unbounded Unicode word classes make UI Filter fixtures depend on "
+            "Vectorscan compilation speed under sanitizers (PR #86). Use explicit "
+            "ASCII classes for ASCII data. Intentional Unicode coverage needs "
+            "'// lint-allow: unicode-filter-regex -- <reason>' on the call."
+        ))
+    return findings
+
+
 def check_text(text: str, path: Path) -> list[Finding]:
     if not _is_test_source(path):
         return []
@@ -200,8 +286,9 @@ def check_text(text: str, path: Path) -> list[Finding]:
         for original, masked in zip(text, comment_masked)
     ).splitlines()
     uncommented = comment_masked.splitlines()
-    stripped = _strip_cpp_literals("\n".join(uncommented)).splitlines()
-    findings: list[Finding] = []
+    code_masked = _strip_cpp_literals(comment_masked)
+    stripped = code_masked.splitlines()
+    findings = _unicode_filter_findings(comment_masked, code_masked, comment_lines, path)
     for index, code in enumerate(stripped):
         original = original_lines[index] if index < len(original_lines) else ""
         line_no = index + 1

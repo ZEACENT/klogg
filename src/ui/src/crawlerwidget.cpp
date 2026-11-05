@@ -1346,6 +1346,11 @@ void CrawlerWidget::setup()
             = [ this ]( const QString& text ) { Q_EMIT sendToScratchpad( text ); };
         hooks.replaceScratchpad
             = [ this ]( const QString& text ) { Q_EMIT replaceDataInScratchpad( text ); };
+        hooks.canCopyMatches = [ this ]( AbstractLogView* fromView ) {
+            return ( fromView == logMainView_ || fromView == filteredView_ )
+                   && canSelectAllMatches();
+        };
+        hooks.copyMatches = [ this ] { selectAllMatches( false, true ); };
         hooks.saveSplitterSizes = [ this ]() { saveSplitterSizes(); };
         hooks.exitView = [ this ]( AbstractLogView* fromView ) {
             if ( fromView == logMainView_ ) {

@@ -160,6 +160,122 @@ class DoubleCheckedPredicateRuleTest(unittest.TestCase):
         self.assertEqual(scan(text), [])
 
 
+class UnicodeFilterFixtureRuleTest(unittest.TestCase):
+    BAD = r'widget.searchFor( QStringLiteral( "ERROR\\w+" ) );'
+    GOOD = r'widget.searchFor( QStringLiteral( "ERROR[a-z]+" ) );'
+    RULE = "unicode-filter-fixture"
+
+    def assert_flagged(self, text, line=1):
+        self.assertEqual([(f.rule, f.line) for f in scan(text)], [(self.RULE, line)])
+
+    def test_incident_and_single_file_equivalent_are_flagged(self):
+        for text in (
+            self.BAD,
+            r'visitor.replaceSearch( QStringLiteral( "ERROR (\\w+)" ) );',
+            r'widget->searchFor( "ERROR\\W*" );',
+            r'widget.searchFor( QStringLiteral( R"query(ERROR\w{1,})query" ) );',
+        ):
+            with self.subTest(text=text):
+                self.assert_flagged(text)
+
+    def test_ascii_and_bounded_or_escaped_word_classes_are_allowed(self):
+        for text in (
+            self.GOOD,
+            r'widget.searchFor( QStringLiteral( "ERROR\\w{1,8}" ) );',
+            r'widget.searchFor( QStringLiteral( "ERROR\\\\w+" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR\\w+)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w+])" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR\Q\w+\E)" ) );',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(scan(text), [])
+
+    def test_repeated_character_classes_containing_word_escapes_are_flagged(self):
+        for text in (
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w]+)" ) );',
+            r'widget.searchFor( QStringLiteral( "ERROR[\\w]+" ) );',
+            r'visitor.replaceSearch( QStringLiteral( R"(ERROR[A-Z\W]*)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[^\w]{2,})" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[]\w]+)" ) );',
+        ):
+            with self.subTest(text=text):
+                self.assert_flagged(text)
+
+    def test_character_class_literals_bounded_repeats_and_unicode_allowance(self):
+        for text in (
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w+])" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w+]{1,3})" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\\w]+)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\Q\w\E]+)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\Q]\w+\E]+)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w]+)" ) );'
+            ' // lint-allow: unicode-filter-regex -- Unicode classes are the contract.',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(scan(text), [])
+
+    def test_quick_find_and_direct_qt_matching_are_not_filter_compilation(self):
+        for text in (
+            r'pattern->changeSearchPattern( QStringLiteral( "ERROR \\w+" ), false, true, false );',
+            r'QRegularExpression expression{ QStringLiteral( "ERROR\\w+" ) };',
+            r'widget.searchForward( QStringLiteral( "ERROR\\w+" ) );',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(scan(text), [])
+
+    def test_comments_and_literal_call_lookalikes_are_ignored(self):
+        for text in (
+            "// " + self.BAD,
+            "/* " + self.BAD + " */",
+            'const auto example = R"example(' + self.BAD + ')example";',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(scan(text), [])
+
+    def test_multiline_concatenated_literals_are_one_query(self):
+        text = '\nwidget.searchFor(\n    QStringLiteral( "ERROR"\n                    "\\\\w" "+" ) );\n'
+        self.assert_flagged(text, line=2)
+
+    def test_intentional_unicode_needs_a_real_comment_and_reason(self):
+        marker = "// lint-allow: unicode-filter-regex -- Unicode word semantics are under test."
+        self.assertEqual(scan(self.BAD + " " + marker), [])
+        multiline = 'widget.searchFor(\n    QStringLiteral( "ERROR\\\\w+" )\n); ' + marker
+        self.assertEqual(scan(multiline), [])
+        for suffix in (
+            "// lint-allow: unicode-filter-regex",
+            "// lint-allow: unicode-filter-regex --",
+            "// lint-allow: unicode-filter-regex --   ",
+            "// lint-allow: test-timing",
+            'const auto fake = "' + marker + '";',
+        ):
+            with self.subTest(suffix=suffix):
+                self.assert_flagged(self.BAD + " " + suffix)
+        self.assert_flagged(marker + "\n" + self.BAD, line=2)
+        self.assert_flagged(
+            r'widget.searchFor( QStringLiteral( "ERROR\\w+ // lint-allow: unicode-filter-regex -- fake" ) );'
+        )
+
+    def test_unclosed_call_does_not_turn_a_later_marker_into_an_allowance(self):
+        self.assert_flagged(
+            'widget.searchFor( QStringLiteral( "ERROR\\\\w+" );\n'
+            '// lint-allow: unicode-filter-regex -- belongs to some other call\n'
+        )
+
+    def test_real_filter_fixtures_reject_reintroducing_the_incident(self):
+        for relative, old, replacement in (
+            ("tests/ui/foldercrawler_test.cpp", r'"ERROR\\w+"', '"ERROR[a-z]+"'),
+            ("tests/ui/crawlerwidget_test.cpp", r'"ERROR (\\w+)"', '"ERROR ([a-z]+)"'),
+        ):
+            with self.subTest(path=relative):
+                text = (REPO_ROOT / relative).read_text()
+                good = text.replace(old, replacement)
+                self.assertIn(replacement, good)
+                self.assertFalse(any(f.rule == self.RULE for f in scan(good, relative)))
+                for unsafe in (old, old.replace(r"\\w+", r"[\\w]+")):
+                    mutant = good.replace(replacement, unsafe, 1)
+                    self.assertTrue(any(f.rule == self.RULE for f in scan(mutant, relative)))
+
+
 class PerfBudgetRuleTest(unittest.TestCase):
     CASE = 'TEST_CASE( "fast path", "[.perf]" )\n{\n%s\n}\n'
 

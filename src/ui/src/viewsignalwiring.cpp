@@ -48,6 +48,17 @@ void ViewSignalWiring::wireView( AbstractLogView* view )
                  [ this, view ]() { hooks_.replaceScratchpad( view->getSelectedText() ); } );
     }
 
+    if ( hooks_.canCopyMatches && hooks_.copyMatches ) {
+        connect( view, &AbstractLogView::contextMenuAboutToShow, this,
+                 [ this, view ] { view->setCopyMatchesEnabled( hooks_.canCopyMatches( view ) ); } );
+        connect( view, &AbstractLogView::copyMatchesRequested, this, [ this, view ] {
+            // A menu can remain open while its query or active pane changes.
+            if ( hooks_.canCopyMatches( view ) ) {
+                hooks_.copyMatches();
+            }
+        } );
+    }
+
     connect( view, QOverload<const QString&>::of( &AbstractLogView::addToSearch ), this,
              [ this ]( const QString& selection ) { addToSearch( selection ); } );
     connect( view, QOverload<const QString&>::of( &AbstractLogView::replaceSearch ), this,

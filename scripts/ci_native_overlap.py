@@ -121,15 +121,17 @@ def object_command(build, *, windows=False):
         inputs = [word.replace("\\", "/") for word in inputs]
     reachable = set(inputs)
     targets = object_targets(build, reachable, windows=windows)
-    # Keep expensive test links inside the overlap window as well. The existing
-    # aggregate is the project's authoritative C++ test build scope. Never run
-    # the tests until final native artifact verification has completed.
+    # Keep native-independent test and benchmark links inside the overlap window.
+    # CMake owns their exact CI scope; package applications remain deferred. Never
+    # run the tests until final native artifact verification has completed.
     listed = subprocess.run(["ninja", "-t", "targets", "all"], cwd=build,
                             check=True, capture_output=True, text=True)
     available = {line.rsplit(": ", 1)[0] for line in listed.stdout.splitlines()}
-    test_aggregates = ["klogg_test_build"] if "klogg_test_build" in available else [
-        name for name in available if Path(name).name == "klogg_test_build"]
-    for target in test_aggregates:
+    aggregates = []
+    for aggregate in ("klogg_test_build", "klogg_benchmark_build"):
+        aggregates += [aggregate] if aggregate in available else [
+            name for name in available if Path(name).name == aggregate]
+    for target in aggregates:
         dependencies = subprocess.run(["ninja", "-t", "graph", target], cwd=build,
                                       check=True, capture_output=True, text=True)
         # Ninja 1.12 inputs omits some direct executable inputs of phony nodes;
@@ -137,8 +139,8 @@ def object_command(build, *, windows=False):
         if (".app/Contents/MacOS/" in dependencies.stdout
                 or (windows and re.search(r'label="(?:[^"\n]*[/\\])?(?:klogg|klogg_portable|klogg_grep)\.exe"',
                                           dependencies.stdout))):
-            raise ValueError("test preparation unexpectedly depends on a package app link")
-    targets += sorted(test_aggregates)
+            raise ValueError("native preparation unexpectedly depends on a package app link: " + target)
+    targets += sorted(aggregates)
     wrapper = build / ".klogg-prepare.ninja"
     wrapper.write_text("include build.ninja\nbuild klogg_prepare_objects: phony "
                        + " ".join(ninja_escape(target) for target in targets) + "\n", encoding="utf-8")

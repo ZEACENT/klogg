@@ -19,13 +19,15 @@
 
 #include <catch2/catch.hpp>
 
-#include <QShortcut>
-#include <QSignalSpy>
+#include <QAction>
 #include <QLineEdit>
-#include <QProxyStyle>
+#include <QMenu>
 #include <QPointer>
+#include <QProxyStyle>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QSignalBlocker>
+#include <QSignalSpy>
 #include <QSpinBox>
 #include <QStyle>
 #include <QTemporaryFile>
@@ -57,9 +59,10 @@
 #include "streaminglogdata.h"
 
 #include "crawlerwidget.h"
-#include "quickfindpattern.h"
 #include "infoline.h"
 #include "platform/platform_input.h"
+#include "quickfindpattern.h"
+#include "searchtoolbar.h"
 #include "shortcuts.h"
 
 static const qint64 SL_NB_LINES = 100LL;
@@ -4054,6 +4057,176 @@ SCENARIO( "Crawler widget color labels apply to every line of a multi-line selec
     }
 }
 
+namespace {
+QAction* refreshedCopyMatchesAction( AbstractLogView* view )
+{
+    auto* const action = view->findChild<QAction*>( QStringLiteral( "copyMatchesAction" ) );
+    REQUIRE( action != nullptr );
+    const auto menus = view->findChildren<QMenu*>( QString{}, Qt::FindDirectChildrenOnly );
+    for ( auto* menu : menus ) {
+        if ( menu->actions().contains( action ) ) {
+            REQUIRE( QMetaObject::invokeMethod( menu, "aboutToShow", Qt::DirectConnection ) );
+            return action;
+        }
+    }
+    FAIL( "Copy Matches must belong to the log-view context menu" );
+    return nullptr;
+}
+} // namespace
+
+TEST_CASE( "Crawler context Copy Matches extracts all Filter captures from either view",
+           "[ui][match-selection][context-copy-matches]" )
+{
+    const bool fromMainView = GENERATE( false, true );
+    const bool cancel = GENERATE( false, true );
+    CAPTURE( fromMainView, cancel );
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    file.write( "ERROR one\ncontext\nERROR two\n" );
+    file.flush();
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+    visitor.crawler->show();
+    visitor.setUseRegexp( true );
+    visitor.replaceSearch( QStringLiteral( "ERROR ([a-z]+)" ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
+    Q_EMIT visitor.mainView()->markLines( { 1_lnum } );
+    visitor.changeContextLinesMode( 3 );
+    visitor.changeContextLinesValue( 1 );
+    session.quickFindPattern()->changeSearchPattern( QStringLiteral( "context" ), false, true,
+                                                     false );
+    auto* const origin = fromMainView
+                             ? visitor.mainView()
+                             : static_cast<AbstractLogView*>( visitor.activeFilteredView() );
+    origin->selectAll();
+    auto* const action = refreshedCopyMatchesAction( origin );
+    REQUIRE( action->text() == QStringLiteral( "Copy Matches" ) );
+    REQUIRE( action->isEnabled() );
+    REQUIRE( action->shortcuts().isEmpty() );
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ visitor.activeFilteredView(), &AbstractLogView::matchSelectionFinished };
+    action->trigger();
+    if ( cancel ) {
+        visitor.activeFilteredView()->cancelMatchSelection();
+        REQUIRE( copied.count() == 1 );
+        REQUIRE_FALSE( copied.at( 0 ).at( 0 ).toBool() );
+        REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "unchanged" ) );
+        return;
+    }
+    REQUIRE( copied.safeWait( 5000 ) );
+    REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
+    const auto contextCopy = QApplication::clipboard()->text();
+    REQUIRE( QString{ contextCopy }.replace( "\r\n", "\n" ) == QStringLiteral( "one\ntwo" ) );
+
+    SafeQSignalSpy documentCopy{ visitor.activeFilteredView(),
+                                 &AbstractLogView::matchSelectionFinished };
+    REQUIRE( visitor.crawler->selectAllMatches( false, true ) );
+    REQUIRE( documentCopy.safeWait( 5000 ) );
+    REQUIRE( documentCopy.at( 0 ).at( 0 ).toBool() );
+    REQUIRE( QApplication::clipboard()->text() == contextCopy );
+}
+
+TEST_CASE( "Crawler context Copy Matches rechecks readiness at menu opening and activation",
+           "[ui][match-selection][context-copy-matches]" )
+{
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    file.write( "ERROR one\ncontext\nERROR two\n" );
+    file.flush();
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+    auto* const origin = visitor.mainView();
+    auto* const action = refreshedCopyMatchesAction( origin );
+    REQUIRE_FALSE( action->isEnabled() );
+    visitor.replaceSearch( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
+    refreshedCopyMatchesAction( origin );
+    REQUIRE( action->isEnabled() );
+    auto* const source = visitor.rawFilteredData();
+    source->updateSearch( 0_lnum, LineNumber{ visitor.rawLogData()->getNbLine().get() } );
+    REQUIRE_FALSE( source->isSearchComplete() );
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ visitor.activeFilteredView(), &AbstractLogView::matchSelectionFinished };
+    // The menu was enabled before the update. Activation must check again.
+    action->trigger();
+    REQUIRE_FALSE( visitor.activeFilteredView()->hasMatchSelection() );
+    refreshedCopyMatchesAction( origin );
+    REQUIRE_FALSE( action->isEnabled() );
+    REQUIRE( waitUiState( [ & ] { return source->isSearchComplete(); } ) );
+    REQUIRE( copied.count() == 0 );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "unchanged" ) );
+    refreshedCopyMatchesAction( origin );
+    REQUIRE( action->isEnabled() );
+
+    SECTION( "no matching rows" )
+    {
+        visitor.replaceSearch( QStringLiteral( "absent" ) );
+        REQUIRE( waitUiState( [ & ] { return source->isSearchComplete(); } ) );
+    }
+    SECTION( "inverse filter" )
+    {
+        auto* const toolbar = visitor.crawler->findChild<SearchToolbar*>();
+        REQUIRE( toolbar != nullptr );
+        toolbar->setInverse( true );
+        visitor.replaceSearch( QStringLiteral( "ERROR" ) );
+        REQUIRE( waitUiState( [ & ] { return source->isSearchComplete(); } ) );
+        REQUIRE( source->getNbMatches() > 0_lcount );
+    }
+    SECTION( "boolean filter" )
+    {
+        auto* const toolbar = visitor.crawler->findChild<SearchToolbar*>();
+        REQUIRE( toolbar != nullptr );
+        toolbar->setBoolean( true );
+        visitor.replaceSearch( QStringLiteral( "\"ERROR\" or \"context\"" ) );
+        REQUIRE( waitUiState( [ & ] { return source->isSearchComplete(); } ) );
+        REQUIRE( source->getNbMatches() > 0_lcount );
+    }
+    refreshedCopyMatchesAction( origin );
+    REQUIRE_FALSE( action->isEnabled() );
+}
+
+TEST_CASE( "Crawler context Copy Matches never redirects a stale filtered-pane action",
+           "[ui][match-selection][context-copy-matches]" )
+{
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    file.write( "ERROR one\nWARN two\n" );
+    file.flush();
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+    visitor.crawler->show();
+    visitor.replaceSearch( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
+    auto* const previous = visitor.activeFilteredView();
+    auto* const staleAction = refreshedCopyMatchesAction( previous );
+    REQUIRE( staleAction->isEnabled() );
+    visitor.createAdditionalFilteredView();
+    visitor.replaceSearch( QStringLiteral( "WARN" ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
+    REQUIRE( visitor.activeFilteredView() != previous );
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ visitor.activeFilteredView(), &AbstractLogView::matchSelectionFinished };
+    staleAction->trigger();
+    REQUIRE_FALSE( previous->hasMatchSelection() );
+    REQUIRE_FALSE( visitor.activeFilteredView()->hasMatchSelection() );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "unchanged" ) );
+    refreshedCopyMatchesAction( previous );
+    REQUIRE_FALSE( staleAction->isEnabled() );
+    refreshedCopyMatchesAction( visitor.mainView() )->trigger();
+    REQUIRE( copied.safeWait( 5000 ) );
+    REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "WARN" ) );
+}
+
 TEST_CASE( "Crawler match command selects Filter fragments even with main view focus",
            "[ui][match-selection]" )
 {
@@ -4351,8 +4524,10 @@ TEST_CASE( "Stopped crawler results are not advertised as all matches",
 }
 
 TEST_CASE( "Live crawler match selection is a snapshot and clear retires it",
-           "[ui][live][match-selection]" )
+           "[ui][live][match-selection][context-copy-matches]" )
 {
+    const bool fromContextMenu = GENERATE( false, true );
+    CAPTURE( fromContextMenu );
     auto& config = Configuration::get();
     const auto autoRefresh = config.isSearchAutoRefreshDefault();
     config.setSearchAutoRefreshDefault( false );
@@ -4379,9 +4554,20 @@ TEST_CASE( "Live crawler match selection is a snapshot and clear retires it",
     REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
     SafeQSignalSpy selected( visitor.activeFilteredView(),
                             SIGNAL( matchSelectionFinished( bool ) ) );
-    REQUIRE( visitor.crawler->selectAllMatches() );
+    if ( fromContextMenu ) {
+        auto* const action = refreshedCopyMatchesAction( visitor.mainView() );
+        REQUIRE( action->isEnabled() );
+        action->trigger();
+    }
+    else {
+        REQUIRE( visitor.crawler->selectAllMatches() );
+    }
     REQUIRE( selected.safeWait( 5000 ) );
+    REQUIRE( selected.at( 0 ).at( 0 ).toBool() );
     const auto snapshot = visitor.filteredViewSelectedText();
+    if ( fromContextMenu ) {
+        REQUIRE( QApplication::clipboard()->text() == snapshot );
+    }
     REQUIRE( QString{ snapshot }.replace( "\r\n", "\n" ) == QStringLiteral( "ERROR\nERROR" ) );
 
     SafeQSignalSpy appended( source, &SearchableLogData::loadingFinished );

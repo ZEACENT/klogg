@@ -209,6 +209,8 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void refreshMatchSelection();
     // Ordinary Copy can arrive before the batched selection is published.
     bool deferCopyUntilMatchSelection();
+    // The document owns Filter scope and completion, not the clicked row.
+    void setCopyMatchesEnabled( bool enabled );
     // Inject a read-only mark source (for views without LogFilteredData, e.g.
     // the folder main view and folder results view). Subclass lineType()
     // overrides OR in LineTypeFlags::Mark from it; the LogViewNextMark/PrevMark
@@ -309,6 +311,8 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     virtual void selectPrevMark();
 
   Q_SIGNALS:
+    void contextMenuAboutToShow();
+    void copyMatchesRequested();
     void matchSelectionFinished( bool completed );
     void matchSelectionProgress( quint64 processed, quint64 total );
     // Sent up to the MainWindow to enable/disable the follow mode
@@ -626,6 +630,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     QMenu* popupMenu_;
     QAction* copyAction_;
     QAction* copyWithLineNumbersAction_;
+    QAction* copyMatchesAction_;
     QAction* markAction_;
     QAction* deleteMarkAction_;
     QAction* sendToScratchpadAction_;

@@ -59,6 +59,9 @@ class ViewSignalWiring : public QObject {
         // Forward the emitting view's selection to the scratchpad.
         std::function<void( const QString& )> sendToScratchpad;
         std::function<void( const QString& )> replaceScratchpad;
+        // Only the main view or active result pane may request Filter extraction.
+        std::function<bool( AbstractLogView* fromView )> canCopyMatches;
+        std::function<void()> copyMatches;
         // Persist the host splitter's sizes as the default.
         std::function<void()> saveSplitterSizes;
         // Move focus to the host's other view (Space).

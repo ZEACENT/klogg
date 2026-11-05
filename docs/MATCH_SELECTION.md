@@ -45,10 +45,15 @@ longer matches Tab-expanded spaces while Filter matches the underlying Tab.
 - Quick Find uses its originating view's presented data rows, independently of
   the Filter predicate. Headers are excluded. Its scope is frozen when accepted;
   later expansion or insertion of marked/context rows does not enlarge it.
-- Commands invoked while the Quick Find input has focus confirm its typed pattern,
-  including when incremental Quick Find is disabled. Otherwise match commands
-  target the Filter pane. Ordinary selection/copy commands use the active view,
-  not a stale Quick Find origin from a previous interaction.
+- Edit-menu commands and shortcuts invoked while the Quick Find input has focus
+  confirm its typed pattern, including when incremental Quick Find is disabled.
+  Otherwise they target the Filter pane. Ordinary selection/copy commands use the
+  active view, not a stale Quick Find origin from a previous interaction.
+- Context-menu Copy Matches always targets the active Filter results, regardless
+  of the clicked row, manual selection or Quick Find state. The main view routes
+  to the active result pane; a request from an inactive result pane is rejected.
+  The document checks eligibility both when the menu opens and when the action
+  triggers, then uses the existing snapshot selection and copy pipeline.
 - Boolean and inverse Filter predicates do not have a fragment projection and
   remain unsupported for this operation. Ordinary row filtering is unchanged.
 - An incomplete, cancelled or superseded Filter execution is not advertised as a
