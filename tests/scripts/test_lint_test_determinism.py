@@ -190,6 +190,30 @@ class UnicodeFilterFixtureRuleTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(scan(text), [])
 
+    def test_repeated_character_classes_containing_word_escapes_are_flagged(self):
+        for text in (
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w]+)" ) );',
+            r'widget.searchFor( QStringLiteral( "ERROR[\\w]+" ) );',
+            r'visitor.replaceSearch( QStringLiteral( R"(ERROR[A-Z\W]*)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[^\w]{2,})" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[]\w]+)" ) );',
+        ):
+            with self.subTest(text=text):
+                self.assert_flagged(text)
+
+    def test_character_class_literals_bounded_repeats_and_unicode_allowance(self):
+        for text in (
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w+])" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w+]{1,3})" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\\w]+)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\Q\w\E]+)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\Q]\w+\E]+)" ) );',
+            r'widget.searchFor( QStringLiteral( R"(ERROR[\w]+)" ) );'
+            ' // lint-allow: unicode-filter-regex -- Unicode classes are the contract.',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(scan(text), [])
+
     def test_quick_find_and_direct_qt_matching_are_not_filter_compilation(self):
         for text in (
             r'pattern->changeSearchPattern( QStringLiteral( "ERROR \\w+" ), false, true, false );',
@@ -247,8 +271,9 @@ class UnicodeFilterFixtureRuleTest(unittest.TestCase):
                 good = text.replace(old, replacement)
                 self.assertIn(replacement, good)
                 self.assertFalse(any(f.rule == self.RULE for f in scan(good, relative)))
-                mutant = good.replace(replacement, old, 1)
-                self.assertTrue(any(f.rule == self.RULE for f in scan(mutant, relative)))
+                for unsafe in (old, old.replace(r"\\w+", r"[\\w]+")):
+                    mutant = good.replace(replacement, unsafe, 1)
+                    self.assertTrue(any(f.rule == self.RULE for f in scan(mutant, relative)))
 
 
 class PerfBudgetRuleTest(unittest.TestCase):

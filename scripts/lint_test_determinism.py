@@ -124,11 +124,18 @@ CPP_STRING_RE = re.compile(
     r'(?:u8|u|U|L)?(?:R"(?P<delimiter>[^\s()\\]{0,16})\((?P<raw>.*?)\)(?P=delimiter)"'
     r'|"(?P<quoted>(?:\\.|[^"\\])*)")', re.DOTALL
 )
-# Consume literal quoting, character classes and escaped pairs before looking
-# for a repeated word class, so e.g. [\w+] and \Q\w+\E are not misclassified.
+# Distinguish a quantifier after a character class from a literal inside it:
+# [\w]+ repeats a Unicode class, whereas [\w+] does not.
+REGEX_QUOTED = r"\\Q.*?(?:\\E|$)"
+REGEX_UNBOUNDED_REPEAT = r"(?:[+*]|\{\d+,\})"
+REGEX_WORD_ESCAPE_RE = re.compile(
+    REGEX_QUOTED + r"|(?P<word>\\[wW])|\\.", re.DOTALL
+)
 REGEX_WORD_TOKEN_RE = re.compile(
-    r"\\Q.*?(?:\\E|$)|\[(?:\\.|[^\\\]])*\]"
-    r"|(?P<repeat>\\[wW](?:[+*]|\{\d+,\}))|\\.", re.DOTALL
+    REGEX_QUOTED
+    + r"|\[(?P<characters>\^?\]?(?:" + REGEX_QUOTED + r"|\\.|[^\\\]])*)\]"
+    + r"(?P<class_repeat>" + REGEX_UNBOUNDED_REPEAT + r")?"
+    + r"|(?P<repeat>\\[wW]" + REGEX_UNBOUNDED_REPEAT + r")|\\.", re.DOTALL
 )
 UNICODE_FILTER_MARKER_RE = re.compile(
     r"//[ \t]*lint-allow: unicode-filter-regex[ \t]+--[ \t]+\S"
@@ -211,6 +218,18 @@ def _span_has_perf_marker(
     )
 
 
+def _has_unbounded_word_class(pattern: str) -> bool:
+    for token in REGEX_WORD_TOKEN_RE.finditer(pattern):
+        if token.group("repeat"):
+            return True
+        if token.group("class_repeat") and any(
+            escape.group("word")
+            for escape in REGEX_WORD_ESCAPE_RE.finditer(token.group("characters"))
+        ):
+            return True
+    return False
+
+
 def _unicode_filter_findings(
     text: str, code: str, comment_lines: list[str], path: Path
 ) -> list[Finding]:
@@ -228,8 +247,7 @@ def _unicode_filter_findings(
             position = literal.end()
             while position < len(text) and text[position].isspace():
                 position += 1
-        if not any(token.group("repeat")
-                   for token in REGEX_WORD_TOKEN_RE.finditer("".join(parts))):
+        if not _has_unbounded_word_class("".join(parts)):
             continue
 
         start_line = text.count("\n", 0, call.start())
