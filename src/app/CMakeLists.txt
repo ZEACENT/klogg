@@ -68,6 +68,10 @@ set(KLOGG_UI_SOURCES
 
 set(KLOGG_GREP_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/klogg_grep.cpp)
 
+# Console-only local GUI control client: no GUI startup, resources, or Widgets.
+add_executable(kloggctl ${CMAKE_CURRENT_SOURCE_DIR}/kloggctl.cpp)
+target_link_libraries(kloggctl PRIVATE klogg_control klogg_version)
+
 set(MAIN_LIBS
     # klogg_logdata removed - provided by klogg_ui
     # klogg_crash_handler removed - provided by klogg_logdata (transitive)
@@ -89,6 +93,23 @@ add_executable(
   klogg_grep ${MAIN_SOURCES} ${KLOGG_GREP_SOURCES}
   $<TARGET_OBJECTS:klogg_common_resources>
 )
+
+if(APPLE)
+  foreach(target IN ITEMS klogg klogg_portable)
+    # Resolve the bundle path outside the custom command, avoiding an implicit
+    # reverse target edge on older CMake versions. Stage on every requested GUI
+    # build so a CLI-only relink cannot leave a stale bundled executable.
+    set(control_cli_destination "${CMAKE_CURRENT_BINARY_DIR}/${target}-control-cli-$<CONFIG>.txt")
+    file(GENERATE OUTPUT "${control_cli_destination}" CONTENT "$<TARGET_FILE_DIR:${target}>\n")
+    add_custom_target(${target}_control_cli_stage
+      COMMAND ${CMAKE_COMMAND} "-DSOURCE=$<TARGET_FILE:kloggctl>"
+        "-DDESTINATION_FILE=${control_cli_destination}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/StageControlCli.cmake"
+      DEPENDS kloggctl
+      VERBATIM)
+    add_dependencies(${target} ${target}_control_cli_stage)
+  endforeach()
+endif()
 
 add_dependencies(klogg klogg_adb_helper)
 add_dependencies(klogg_portable klogg_adb_helper)
@@ -159,7 +180,7 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
   endif()
 endif()
 
-add_dependencies(ci_build klogg klogg_grep)
+add_dependencies(ci_build klogg klogg_grep kloggctl)
 if(APPLE AND TARGET klogg_stage_adb_helpers)
   add_dependencies(ci_build klogg_stage_adb_helpers)
 endif()

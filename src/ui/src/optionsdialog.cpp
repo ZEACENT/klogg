@@ -63,15 +63,104 @@
 #include "platform/platform_files.h"
 
 #include "optionsdialog.h"
+#include "ui_optionsdialog.h"
+#include "uimessage.h"
 
 static constexpr int PollIntervalMin = 10;
 static constexpr int PollIntervalMax = 3600000;
 
-// Constructor
-OptionsDialog::OptionsDialog( QWidget* parent )
-    : QDialog( parent )
+OptionsDialog::~OptionsDialog() = default;
+
+void OptionsDialog::showControlInstallationResult( const klogg::control::InstallResult& result )
 {
-    setupUi( this );
+    QStringList lines;
+    if ( result.status == klogg::control::InstallStatus::PartialFailure )
+        lines.append( tr( "Installation changed only partially. Inspect the paths below before retrying." ) );
+    lines.append( result.message );
+    if ( !result.executable.isEmpty() )
+        lines.append( tr( "Bundled executable: %1" ).arg( result.executable ) );
+    if ( !result.plannedPaths.isEmpty() )
+        lines.append( tr( "Planned changes:\n%1" ).arg( result.plannedPaths.join( QLatin1Char( '\n' ) ) ) );
+    if ( !result.changedPaths.isEmpty() )
+        lines.append( tr( "Changed:\n%1" ).arg( result.changedPaths.join( QLatin1Char( '\n' ) ) ) );
+    if ( !result.backupPaths.isEmpty() )
+        lines.append( tr( "Backups:\n%1" ).arg( result.backupPaths.join( QLatin1Char( '\n' ) ) ) );
+    if ( result.restartRequired )
+        lines.append( tr( "Running shells keep their environment. Restart your shell; if PATH has not refreshed, sign out and back in." ) );
+    ui_->controlCliStatusLabel->setText( lines.join( QLatin1Char( '\n' ) ) );
+}
+
+void OptionsDialog::checkControlInstallation()
+{
+    showControlInstallationResult( controlInstaller_( klogg::control::InstallAction::Check, {} ) );
+}
+
+void OptionsDialog::changeControlInstallation( klogg::control::InstallAction action )
+{
+    using namespace klogg::control;
+    const bool removing = action == InstallAction::Remove;
+    const auto preview = controlInstaller_(
+        removing ? InstallAction::CheckRemoval : InstallAction::Check, {} );
+    showControlInstallationResult( preview );
+    const bool ready = removing ? preview.status == InstallStatus::Installed
+                               : ( preview.status == InstallStatus::NotInstalled
+                                   || preview.status == InstallStatus::NeedsRepair );
+    if ( !ready || preview.plannedPaths.isEmpty() ) return;
+
+    QMessageBox confirmation( QMessageBox::Question, tr( "kloggctl shell installation" ),
+        ( removing ? tr( "Remove only the managed shell installation at these paths?\n%1" )
+                   : tr( "Install or repair shell access using these paths?\n%1" ) )
+            .arg( preview.plannedPaths.join( QLatin1Char( '\n' ) ) ),
+        QMessageBox::Yes | QMessageBox::No, this );
+    confirmation.setTextFormat( Qt::PlainText );
+    confirmation.setDefaultButton( QMessageBox::No );
+    if ( klogg::ui::execDialog( confirmation ) != QMessageBox::Yes ) return;
+    showControlInstallationResult( controlInstaller_( action, preview.plannedPaths ) );
+}
+
+void OptionsDialog::installControlCli()
+{
+    changeControlInstallation( klogg::control::InstallAction::Install );
+}
+
+void OptionsDialog::removeControlCli()
+{
+    changeControlInstallation( klogg::control::InstallAction::Remove );
+}
+
+// Constructor
+OptionsDialog::OptionsDialog( QWidget* parent, ControlInstaller controlInstaller )
+    : QDialog( parent ), ui_( std::make_unique<Ui::OptionsDialog>() ),
+      controlInstaller_( std::move( controlInstaller ) )
+{
+    ui_->setupUi( this );
+    if ( !controlInstaller_ ) {
+        // Resolve only on explicit action, and retain the same options across
+        // preview/confirmation. Never select an unrelated executable from PATH.
+        controlInstaller_ = [options = std::optional<klogg::control::InstallOptions>{}](
+            klogg::control::InstallAction action, const QStringList& approvedPaths ) mutable {
+            using namespace klogg::control;
+            const bool preview = action == InstallAction::Check || action == InstallAction::CheckRemoval;
+            if ( preview ) {
+                options = defaultInstallOptions( QDir( QCoreApplication::applicationDirPath() )
+                    .filePath( QStringLiteral( KLOGG_CONTROL_EXECUTABLE_NAME ) ) );
+            }
+            if ( !options ) {
+                InstallResult result;
+                result.status = InstallStatus::Unsupported;
+                result.message = tr( "Automatic shell installation is unavailable for this environment. Use the bundled kloggctl by its full path." );
+                return result;
+            }
+            return configureControlInstallation( *options, action, nullptr,
+                                                 preview ? nullptr : &approvedPaths );
+        };
+    }
+    connect( ui_->controlCliCheckButton, &QPushButton::clicked,
+             this, &OptionsDialog::checkControlInstallation );
+    connect( ui_->controlCliInstallButton, &QPushButton::clicked,
+             this, &OptionsDialog::installControlCli );
+    connect( ui_->controlCliRemoveButton, &QPushButton::clicked,
+             this, &OptionsDialog::removeControlCli );
     setSizeGripEnabled( true );
     setMinimumSize( QSize( 640, 520 ) );
 
@@ -93,34 +182,34 @@ OptionsDialog::OptionsDialog( QWidget* parent )
     // LeakSanitizer exit leak in the unit tests).
     QValidator* pollingIntervalValidator
         = new QIntValidator( PollIntervalMin, PollIntervalMax, this );
-    pollIntervalLineEdit->setValidator( pollingIntervalValidator );
+    ui_->pollIntervalLineEdit->setValidator( pollingIntervalValidator );
 
-    connect( buttonBox, &QDialogButtonBox::clicked, this, &OptionsDialog::onButtonBoxClicked );
-    connect( fontFamilyBox, &QComboBox::currentTextChanged, this, &OptionsDialog::updateFontSize );
-    connect( pollingCheckBox, &QCheckBox::toggled, [ this ]( auto ) { this->setupPolling(); } );
-    connect( searchResultsCacheCheckBox, &QCheckBox::toggled,
+    connect( ui_->buttonBox, &QDialogButtonBox::clicked, this, &OptionsDialog::onButtonBoxClicked );
+    connect( ui_->fontFamilyBox, &QComboBox::currentTextChanged, this, &OptionsDialog::updateFontSize );
+    connect( ui_->pollingCheckBox, &QCheckBox::toggled, [ this ]( auto ) { this->setupPolling(); } );
+    connect( ui_->searchResultsCacheCheckBox, &QCheckBox::toggled,
              [ this ]( auto ) { this->setupSearchResultsCache(); } );
-    connect( loggingCheckBox, &QCheckBox::toggled, [ this ]( auto ) { this->setupLogging(); } );
-    connect( openLogFileButton, &QPushButton::clicked, this, &OptionsDialog::openLogFile );
+    connect( ui_->loggingCheckBox, &QCheckBox::toggled, [ this ]( auto ) { this->setupLogging(); } );
+    connect( ui_->openLogFileButton, &QPushButton::clicked, this, &OptionsDialog::openLogFile );
 
-    connect( extractArchivesCheckBox, &QCheckBox::toggled,
+    connect( ui_->extractArchivesCheckBox, &QCheckBox::toggled,
              [ this ]( auto ) { this->setupArchives(); } );
-    connect( hideAnsiColorsCheckBox, &QCheckBox::toggled, this, [ this ]( bool checked ) {
+    connect( ui_->hideAnsiColorsCheckBox, &QCheckBox::toggled, this, [ this ]( bool checked ) {
         if ( checked ) {
-            renderAnsiColorsCheckBox->setChecked( false );
+            ui_->renderAnsiColorsCheckBox->setChecked( false );
         }
     } );
-    connect( renderAnsiColorsCheckBox, &QCheckBox::toggled, this, [ this ]( bool checked ) {
+    connect( ui_->renderAnsiColorsCheckBox, &QCheckBox::toggled, this, [ this ]( bool checked ) {
         if ( checked ) {
-            hideAnsiColorsCheckBox->setChecked( false );
+            ui_->hideAnsiColorsCheckBox->setChecked( false );
         }
     } );
 
-    connect( mainSearchColorButton, &QPushButton::clicked, this, &OptionsDialog::changeMainColor );
-    connect( quickFindColorButton, &QPushButton::clicked, this, &OptionsDialog::changeQfColor );
+    connect( ui_->mainSearchColorButton, &QPushButton::clicked, this, &OptionsDialog::changeMainColor );
+    connect( ui_->quickFindColorButton, &QPushButton::clicked, this, &OptionsDialog::changeQfColor );
 
-    restoreShortcutsDefaults->setText( tr( "Reset to defaults" ) );
-    connect( restoreShortcutsDefaults, &QPushButton::clicked, this,
+    ui_->restoreShortcutsDefaults->setText( tr( "Reset to defaults" ) );
+    connect( ui_->restoreShortcutsDefaults, &QPushButton::clicked, this,
              &OptionsDialog::resetShortcutsDefaults );
 
     updateDialogFromConfig();
@@ -139,16 +228,16 @@ OptionsDialog::OptionsDialog( QWidget* parent )
 void OptionsDialog::setupTabs()
 {
     if ( !klogg::platform::hasExclusiveFileLocks ) {
-        keepFileClosedCheckBox->setVisible( false );
+        ui_->keepFileClosedCheckBox->setVisible( false );
     }
 
 #ifdef Q_OS_MAC
-    minimizeToTrayCheckBox->setVisible( false );
+    ui_->minimizeToTrayCheckBox->setVisible( false );
 #endif
 
 #ifndef KLOGG_HAS_VECTORSCAN
-    regexpEngineLabel->setVisible( false );
-    regexpEngineComboBox->setVisible( false );
+    ui_->regexpEngineLabel->setVisible( false );
+    ui_->regexpEngineComboBox->setVisible( false );
 #endif
 }
 
@@ -157,7 +246,7 @@ void OptionsDialog::setupFontList()
 {
     const auto families = FontUtils::availableFonts();
     for ( const QString& str : families ) {
-        fontFamilyBox->addItem( str );
+        ui_->fontFamilyBox->addItem( str );
     }
 }
 
@@ -167,49 +256,49 @@ void OptionsDialog::setupRegexp()
     QStringList regexpTypes;
     regexpTypes << tr( "Extended Regexp" ) << tr( "Fixed Strings" );
 
-    mainSearchBox->addItems( regexpTypes );
-    quickFindSearchBox->addItems( regexpTypes );
+    ui_->mainSearchBox->addItems( regexpTypes );
+    ui_->quickFindSearchBox->addItems( regexpTypes );
 
     QStringList regexpEngines;
     regexpEngines << tr( "Vectorscan" ) << tr( "Qt" );
 
-    regexpEngineComboBox->addItems( regexpEngines );
+    ui_->regexpEngineComboBox->addItems( regexpEngines );
 }
 
 void OptionsDialog::setupStyles()
 {
-    styleComboBox->clear();
-    styleComboBox->addItem( tr( "Modern" ), StyleManager::ModernKey );
-    styleComboBox->addItem( tr( "System" ), StyleManager::SystemKey );
-    styleComboBox->addItem( tr( "Classic Dark" ), StyleManager::DarkStyleKey );
+    ui_->styleComboBox->clear();
+    ui_->styleComboBox->addItem( tr( "Modern" ), StyleManager::ModernKey );
+    ui_->styleComboBox->addItem( tr( "System" ), StyleManager::SystemKey );
+    ui_->styleComboBox->addItem( tr( "Classic Dark" ), StyleManager::DarkStyleKey );
 
     // Setup theme mode combo box
-    themeModeComboBox->addItem( tr( "Light" ), static_cast<int>( ThemeMode::Light ) );
-    themeModeComboBox->addItem( tr( "Dark" ), static_cast<int>( ThemeMode::Dark ) );
-    themeModeComboBox->addItem( tr( "Auto (Follow System)" ), static_cast<int>( ThemeMode::Auto ) );
+    ui_->themeModeComboBox->addItem( tr( "Light" ), static_cast<int>( ThemeMode::Light ) );
+    ui_->themeModeComboBox->addItem( tr( "Dark" ), static_cast<int>( ThemeMode::Dark ) );
+    ui_->themeModeComboBox->addItem( tr( "Auto (Follow System)" ), static_cast<int>( ThemeMode::Auto ) );
 
     // "Classic Dark" is an inherently dark style; the theme mode selector has
     // no effect on it, so disable it (and explain why) instead of presenting a
     // dead control. The theme mode still applies to "Modern" and "System".
-    connect( styleComboBox, qOverload<int>( &QComboBox::currentIndexChanged ), this,
+    connect( ui_->styleComboBox, qOverload<int>( &QComboBox::currentIndexChanged ), this,
              [ this ]( int ) { updateThemeModeAvailability(); } );
     updateThemeModeAvailability();
 }
 
 void OptionsDialog::updateThemeModeAvailability()
 {
-    const bool classicDark = styleComboBox->currentData() == StyleManager::DarkStyleKey;
+    const bool classicDark = ui_->styleComboBox->currentData() == StyleManager::DarkStyleKey;
 
     if ( classicDark && !themeModePinnedToDark_ ) {
         // Entering Classic Dark: remember the theme-mode the user had selected
         // so it can be restored when leaving, then pin the selector to Dark.
         // An inherently dark style makes the mode selector a no-op, and leaving
         // it showing e.g. "Auto" is confusing.
-        themeModeRestore_ = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+        themeModeRestore_ = static_cast<ThemeMode>( ui_->themeModeComboBox->currentData().toInt() );
         const int darkModeIndex
-            = themeModeComboBox->findData( static_cast<int>( ThemeMode::Dark ) );
+            = ui_->themeModeComboBox->findData( static_cast<int>( ThemeMode::Dark ) );
         if ( darkModeIndex != -1 ) {
-            themeModeComboBox->setCurrentIndex( darkModeIndex );
+            ui_->themeModeComboBox->setCurrentIndex( darkModeIndex );
         }
         themeModePinnedToDark_ = true;
     }
@@ -218,23 +307,23 @@ void OptionsDialog::updateThemeModeAvailability()
         themeModePinnedToDark_ = false;
         if ( themeModeRestore_ ) {
             const int restoreIndex
-                = themeModeComboBox->findData( static_cast<int>( *themeModeRestore_ ) );
+                = ui_->themeModeComboBox->findData( static_cast<int>( *themeModeRestore_ ) );
             if ( restoreIndex != -1 ) {
-                themeModeComboBox->setCurrentIndex( restoreIndex );
+                ui_->themeModeComboBox->setCurrentIndex( restoreIndex );
             }
             themeModeRestore_.reset();
         }
     }
 
-    themeModeComboBox->setEnabled( !classicDark );
-    themeModeLabel->setEnabled( !classicDark );
-    themeModeHintLabel->setVisible( classicDark );
+    ui_->themeModeComboBox->setEnabled( !classicDark );
+    ui_->themeModeLabel->setEnabled( !classicDark );
+    ui_->themeModeHintLabel->setVisible( classicDark );
 }
 
 void OptionsDialog::setupEncodings()
 {
     const auto availableEncodings = EncodingMenu::supportedEncodings();
-    encodingComboBox->addItem( "Auto", -1 );
+    ui_->encodingComboBox->addItem( "Auto", -1 );
 
     std::map<QString, int> allMibs;
 
@@ -248,7 +337,7 @@ void OptionsDialog::setupEncodings()
     }
 
     for ( const auto& codec : allMibs ) {
-        encodingComboBox->addItem( codec.first, codec.second );
+        ui_->encodingComboBox->addItem( codec.first, codec.second );
     }
 }
 
@@ -267,7 +356,7 @@ void OptionsDialog::setupLanguageList()
 
         if ( xml.name() == QString( "language" ) && token == QXmlStreamReader::StartElement ) {
             QXmlStreamAttributes attributes = xml.attributes();
-            languageComboBox->addItem( attributes.value( "name" ).toString(),
+            ui_->languageComboBox->addItem( attributes.value( "name" ).toString(),
                                        attributes.value( "ietfCode" ).toString() );
         }
     }
@@ -279,13 +368,13 @@ void OptionsDialog::setupIosLogSettings()
     // transports. Preferences expose presentation policy only; executable
     // paths, environment detection and free-form arguments are compatibility-
     // backend concerns and have no editable UI.
-    adbAnsiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), adbGroupBox );
+    adbAnsiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), ui_->adbGroupBox );
     adbAnsiOutputCheckBox_->setObjectName( QStringLiteral( "adbAnsiOutputCheckBox" ) );
-    if ( auto* adbLayout = qobject_cast<QVBoxLayout*>( adbGroupBox->layout() ) ) {
+    if ( auto* adbLayout = qobject_cast<QVBoxLayout*>( ui_->adbGroupBox->layout() ) ) {
         adbLayout->addWidget( adbAnsiOutputCheckBox_ );
     }
 
-    iosLogGroupBox_ = new QGroupBox( tr( "iOS Log Stream" ), liveSourceTab );
+    iosLogGroupBox_ = new QGroupBox( tr( "iOS Log Stream" ), ui_->liveSourceTab );
     iosLogGroupBox_->setObjectName( QStringLiteral( "iosLogGroupBox" ) );
 
     auto* layout = new QVBoxLayout( iosLogGroupBox_ );
@@ -294,8 +383,8 @@ void OptionsDialog::setupIosLogSettings()
     iosLogAnsiOutputCheckBox_->setObjectName( QStringLiteral( "iosLogAnsiOutputCheckBox" ) );
     layout->addWidget( iosLogAnsiOutputCheckBox_ );
 
-    const auto insertIndex = std::max( 0, verticalLayout_liveSource->count() - 1 );
-    verticalLayout_liveSource->insertWidget( insertIndex, iosLogGroupBox_ );
+    const auto insertIndex = std::max( 0, ui_->verticalLayout_liveSource->count() - 1 );
+    ui_->verticalLayout_liveSource->insertWidget( insertIndex, iosLogGroupBox_ );
 
 #ifndef Q_OS_MAC
     iosLogGroupBox_->setVisible( false );
@@ -308,7 +397,7 @@ void OptionsDialog::setupLiveSourceSettings()
     // These settings control the behavior of live log streams (ADB logcat, iOS log).
     // Inserted on the File tab alongside the ADB and iOS log stream settings.
 
-    liveSourceGroupBox_ = new QGroupBox( tr( "Live Source" ), liveSourceTab );
+    liveSourceGroupBox_ = new QGroupBox( tr( "Live Source" ), ui_->liveSourceTab );
     liveSourceGroupBox_->setObjectName( QStringLiteral( "liveSourceGroupBox" ) );
 
     auto* layout = new QVBoxLayout( liveSourceGroupBox_ );
@@ -402,8 +491,8 @@ void OptionsDialog::setupLiveSourceSettings()
     layout->addWidget( helpLabel );
 
     // Insert before the spacer at the bottom of the File tab layout
-    const auto insertIndex = std::max( 0, verticalLayout_liveSource->count() - 1 );
-    verticalLayout_liveSource->insertWidget( insertIndex, liveSourceGroupBox_ );
+    const auto insertIndex = std::max( 0, ui_->verticalLayout_liveSource->count() - 1 );
+    ui_->verticalLayout_liveSource->insertWidget( insertIndex, liveSourceGroupBox_ );
 }
 
 void OptionsDialog::setupPanelResetButtons()
@@ -423,15 +512,15 @@ void OptionsDialog::setupPanelResetButtons()
         connect( button, &QPushButton::clicked, this, slot );
     };
 
-    addResetButton( general_tab, QStringLiteral( "resetGeneralDefaultsButton" ),
+    addResetButton( ui_->general_tab, QStringLiteral( "resetGeneralDefaultsButton" ),
                     &OptionsDialog::resetGeneralDefaults );
-    addResetButton( viewTab, QStringLiteral( "resetViewDefaultsButton" ),
+    addResetButton( ui_->viewTab, QStringLiteral( "resetViewDefaultsButton" ),
                     &OptionsDialog::resetViewDefaults );
-    addResetButton( file_watch_tab, QStringLiteral( "resetFileDefaultsButton" ),
+    addResetButton( ui_->file_watch_tab, QStringLiteral( "resetFileDefaultsButton" ),
                     &OptionsDialog::resetFileDefaults );
-    addResetButton( liveSourceTab, QStringLiteral( "resetLiveSourceDefaultsButton" ),
+    addResetButton( ui_->liveSourceTab, QStringLiteral( "resetLiveSourceDefaultsButton" ),
                     &OptionsDialog::resetLiveSourceDefaults );
-    addResetButton( advanced_tab, QStringLiteral( "resetAdvancedDefaultsButton" ),
+    addResetButton( ui_->advanced_tab, QStringLiteral( "resetAdvancedDefaultsButton" ),
                     &OptionsDialog::resetAdvancedDefaults );
 }
 
@@ -444,7 +533,7 @@ void OptionsDialog::standardizeLayoutSpacing()
     static constexpr int kTabLayoutSpacing = 6;
 
     const QList<QWidget*> tabs
-        = { general_tab, viewTab, file_watch_tab, liveSourceTab, shortcutsTab, advanced_tab };
+        = { ui_->general_tab, ui_->viewTab, ui_->file_watch_tab, ui_->liveSourceTab, ui_->shortcutsTab, ui_->advanced_tab };
 
     for ( auto* tab : tabs ) {
         if ( !tab ) {
@@ -468,36 +557,36 @@ void OptionsDialog::standardizeLayoutSpacing()
 
 void OptionsDialog::setupPolling()
 {
-    pollIntervalLineEdit->setEnabled( pollingCheckBox->isChecked() );
+    ui_->pollIntervalLineEdit->setEnabled( ui_->pollingCheckBox->isChecked() );
 }
 
 void OptionsDialog::setupSearchResultsCache()
 {
-    searchCacheSpinBox->setEnabled( searchResultsCacheCheckBox->isChecked() );
+    ui_->searchCacheSpinBox->setEnabled( ui_->searchResultsCacheCheckBox->isChecked() );
 }
 
 void OptionsDialog::setupLogging()
 {
-    verbositySpinBox->setEnabled( loggingCheckBox->isChecked() );
+    ui_->verbositySpinBox->setEnabled( ui_->loggingCheckBox->isChecked() );
 
     // Update log file path display
-    if ( loggingCheckBox->isChecked() ) {
+    if ( ui_->loggingCheckBox->isChecked() ) {
         const auto logFilePath = logging::getLogFilePath();
         if ( !logFilePath.isEmpty() ) {
-            logFilePathLabel->setText( tr( "Log file: %1" ).arg( logFilePath ) );
-            logFilePathLabel->setVisible( true );
-            openLogFileButton->setVisible( true );
-            openLogFileButton->setEnabled( true );
+            ui_->logFilePathLabel->setText( tr( "Log file: %1" ).arg( logFilePath ) );
+            ui_->logFilePathLabel->setVisible( true );
+            ui_->openLogFileButton->setVisible( true );
+            ui_->openLogFileButton->setEnabled( true );
         }
         else {
-            logFilePathLabel->setText( tr( "Log file: Console output only" ) );
-            logFilePathLabel->setVisible( true );
-            openLogFileButton->setVisible( false );
+            ui_->logFilePathLabel->setText( tr( "Log file: Console output only" ) );
+            ui_->logFilePathLabel->setVisible( true );
+            ui_->openLogFileButton->setVisible( false );
         }
     }
     else {
-        logFilePathLabel->setVisible( false );
-        openLogFileButton->setVisible( false );
+        ui_->logFilePathLabel->setVisible( false );
+        ui_->openLogFileButton->setVisible( false );
     }
 }
 
@@ -511,7 +600,7 @@ void OptionsDialog::openLogFile()
 
 void OptionsDialog::setupArchives()
 {
-    extractArchivesAlwaysCheckBox->setEnabled( extractArchivesCheckBox->isChecked() );
+    ui_->extractArchivesAlwaysCheckBox->setEnabled( ui_->extractArchivesCheckBox->isChecked() );
 }
 
 // Convert a regexp type to its index in the list
@@ -593,97 +682,98 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     const auto configuredFamily = configuredFont.family();
     const auto configuredPointSize = configuredFont.pointSize();
 
-    int familyIndex = fontFamilyBox->findText( configuredFamily );
+    int familyIndex = ui_->fontFamilyBox->findText( configuredFamily );
     if ( familyIndex == -1 && !configuredFamily.isEmpty() ) {
-        fontFamilyBox->addItem( configuredFamily );
-        familyIndex = fontFamilyBox->findText( configuredFamily );
+        ui_->fontFamilyBox->addItem( configuredFamily );
+        familyIndex = ui_->fontFamilyBox->findText( configuredFamily );
     }
     if ( familyIndex != -1 ) {
-        fontFamilyBox->setCurrentIndex( familyIndex );
+        ui_->fontFamilyBox->setCurrentIndex( familyIndex );
     }
 
-    updateFontSizePreservingSelection( fontFamilyBox->currentText(), configuredPointSize );
+    updateFontSizePreservingSelection( ui_->fontFamilyBox->currentText(), configuredPointSize );
 
-    lineSpacingSpinBox->setValue( config.lineSpacingPercent() );
-    fontSmoothCheckBox->setChecked( config.forceFontAntialiasing() );
-    boldFontCheckBox->setChecked( config.useBoldFont() );
-    wrapTextCheckBox->setChecked( config.useTextWrap() );
-    enableQtHiDpiCheckBox->setChecked( config.enableQtHighDpi() );
-    scaleRoundingComboBox->setCurrentIndex( config.scaleFactorRounding() - 1 );
+    ui_->lineSpacingSpinBox->setValue( config.lineSpacingPercent() );
+    ui_->fontSmoothCheckBox->setChecked( config.forceFontAntialiasing() );
+    ui_->boldFontCheckBox->setChecked( config.useBoldFont() );
+    ui_->wrapTextCheckBox->setChecked( config.useTextWrap() );
+    ui_->enableQtHiDpiCheckBox->setChecked( config.enableQtHighDpi() );
+    ui_->scaleRoundingComboBox->setCurrentIndex( config.scaleFactorRounding() - 1 );
 
     // Language
-    auto langIdx = languageComboBox->findData( { config.language() } );
+    auto langIdx = ui_->languageComboBox->findData( { config.language() } );
     if ( langIdx == -1 ) {
         langIdx = 0;
     }
-    languageComboBox->setCurrentIndex( langIdx );
+    ui_->languageComboBox->setCurrentIndex( langIdx );
 
     // Theme mode is set before the style: selecting Classic Dark pins the theme
     // selector to Dark via the style combo's change handler, which must read
     // the configured mode here rather than the pre-init default.
     const auto themeMode = config.themeMode();
-    const int themeModeIndex = themeModeComboBox->findData( static_cast<int>( themeMode ) );
+    const int themeModeIndex = ui_->themeModeComboBox->findData( static_cast<int>( themeMode ) );
     if ( themeModeIndex != -1 ) {
-        themeModeComboBox->setCurrentIndex( themeModeIndex );
+        ui_->themeModeComboBox->setCurrentIndex( themeModeIndex );
     }
     else {
-        themeModeComboBox->setCurrentIndex( 2 ); // Default to Auto
+        ui_->themeModeComboBox->setCurrentIndex( 2 ); // Default to Auto
     }
 
     const auto style = config.style();
-    const int styleIndex = styleComboBox->findData( style );
-    styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
+    const int styleIndex = ui_->styleComboBox->findData( style );
+    ui_->styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
 
     // Reflect the saved style in the theme-selector availability (the style
     // combo's own index change already fires the handler, but not when the
     // saved style matches the current selection).
     updateThemeModeAvailability();
 
-    hideAnsiColorsCheckBox->setChecked( config.hideAnsiColorSequences() );
-    renderAnsiColorsCheckBox->setChecked( !config.hideAnsiColorSequences()
+    ui_->hideAnsiColorsCheckBox->setChecked( config.hideAnsiColorSequences() );
+    ui_->renderAnsiColorsCheckBox->setChecked( !config.hideAnsiColorSequences()
                                           && config.renderAnsiColorSequences() );
 
     // Regexp types
-    mainSearchBox->setCurrentIndex( getRegexpTypeIndex( config.mainRegexpType() ) );
+    ui_->mainSearchBox->setCurrentIndex( getRegexpTypeIndex( config.mainRegexpType() ) );
     mainSearchColor_ = config.mainSearchBackColor();
-    HighlighterEdit::updateIcon( mainSearchColorButton, mainSearchColor_ );
-    quickFindSearchBox->setCurrentIndex( getRegexpTypeIndex( config.quickfindRegexpType() ) );
+    HighlighterEdit::updateIcon( ui_->mainSearchColorButton, mainSearchColor_ );
+    ui_->quickFindSearchBox->setCurrentIndex( getRegexpTypeIndex( config.quickfindRegexpType() ) );
     qfSearchColor_ = config.qfBackColor();
-    HighlighterEdit::updateIcon( quickFindColorButton, qfSearchColor_ );
-    regexpEngineComboBox->setCurrentIndex( getRegexpEngineIndex( config.regexpEngine() ) );
-    autoRunSearchOnAddCheckBox->setChecked( config.autoRunSearchOnPatternChange() );
-    showAllFilteredWhenEmptyCheckBox->setChecked( config.showAllInFilteredViewWhenSearchEmpty() );
+    HighlighterEdit::updateIcon( ui_->quickFindColorButton, qfSearchColor_ );
+    ui_->regexpEngineComboBox->setCurrentIndex( getRegexpEngineIndex( config.regexpEngine() ) );
+    ui_->autoRunSearchOnAddCheckBox->setChecked( config.autoRunSearchOnPatternChange() );
+    ui_->showAllFilteredWhenEmptyCheckBox->setChecked( config.showAllInFilteredViewWhenSearchEmpty() );
 
-    highlightMainSearchCheckBox->setChecked( config.mainSearchHighlight() );
-    variateHighlightCheckBox->setChecked( config.variateMainSearchHighlight() );
-    incrementalCheckBox->setChecked( config.isQuickfindIncremental() );
-    caseSensitiveCheckBox->setChecked( !config.isSearchIgnoreCaseDefault() );
-    logicalCombiningCheckBox->setChecked( config.isSearchLogicalCombiningDefault() );
-    autoRefreshCheckBox->setChecked( config.isSearchAutoRefreshDefault() );
+    ui_->highlightMainSearchCheckBox->setChecked( config.mainSearchHighlight() );
+    ui_->variateHighlightCheckBox->setChecked( config.variateMainSearchHighlight() );
+    ui_->incrementalCheckBox->setChecked( config.isQuickfindIncremental() );
+    ui_->caseSensitiveCheckBox->setChecked( !config.isSearchIgnoreCaseDefault() );
+    ui_->logicalCombiningCheckBox->setChecked( config.isSearchLogicalCombiningDefault() );
+    ui_->autoRefreshCheckBox->setChecked( config.isSearchAutoRefreshDefault() );
 
     // Color label match defaults live in HighlighterSetCollection (the single
     // source of truth shared with the context-menu toggles), not in
     // Configuration; the dialog only mirrors them.
     const auto colorLabelDefaults = HighlighterSetCollection::get().quickHighlighterDefaults();
-    colorLabelsIgnoreCaseCheckBox->setChecked( colorLabelDefaults.ignoreCase );
-    colorLabelsWholeWordCheckBox->setChecked( colorLabelDefaults.wholeWord );
+    ui_->colorLabelsIgnoreCaseCheckBox->setChecked( colorLabelDefaults.ignoreCase );
+    ui_->colorLabelsWholeWordCheckBox->setChecked( colorLabelDefaults.wholeWord );
 
     // Polling
-    nativeFileWatchCheckBox->setChecked( config.nativeFileWatchEnabled() );
-    fastModificationDetectionCheckBox->setChecked( config.fastModificationDetection() );
-    pollingCheckBox->setChecked( config.pollingEnabled() );
-    pollIntervalLineEdit->setText( QString::number( config.pollIntervalMs() ) );
-    allowFollowOnScrollCheckBox->setChecked( config.allowFollowOnScroll() );
+    ui_->nativeFileWatchCheckBox->setChecked( config.nativeFileWatchEnabled() );
+    ui_->fastModificationDetectionCheckBox->setChecked( config.fastModificationDetection() );
+    ui_->pollingCheckBox->setChecked( config.pollingEnabled() );
+    ui_->pollIntervalLineEdit->setText( QString::number( config.pollIntervalMs() ) );
+    ui_->allowFollowOnScrollCheckBox->setChecked( config.allowFollowOnScroll() );
 
     // Last session
-    loadLastSessionCheckBox->setChecked( config.loadLastSession() );
-    followFileOnLoadCheckBox->setChecked( config.followFileOnLoad() );
-    minimizeToTrayCheckBox->setChecked( config.minimizeToTray() );
-    multipleWindowsCheckBox->setChecked( config.allowMultipleWindows() );
-    confirmTabCloseCheckBox->setChecked( config.confirmTabClose() );
+    ui_->loadLastSessionCheckBox->setChecked( config.loadLastSession() );
+    ui_->followFileOnLoadCheckBox->setChecked( config.followFileOnLoad() );
+    ui_->minimizeToTrayCheckBox->setChecked( config.minimizeToTray() );
+    ui_->multipleWindowsCheckBox->setChecked( config.allowMultipleWindows() );
+    ui_->confirmTabCloseCheckBox->setChecked( config.confirmTabClose() );
+    ui_->localControlEnabledCheckBox->setChecked( config.localControlEnabled() );
 
-    loggingCheckBox->setChecked( config.enableLogging() );
-    verbositySpinBox->setValue( config.loggingLevel() );
+    ui_->loggingCheckBox->setChecked( config.enableLogging() );
+    ui_->verbositySpinBox->setValue( config.loggingLevel() );
 
     // Apply logging settings to get log file path
     logging::enableFileLogging( config.enableLogging(),
@@ -692,24 +782,24 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     // Update log file path display immediately
     setupLogging();
 
-    extractArchivesCheckBox->setChecked( config.extractArchives() );
-    extractArchivesAlwaysCheckBox->setChecked( config.extractArchivesAlways() );
+    ui_->extractArchivesCheckBox->setChecked( config.extractArchives() );
+    ui_->extractArchivesAlwaysCheckBox->setChecked( config.extractArchivesAlways() );
 
     // Perf
-    parallelSearchCheckBox->setChecked( config.useParallelSearch() );
-    searchResultsCacheCheckBox->setChecked( config.useSearchResultsCache() );
-    searchCacheSpinBox->setValue( static_cast<int>( config.searchResultsCacheLines() ) );
-    indexReadBufferSpinBox->setValue( config.indexReadBufferSizeMb() );
-    searchReadBufferSpinBox->setValue( config.searchReadBufferSizeLines() );
-    keepFileClosedCheckBox->setChecked( config.keepFileClosed() );
-    compressedIndexCheckBox->setChecked( config.useCompressedIndex() );
-    optimizeForNotLatinEncodingsCheckBox->setChecked( config.optimizeForNotLatinEncodings() );
+    ui_->parallelSearchCheckBox->setChecked( config.useParallelSearch() );
+    ui_->searchResultsCacheCheckBox->setChecked( config.useSearchResultsCache() );
+    ui_->searchCacheSpinBox->setValue( static_cast<int>( config.searchResultsCacheLines() ) );
+    ui_->indexReadBufferSpinBox->setValue( config.indexReadBufferSizeMb() );
+    ui_->searchReadBufferSpinBox->setValue( config.searchReadBufferSizeLines() );
+    ui_->keepFileClosedCheckBox->setChecked( config.keepFileClosed() );
+    ui_->compressedIndexCheckBox->setChecked( config.useCompressedIndex() );
+    ui_->optimizeForNotLatinEncodingsCheckBox->setChecked( config.optimizeForNotLatinEncodings() );
 
     // version checking
-    checkForNewVersionCheckBox->setChecked( config.versionCheckingEnabled() );
+    ui_->checkForNewVersionCheckBox->setChecked( config.versionCheckingEnabled() );
 
     // downloads
-    verifySslCheckBox->setChecked( config.verifySslPeers() );
+    ui_->verifySslCheckBox->setChecked( config.verifySslPeers() );
     if ( adbAnsiOutputCheckBox_ ) {
         adbAnsiOutputCheckBox_->setChecked( config.adbLogcatAnsiOutputEnabled() );
     }
@@ -730,18 +820,18 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
         liveSourceRollingBackupCountSpinBox_->setValue( config.liveCaptureRollingBackupCount() );
     }
 
-    const auto encodingIndex = encodingComboBox->findData( config.defaultEncodingMib() );
-    encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
+    const auto encodingIndex = ui_->encodingComboBox->findData( config.defaultEncodingMib() );
+    ui_->encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
 
     buildShortcutsTable( false );
 
     const auto& savedSearches = SavedSearches::get();
-    searchHistorySpinBox->setValue( savedSearches.historySize() );
+    ui_->searchHistorySpinBox->setValue( savedSearches.historySize() );
 
     const auto& recentFiles = RecentFiles::get();
-    filesHistoryMaxItemsSpinBox->setMinimum( 1 );
-    filesHistoryMaxItemsSpinBox->setMaximum( MAX_RECENT_FILES );
-    filesHistoryMaxItemsSpinBox->setValue( recentFiles.filesHistoryMaxItems() );
+    ui_->filesHistoryMaxItemsSpinBox->setMinimum( 1 );
+    ui_->filesHistoryMaxItemsSpinBox->setMaximum( MAX_RECENT_FILES );
+    ui_->filesHistoryMaxItemsSpinBox->setValue( recentFiles.filesHistoryMaxItems() );
 }
 
 //
@@ -751,7 +841,7 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
 void OptionsDialog::updateFontSize( const QString& fontFamily )
 {
     bool ok = false;
-    const auto oldFontSize = fontSizeBox->currentText().toInt( &ok );
+    const auto oldFontSize = ui_->fontSizeBox->currentText().toInt( &ok );
     updateFontSizePreservingSelection( fontFamily, ok ? oldFontSize : -1 );
 }
 
@@ -760,25 +850,25 @@ void OptionsDialog::updateFontSizePreservingSelection( const QString& fontFamily
 {
     const auto sizes = FontUtils::availableFontSizes( fontFamily );
 
-    fontSizeBox->clear();
+    ui_->fontSizeBox->clear();
     for ( int size : sizes ) {
-        fontSizeBox->addItem( QString::number( size ) );
+        ui_->fontSizeBox->addItem( QString::number( size ) );
     }
 
     if ( preferredPointSize > 0
-         && fontSizeBox->findText( QString::number( preferredPointSize ) ) == -1 ) {
+         && ui_->fontSizeBox->findText( QString::number( preferredPointSize ) ) == -1 ) {
         auto insertIndex = 0;
-        while ( insertIndex < fontSizeBox->count()
-                && fontSizeBox->itemText( insertIndex ).toInt() < preferredPointSize ) {
+        while ( insertIndex < ui_->fontSizeBox->count()
+                && ui_->fontSizeBox->itemText( insertIndex ).toInt() < preferredPointSize ) {
             ++insertIndex;
         }
-        fontSizeBox->insertItem( insertIndex, QString::number( preferredPointSize ) );
+        ui_->fontSizeBox->insertItem( insertIndex, QString::number( preferredPointSize ) );
     }
 
     // Now restore the size we had before
-    int i = fontSizeBox->findText( QString::number( preferredPointSize ) );
+    int i = ui_->fontSizeBox->findText( QString::number( preferredPointSize ) );
     if ( i != -1 ) {
-        fontSizeBox->setCurrentIndex( i );
+        ui_->fontSizeBox->setCurrentIndex( i );
     }
 }
 
@@ -787,7 +877,7 @@ void OptionsDialog::changeMainColor()
     QColor newColor;
     if ( HighlighterEdit::showColorPicker( mainSearchColor_, newColor ) ) {
         mainSearchColor_ = newColor;
-        HighlighterEdit::updateIcon( mainSearchColorButton, mainSearchColor_ );
+        HighlighterEdit::updateIcon( ui_->mainSearchColorButton, mainSearchColor_ );
     }
 }
 
@@ -796,7 +886,7 @@ void OptionsDialog::changeQfColor()
     QColor newColor;
     if ( HighlighterEdit::showColorPicker( qfSearchColor_, newColor ) ) {
         qfSearchColor_ = newColor;
-        HighlighterEdit::updateIcon( quickFindColorButton, qfSearchColor_ );
+        HighlighterEdit::updateIcon( ui_->quickFindColorButton, qfSearchColor_ );
     }
 }
 
@@ -805,37 +895,38 @@ void OptionsDialog::resetGeneralDefaults()
     const Configuration defaults;
     const SavedSearches defaultSavedSearches;
 
-    mainSearchBox->setCurrentIndex( getRegexpTypeIndex( defaults.mainRegexpType() ) );
+    ui_->mainSearchBox->setCurrentIndex( getRegexpTypeIndex( defaults.mainRegexpType() ) );
     mainSearchColor_ = defaults.mainSearchBackColor();
-    HighlighterEdit::updateIcon( mainSearchColorButton, mainSearchColor_ );
-    quickFindSearchBox->setCurrentIndex( getRegexpTypeIndex( defaults.quickfindRegexpType() ) );
+    HighlighterEdit::updateIcon( ui_->mainSearchColorButton, mainSearchColor_ );
+    ui_->quickFindSearchBox->setCurrentIndex( getRegexpTypeIndex( defaults.quickfindRegexpType() ) );
     qfSearchColor_ = defaults.qfBackColor();
-    HighlighterEdit::updateIcon( quickFindColorButton, qfSearchColor_ );
+    HighlighterEdit::updateIcon( ui_->quickFindColorButton, qfSearchColor_ );
 
-    highlightMainSearchCheckBox->setChecked( defaults.mainSearchHighlight() );
-    variateHighlightCheckBox->setChecked( defaults.variateMainSearchHighlight() );
-    incrementalCheckBox->setChecked( defaults.isQuickfindIncremental() );
-    caseSensitiveCheckBox->setChecked( !defaults.isSearchIgnoreCaseDefault() );
-    logicalCombiningCheckBox->setChecked( defaults.isSearchLogicalCombiningDefault() );
-    autoRefreshCheckBox->setChecked( defaults.isSearchAutoRefreshDefault() );
-    autoRunSearchOnAddCheckBox->setChecked( defaults.autoRunSearchOnPatternChange() );
-    showAllFilteredWhenEmptyCheckBox->setChecked( defaults.showAllInFilteredViewWhenSearchEmpty() );
+    ui_->highlightMainSearchCheckBox->setChecked( defaults.mainSearchHighlight() );
+    ui_->variateHighlightCheckBox->setChecked( defaults.variateMainSearchHighlight() );
+    ui_->incrementalCheckBox->setChecked( defaults.isQuickfindIncremental() );
+    ui_->caseSensitiveCheckBox->setChecked( !defaults.isSearchIgnoreCaseDefault() );
+    ui_->logicalCombiningCheckBox->setChecked( defaults.isSearchLogicalCombiningDefault() );
+    ui_->autoRefreshCheckBox->setChecked( defaults.isSearchAutoRefreshDefault() );
+    ui_->autoRunSearchOnAddCheckBox->setChecked( defaults.autoRunSearchOnPatternChange() );
+    ui_->showAllFilteredWhenEmptyCheckBox->setChecked( defaults.showAllInFilteredViewWhenSearchEmpty() );
 
     // Compiled defaults (ignore case on, whole word off) come from the
     // QuickHighlighterDefaults struct itself, not from the stored collection.
     const QuickHighlighterDefaults defaultColorLabelDefaults;
-    colorLabelsIgnoreCaseCheckBox->setChecked( defaultColorLabelDefaults.ignoreCase );
-    colorLabelsWholeWordCheckBox->setChecked( defaultColorLabelDefaults.wholeWord );
+    ui_->colorLabelsIgnoreCaseCheckBox->setChecked( defaultColorLabelDefaults.ignoreCase );
+    ui_->colorLabelsWholeWordCheckBox->setChecked( defaultColorLabelDefaults.wholeWord );
 
-    searchHistorySpinBox->setValue( defaultSavedSearches.historySize() );
+    ui_->searchHistorySpinBox->setValue( defaultSavedSearches.historySize() );
 
-    loadLastSessionCheckBox->setChecked( defaults.loadLastSession() );
-    followFileOnLoadCheckBox->setChecked( defaults.followFileOnLoad() );
-    minimizeToTrayCheckBox->setChecked( defaults.minimizeToTray() );
-    multipleWindowsCheckBox->setChecked( defaults.allowMultipleWindows() );
-    confirmTabCloseCheckBox->setChecked( defaults.confirmTabClose() );
+    ui_->loadLastSessionCheckBox->setChecked( defaults.loadLastSession() );
+    ui_->followFileOnLoadCheckBox->setChecked( defaults.followFileOnLoad() );
+    ui_->minimizeToTrayCheckBox->setChecked( defaults.minimizeToTray() );
+    ui_->multipleWindowsCheckBox->setChecked( defaults.allowMultipleWindows() );
+    ui_->confirmTabCloseCheckBox->setChecked( defaults.confirmTabClose() );
+    ui_->localControlEnabledCheckBox->setChecked( defaults.localControlEnabled() );
 
-    checkForNewVersionCheckBox->setChecked( defaults.versionCheckingEnabled() );
+    ui_->checkForNewVersionCheckBox->setChecked( defaults.versionCheckingEnabled() );
 }
 
 void OptionsDialog::resetViewDefaults()
@@ -843,33 +934,33 @@ void OptionsDialog::resetViewDefaults()
     const Configuration defaults;
 
     const auto defaultFont = defaults.mainFont();
-    auto familyIndex = fontFamilyBox->findText( defaultFont.family() );
+    auto familyIndex = ui_->fontFamilyBox->findText( defaultFont.family() );
     if ( familyIndex == -1 ) {
-        fontFamilyBox->addItem( defaultFont.family() );
-        familyIndex = fontFamilyBox->findText( defaultFont.family() );
+        ui_->fontFamilyBox->addItem( defaultFont.family() );
+        familyIndex = ui_->fontFamilyBox->findText( defaultFont.family() );
     }
     if ( familyIndex != -1 ) {
-        fontFamilyBox->setCurrentIndex( familyIndex );
+        ui_->fontFamilyBox->setCurrentIndex( familyIndex );
     }
-    updateFontSizePreservingSelection( fontFamilyBox->currentText(), defaultFont.pointSize() );
-    lineSpacingSpinBox->setValue( defaults.lineSpacingPercent() );
-    fontSmoothCheckBox->setChecked( defaults.forceFontAntialiasing() );
-    boldFontCheckBox->setChecked( defaults.useBoldFont() );
-    wrapTextCheckBox->setChecked( defaults.useTextWrap() );
+    updateFontSizePreservingSelection( ui_->fontFamilyBox->currentText(), defaultFont.pointSize() );
+    ui_->lineSpacingSpinBox->setValue( defaults.lineSpacingPercent() );
+    ui_->fontSmoothCheckBox->setChecked( defaults.forceFontAntialiasing() );
+    ui_->boldFontCheckBox->setChecked( defaults.useBoldFont() );
+    ui_->wrapTextCheckBox->setChecked( defaults.useTextWrap() );
 
-    auto langIdx = languageComboBox->findData( defaults.language() );
-    languageComboBox->setCurrentIndex( langIdx == -1 ? 0 : langIdx );
+    auto langIdx = ui_->languageComboBox->findData( defaults.language() );
+    ui_->languageComboBox->setCurrentIndex( langIdx == -1 ? 0 : langIdx );
 
-    const auto styleIndex = styleComboBox->findData( defaults.style() );
-    styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
+    const auto styleIndex = ui_->styleComboBox->findData( defaults.style() );
+    ui_->styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
     const auto themeModeIndex
-        = themeModeComboBox->findData( static_cast<int>( defaults.themeMode() ) );
-    themeModeComboBox->setCurrentIndex( themeModeIndex == -1 ? 0 : themeModeIndex );
+        = ui_->themeModeComboBox->findData( static_cast<int>( defaults.themeMode() ) );
+    ui_->themeModeComboBox->setCurrentIndex( themeModeIndex == -1 ? 0 : themeModeIndex );
 
-    enableQtHiDpiCheckBox->setChecked( defaults.enableQtHighDpi() );
-    scaleRoundingComboBox->setCurrentIndex( defaults.scaleFactorRounding() - 1 );
-    hideAnsiColorsCheckBox->setChecked( defaults.hideAnsiColorSequences() );
-    renderAnsiColorsCheckBox->setChecked( !defaults.hideAnsiColorSequences()
+    ui_->enableQtHiDpiCheckBox->setChecked( defaults.enableQtHighDpi() );
+    ui_->scaleRoundingComboBox->setCurrentIndex( defaults.scaleFactorRounding() - 1 );
+    ui_->hideAnsiColorsCheckBox->setChecked( defaults.hideAnsiColorSequences() );
+    ui_->renderAnsiColorsCheckBox->setChecked( !defaults.hideAnsiColorSequences()
                                           && defaults.renderAnsiColorSequences() );
 }
 
@@ -878,22 +969,22 @@ void OptionsDialog::resetFileDefaults()
     const Configuration defaults;
     const RecentFiles defaultRecentFiles;
 
-    nativeFileWatchCheckBox->setChecked( defaults.nativeFileWatchEnabled() );
-    fastModificationDetectionCheckBox->setChecked( defaults.fastModificationDetection() );
-    pollingCheckBox->setChecked( defaults.pollingEnabled() );
-    pollIntervalLineEdit->setText( QString::number( defaults.pollIntervalMs() ) );
-    allowFollowOnScrollCheckBox->setChecked( defaults.allowFollowOnScroll() );
+    ui_->nativeFileWatchCheckBox->setChecked( defaults.nativeFileWatchEnabled() );
+    ui_->fastModificationDetectionCheckBox->setChecked( defaults.fastModificationDetection() );
+    ui_->pollingCheckBox->setChecked( defaults.pollingEnabled() );
+    ui_->pollIntervalLineEdit->setText( QString::number( defaults.pollIntervalMs() ) );
+    ui_->allowFollowOnScrollCheckBox->setChecked( defaults.allowFollowOnScroll() );
     setupPolling();
 
-    const auto encodingIndex = encodingComboBox->findData( defaults.defaultEncodingMib() );
-    encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
-    filesHistoryMaxItemsSpinBox->setValue( defaultRecentFiles.filesHistoryMaxItems() );
+    const auto encodingIndex = ui_->encodingComboBox->findData( defaults.defaultEncodingMib() );
+    ui_->encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
+    ui_->filesHistoryMaxItemsSpinBox->setValue( defaultRecentFiles.filesHistoryMaxItems() );
 
-    extractArchivesCheckBox->setChecked( defaults.extractArchives() );
-    extractArchivesAlwaysCheckBox->setChecked( defaults.extractArchivesAlways() );
+    ui_->extractArchivesCheckBox->setChecked( defaults.extractArchives() );
+    ui_->extractArchivesAlwaysCheckBox->setChecked( defaults.extractArchivesAlways() );
     setupArchives();
 
-    verifySslCheckBox->setChecked( defaults.verifySslPeers() );
+    ui_->verifySslCheckBox->setChecked( defaults.verifySslPeers() );
 }
 
 void OptionsDialog::resetLiveSourceDefaults()
@@ -930,19 +1021,19 @@ void OptionsDialog::resetAdvancedDefaults()
 {
     const Configuration defaults;
 
-    regexpEngineComboBox->setCurrentIndex( getRegexpEngineIndex( defaults.regexpEngine() ) );
-    parallelSearchCheckBox->setChecked( defaults.useParallelSearch() );
-    searchResultsCacheCheckBox->setChecked( defaults.useSearchResultsCache() );
-    searchCacheSpinBox->setValue( static_cast<int>( defaults.searchResultsCacheLines() ) );
-    indexReadBufferSpinBox->setValue( defaults.indexReadBufferSizeMb() );
-    searchReadBufferSpinBox->setValue( defaults.searchReadBufferSizeLines() );
-    keepFileClosedCheckBox->setChecked( defaults.keepFileClosed() );
-    compressedIndexCheckBox->setChecked( defaults.useCompressedIndex() );
-    optimizeForNotLatinEncodingsCheckBox->setChecked( defaults.optimizeForNotLatinEncodings() );
+    ui_->regexpEngineComboBox->setCurrentIndex( getRegexpEngineIndex( defaults.regexpEngine() ) );
+    ui_->parallelSearchCheckBox->setChecked( defaults.useParallelSearch() );
+    ui_->searchResultsCacheCheckBox->setChecked( defaults.useSearchResultsCache() );
+    ui_->searchCacheSpinBox->setValue( static_cast<int>( defaults.searchResultsCacheLines() ) );
+    ui_->indexReadBufferSpinBox->setValue( defaults.indexReadBufferSizeMb() );
+    ui_->searchReadBufferSpinBox->setValue( defaults.searchReadBufferSizeLines() );
+    ui_->keepFileClosedCheckBox->setChecked( defaults.keepFileClosed() );
+    ui_->compressedIndexCheckBox->setChecked( defaults.useCompressedIndex() );
+    ui_->optimizeForNotLatinEncodingsCheckBox->setChecked( defaults.optimizeForNotLatinEncodings() );
     setupSearchResultsCache();
 
-    loggingCheckBox->setChecked( defaults.enableLogging() );
-    verbositySpinBox->setValue( defaults.loggingLevel() );
+    ui_->loggingCheckBox->setChecked( defaults.enableLogging() );
+    ui_->verbositySpinBox->setValue( defaults.loggingLevel() );
     setupLogging();
 }
 
@@ -951,33 +1042,33 @@ void OptionsDialog::checkShortcutsOnDuplicate() const
     static constexpr int PRIMARY_COL = 1;
     static constexpr int SECONDARY_COL = 2;
 
-    if ( !shortcutsTable->rowCount() ) {
+    if ( !ui_->shortcutsTable->rowCount() ) {
         return;
     }
 
-    const auto DEFAULT_BACKGROUND = shortcutsTable->item( 0, PRIMARY_COL )->background();
+    const auto DEFAULT_BACKGROUND = ui_->shortcutsTable->item( 0, PRIMARY_COL )->background();
 
-    for ( auto shortcutRow = 0; shortcutRow < shortcutsTable->rowCount(); ++shortcutRow ) {
-        shortcutsTable->item( shortcutRow, PRIMARY_COL )->setBackground( DEFAULT_BACKGROUND );
-        shortcutsTable->item( shortcutRow, SECONDARY_COL )->setBackground( DEFAULT_BACKGROUND );
+    for ( auto shortcutRow = 0; shortcutRow < ui_->shortcutsTable->rowCount(); ++shortcutRow ) {
+        ui_->shortcutsTable->item( shortcutRow, PRIMARY_COL )->setBackground( DEFAULT_BACKGROUND );
+        ui_->shortcutsTable->item( shortcutRow, SECONDARY_COL )->setBackground( DEFAULT_BACKGROUND );
     }
 
     std::unordered_map<std::string, std::pair<int, int>> uniqueShortcuts;
     bool hasDuplicateShortcuts = false;
-    for ( auto shortcutRow = 0; shortcutRow < shortcutsTable->rowCount(); ++shortcutRow ) {
+    for ( auto shortcutRow = 0; shortcutRow < ui_->shortcutsTable->rowCount(); ++shortcutRow ) {
 
         auto hasDuplicates = [ &uniqueShortcuts, shortcutRow, this ]( int ncol ) {
             auto keySequence = static_cast<KeySequencePresenter*>(
-                                   shortcutsTable->cellWidget( shortcutRow, ncol ) )
+                                   ui_->shortcutsTable->cellWidget( shortcutRow, ncol ) )
                                    ->keySequence();
 
             if ( !keySequence.isEmpty() ) {
                 if ( auto it = uniqueShortcuts.find( keySequence.toStdString() );
                      it != uniqueShortcuts.end() ) {
 
-                    shortcutsTable->item( it->second.first, it->second.second )
+                    ui_->shortcutsTable->item( it->second.first, it->second.second )
                         ->setBackground( Qt::red );
-                    shortcutsTable->item( shortcutRow, ncol )->setBackground( Qt::red );
+                    ui_->shortcutsTable->item( shortcutRow, ncol )->setBackground( Qt::red );
 
                     return true;
                 }
@@ -994,13 +1085,13 @@ void OptionsDialog::checkShortcutsOnDuplicate() const
         }
     }
 
-    buttonBox->button( QDialogButtonBox::Ok )->setEnabled( !hasDuplicateShortcuts );
-    buttonBox->button( QDialogButtonBox::Apply )->setEnabled( !hasDuplicateShortcuts );
+    ui_->buttonBox->button( QDialogButtonBox::Ok )->setEnabled( !hasDuplicateShortcuts );
+    ui_->buttonBox->button( QDialogButtonBox::Apply )->setEnabled( !hasDuplicateShortcuts );
 }
 
 int OptionsDialog::updateTranslate()
 {
-    return MainWindow::installLanguage( languageComboBox->currentData().toString() );
+    return MainWindow::installLanguage( ui_->languageComboBox->currentData().toString() );
 }
 
 void OptionsDialog::updateConfigFromDialog()
@@ -1009,52 +1100,53 @@ void OptionsDialog::updateConfigFromDialog()
     auto& config = Configuration::get();
 
     bool fontSizeOk = false;
-    auto fontPointSize = fontSizeBox->currentText().toInt( &fontSizeOk );
+    auto fontPointSize = ui_->fontSizeBox->currentText().toInt( &fontSizeOk );
     if ( !fontSizeOk || fontPointSize <= 0 ) {
         fontPointSize = Configuration{}.mainFont().pointSize();
     }
-    QFont font = QFont( fontFamilyBox->currentText(), fontPointSize );
+    QFont font = QFont( ui_->fontFamilyBox->currentText(), fontPointSize );
     config.setMainFont( font );
-    config.setLineSpacingPercent( lineSpacingSpinBox->value() );
-    config.setForceFontAntialiasing( fontSmoothCheckBox->isChecked() );
-    config.setUseBoldFont( boldFontCheckBox->isChecked() );
-    config.setUseTextWrap( wrapTextCheckBox->isChecked() );
-    config.setEnableQtHighDpi( enableQtHiDpiCheckBox->isChecked() );
-    config.setScaleFactorRounding( scaleRoundingComboBox->currentIndex() + 1 );
+    config.setLineSpacingPercent( ui_->lineSpacingSpinBox->value() );
+    config.setForceFontAntialiasing( ui_->fontSmoothCheckBox->isChecked() );
+    config.setUseBoldFont( ui_->boldFontCheckBox->isChecked() );
+    config.setUseTextWrap( ui_->wrapTextCheckBox->isChecked() );
+    config.setEnableQtHighDpi( ui_->enableQtHiDpiCheckBox->isChecked() );
+    config.setScaleFactorRounding( ui_->scaleRoundingComboBox->currentIndex() + 1 );
 
-    config.setMainRegexpType( getRegexpTypeFromIndex( mainSearchBox->currentIndex() ) );
+    config.setMainRegexpType( getRegexpTypeFromIndex( ui_->mainSearchBox->currentIndex() ) );
     config.setMainSearchBackColor( mainSearchColor_ );
-    config.setEnableMainSearchHighlight( highlightMainSearchCheckBox->isChecked() );
-    config.setVariateMainSearchHighlight( variateHighlightCheckBox->isChecked() );
-    config.setSearchIgnoreCaseDefault( !caseSensitiveCheckBox->isChecked() );
-    config.setSearchAutoRefreshDefault( autoRefreshCheckBox->isChecked() );
-    config.setSearchLogicalCombiningDefault( logicalCombiningCheckBox->isChecked() );
-    config.setQuickfindRegexpType( getRegexpTypeFromIndex( quickFindSearchBox->currentIndex() ) );
+    config.setEnableMainSearchHighlight( ui_->highlightMainSearchCheckBox->isChecked() );
+    config.setVariateMainSearchHighlight( ui_->variateHighlightCheckBox->isChecked() );
+    config.setSearchIgnoreCaseDefault( !ui_->caseSensitiveCheckBox->isChecked() );
+    config.setSearchAutoRefreshDefault( ui_->autoRefreshCheckBox->isChecked() );
+    config.setSearchLogicalCombiningDefault( ui_->logicalCombiningCheckBox->isChecked() );
+    config.setQuickfindRegexpType( getRegexpTypeFromIndex( ui_->quickFindSearchBox->currentIndex() ) );
     config.setQfBackColor( qfSearchColor_ );
-    config.setQuickfindIncremental( incrementalCheckBox->isChecked() );
-    config.setRegexpEnging( getRegexpEngineFromIndex( regexpEngineComboBox->currentIndex() ) );
-    config.setAutoRunSearchOnPatternChange( autoRunSearchOnAddCheckBox->isChecked() );
-    config.setShowAllInFilteredViewWhenSearchEmpty( showAllFilteredWhenEmptyCheckBox->isChecked() );
+    config.setQuickfindIncremental( ui_->incrementalCheckBox->isChecked() );
+    config.setRegexpEnging( getRegexpEngineFromIndex( ui_->regexpEngineComboBox->currentIndex() ) );
+    config.setAutoRunSearchOnPatternChange( ui_->autoRunSearchOnAddCheckBox->isChecked() );
+    config.setShowAllInFilteredViewWhenSearchEmpty( ui_->showAllFilteredWhenEmptyCheckBox->isChecked() );
 
-    config.setNativeFileWatchEnabled( nativeFileWatchCheckBox->isChecked() );
-    config.setPollingEnabled( pollingCheckBox->isChecked() );
-    auto pollInterval = pollIntervalLineEdit->text().toInt();
+    config.setNativeFileWatchEnabled( ui_->nativeFileWatchCheckBox->isChecked() );
+    config.setPollingEnabled( ui_->pollingCheckBox->isChecked() );
+    auto pollInterval = ui_->pollIntervalLineEdit->text().toInt();
     if ( pollInterval < PollIntervalMin )
         pollInterval = PollIntervalMin;
     else if ( pollInterval > PollIntervalMax )
         pollInterval = PollIntervalMax;
 
     config.setPollIntervalMs( pollInterval );
-    config.setFastModificationDetection( fastModificationDetectionCheckBox->isChecked() );
-    config.setAllowFollowOnScroll( allowFollowOnScrollCheckBox->isChecked() );
+    config.setFastModificationDetection( ui_->fastModificationDetectionCheckBox->isChecked() );
+    config.setAllowFollowOnScroll( ui_->allowFollowOnScrollCheckBox->isChecked() );
 
-    config.setLoadLastSession( loadLastSessionCheckBox->isChecked() );
-    config.setFollowFileOnLoad( followFileOnLoadCheckBox->isChecked() );
-    config.setAllowMultipleWindows( multipleWindowsCheckBox->isChecked() );
-    config.setMinimizeToTray( minimizeToTrayCheckBox->isChecked() );
-    config.setConfirmTabClose( confirmTabCloseCheckBox->isChecked() );
-    config.setEnableLogging( loggingCheckBox->isChecked() );
-    config.setLoggingLevel( verbositySpinBox->value() );
+    config.setLoadLastSession( ui_->loadLastSessionCheckBox->isChecked() );
+    config.setFollowFileOnLoad( ui_->followFileOnLoadCheckBox->isChecked() );
+    config.setAllowMultipleWindows( ui_->multipleWindowsCheckBox->isChecked() );
+    config.setMinimizeToTray( ui_->minimizeToTrayCheckBox->isChecked() );
+    config.setConfirmTabClose( ui_->confirmTabCloseCheckBox->isChecked() );
+    config.setLocalControlEnabled( ui_->localControlEnabledCheckBox->isChecked() );
+    config.setEnableLogging( ui_->loggingCheckBox->isChecked() );
+    config.setLoggingLevel( ui_->verbositySpinBox->value() );
 
     // Apply logging settings immediately
     logging::enableFileLogging( config.enableLogging(),
@@ -1063,22 +1155,22 @@ void OptionsDialog::updateConfigFromDialog()
     // Update log file path display
     setupLogging();
 
-    config.setExtractArchives( extractArchivesCheckBox->isChecked() );
-    config.setExtractArchivesAlways( extractArchivesAlwaysCheckBox->isChecked() );
+    config.setExtractArchives( ui_->extractArchivesCheckBox->isChecked() );
+    config.setExtractArchivesAlways( ui_->extractArchivesAlwaysCheckBox->isChecked() );
 
-    config.setUseParallelSearch( parallelSearchCheckBox->isChecked() );
-    config.setUseSearchResultsCache( searchResultsCacheCheckBox->isChecked() );
-    config.setSearchResultsCacheLines( static_cast<unsigned>( searchCacheSpinBox->value() ) );
-    config.setIndexReadBufferSizeMb( indexReadBufferSpinBox->value() );
-    config.setSearchReadBufferSizeLines( searchReadBufferSpinBox->value() );
-    config.setKeepFileClosed( keepFileClosedCheckBox->isChecked() );
-    config.setUseCompressedIndex( compressedIndexCheckBox->isChecked() );
-    config.setOptimizeForNotLatinEncodings( optimizeForNotLatinEncodingsCheckBox->isChecked() );
+    config.setUseParallelSearch( ui_->parallelSearchCheckBox->isChecked() );
+    config.setUseSearchResultsCache( ui_->searchResultsCacheCheckBox->isChecked() );
+    config.setSearchResultsCacheLines( static_cast<unsigned>( ui_->searchCacheSpinBox->value() ) );
+    config.setIndexReadBufferSizeMb( ui_->indexReadBufferSpinBox->value() );
+    config.setSearchReadBufferSizeLines( ui_->searchReadBufferSpinBox->value() );
+    config.setKeepFileClosed( ui_->keepFileClosedCheckBox->isChecked() );
+    config.setUseCompressedIndex( ui_->compressedIndexCheckBox->isChecked() );
+    config.setOptimizeForNotLatinEncodings( ui_->optimizeForNotLatinEncodingsCheckBox->isChecked() );
 
     // version checking
-    config.setVersionCheckingEnabled( checkForNewVersionCheckBox->isChecked() );
+    config.setVersionCheckingEnabled( ui_->checkForNewVersionCheckBox->isChecked() );
 
-    config.setVerifySslPeers( verifySslCheckBox->isChecked() );
+    config.setVerifySslPeers( ui_->verifySslCheckBox->isChecked() );
     if ( adbAnsiOutputCheckBox_ ) {
         config.setAdbLogcatAnsiOutputEnabled( adbAnsiOutputCheckBox_->isChecked() );
     }
@@ -1100,7 +1192,7 @@ void OptionsDialog::updateConfigFromDialog()
         config.setLiveCaptureRollingBackupCount( liveSourceRollingBackupCountSpinBox_->value() );
     }
 
-    const auto selectedStyle = styleComboBox->currentData().toString();
+    const auto selectedStyle = ui_->styleComboBox->currentData().toString();
     restartAppMessage = config.style() != selectedStyle;
 
     config.setStyle( selectedStyle );
@@ -1111,7 +1203,7 @@ void OptionsDialog::updateConfigFromDialog()
     // Classic Dark is selected would silently rewrite Auto/Light to Dark and a
     // later switch away from Classic Dark could never restore the earlier mode.
     const auto selectedThemeMode
-        = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+        = static_cast<ThemeMode>( ui_->themeModeComboBox->currentData().toInt() );
     const auto themeMode
         = themeModePinnedToDark_ && themeModeRestore_ ? *themeModeRestore_ : selectedThemeMode;
     const bool themeModeChanged = config.themeMode() != themeMode;
@@ -1122,26 +1214,26 @@ void OptionsDialog::updateConfigFromDialog()
         StyleManager::applyStyle( config.style() );
     }
 
-    config.setHideAnsiColorSequences( hideAnsiColorsCheckBox->isChecked() );
-    config.setRenderAnsiColorSequences( !hideAnsiColorsCheckBox->isChecked()
-                                        && renderAnsiColorsCheckBox->isChecked() );
+    config.setHideAnsiColorSequences( ui_->hideAnsiColorsCheckBox->isChecked() );
+    config.setRenderAnsiColorSequences( !ui_->hideAnsiColorsCheckBox->isChecked()
+                                        && ui_->renderAnsiColorsCheckBox->isChecked() );
 
-    config.setDefaultEncodingMib( encodingComboBox->currentData().toInt() );
+    config.setDefaultEncodingMib( ui_->encodingComboBox->currentData().toInt() );
 
     auto shortcuts = config.shortcuts();
-    for ( auto shortcutRow = 0; shortcutRow < shortcutsTable->rowCount(); ++shortcutRow ) {
+    for ( auto shortcutRow = 0; shortcutRow < ui_->shortcutsTable->rowCount(); ++shortcutRow ) {
         QStringList actionKeys;
 
         auto primaryKeySequence
-            = static_cast<KeySequencePresenter*>( shortcutsTable->cellWidget( shortcutRow, 1 ) )
+            = static_cast<KeySequencePresenter*>( ui_->shortcutsTable->cellWidget( shortcutRow, 1 ) )
                   ->keySequence();
         auto secondaryKeySequence
-            = static_cast<KeySequencePresenter*>( shortcutsTable->cellWidget( shortcutRow, 2 ) )
+            = static_cast<KeySequencePresenter*>( ui_->shortcutsTable->cellWidget( shortcutRow, 2 ) )
                   ->keySequence();
         actionKeys << primaryKeySequence << secondaryKeySequence;
 
         auto action
-            = shortcutsTable->item( shortcutRow, 0 )->data( Qt::UserRole ).toString().toStdString();
+            = ui_->shortcutsTable->item( shortcutRow, 0 )->data( Qt::UserRole ).toString().toStdString();
         shortcuts[ action ] = actionKeys;
     }
     config.setShortcuts( shortcuts );
@@ -1150,28 +1242,28 @@ void OptionsDialog::updateConfigFromDialog()
     // An empty selector (the i18n resource is unavailable, e.g. in the unit
     // tests) has no selection to compare against; a missing selector must not
     // demand a restart, which would otherwise block Apply on a modal warning.
-    if ( !languageComboBox->currentData().isNull() ) {
-        restartAppMessage |= config.language() != languageComboBox->currentData().toString();
+    if ( !ui_->languageComboBox->currentData().isNull() ) {
+        restartAppMessage |= config.language() != ui_->languageComboBox->currentData().toString();
     }
     updateTranslate();
-    config.setLanguage( languageComboBox->currentData().toString() );
-    retranslateUi( this );
+    config.setLanguage( ui_->languageComboBox->currentData().toString() );
+    ui_->retranslateUi( this );
 
     config.save();
 
     auto& savedSearches = SavedSearches::get();
-    savedSearches.setHistorySize( searchHistorySpinBox->value() );
+    savedSearches.setHistorySize( ui_->searchHistorySpinBox->value() );
     savedSearches.save();
 
     auto& recentFiles = RecentFiles::get();
-    recentFiles.setFilesHistoryMaxItems( filesHistoryMaxItemsSpinBox->value() );
+    recentFiles.setFilesHistoryMaxItems( ui_->filesHistoryMaxItemsSpinBox->value() );
     recentFiles.save();
 
     // Same non-Configuration-persistable pattern as SavedSearches/RecentFiles
     // above: HighlighterSetCollection owns the color-label match defaults.
     auto& highlighterSetCollection = HighlighterSetCollection::get();
     highlighterSetCollection.setQuickHighlighterDefaults(
-        { colorLabelsIgnoreCaseCheckBox->isChecked(), colorLabelsWholeWordCheckBox->isChecked() } );
+        { ui_->colorLabelsIgnoreCaseCheckBox->isChecked(), ui_->colorLabelsWholeWordCheckBox->isChecked() } );
     highlighterSetCollection.save();
 
     if ( restartAppMessage ) {
@@ -1186,7 +1278,7 @@ void OptionsDialog::updateConfigFromDialog()
 
 void OptionsDialog::onButtonBoxClicked( QAbstractButton* button )
 {
-    QDialogButtonBox::ButtonRole role = buttonBox->buttonRole( button );
+    QDialogButtonBox::ButtonRole role = ui_->buttonBox->buttonRole( button );
     if ( ( role == QDialogButtonBox::AcceptRole ) || ( role == QDialogButtonBox::ApplyRole ) ) {
         updateConfigFromDialog();
     }
@@ -1260,7 +1352,7 @@ void KeySequencePresenter::showEditor()
 
 void OptionsDialog::buildShortcutsTable( bool useDefaultsOnly )
 {
-    shortcutsTable->setRowCount( 0 );
+    ui_->shortcutsTable->setRowCount( 0 );
 
     const auto& config = Configuration::get();
     auto shortcutList = ShortcutAction::defaultShortcutList();
@@ -1271,41 +1363,41 @@ void OptionsDialog::buildShortcutsTable( bool useDefaultsOnly )
     }
 
     for ( const auto& [ action, shortCut ] : shortcutList ) {
-        auto currentRow = shortcutsTable->rowCount();
-        shortcutsTable->insertRow( currentRow );
+        auto currentRow = ui_->shortcutsTable->rowCount();
+        ui_->shortcutsTable->insertRow( currentRow );
 
         auto keyItem = new QTableWidgetItem( shortCut.name );
         keyItem->setFlags( Qt::ItemIsEnabled | Qt::ItemIsSelectable );
         keyItem->setData( Qt::UserRole, QString::fromStdString( action ) );
-        shortcutsTable->setItem( currentRow, 0, keyItem );
+        ui_->shortcutsTable->setItem( currentRow, 0, keyItem );
 
         auto primaryKeySequence = new KeySequencePresenter(
             shortCut.keySequence.size() > 0 ? shortCut.keySequence[ 0 ] : "" );
-        shortcutsTable->setItem( currentRow, 1, new QTableWidgetItem );
-        shortcutsTable->setCellWidget( currentRow, 1, primaryKeySequence );
+        ui_->shortcutsTable->setItem( currentRow, 1, new QTableWidgetItem );
+        ui_->shortcutsTable->setCellWidget( currentRow, 1, primaryKeySequence );
         connect( primaryKeySequence, &KeySequencePresenter::edited, this,
                  &OptionsDialog::checkShortcutsOnDuplicate );
 
         auto secondaryKeySequence = new KeySequencePresenter(
             shortCut.keySequence.size() > 1 ? shortCut.keySequence[ 1 ] : "" );
-        shortcutsTable->setItem( currentRow, 2, new QTableWidgetItem );
-        shortcutsTable->setCellWidget( currentRow, 2, secondaryKeySequence );
+        ui_->shortcutsTable->setItem( currentRow, 2, new QTableWidgetItem );
+        ui_->shortcutsTable->setCellWidget( currentRow, 2, secondaryKeySequence );
         connect( secondaryKeySequence, &KeySequencePresenter::edited, this,
                  &OptionsDialog::checkShortcutsOnDuplicate );
     }
 
-    shortcutsTable->horizontalHeader()->setSectionResizeMode( QHeaderView::Stretch );
-    shortcutsTable->horizontalHeader()->setSectionResizeMode( 0, QHeaderView::Interactive );
-    shortcutsTable->horizontalHeader()->setMinimumSectionSize( 150 );
-    shortcutsTable->resizeColumnToContents( 0 );
-    shortcutsTable->setHorizontalHeaderItem( 0, new QTableWidgetItem( tr( "Action" ) ) );
-    shortcutsTable->setHorizontalHeaderItem( 1, new QTableWidgetItem( tr( "Primary shortcut" ) ) );
-    shortcutsTable->setHorizontalHeaderItem( 2,
+    ui_->shortcutsTable->horizontalHeader()->setSectionResizeMode( QHeaderView::Stretch );
+    ui_->shortcutsTable->horizontalHeader()->setSectionResizeMode( 0, QHeaderView::Interactive );
+    ui_->shortcutsTable->horizontalHeader()->setMinimumSectionSize( 150 );
+    ui_->shortcutsTable->resizeColumnToContents( 0 );
+    ui_->shortcutsTable->setHorizontalHeaderItem( 0, new QTableWidgetItem( tr( "Action" ) ) );
+    ui_->shortcutsTable->setHorizontalHeaderItem( 1, new QTableWidgetItem( tr( "Primary shortcut" ) ) );
+    ui_->shortcutsTable->setHorizontalHeaderItem( 2,
                                              new QTableWidgetItem( tr( "Secondary shortcut" ) ) );
 
     // in case if user set duplicate keys and after restores defaults
     // it is need to enable back standard buttons
     checkShortcutsOnDuplicate();
 
-    shortcutsTable->sortItems( 0 );
+    ui_->shortcutsTable->sortItems( 0 );
 }

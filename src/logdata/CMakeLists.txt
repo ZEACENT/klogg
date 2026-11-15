@@ -10,6 +10,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingdetector.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingutils.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logsnapshot.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/logsnapshot.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/folderscanarena.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderscanarena.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchengine.h

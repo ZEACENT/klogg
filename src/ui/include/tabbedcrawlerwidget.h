@@ -130,6 +130,10 @@ class TabbedCrawlerWidget : public QTabWidget {
   Q_SIGNALS:
     void tabsReordered();
     void crawlerAdded();
+    // Synchronous notification from membership/order/title mutation paths,
+    // including every move during a drag (tabsReordered is drag-coalesced).
+    // Consumers compare their exposed metadata to deduplicate semantic no-ops.
+    void crawlerInventoryChanged();
     void tabsCloseRequested( const QList<QWidget*>& tabs );
 
   protected:

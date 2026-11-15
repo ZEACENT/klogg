@@ -232,6 +232,55 @@
         </widget>
        </item>
        <item>
+        <widget class="QGroupBox" name="localControlBox">
+         <property name="title">
+          <string>Local command-line control</string>
+         </property>
+         <layout class="QVBoxLayout" name="localControlLayout">
+          <item>
+           <widget class="QCheckBox" name="localControlEnabledCheckBox">
+            <property name="text">
+             <string>Allow local command-line control</string>
+            </property>
+            <property name="toolTip">
+             <string>Programs running as your operating-system user can inspect and modify the same review state. No per-program authorization prompts are shown. Disabling control closes its local endpoint and discards pending transactions.</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="controlCliButtonsLayout">
+            <item>
+             <widget class="QPushButton" name="controlCliCheckButton">
+              <property name="text"><string>Check shell installation</string></property>
+              <property name="autoDefault"><bool>false</bool></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="controlCliInstallButton">
+              <property name="text"><string>Install / repair kloggctl...</string></property>
+              <property name="autoDefault"><bool>false</bool></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="controlCliRemoveButton">
+              <property name="text"><string>Remove shell installation...</string></property>
+              <property name="autoDefault"><bool>false</bool></property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <widget class="QLabel" name="controlCliStatusLabel">
+            <property name="text"><string>Shell installation is optional and only changes after confirmation. It does not change the control switch.</string></property>
+            <property name="textFormat"><enum>Qt::PlainText</enum></property>
+            <property name="wordWrap"><bool>true</bool></property>
+            <property name="textInteractionFlags"><set>Qt::TextSelectableByMouse</set></property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
         <widget class="QGroupBox" name="versionCheckingBox">
          <property name="title">
           <string>Version checking options</string>

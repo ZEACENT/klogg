@@ -404,6 +404,14 @@ MainWindow::MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
              [ this ]( int index ) { this->closeTab( index, ActionInitiator::User ); } );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::tabsCloseRequested, this,
              &MainWindow::closeTabs );
+    // Update observation before existing synchronous GUI consumers run. This
+    // projection resolves Session metadata by widget, never by path identity.
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::currentChanged, this,
+             &MainWindow::refreshInventory );
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerInventoryChanged, this,
+             &MainWindow::refreshInventory );
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerAdded, this,
+             &MainWindow::refreshInventory );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::currentChanged, this,
              &MainWindow::currentTabChanged );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerAdded, this,
@@ -459,6 +467,47 @@ MainWindow::MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
     updateTitleBar( "" );
     loadIcons();
     reTranslateUI();
+}
+
+bool MainWindow::TabInventoryEntry::operator==( const TabInventoryEntry& other ) const
+{
+    return tabId == other.tabId && kind == other.kind && documentId == other.documentId
+           && displayName == other.displayName && associatedPath == other.associatedPath
+           && tabTitle == other.tabTitle && widget == other.widget;
+}
+
+MainWindow::InventorySnapshot MainWindow::inventorySnapshot() const
+{
+    return inventory_;
+}
+
+void MainWindow::refreshInventory()
+{
+    auto current = readInventory();
+    if ( current.tabs != inventory_.tabs || current.currentTabId != inventory_.currentTabId ) {
+        current.revision = inventory_.revision + 1;
+        inventory_ = std::move( current );
+    }
+}
+
+MainWindow::InventorySnapshot MainWindow::readInventory() const
+{
+    InventorySnapshot result{ runtimeWindowId_, 0, {}, {} };
+    for ( int index = 0; index < mainTabWidget_.count(); ++index ) {
+        auto* const widget = mainTabWidget_.widget( index );
+        const auto* const document = dynamic_cast<const AbstractCrawlerWidget*>( widget );
+        if ( document == nullptr ) {
+            continue;
+        }
+        result.tabs.push_back( { document->runtimeTabId(), session_.getDocumentKind( document ),
+                                 session_.getDocumentId( document ), session_.getDisplayName( document ),
+                                 session_.getAssociatedPath( document ), mainTabWidget_.tabText( index ),
+                                 widget } );
+        if ( widget == mainTabWidget_.currentWidget() ) {
+            result.currentTabId = document->runtimeTabId();
+        }
+    }
+    return result;
 }
 
 void MainWindow::reloadGeometry()
@@ -2284,9 +2333,7 @@ void MainWindow::exportFilterFavoritesToFile( QString file )
 void MainWindow::options()
 {
     OptionsDialog dialog( this );
-    signalMux_.connect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
-
-    connect( &dialog, &OptionsDialog::optionsChanged, [ this ]() {
+    connect( &dialog, &OptionsDialog::optionsChanged, this, [ this ]() {
         const auto& config = Configuration::get();
         logging::enableFileLogging( config.enableLogging(),
                                     static_cast<logging::LogLevel>( config.loggingLevel() ) );
@@ -2297,10 +2344,11 @@ void MainWindow::options()
         updateShortcuts();
         updateRecentFileActions();
         updateRecentFolderActions();
+        // Use the window's existing configuration fan-out for both views and
+        // application services. A dialog-only mux bypasses application policy.
+        Q_EMIT optionsChanged();
     } );
     dialog.exec();
-
-    signalMux_.disconnect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
 }
 
 void MainWindow::about()

@@ -100,6 +100,19 @@ class FolderSearchResults::ReadSnapshot final : public klogg::LogSnapshot {
                  !item.isMarkRow && record( item ).role == klogg::folder::RecordRole::Match };
     }
 
+    std::optional<uint64_t> sourceBytesForLine( LineNumber index ) const override
+    {
+        const auto& item = at( index );
+        const auto content = source( item );
+        if ( item.isMarkRow ) return content->sourceBytesForLine( item.markLocalLine );
+        const auto& match = record( item );
+        const auto start = match.lineStartByte.get();
+        const auto end = match.lineEndByte.get();
+        if ( start < 0 || end < start || end > content->byteSize() )
+            throw klogg::SnapshotError( "Folder snapshot record extent is invalid" );
+        return static_cast<uint64_t>( end - start );
+    }
+
     QString lineString( LineNumber index ) const override
     {
         const auto& item = at( index );

@@ -977,6 +977,15 @@ stored in the repository.
 ## Proposed Work and Historical Analysis
 
 [BACKLOG.md](BACKLOG.md) records proposals separately from completed work.
+[Transactional review CLI](AGENT_CONTROL_PROPOSAL.md) records the accepted local,
+provider-neutral control design with shared human/programmatic state, optimistic
+transactions, explicit runtime pipeline ownership, and settings-based shell
+integration. The [implementation record](AGENT_CONTROL_IMPLEMENTATION.md) tracks
+the experimental `kloggctl`, local transport, payload-free pane observation,
+bounded asynchronous snapshot reads, label transactions and explicit shell
+installation. Remaining mutation domains and packaged acceptance are not complete. Launcher,
+headless search and test-runner entrypoints remain separate. The single-instance
+file-forwarding channel is not reused as a general control API.
 The Chart Panel and persistent Filters Panel are proposed features, not
 shipped UI. [WRAP_TEXT_ANALYSIS.md](WRAP_TEXT_ANALYSIS.md) preserves historical
 investigation, not the current rendering contract. Current search dispatch,

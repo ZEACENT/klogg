@@ -95,11 +95,28 @@ class FolderCrawlerWidget : public QWidget,
     explicit FolderCrawlerWidget( QWidget* parent = nullptr );
     ~FolderCrawlerWidget() override;
 
+    ReviewControls reviewControls() override
+    {
+        return { searchToolbar_, &colorLabelsController_ };
+    }
+
     FolderCrawlerWidget( const FolderCrawlerWidget& ) = delete;
     FolderCrawlerWidget& operator=( const FolderCrawlerWidget& ) = delete;
 
     // Identify the folder + its (already enumerated, natural-sorted) files.
     void setFolder( const QString& folderPath, const QStringList& filePaths );
+
+    struct MarksSnapshot {
+        uint64_t revision = 0;
+        QHash<QString, std::set<uint64_t>> marks;
+    };
+
+    // Owner-thread detached read of the per-file store shared by every pane.
+    // Keys are the stored file paths; values are zero-based source-model line
+    // indices, NOT stable evidence addresses. Includes hidden/absent-file marks;
+    // does not open sources, select rows, search, or alter presentation. The
+    // owner-local revision advances only when the stored marks change.
+    MarksSnapshot marksSnapshot() const;
 
     // --- Test access / programmatic driving (no UI events needed) ---
     // folderResults()/filteredView() return the ACTIVE pane's objects (keeps
@@ -256,6 +273,8 @@ class FolderCrawlerWidget : public QWidget,
     void followModeChanged( bool follow );
 
   protected:
+    const AbstractLogView* reviewPane( Pane pane ) const override;
+
     // ViewInterface (single-file APIs are no-ops in folder mode).
     void doSetData( std::shared_ptr<SearchableLogData> log_data,
                     std::shared_ptr<LogFilteredData> filtered_data ) override;
@@ -554,6 +573,7 @@ class FolderCrawlerWidget : public QWidget,
     // bullet (LineTypeFlags::Mark) and Next/Prev-mark navigation work, and kept
     // per-file so marks survive switching result files within a session.
     QHash<QString, std::set<uint64_t>> folderMarks_;
+    uint64_t marksRevision_ = 0;
     // MarkProvider over folderMarks_ for the file currently in the main view;
     // reads currentMainFilePath_ live so it stays correct across file swaps.
     class MainViewMarkProvider : public MarkProvider {

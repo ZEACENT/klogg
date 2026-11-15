@@ -26,6 +26,7 @@
 #include <QMenu>
 #include <QProxyStyle>
 #include <QStyleFactory>
+#include <QSignalSpy>
 #include <QTabBar>
 #include <QTimer>
 #include <QTranslator>
@@ -105,6 +106,45 @@ class LiveStatusTranslator : public QTranslator {
         return {};
     }
 };
+
+TEST_CASE( "Tab inventory notifications observe immediate moves and background removal during drag",
+           "[tab-inventory]" )
+{
+    TabbedCrawlerWidget tabs;
+    auto* const first = new DummyCrawlerWidget;
+    auto* const second = new DummyCrawlerWidget;
+    auto* const third = new DummyCrawlerWidget;
+    tabs.addCrawler( first, QStringLiteral( "/inventory/a.log" ) );
+    tabs.addCrawler( second, QStringLiteral( "/inventory/b.log" ) );
+    tabs.addCrawler( third, QStringLiteral( "/inventory/c.log" ) );
+    tabs.setCurrentIndex( 0 );
+    QSignalSpy changed( &tabs, &TabbedCrawlerWidget::crawlerInventoryChanged );
+    QSignalSpy settled( &tabs, &TabbedCrawlerWidget::tabsReordered );
+    QList<QWidget*> observed;
+    QObject::connect( &tabs, &TabbedCrawlerWidget::crawlerInventoryChanged, &tabs, [ & ] {
+        observed.clear();
+        for ( int index = 0; index < tabs.count(); ++index ) {
+            observed.append( tabs.widget( index ) );
+        }
+    } );
+    auto* const bar = qobject_cast<CrawlerTabBar*>( tabs.tabBar() );
+    REQUIRE( bar != nullptr );
+    Q_EMIT bar->tabDragStarted();
+    bar->moveTab( 1, 2 );
+    REQUIRE( changed.count() > 0 );
+    REQUIRE( settled.isEmpty() );
+    REQUIRE( observed == QList<QWidget*>{ first, third, second } );
+    changed.clear();
+    tabs.removeCrawler( 2 );
+    REQUIRE( tabs.currentWidget() == first );
+    REQUIRE( changed.count() > 0 );
+    REQUIRE( observed == QList<QWidget*>{ first, third } );
+    Q_EMIT bar->tabDragFinished();
+    changed.clear();
+    tabs.updateCrawler( 1, QStringLiteral( "New title" ), QStringLiteral( "Tooltip" ) );
+    REQUIRE( changed.count() > 0 );
+    REQUIRE( tabs.tabText( 1 ) == QStringLiteral( "New title" ) );
+}
 
 TEST_CASE( "displayNameForPath is robust to trailing slashes and never blanks a label" )
 {

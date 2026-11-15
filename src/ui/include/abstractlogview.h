@@ -69,6 +69,7 @@
 #include "matchselectionjob.h"
 #include "quickfindmux.h"
 #include "regularexpressionpattern.h"
+#include "reviewpanemetadata.h"
 #include "selection.h"
 #include "viewtools.h"
 #include "wrappedstring.h"
@@ -185,6 +186,16 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();
+    // Owner-thread, payload-free widget state. Row ordinals belong to the
+    // current presentation (including synthetic folder headers), not stable
+    // source addresses. No visible-line map or selection text is materialized.
+    using PaneMetadata = klogg::ReviewPaneMetadata;
+    PaneMetadata paneMetadata() const;
+    // Explicit owner-thread capture, separate from metadata. The provider owns
+    // scope semantics, frozen mapping and lifetime; null/exception means capture
+    // is unsupported/failed. Never falls back to mutable reads or reopening paths.
+    klogg::LogSnapshot::Ptr createPaneSnapshot( klogg::SnapshotScope scope ) const;
+
     // Return the line number of the top line of the view
     LineNumber getTopLine() const;
     // Return the text of the current selection.
@@ -241,7 +252,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     }
 
     using QuickHighlighters = QList<QuickLabelEntry>;
-    void setQuickHighlighters( const std::vector<QuickHighlighters>& wordHighlighters );
+    void setQuickHighlighters( std::vector<QuickHighlighters> wordHighlighters );
 
     void registerShortcuts();
 

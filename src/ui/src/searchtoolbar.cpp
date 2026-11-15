@@ -36,11 +36,13 @@
 #include <QListView>
 #include <QMenu>
 #include <QPushButton>
+#include <QScopedValueRollback>
 #include <QStringListModel>
 #include <QToolButton>
 #include <algorithm>
 #include <iterator>
 #include <limits>
+#include <utility>
 
 #include "configuration.h"
 #include "dispatch_to.h"
@@ -195,6 +197,18 @@ void SearchToolbar::setupWidgets()
 
 void SearchToolbar::setupConnections()
 {
+    // Track the actual editor: folder search/session restore can block the
+    // combo's signals. textEdited precedes textChanged for human input, so
+    // observe both before forwarding any existing host notifications.
+    connect( searchLineEdit_->lineEdit(), &QLineEdit::textEdited, this,
+             &SearchToolbar::updateFilterDraft );
+    connect( searchLineEdit_->lineEdit(), &QLineEdit::textChanged, this,
+             &SearchToolbar::updateFilterDraft );
+    for ( auto* button : { matchCaseButton_, useRegexpButton_, inverseButton_, booleanButton_,
+                          searchRefreshButton_, keepSearchResultsButton_ } ) {
+        connect( button, &QToolButton::toggled, this, &SearchToolbar::updateFilterDraft );
+    }
+
     // Return / search button -> searchRequested (ports 1520-1521 + 1539).
     connect( searchLineEdit_->lineEdit(), &QLineEdit::returnPressed, searchButton_,
              &QToolButton::click );
@@ -241,13 +255,38 @@ void SearchToolbar::setupConnections()
     connect( useRegexpButton_, &QPushButton::toggled, this, [ this ]( bool ) { Q_EMIT optionsChanged(); } );
     connect( booleanButton_, &QPushButton::toggled, this, [ this ]( bool ) { Q_EMIT optionsChanged(); } );
 
-    // inverseButton has NO toggled handler today (only read at pattern-build
-    // time) -- keep it handler-less to preserve behavior.
+    // Inverse changes only the draft revision; retain the existing absence of
+    // an optionsChanged notification (hosts read it at pattern-build time).
 
     // auto-refresh: emit autoRefreshChanged (host runs searchRefreshChangedHandler
     // and forwards searchRefreshChanged to MainWindow). Ports 1622-1623 +
     // 1636-1637.
     connect( searchRefreshButton_, &QPushButton::toggled, this, &SearchToolbar::autoRefreshChanged );
+}
+
+bool SearchToolbar::FilterSpec::operator==( const FilterSpec& other ) const
+{
+    return text == other.text && matchCase == other.matchCase && useRegexp == other.useRegexp
+           && inverse == other.inverse && boolean == other.boolean
+           && autoRefresh == other.autoRefresh && keepResults == other.keepResults;
+}
+
+SearchToolbar::FilterDraftSnapshot SearchToolbar::filterDraftSnapshot() const
+{
+    return filterDraft_;
+}
+
+void SearchToolbar::updateFilterDraft()
+{
+    // Rebuilding the history dropdown temporarily clears/replaces its edit
+    // text, but preserves the draft. Do not count that internal ABA as input.
+    FilterSpec current{ updatingHistoryItems_ ? filterDraft_.filter.text : currentSearchText(),
+                        isMatchCase(), isUseRegexp(), isInverse(), isBoolean(),
+                        isAutoRefresh(), isKeepResultsChecked() };
+    if ( current != filterDraft_.filter ) {
+        filterDraft_.filter = std::move( current );
+        ++filterDraft_.revision;
+    }
 }
 
 RegularExpressionPattern SearchToolbar::currentRegularExpressionPattern() const
@@ -403,6 +442,7 @@ void SearchToolbar::setSearchInProgress( bool busy )
 
 void SearchToolbar::setItems( const QStringList& items )
 {
+    const QScopedValueRollback<bool> updatingHistory( updatingHistoryItems_, true );
     const QString text = searchLineEdit_->lineEdit()->text();
     searchLineEdit_->clear();
     searchLineEdit_->addItems( items );

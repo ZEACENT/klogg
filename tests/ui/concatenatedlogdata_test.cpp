@@ -374,6 +374,46 @@ TEST_CASE( "Setting a concatenated display encoding emits one interpretation cha
     }
 }
 
+TEST_CASE( "Indexed and concatenated snapshot bounds follow retained record extents",
+           "[concatenatedlogdata][snapshot-bounded]" )
+{
+    TestLogSource first, second;
+    REQUIRE( first.create( { "short" } ) );
+    REQUIRE( second.create( { QString( 1024, QLatin1Char( 'x' ) ) } ) );
+    const auto indexed = first.logData->createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( indexed );
+    CHECK( indexed->sourceBytesForLine( 0_lnum ) == std::optional<uint64_t>( 6 ) );
+    CHECK_THROWS_AS( indexed->readLineBounded( 0_lnum, 5, 5 ), klogg::SnapshotLimitError );
+    CHECK( indexed->readLineBounded( 0_lnum, 6, 5 ).text == QStringLiteral( "short" ) );
+    ConcatenatedLogData concat;
+    concat.addSource( first.logData );
+    concat.addSource( second.logData );
+    const auto snapshot = concat.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot );
+    CHECK( snapshot->sourceBytesForLine( 1_lnum ) == std::optional<uint64_t>( 1025 ) );
+    CHECK_THROWS_AS( snapshot->readLineBounded( 1_lnum, 1024, 1024 ), klogg::SnapshotLimitError );
+    CHECK( snapshot->readLineBounded( 1_lnum, 1025, 1024 ).text.size() == 1024 );
+    {
+        QFile file( first.filePath );
+        REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        const auto bytes = QByteArray::fromHex( "fffe41000a004200" );
+        REQUIRE( file.write( bytes ) == bytes.size() );
+    }
+    SafeQSignalSpy finished( first.logData.get(), SIGNAL( loadingFinished( LoadingStatus ) ) );
+    first.logData->reload( QTextCodec::codecForName( "UTF-16LE" ) );
+    REQUIRE( finished.safeWait( 10000 ) );
+    // Index framing and display interpretation are separate owner settings.
+    first.logData->setDisplayEncoding( "UTF-16LE" );
+    const auto tail = first.logData->createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( tail->lineCount() == 2_lcount );
+    CHECK( tail->sourceBytesForLine( 0_lnum ) == std::optional<uint64_t>( 6 ) );
+    CHECK( tail->sourceBytesForLine( 1_lnum ) == std::optional<uint64_t>( 2 ) );
+    INFO( first.logData->getDisplayEncoding()->name().toStdString() );
+    INFO( tail->lineString( 1_lnum ).toUtf8().toHex().toStdString() );
+    CHECK( tail->readLineBounded( 1_lnum, 2, 1 ).text == QStringLiteral( "B" ) );
+    CHECK( snapshot->readLineBounded( 0_lnum, 6, 5 ).text == QStringLiteral( "short" ) );
+}
+
 TEST_CASE( "Concatenated snapshots freeze content labels and global row mappings",
            "[concatenatedlogdata][concatenated-snapshot]" )
 {

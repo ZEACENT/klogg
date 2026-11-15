@@ -20,16 +20,15 @@
 #ifndef KLOGG_COLORLABELSMANAGER_H
 #define KLOGG_COLORLABELSMANAGER_H
 
-#include "abstractlogview.h"
+#include "highlighterset.h"
+#include <QList>
 #include <QStringList>
 #include <optional>
-#include <qobject.h>
-#include <qobjectdefs.h>
 #include <vector>
 
 class ColorLabelsManager {
   public:
-    using QuickHighlightersCollection = std::vector<AbstractLogView::QuickHighlighters>;
+    using QuickHighlightersCollection = std::vector<QList<QuickLabelEntry>>;
 
     // Cap on the number of distinct texts labelled in one bulk action (e.g. a
     // multi-line selection). Every entry becomes one regex evaluated per drawn
@@ -39,6 +38,10 @@ class ColorLabelsManager {
     static constexpr size_t MaxBulkLabelTexts = 1000;
 
     QuickHighlightersCollection colorLabels() const;
+
+    // Includes the cycle position: equal visible entries alone do not imply
+    // that the next GUI cycle operation has the same meaning.
+    bool hasSameState( const ColorLabelsManager& other ) const;
 
     // The QStringList overloads apply the operation to each distinct
     // (non-empty) text; the QString overloads are the single-text case.

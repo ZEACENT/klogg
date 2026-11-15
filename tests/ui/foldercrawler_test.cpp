@@ -76,6 +76,7 @@
 #include "regularexpressionpattern.h"
 #include "savedsearches.h"
 #include "searchtoolbar.h"
+#include "searchablelogdata.h"
 #include "shortcuts.h"
 #include "test_utils.h"
 #include "viewinterface.h"
@@ -997,6 +998,187 @@ TEST_CASE( "FolderCrawlerWidget exposes main-view file info for the status bar",
     REQUIRE( infoB.has_value() );
     REQUIRE( infoB->path == b );
     REQUIRE( infoB->nbLines == 1 );
+}
+
+namespace {
+void runMarksStateSearch( FolderCrawlerWidget& widget, const QString& pattern )
+{
+    widget.searchFor( pattern );
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( widget.isSearchActive() && deadline.elapsed() < 5000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
+    }
+    REQUIRE_FALSE( widget.isSearchActive() );
+}
+} // namespace
+
+TEST_CASE( "Folder mark snapshots retain hidden and absent source marks across neutral restores",
+           "[folder][marks-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "ERROR one\npadding\nERROR two\n" );
+    const auto absent = QDir( dir.path() ).absoluteFilePath( "absent.log" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a } );
+    const auto empty = widget.marksSnapshot();
+    REQUIRE( empty.revision == 0 );
+    REQUIRE( empty.marks.isEmpty() );
+    const auto context = QStringLiteral( R"({"M":{"a.log":[2,1,1],"absent.log":[9]}})" );
+    widget.setViewContext( context );
+    const auto restored = widget.marksSnapshot();
+    REQUIRE( restored.marks.size() == 2 );
+    REQUIRE( restored.marks.value( a ) == std::set<uint64_t>{ 1, 2 } );
+    REQUIRE( restored.marks.value( absent ) == std::set<uint64_t>{ 9 } );
+    REQUIRE( restored.revision == empty.revision + 1 );
+    widget.setViewContext( context );
+    widget.setViewContext( QStringLiteral( R"({"P":"different","M":{"absent.log":[9],"a.log":[1,2]}})" ) );
+    widget.setResultsVisibility( FolderSearchResults::Visibility::Matches );
+    widget.collapseAll();
+    widget.expandAll();
+    REQUIRE( widget.marksSnapshot().marks == restored.marks );
+    REQUIRE( widget.marksSnapshot().revision == restored.revision );
+    REQUIRE( widget.currentMainFilePath().isEmpty() );
+    REQUIRE_FALSE( widget.isSearchActive() );
+
+    // Removing a folder member hides its rows, but the existing mark owner
+    // retains absent-file marks. Report storage, not the empty result layout.
+    REQUIRE( QFile::remove( a ) );
+    runMarksStateSearch( widget, QStringLiteral( "ERROR" ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+    REQUIRE( widget.marksSnapshot().marks == restored.marks );
+    REQUIRE( widget.marksSnapshot().revision == restored.revision );
+
+    // Context restore is one committed replacement, not clear + N additions.
+    widget.setViewContext( QStringLiteral( R"({"M":{"a.log":[0]}})" ) );
+    widget.setViewContext( context );
+    REQUIRE( widget.marksSnapshot().marks == restored.marks );
+    REQUIRE( widget.marksSnapshot().revision == restored.revision + 2 );
+    widget.setViewContext( QStringLiteral( "{}" ) );
+    const auto cleared = widget.marksSnapshot();
+    REQUIRE( cleared.marks.isEmpty() );
+    REQUIRE( cleared.revision == restored.revision + 3 );
+    widget.setViewContext( QStringLiteral( "{}" ) );
+    REQUIRE( widget.marksSnapshot().revision == cleared.revision );
+}
+
+TEST_CASE( "Folder mark revisions share GUI and programmatic edits across kept panes",
+           "[folder][marks-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "ERROR one\nERROR two\n" );
+    const auto b = writeFile( dir, "b.log", "ERROR other\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b } );
+    runMarksStateSearch( widget, QStringLiteral( "ERROR" ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
+    widget.markMainViewLine( 0_lnum );
+    const auto marked = widget.marksSnapshot();
+    REQUIRE( marked.marks.value( a ) == std::set<uint64_t>{ 0 } );
+    REQUIRE( marked.revision == 1 );
+    widget.markMainViewLine( 0_lnum );
+    widget.unmarkMainViewLine( 1_lnum );
+    Q_EMIT widget.mainView()->markLines( { 0_lnum } );
+    Q_EMIT widget.filteredView()->markLines( { 0_lnum, 1_lnum } ); // Header + duplicate.
+    Q_EMIT widget.filteredView()->deleteMarkLines( { 2_lnum } ); // Unmarked source line.
+    REQUIRE( widget.marksSnapshot().revision == marked.revision );
+
+    auto* const keptView = widget.filteredView();
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    runMarksStateSearch( widget, QStringLiteral( "ERROR" ) );
+    REQUIRE( widget.paneCount() == 2 );
+    REQUIRE( widget.marksSnapshot().revision == marked.revision );
+    widget.filteredView()->selectAndDisplayLine( 1_lnum );
+    widget.filteredView()->deleteMarksSelected();
+    widget.filteredView()->markSelected();
+    REQUIRE( widget.marksSnapshot().marks == marked.marks );
+    REQUIRE( widget.marksSnapshot().revision == marked.revision + 2 );
+    // Both the kept pane and main view still resolve into this same store.
+    keptView->selectAndDisplayLine( 1_lnum );
+    keptView->deleteMarksSelected();
+    REQUIRE_FALSE( widget.isMainViewLineMarked( 0_lnum ) );
+    REQUIRE( widget.marksSnapshot().revision == marked.revision + 3 );
+    Q_EMIT widget.mainView()->markLines( { 0_lnum } );
+    REQUIRE( widget.isFilteredResultRowMarked( 1_lnum ) );
+    REQUIRE( widget.marksSnapshot().revision == marked.revision + 4 );
+}
+
+TEST_CASE( "Folder mark snapshots are detached and never drive source or presentation",
+           "[folder][marks-state]" )
+{
+    using ViewAccess = AbstractLogView::access_by<FolderViewTestAccess>;
+    using WidgetAccess = FolderCrawlerWidget::access_by<FolderViewTestAccess>;
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "ERROR one\nERROR two\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a } );
+    runMarksStateSearch( widget, QStringLiteral( "ERROR" ) );
+    widget.filteredView()->selectAndDisplayLine( 1_lnum );
+    widget.filteredView()->markSelected();
+    flushFolderPresentation( widget );
+    const auto before = widget.marksSnapshot();
+    const auto selected = ViewAccess::selectedLines( widget.filteredView() );
+    const auto file = widget.currentMainFilePath();
+    const auto generation = WidgetAccess::searchGeneration( &widget );
+    const auto refreshes = ViewAccess::updateDataCount( widget.filteredView() );
+    auto* const focus = QApplication::focusWidget();
+    QSignalSpy sourceChanges( &widget, &FolderCrawlerWidget::mainViewFileChanged );
+    QSignalSpy searches( widget.searchToolbar(), &SearchToolbar::searchRequested );
+    QSignalSpy focusChanges( qApp, &QApplication::focusChanged );
+    const FolderCrawlerWidget& readOnly = widget;
+    auto detached = readOnly.marksSnapshot();
+    detached.marks[ a ].insert( 999 );
+    detached.marks.clear();
+    REQUIRE( readOnly.marksSnapshot().marks == before.marks );
+    REQUIRE( readOnly.marksSnapshot().revision == before.revision );
+    REQUIRE( ViewAccess::selectedLines( widget.filteredView() ) == selected );
+    REQUIRE( widget.currentMainFilePath() == file ); // lint-allow: platform-fragile -- unchanged-path observation; no selection/event loop after baseline
+    REQUIRE( WidgetAccess::searchGeneration( &widget ) == generation );
+    REQUIRE( ViewAccess::updateDataCount( widget.filteredView() ) == refreshes );
+    REQUIRE( QApplication::focusWidget() == focus );
+    REQUIRE( sourceChanges.isEmpty() );
+    REQUIRE( searches.isEmpty() );
+    REQUIRE( focusChanges.isEmpty() );
+    REQUIRE( before.revision == 1 );
+
+    FolderCrawlerWidget::MarksSnapshot retained;
+    {
+        FolderCrawlerWidget shortLived;
+        shortLived.setFolder( dir.path(), { a } );
+        shortLived.setViewContext( QStringLiteral( R"({"M":{"a.log":[1]}})" ) );
+        retained = shortLived.marksSnapshot();
+    }
+    REQUIRE( retained.marks.value( a ) == std::set<uint64_t>{ 1 } );
+}
+
+TEST_CASE( "Folder source truncation advances marks revision only when that file had marks",
+           "[folder][marks-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", "ERROR one\nERROR two\n" );
+    const auto b = writeFile( dir, "b.log", "ERROR other\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b } );
+    runMarksStateSearch( widget, QStringLiteral( "ERROR" ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
+    widget.setViewContext( QStringLiteral( R"({"M":{"a.log":[0,1],"b.log":[0]}})" ) );
+    const auto before = widget.marksSnapshot();
+    auto* const source = const_cast<SearchableLogData*>( dynamic_cast<const SearchableLogData*>(
+        AbstractLogView::access_by<FolderViewTestAccess>::logData( widget.mainView() ) ) );
+    REQUIRE( source != nullptr );
+    // Deliver the existing source-owner notification directly: filesystem
+    // watcher scheduling is not part of this mark-owner contract.
+    Q_EMIT source->fileChanged( MonitoredFileStatus::Truncated );
+    const auto truncated = widget.marksSnapshot();
+    REQUIRE_FALSE( truncated.marks.contains( a ) );
+    REQUIRE( truncated.marks.value( b ) == std::set<uint64_t>{ 0 } );
+    REQUIRE( truncated.revision == before.revision + 1 );
+    Q_EMIT source->fileChanged( MonitoredFileStatus::Truncated );
+    REQUIRE( widget.marksSnapshot().revision == truncated.revision );
 }
 
 TEST_CASE( "FolderCrawlerWidget main-view marks are per-file and survive swaps", "[folder]" )

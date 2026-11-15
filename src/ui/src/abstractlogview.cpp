@@ -1541,9 +1541,11 @@ void AbstractLogView::setSearchPattern( const RegularExpressionPattern& pattern 
 }
 
 void AbstractLogView::setQuickHighlighters(
-    const std::vector<QuickHighlighters>& quickHighlighters )
+    std::vector<QuickHighlighters> quickHighlighters )
 {
-    quickHighlighters_ = quickHighlighters;
+    // Callers may prepare the projection before a multi-owner commit. Adopting
+    // that owned value does not allocate or expose a partial label collection.
+    quickHighlighters_.swap( quickHighlighters );
     forceRefresh();
 }
 
@@ -2041,6 +2043,30 @@ void AbstractLogView::updateDisplaySize()
         // Set scroll value to max (might not trigger scrollContentsBy if value unchanged)
         verticalScrollBar()->setValue( newMax );
     }
+}
+
+AbstractLogView::PaneMetadata AbstractLogView::paneMetadata() const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    PaneMetadata state;
+    state.available = logData_ != nullptr;
+    if ( logData_ ) {
+        state.sourceRowCount = logData_->getNbLine();
+        if ( state.sourceRowCount > 0_lcount ) {
+            state.topPresentedRow = getTopLine();
+        }
+    }
+    state.follow = isFollowEnabled();
+    state.wrap = isTextWrapEnabled();
+    state.visible = isVisible();
+    state.focused = hasFocus();
+    return state;
+}
+
+klogg::LogSnapshot::Ptr AbstractLogView::createPaneSnapshot( klogg::SnapshotScope scope ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    return logData_ ? logData_->createReadSnapshot( scope ) : klogg::LogSnapshot::Ptr{};
 }
 
 LineNumber AbstractLogView::getTopLine() const

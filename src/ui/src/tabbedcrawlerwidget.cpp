@@ -459,6 +459,7 @@ void TabbedCrawlerWidget::removeCrawler( int index )
         myTabBar_.hide();
 
     onGroupsChanged();
+    Q_EMIT crawlerInventoryChanged();
 }
 
 void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
@@ -488,6 +489,7 @@ void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
     if ( myTabBar_.tabText( index ) != label ) {
         myTabBar_.setTabText( index, label );
     }
+    Q_EMIT crawlerInventoryChanged();
 }
 
 void TabbedCrawlerWidget::selectNextTab()
@@ -558,6 +560,7 @@ void TabbedCrawlerWidget::handleTabMoved( int fromIndex, int toIndex )
         return;
     }
 
+    Q_EMIT crawlerInventoryChanged();
     const bool dragActive = tabDragInProgress_ || QApplication::mouseButtons().testFlag( Qt::LeftButton );
     if ( !dragActive ) {
         Q_EMIT tabsReordered();
@@ -958,12 +961,14 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
             else {
                 myTabBar_.setTabText( tab, newName );
             }
+            Q_EMIT crawlerInventoryChanged();
         }
     } );
 
     connect( resetTabName, &QAction::triggered, this, [ this, tab, tabPath ] {
         TabNameMapping::getSynced().setTabName( tabPath, "" ).save();
         myTabBar_.setTabText( tab, myTabBar_.tabData( tab ).toMap().value( TitleKey ).toString() );
+        Q_EMIT crawlerInventoryChanged();
     } );
 
     menu.exec( globalPoint );
@@ -1383,6 +1388,7 @@ void TabbedCrawlerWidget::onGroupsChanged()
     }
 
     myTabBar_.update();
+    Q_EMIT crawlerInventoryChanged();
 }
 
 void TabbedCrawlerWidget::populateGroupActions( QMenu* menu, const QString& groupId )

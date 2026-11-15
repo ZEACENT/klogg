@@ -4245,6 +4245,21 @@ klogg::SnapshotRow CaptureStore::Snapshot::row( LineNumber index ) const
              LineNumber{ index.get() + 1 }, true, false };
 }
 
+uint64_t CaptureStore::Snapshot::sourceBytesForLine( LineNumber index ) const
+{
+    if ( index >= lineCount_ ) throw klogg::SnapshotError( "Capture row is outside the snapshot" );
+    const auto part = std::lower_bound(
+        parts_.cbegin(), parts_.cend(), index.get(),
+        []( const Part& candidate, uint64_t line ) { return candidate.endLine <= line; } );
+    const auto& offsets = *part->lineOffsets;
+    const auto local = static_cast<size_t>( index.get() - ( part->endLine - offsets.size() ) );
+    const auto start = offsets[ local ];
+    const auto end = local + 1 < offsets.size() ? offsets[ local + 1 ] : part->bytes;
+    if ( start < 0 || end < start || end > part->bytes )
+        throw klogg::SnapshotError( "Capture snapshot has invalid byte offsets" );
+    return static_cast<uint64_t>( end - start );
+}
+
 OptionalLineNumber
 CaptureStore::Snapshot::rowForIdentity( const klogg::LogRowId& identity ) const
 {

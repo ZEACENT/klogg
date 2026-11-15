@@ -593,6 +593,9 @@ public:
         useTextWrap_ = enable;
     }
 
+    bool localControlEnabled() const { return localControlEnabled_; }
+    void setLocalControlEnabled( bool enabled ) { localControlEnabled_ = enabled; }
+
     bool confirmTabClose() const
     {
         return confirmTabClose_;
@@ -782,6 +785,7 @@ private:
     int lineSpacingPercent_ = DefaultLineSpacingPercent;
 
     bool confirmTabClose_ = true;
+    bool localControlEnabled_ = true;
 
     std::map<std::string, QStringList> shortcuts_;
 

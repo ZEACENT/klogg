@@ -135,6 +135,44 @@ keyboard commands, and saving. It is also available from the application's Help
 menu. The **[documentation hub](docs/README.md)** separates everyday workflows
 from architecture, build instructions, benchmarks, and future plans.
 
+## Agent-assisted review: in development
+
+Developer builds now include an experimental, provider-neutral `kloggctl` client
+for the running GUI. The current surface discovers instances, reads window/tab
+inventory, pane metadata and filter drafts, and reads or changes shared color
+labels. Explicit label transactions stage changes without touching the GUI,
+detect relevant human edits, and publish together without changing application
+focus. Explicit snapshot reads return bounded log content asynchronously; ordinary
+state observation does not read log lines.
+
+```sh
+kloggctl instance list
+kloggctl --instance INSTANCE state get
+kloggctl --instance INSTANCE tab get --tab TAB
+kloggctl --help
+```
+
+Local control is enabled by default. **Options > General > Local command-line
+control** disables it for all windows and clients in that GUI instance and
+discards pending transactions. Programs running as your operating-system user
+share the same review state; there are no per-program authorization prompts.
+The control service does not open a TCP listener. Inventory responses omit log
+lines; requested filter and label values remain visible to the caller.
+
+The same settings group offers optional shell-installation Check, Install / repair,
+and Remove actions. Installation changes are previewed and require confirmation;
+opening settings or enabling control does not alter shell configuration. Backups
+and partial failures are reported. Shell installation and control enablement are
+independent.
+
+**This is not the complete feature or packaged acceptance.** Transactional
+file/folder open and close, applied filters, marks, global highlighters,
+source-addressed navigation/selection, and relocatable package integration are
+still being implemented. Existing launcher and headless-search command-line roles are unchanged.
+See the [accepted design](docs/AGENT_CONTROL_PROPOSAL.md) and the
+[implementation record](docs/AGENT_CONTROL_IMPLEMENTATION.md) for supported scope,
+verification evidence, and remaining gates.
+
 ## Built for demanding logs
 
 The interface is backed by C++17 and Qt, 64-bit line addressing, parallel search,

@@ -10,6 +10,7 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+#include <utility>
 
 namespace klogg::folder {
 
@@ -35,6 +36,7 @@ class ScannedFileContent {
     // interpretation of record content, never its retained byte boundaries.
     QString readRecord( qint64 offset, qint64 length, const QByteArray& displayCodec ) const;
     QString readLine( LineNumber line, const QByteArray& displayCodec ) const;
+    uint64_t sourceBytesForLine( LineNumber line ) const;
     const QByteArray& codecName() const { return codecName_; }
     qint64 byteSize() const { return byteSize_; }
     LinesCount lineCount() const { return lineCount_; }
@@ -45,6 +47,7 @@ class ScannedFileContent {
 
   private:
     friend class ScanArena;
+    std::pair<qint64, qint64> lineByteRange( LineNumber line ) const;
     IndexedContentSnapshot::Ptr bytes_;
     IndexedContentSnapshot::Ptr rowEnds_;
     std::vector<ScanSpan> spans_;

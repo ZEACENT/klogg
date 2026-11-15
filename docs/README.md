@@ -65,6 +65,7 @@ budgets are opt-in local checks.
 | Document | Status |
 | --- | --- |
 | [Backlog](BACKLOG.md) | Planning record; an entry is not a delivery commitment. |
+| [Transactional review CLI](AGENT_CONTROL_PROPOSAL.md) | Accepted design, implementation in progress. Developer CLI/local transport, label transactions, pane observation, bounded snapshot reads and explicit shell installation exist; [delivery evidence](AGENT_CONTROL_IMPLEMENTATION.md) distinguishes verified slices from remaining commands and package gates. |
 | [Unified match pipeline execution record](MATCH_SELECTION_PIPELINE_PLAN.md) | Defect inventory, snapshot architecture, phased tasks, verified checkpoints, and remaining acceptance gates. |
 | [Chart and filters panel specification](SPEC_CHART_AND_FILTERS_PANEL.md) | Proposal. The proposed dock panels are not shipped features. |
 | [Text-wrapping analysis](WRAP_TEXT_ANALYSIS.md) | Historical implementation investigation; not a current testing recipe. |

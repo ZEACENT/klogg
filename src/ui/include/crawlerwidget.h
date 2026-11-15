@@ -92,6 +92,11 @@ class CrawlerWidget : public QSplitter,
     CrawlerWidget( QWidget* parent = nullptr );
     ~CrawlerWidget() override;
 
+    ReviewControls reviewControls() override
+    {
+        return { searchToolbar_, &colorLabelsController_ };
+    }
+
     // Get the line number of the first line displayed.
     LineNumber getTopLine() const;
     // Get the selected text as a string (from the main window)
@@ -149,6 +154,8 @@ class CrawlerWidget : public QSplitter,
     struct access_by;
 
   protected:
+    const AbstractLogView* reviewPane( Pane pane ) const override;
+
     // Implementation of the ViewInterface functions
     void doSetData( std::shared_ptr<SearchableLogData> logData,
                     std::shared_ptr<LogFilteredData> filteredData ) override;

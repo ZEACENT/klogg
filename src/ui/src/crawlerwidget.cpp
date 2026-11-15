@@ -66,6 +66,7 @@
 #include <QShortcut>
 #include <QStandardItemModel>
 #include <QStringListModel>
+#include <QThread>
 #include <qglobal.h>
 #include <qobject.h>
 #include <string>
@@ -197,6 +198,18 @@ CrawlerWidget::CrawlerWidget( QWidget* parent )
     , iconLoader_{ this }
     , colorLabelsController_( this, [ this ]() { return activeView(); } )
 {
+}
+
+const AbstractLogView* CrawlerWidget::reviewPane( Pane pane ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    switch ( pane ) {
+    case Pane::Main:
+        return logMainView_;
+    case Pane::Results:
+        return filteredView_;
+    }
+    return nullptr;
 }
 
 // The top line is first one on the main display

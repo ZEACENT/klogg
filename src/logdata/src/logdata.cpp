@@ -72,6 +72,14 @@ class IndexedReadSnapshot final : public SearchableLogData::ReadSnapshot {
 
     LinesCount lineCount() const override { return content_->lineCount(); }
     qint64 byteSize() const override { return content_->byteSize(); }
+    std::optional<uint64_t> sourceBytesForLine( LineNumber index ) const override
+    {
+        if ( index >= lineCount() ) throw klogg::SnapshotError( "Snapshot row is out of bounds" );
+        const auto start = index == 0_lnum ? 0 : content_->lineEnd( index - 1_lcount ).get();
+        const auto end = std::min<qint64>( content_->lineEnd( index ).get(), byteSize() );
+        if ( start < 0 || end < start ) throw klogg::SnapshotError( "Snapshot record extent is invalid" );
+        return static_cast<uint64_t>( end - start );
+    }
     std::optional<CacheKey> cacheKey() const override
     {
         return CacheKey{ klogg::LogRowId::Origin::IndexedFile, content_->incarnation(),

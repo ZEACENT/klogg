@@ -94,6 +94,10 @@ public:
     {
         return source_->lineString( sourceLine( index ) );
     }
+    std::optional<uint64_t> sourceBytesForLine( LineNumber index ) const override
+    {
+        return source_->sourceBytesForLine( sourceLine( index ) );
+    }
     bool preservesPresentationOf( const klogg::LogSnapshot& previous ) const override
     {
         if ( this == &previous ) return true;
@@ -576,6 +580,11 @@ void LogFilteredData::iterateOverLines( const std::function<void( LineNumber )>&
 
 // Delegation to our Marks object
 
+LogFilteredData::MarksSnapshot LogFilteredData::marksSnapshot() const
+{
+    return { marksRevision_, getMarks() };
+}
+
 void LogFilteredData::toggleMark( LineNumber line )
 {
     // Safety check: if sourceLogData_ is null (object being destroyed), return early
@@ -584,6 +593,7 @@ void LogFilteredData::toggleMark( LineNumber line )
     }
     refreshPresentedSourceForDisplay();
     if ( ( line >= 0_lnum ) && line < sourceLogData_->getNbLine() ) {
+        ++marksRevision_;
         if ( !marks_.addChecked( line.get() ) ) {
             marks_.remove( line.get() );
             updateMaxLengthMarks( {}, line );
@@ -607,7 +617,9 @@ void LogFilteredData::addMark( LineNumber line )
     }
     refreshPresentedSourceForDisplay();
     if ( ( line >= 0_lnum ) && line < sourceLogData_->getNbLine() ) {
-        marks_.add( line.get() );
+        if ( marks_.addChecked( line.get() ) ) {
+            ++marksRevision_;
+        }
         updateMaxLengthMarks( line, {} );
         // marks_and_matches_ is already updated by updateMaxLengthMarks()
         contextLinesListValid_ = false; // Invalidate context lines cache when marks change
@@ -660,7 +672,9 @@ OptionalLineNumber LogFilteredData::getMarkBefore( LineNumber line ) const
 
 void LogFilteredData::deleteMark( LineNumber line )
 {
-    marks_.remove( line.get() );
+    if ( marks_.removeChecked( line.get() ) ) {
+        ++marksRevision_;
+    }
     updateMaxLengthMarks( {}, line );
     // marks_and_matches_ is already updated by updateMaxLengthMarks()
     contextLinesListValid_ = false; // Invalidate context lines cache when marks change
@@ -703,6 +717,9 @@ void LogFilteredData::updateMaxLengthMarks( OptionalLineNumber added_line,
 
 void LogFilteredData::clearMarks()
 {
+    if ( !marks_.isEmpty() ) {
+        ++marksRevision_;
+    }
     marks_ = {};
     marks_and_matches_ = matching_lines_;
     maxLengthMarks_ = 0_length;
@@ -742,6 +759,7 @@ void LogFilteredData::setContextLines( int before, int after )
 
 void LogFilteredData::rebuildContextLinesList() const
 {
+    maxLengthContext_.reset();
     // Context lines should always be calculated relative to search matches (matching_lines_),
     // regardless of visibility settings. This is because the feature is designed to provide
     // context around search results similar to grep's -B, -A, -C options.
@@ -828,14 +846,11 @@ void LogFilteredData::rebuildContextLinesList() const
         marks_.iterate( addLineWithContext, static_cast<void*>( &contextData ) );
     }
 
-    // Convert set to sorted vector (set is already sorted) and track max length
+    // Membership is payload-free; only an explicit width query decodes lines.
     contextLinesList_.clear();
     contextLinesList_.reserve( linesSet.size() );
-    maxLengthContext_ = 0_length;
     for ( const auto& line : linesSet ) {
         contextLinesList_.emplace_back( LineNumber( line ) );
-        maxLengthContext_
-            = qMax( maxLengthContext_, sourceLogData_->getLineLength( LineNumber( line ) ) );
     }
 
     contextLinesListValid_ = true;
@@ -1283,7 +1298,16 @@ LineLength LogFilteredData::doGetMaxLength() const
         if ( !contextLinesListValid_ ) {
             rebuildContextLinesList();
         }
-        result = qMax( result, maxLengthContext_ );
+        if ( !maxLengthContext_ ) {
+            LineLength maximum = 0_length;
+            if ( sourceLogData_ ) {
+                for ( const auto line : contextLinesList_ ) {
+                    maximum = qMax( maximum, sourceLogData_->getLineLength( line ) );
+                }
+            }
+            maxLengthContext_ = maximum;
+        }
+        result = qMax( result, *maxLengthContext_ );
     }
 
     // Fall back to the source data's max length so the horizontal scrollbar

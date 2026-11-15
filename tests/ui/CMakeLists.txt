@@ -1,5 +1,6 @@
 set(UI_TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/qtests_main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reviewcontroladapter_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/logdata_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/logfiltereddata_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/crawlerwidget_test.cpp
@@ -12,6 +13,8 @@ set(UI_TEST_SOURCES
 LIST(APPEND UI_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/mainwindow_test.cpp)
 
 add_executable(klogg_itests ${UI_TEST_SOURCES})
+add_dependencies(klogg_itests kloggctl)
+target_compile_definitions(klogg_itests PRIVATE KLOGG_CONTROL_CLI_PATH="$<TARGET_FILE:kloggctl>")
 
 target_link_libraries(klogg_itests klogg_ui klogg_utils Catch2 Qt${QT_VERSION_MAJOR}::Test test_utils test_crash_trace)
 set_target_properties(klogg_itests PROPERTIES AUTOMOC ON)

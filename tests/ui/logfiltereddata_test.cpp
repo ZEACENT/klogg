@@ -24,6 +24,7 @@
 #include <QDir>
 #include <QSignalSpy>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <qglobal.h>
@@ -34,6 +35,7 @@
 
 #include "logdata.h"
 #include "logfiltereddata.h"
+#include "streaminglogdata.h"
 
 static const qint64 SL_NB_LINES = 500LL;
 
@@ -350,6 +352,116 @@ TEST_CASE( "Overview range counts classify only visible matches and marks",
     filteredData->setVisibility( VisibilityFlags::None );
     requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
                                 0_lcount, 0_lcount );
+}
+
+TEST_CASE( "Filtered model mark snapshots track actual mutations and semantic ABA",
+           "[logdata][marks-state]" )
+{
+    LogDataLoader loader;
+    auto filtered = makeTestFilteredData( loader.log_data );
+    const auto initial = filtered->marksSnapshot();
+    REQUIRE( initial.revision == 0 );
+    REQUIRE( initial.marks.isEmpty() );
+    filtered->addMark( 25_lnum );
+    filtered->addMark( 10_lnum );
+    const auto marked = filtered->marksSnapshot();
+    REQUIRE( marked.marks == QList<LineNumber>{ 10_lnum, 25_lnum } );
+    REQUIRE( marked.revision == initial.revision + 2 );
+    filtered->addMark( 25_lnum );
+    filtered->deleteMark( 24_lnum );
+    filtered->addMark( LineNumber( SL_NB_LINES + 1 ) );
+    filtered->toggleMark( LineNumber( SL_NB_LINES + 1 ) );
+    REQUIRE( filtered->marksSnapshot().revision == marked.revision );
+
+    // No intervening read: reverting to the same marks must still invalidate
+    // a dependency captured before the human/API edits.
+    filtered->toggleMark( 10_lnum );
+    filtered->toggleMark( 10_lnum );
+    REQUIRE( filtered->marksSnapshot().marks == marked.marks );
+    REQUIRE( filtered->marksSnapshot().revision == marked.revision + 2 );
+    filtered->deleteMark( 25_lnum );
+    REQUIRE( filtered->marksSnapshot().marks == QList<LineNumber>{ 10_lnum } );
+    REQUIRE( filtered->marksSnapshot().revision == marked.revision + 3 );
+    filtered->clearMarks();
+    REQUIRE( filtered->marksSnapshot().marks.isEmpty() );
+    REQUIRE( filtered->marksSnapshot().revision == marked.revision + 4 );
+    filtered->clearMarks();
+    REQUIRE( filtered->marksSnapshot().revision == marked.revision + 4 );
+}
+
+TEST_CASE( "Filtered mark snapshots are detached per model and ignore search presentation",
+           "[logdata][marks-state]" )
+{
+    LogDataLoader loader;
+    auto filtered = makeTestFilteredData( loader.log_data );
+    auto otherPane = makeTestFilteredData( loader.log_data );
+    filtered->addMark( 10_lnum );
+    filtered->addMark( 25_lnum );
+    const auto before = filtered->marksSnapshot();
+    REQUIRE( otherPane->marksSnapshot().marks.isEmpty() );
+    REQUIRE( otherPane->marksSnapshot().revision == 0 );
+    SafeQSignalSpy progress( filtered.get(), &LogFilteredData::searchProgressed );
+    runSearch( filtered.get(), QStringLiteral( "this is line 000099" ), progress );
+    filtered->setVisibility( VisibilityFlags::Matches );
+    REQUIRE( filtered->getNbLine() == 1_lcount );
+    REQUIRE( filtered->marksSnapshot().marks == before.marks );
+    REQUIRE( filtered->marksSnapshot().revision == before.revision );
+    filtered->setContextLines( 2, 3 );
+    filtered->setAllLinesVisible( true );
+    filtered->clearSearch();
+    filtered->setAllLinesVisible( false );
+    filtered->setVisibility( VisibilityFlags::Marks );
+    REQUIRE( filtered->marksSnapshot().revision == before.revision );
+
+    const auto generation = filtered->currentSearchGeneration();
+    const auto visibleCount = filtered->getNbLine();
+    const auto sourceCount = loader.log_data.getNbLine();
+    QSignalSpy results( filtered.get(), &LogFilteredData::searchResultsChanged );
+    progress.clear();
+    auto detached = static_cast<const LogFilteredData&>( *filtered ).marksSnapshot();
+    detached.marks.clear();
+    REQUIRE( filtered->marksSnapshot().marks == before.marks );
+    REQUIRE( filtered->marksSnapshot().revision == before.revision );
+    REQUIRE( filtered->currentSearchGeneration() == generation );
+    REQUIRE( filtered->getNbLine() == visibleCount );
+    REQUIRE( loader.log_data.getNbLine() == sourceCount );
+    REQUIRE( results.isEmpty() );
+    REQUIRE( progress.count() == 0 );
+
+    LogFilteredData::MarksSnapshot retained;
+    {
+        auto shortLived = makeTestFilteredData( loader.log_data );
+        shortLived->addMark( 7_lnum );
+        retained = shortLived->marksSnapshot();
+    }
+    REQUIRE( retained.marks == QList<LineNumber>{ 7_lnum } );
+    REQUIRE( retained.revision == 1 );
+}
+
+TEST_CASE( "Live filtered models retain their own mark revisions across source append",
+           "[logdata][marks-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    StreamingLogData source( QStringLiteral( "marks-state" ), dir.path() );
+    source.appendUtf8( QByteArray( "first\nsecond\nthird\n" ) );
+    REQUIRE( source.getNbLine() == 3_lcount );
+    auto filtered = source.getNewFilteredData();
+    filtered->addMark( 1_lnum );
+    const auto before = filtered->marksSnapshot();
+    REQUIRE( before.marks == QList<LineNumber>{ 1_lnum } );
+    REQUIRE( before.revision == 1 );
+    source.appendUtf8( QByteArray( "fourth\nfifth\n" ) );
+    REQUIRE( source.getNbLine() == 5_lcount );
+    REQUIRE( filtered->marksSnapshot().marks == before.marks );
+    REQUIRE( filtered->marksSnapshot().revision == before.revision );
+    auto anotherPane = source.getNewFilteredData();
+    REQUIRE( anotherPane->marksSnapshot().marks.isEmpty() );
+    REQUIRE( anotherPane->marksSnapshot().revision == 0 );
+    filtered->toggleMark( 4_lnum );
+    filtered->toggleMark( 4_lnum );
+    REQUIRE( filtered->marksSnapshot().marks == before.marks );
+    REQUIRE( filtered->marksSnapshot().revision == before.revision + 2 );
 }
 
 SCENARIO( "marks in filtered log data", "[logdata]" )

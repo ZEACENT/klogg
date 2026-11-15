@@ -230,6 +230,30 @@ SCENARIO( "next color label applies one label to the whole selection", "[colorla
     }
 }
 
+TEST_CASE( "A copied color-label manager can prepare changes without publishing them",
+           "[colorlabels][control-characterization]" )
+{
+    ColorLabelsManager published;
+    published.setColorLabel( 1, QStringLiteral( "Error" ), { false, true } );
+    auto prepared = published;
+    prepared.setColorLabel( 3, QStringLiteral( "Error" ), { true, false } );
+    prepared.setColorLabel( 4, QStringLiteral( "Warning" ), { true, false } );
+
+    const auto before = published.colorLabels();
+    REQUIRE( before[ 1 ].size() == 1 );
+    CHECK( before[ 1 ].front().text == QStringLiteral( "Error" ) );
+    CHECK( before[ 3 ].isEmpty() );
+    CHECK( before[ 4 ].isEmpty() );
+
+    const auto candidate = prepared.colorLabels();
+    CHECK( candidate[ 1 ].isEmpty() );
+    REQUIRE( candidate[ 3 ].size() == 1 );
+    CHECK_FALSE( candidate[ 3 ].front().ignoreCase );
+    CHECK( candidate[ 3 ].front().wholeWord );
+    REQUIRE( candidate[ 4 ].size() == 1 );
+    CHECK( candidate[ 4 ].front().text == QStringLiteral( "Warning" ) );
+}
+
 SCENARIO( "quick color label defaults persist in highlighter settings", "[colorlabels]" )
 {
     QTemporaryDir temporaryDir;

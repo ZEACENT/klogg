@@ -758,6 +758,37 @@ TEST_CASE( "FolderSearchResults getters are race-free against streaming and conc
              == static_cast<uint64_t>( fileCount * groupsPerFile * ( 1 + matchesPerGroup ) ) );
 }
 
+TEST_CASE( "Folder bounded snapshots reject large marked or matched rows before reading payload",
+           "[folder][snapshot-bounded]" )
+{
+    const bool marked = GENERATE( false, true );
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto text = QStringLiteral( "ERROR " ) + QString( 1024, QLatin1Char( 'x' ) );
+    const auto path = writeFile( dir, "bounded.log", { "prefix", text } );
+    RegularExpression expression{ RegularExpressionPattern{ marked ? "absent" : "ERROR" } };
+    auto matcher = expression.createMatcher();
+    auto group = FolderSearchEngine::scanFile( path, *matcher );
+    REQUIRE( group.content );
+    const auto content = group.content;
+    QHash<QString, std::set<uint64_t>> marks;
+    if ( marked ) marks[ path ].insert( 1 );
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.setResults( { std::move( group ) } );
+    const auto snapshot = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot );
+    REQUIRE( snapshot->lineCount() == 1_lcount );
+    const auto before = content->bytesReadForTesting();
+    CHECK_THROWS_AS( snapshot->readLineBounded( 0_lnum, 1024, 2048 ), klogg::SnapshotLimitError );
+    // Mark-only rows may inspect two fixed-size offset entries, never the body.
+    CHECK( content->bytesReadForTesting() - before <= 2 * sizeof( qint64 ) );
+    const auto bytes = static_cast<uint64_t>( text.toUtf8().size() ) + 1;
+    CHECK( snapshot->sourceBytesForLine( 0_lnum ) == std::optional<uint64_t>( bytes ) );
+    REQUIRE( QFile::remove( path ) );
+    CHECK( snapshot->readLineBounded( 0_lnum, bytes, 2048 ).text == text );
+}
+
 TEST_CASE( "Folder snapshots retain canonical matches through source and layout replacement",
            "[folder][folder-snapshot]" )
 {

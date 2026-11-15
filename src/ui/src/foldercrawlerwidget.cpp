@@ -37,6 +37,7 @@
 #include <QToolButton>
 #include <QTabWidget>
 #include <QTimer>
+#include <QThread>
 #include <QVBoxLayout>
 
 #include "qtcompat/qtcompat.h"
@@ -609,6 +610,19 @@ QString FolderCrawlerWidget::statusText() const
     return statusLabel_ != nullptr ? statusLabel_->text() : QString();
 }
 
+const AbstractLogView* FolderCrawlerWidget::reviewPane( Pane pane ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    switch ( pane ) {
+    case Pane::Main:
+        return currentMainData_ != nullptr && currentMainData_ != placeholderData_
+                   ? mainView_ : nullptr;
+    case Pane::Results:
+        return activeFilteredView();
+    }
+    return nullptr;
+}
+
 std::optional<AbstractCrawlerWidget::MainViewInfo>
 FolderCrawlerWidget::currentMainViewInfo() const
 {
@@ -628,12 +642,19 @@ FolderCrawlerWidget::currentMainViewInfo() const
     return info;
 }
 
+FolderCrawlerWidget::MarksSnapshot FolderCrawlerWidget::marksSnapshot() const
+{
+    return { marksRevision_, folderMarks_ };
+}
+
 void FolderCrawlerWidget::addMark( const QString& file, LineNumber line )
 {
     if ( file.isEmpty() ) {
         return;
     }
-    folderMarks_[ file ].insert( line.get() );
+    if ( folderMarks_[ file ].insert( line.get() ).second ) {
+        ++marksRevision_;
+    }
 }
 
 void FolderCrawlerWidget::removeMark( const QString& file, LineNumber line )
@@ -642,7 +663,9 @@ void FolderCrawlerWidget::removeMark( const QString& file, LineNumber line )
     if ( it == folderMarks_.end() ) {
         return;
     }
-    it->erase( line.get() );
+    if ( it->erase( line.get() ) != 0 ) {
+        ++marksRevision_;
+    }
     if ( it->empty() ) {
         folderMarks_.erase( it );
     }
@@ -1494,7 +1517,9 @@ void FolderCrawlerWidget::bindMainViewDataSignals()
                            for ( const auto& pane : panes_ ) {
                                pane->view->invalidateMatchSelection();
                            }
-                           folderMarks_.remove( currentMainFilePath_ );
+                           if ( folderMarks_.remove( currentMainFilePath_ ) != 0 ) {
+                               ++marksRevision_;
+                           }
                            refreshAllPanesForMarks();
                        }
                    } );
@@ -1663,14 +1688,18 @@ void FolderCrawlerWidget::doSetViewContext( const QString& view_context )
     // file is currently absent from the folder are KEPT (not pruned): folder
     // contents change over time, and the marks re-render if the file returns
     // (single-file sessions restore marks just as blindly).
-    folderMarks_.clear();
+    decltype( folderMarks_ ) restoredMarks;
     const QDir root( folderPath_ );
     const auto& contextMarks = context.marks();
     for ( auto it = contextMarks.begin(); it != contextMarks.end(); ++it ) {
         const auto absolutePath = root.absoluteFilePath( it.key() );
         for ( const auto& lineVariant : it.value().toList() ) {
-            folderMarks_[ absolutePath ].insert( lineVariant.toULongLong() );
+            restoredMarks[ absolutePath ].insert( lineVariant.toULongLong() );
         }
+    }
+    if ( restoredMarks != folderMarks_ ) {
+        folderMarks_.swap( restoredMarks );
+        ++marksRevision_;
     }
     refreshAllPanesForMarks();
 

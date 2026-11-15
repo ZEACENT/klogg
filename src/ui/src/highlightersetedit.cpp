@@ -138,10 +138,19 @@ void HighlighterSetEdit::setHighlighters( HighlighterSet set )
     addHighlighterButton->setEnabled(true);
 }
 
+void HighlighterSetEdit::notifyChanged()
+{
+    // A draft may inherit a compiled set from the committed collection. Every
+    // edit must invalidate that prefilter before a subscriber copies the draft;
+    // rebuilding only the combined active set leaves individual sets stale.
+    highlighterSet_.compiledExpression_.reset();
+    Q_EMIT changed();
+}
+
 void HighlighterSetEdit::setName( const QString& name )
 {
     highlighterSet_.name_ = name;
-    Q_EMIT changed();
+    notifyChanged();
 }
 
 void HighlighterSetEdit::addHighlighter()
@@ -157,7 +166,7 @@ void HighlighterSetEdit::addHighlighter()
 
     setCurrentRow( highlighterListWidget->count() - 1 );
 
-    Q_EMIT changed();
+    notifyChanged();
 }
 
 void HighlighterSetEdit::removeHighlighter()
@@ -183,7 +192,7 @@ void HighlighterSetEdit::removeHighlighter()
             }
         } );
 
-        Q_EMIT changed();
+        notifyChanged();
     }
 }
 
@@ -202,7 +211,7 @@ void HighlighterSetEdit::moveHighlighterUp()
             setCurrentRow( index - 1 );
         } );
 
-        Q_EMIT changed();
+        notifyChanged();
     }
 }
 
@@ -221,7 +230,7 @@ void HighlighterSetEdit::moveHighlighterDown()
             setCurrentRow( index + 1 );
         } );
 
-        Q_EMIT changed();
+        notifyChanged();
     }
 }
 
@@ -275,7 +284,7 @@ void HighlighterSetEdit::updateHighlighterProperties()
         highlighterListWidget->currentItem()->setBackground(
             QBrush( currentHighlighter.backColor() ) );
 
-        Q_EMIT changed();
+        notifyChanged();
     }
 }
 

@@ -25,6 +25,7 @@
 
 #include <QAction>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QPointer>
 #include <QApplication>
 #include <QComboBox>
@@ -757,6 +758,289 @@ QStringList favoriteActionPaths( const QMenu* menu )
     return paths;
 }
 } // namespace
+
+namespace {
+void writeInventoryFixture( const QTemporaryDir& dir )
+{
+    QFile file( dir.filePath( QStringLiteral( "inventory.log" ) ) );
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    REQUIRE( file.write( "line\n" ) == 5 );
+}
+} // namespace
+
+TEST_CASE( "Window inventory identities belong to runtime objects not persisted window indices",
+           "[ui][tab-inventory]" )
+{
+    auto session = std::make_shared<Session>();
+    MainWindow first{ WindowSession{ session, "Inventory", 0 } };
+    MainWindow second{ WindowSession{ session, "Inventory", 0 } };
+    const auto initial = first.inventorySnapshot();
+    REQUIRE_FALSE( initial.windowId.isEmpty() );
+    REQUIRE( initial.windowId == first.runtimeWindowId() );
+    REQUIRE( initial.windowId != second.runtimeWindowId() );
+    REQUIRE( initial.currentTabId.isEmpty() );
+    REQUIRE( initial.tabs.empty() );
+    REQUIRE( initial.revision == 0 );
+    REQUIRE( first.inventorySnapshot().windowId == initial.windowId );
+    REQUIRE( first.inventorySnapshot().revision == initial.revision );
+}
+
+TEST_CASE( "Window inventory distinguishes duplicate folders and expires closed weak widgets",
+           "[ui][tab-inventory]" )
+{
+    TabGroupCleanupGuard groups;
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    writeInventoryFixture( dir );
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "InventoryDuplicates", 0 } };
+    const auto empty = window.inventorySnapshot();
+    window.openFolderByPath( dir.path() );
+    window.openFolderByPath( dir.path() );
+    auto* const tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( tabs->count() == 2 );
+    const auto opened = window.inventorySnapshot();
+    REQUIRE( opened.tabs.size() == 2 );
+    REQUIRE( opened.revision > empty.revision );
+    REQUIRE( opened.tabs[ 0 ].tabId != opened.tabs[ 1 ].tabId );
+    REQUIRE( opened.tabs[ 0 ].documentId == opened.tabs[ 1 ].documentId );
+    REQUIRE( opened.currentTabId == opened.tabs[ 1 ].tabId );
+    for ( int index = 0; index < tabs->count(); ++index ) {
+        const auto& entry = opened.tabs[ static_cast<size_t>( index ) ];
+        const auto* const document = dynamic_cast<AbstractCrawlerWidget*>( tabs->widget( index ) );
+        REQUIRE( document != nullptr );
+        REQUIRE( entry.widget == tabs->widget( index ) );
+        REQUIRE( entry.tabId == document->runtimeTabId() );
+        REQUIRE( entry.kind == DocumentKind::Folder );
+        REQUIRE( entry.documentId == session->getDocumentId( document ) );
+        REQUIRE( entry.displayName == session->getDisplayName( document ) );
+        REQUIRE( entry.associatedPath == session->getAssociatedPath( document ) );
+    }
+    MainWindowLiveSaveTestAccess::closeByApp( window, opened.tabs[ 0 ].widget );
+    const auto closed = window.inventorySnapshot();
+    REQUIRE( closed.tabs.size() == 1 );
+    REQUIRE( closed.tabs.front().tabId == opened.tabs[ 1 ].tabId );
+    REQUIRE( closed.revision > opened.revision );
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+    REQUIRE( opened.tabs[ 0 ].widget.isNull() );
+    REQUIRE_FALSE( opened.tabs[ 1 ].widget.isNull() );
+    window.openFolderByPath( dir.path() );
+    const auto reopened = window.inventorySnapshot();
+    REQUIRE( reopened.tabs.size() == 2 );
+    REQUIRE( reopened.tabs.back().tabId != opened.tabs.front().tabId );
+    REQUIRE( reopened.tabs.back().tabId != opened.tabs.back().tabId );
+    REQUIRE( reopened.revision > closed.revision );
+    REQUIRE( opened.tabs.size() == 2 );
+}
+
+TEST_CASE( "Window inventory tracks selection and immediate drag reorder ABA without reads",
+           "[ui][tab-inventory]" )
+{
+    TabGroupCleanupGuard groups;
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    writeInventoryFixture( dir );
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "InventoryOrder", 0 } };
+    window.openFolderByPath( dir.path() );
+    window.openFolderByPath( dir.path() );
+    window.openFolderByPath( dir.path() );
+    auto* const tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    const auto before = window.inventorySnapshot();
+    tabs->setCurrentIndex( 0 );
+    tabs->setCurrentIndex( 2 );
+    const auto selected = window.inventorySnapshot();
+    REQUIRE( selected.currentTabId == before.currentTabId );
+    REQUIRE( selected.revision >= before.revision + 2 );
+    tabs->setCurrentIndex( 2 );
+    REQUIRE( window.inventorySnapshot().revision == selected.revision );
+
+    auto* const bar = qobject_cast<CrawlerTabBar*>( tabs->tabBar() );
+    REQUIRE( bar != nullptr );
+    Q_EMIT bar->tabDragStarted();
+    bar->moveTab( 0, 1 );
+    bar->moveTab( 1, 0 );
+    const auto returned = window.inventorySnapshot();
+    REQUIRE( returned.tabs == selected.tabs );
+    REQUIRE( returned.currentTabId == selected.currentTabId );
+    REQUIRE( returned.revision >= selected.revision + 2 );
+    Q_EMIT bar->tabDragFinished();
+    const auto settled = window.inventorySnapshot();
+    bar->moveTab( 0, 2 );
+    const auto moved = window.inventorySnapshot();
+    REQUIRE( moved.tabs[ 2 ].tabId == settled.tabs[ 0 ].tabId );
+    REQUIRE( moved.tabs[ 0 ].tabId == settled.tabs[ 1 ].tabId );
+    REQUIRE( moved.revision > settled.revision );
+}
+
+TEST_CASE( "Window inventory includes collapsed tabs and deduplicates metadata updates",
+           "[ui][tab-inventory]" )
+{
+    TabGroupCleanupGuard groups;
+    QTemporaryDir firstDir;
+    QTemporaryDir secondDir;
+    REQUIRE( firstDir.isValid() );
+    REQUIRE( secondDir.isValid() );
+    writeInventoryFixture( firstDir );
+    writeInventoryFixture( secondDir );
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "InventoryMetadata", 0 } };
+    window.openFolderByPath( firstDir.path() );
+    window.openFolderByPath( secondDir.path() );
+    auto* const tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    const auto before = window.inventorySnapshot();
+    tabs->updateCrawler( 0, QStringLiteral( "Edited title" ), firstDir.path() );
+    const auto changed = window.inventorySnapshot();
+    REQUIRE( changed.tabs.front().tabTitle == QStringLiteral( "Edited title" ) );
+    REQUIRE( changed.tabs.front().displayName == before.tabs.front().displayName );
+    REQUIRE( changed.revision > before.revision );
+    tabs->updateCrawler( 0, QStringLiteral( "Edited title" ), QStringLiteral( "tooltip only" ) );
+    tabs->setTabDataStatus( 0, DataStatus::NEW_DATA );
+    REQUIRE( window.inventorySnapshot().revision == changed.revision );
+    tabs->updateCrawler( 0, before.tabs.front().tabTitle, firstDir.path() );
+    REQUIRE( window.inventorySnapshot().revision > changed.revision );
+
+    auto& manager = TabGroupManager::get();
+    manager.createGroup( QStringLiteral( "Inventory group" ), QColor( Qt::blue ) );
+    REQUIRE( manager.groups().size() == 1 );
+    const auto groupId = manager.groups().front().id;
+    manager.addTabToGroup( groupId, firstDir.path() );
+    manager.addTabToGroup( groupId, secondDir.path() );
+    manager.toggleCollapsed( groupId );
+    const auto collapsed = window.inventorySnapshot();
+    REQUIRE( collapsed.tabs.size() == 2 );
+    REQUIRE( collapsed.tabs[ 0 ].tabId == before.tabs[ 0 ].tabId );
+    REQUIRE( collapsed.tabs[ 1 ].tabId == before.tabs[ 1 ].tabId );
+    REQUIRE( collapsed.tabs[ 1 ].tabTitle == tabs->tabText( 1 ) );
+    REQUIRE( collapsed.revision > changed.revision );
+    tabs->onGroupsChanged();
+    REQUIRE( window.inventorySnapshot().revision == collapsed.revision );
+}
+
+TEST_CASE( "Window inventory reads are detached and leave focus selection search and settings alone",
+           "[ui][tab-inventory]" )
+{
+    TabGroupCleanupGuard groups;
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    writeInventoryFixture( dir );
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, "InventoryReads", 0 } };
+    window.openFolderByPath( dir.path() );
+    auto* const tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    auto* const folder = qobject_cast<FolderCrawlerWidget*>( tabs->currentWidget() );
+    REQUIRE( folder != nullptr );
+    const auto before = window.inventorySnapshot();
+    auto* const focus = QApplication::focusWidget();
+    const auto filter = folder->searchToolbar()->filterDraftSnapshot();
+    QSignalSpy selection( tabs, &QTabWidget::currentChanged );
+    QSignalSpy focusChanges( qApp, &QApplication::focusChanged );
+    QSignalSpy searches( folder->searchToolbar(), &SearchToolbar::searchRequested );
+    QMap<QString, QVariant> settingsBefore;
+    auto& settings = PersistentInfo::getSettings( app_settings{} );
+    for ( const auto& key : settings.allKeys() ) {
+        settingsBefore.insert( key, settings.value( key ) );
+    }
+    const MainWindow& readOnly = window;
+    auto detached = readOnly.inventorySnapshot();
+    detached.tabs.clear();
+    detached.currentTabId.clear();
+    REQUIRE( readOnly.inventorySnapshot().tabs == before.tabs );
+    REQUIRE( readOnly.inventorySnapshot().currentTabId == before.currentTabId );
+    REQUIRE( readOnly.inventorySnapshot().revision == before.revision );
+    REQUIRE( QApplication::focusWidget() == focus );
+    REQUIRE( selection.isEmpty() );
+    REQUIRE( focusChanges.isEmpty() );
+    REQUIRE( searches.isEmpty() );
+    REQUIRE( folder->searchToolbar()->filterDraftSnapshot().revision == filter.revision );
+    REQUIRE( folder->currentMainFilePath().isEmpty() );
+    QMap<QString, QVariant> settingsAfter;
+    for ( const auto& key : settings.allKeys() ) {
+        settingsAfter.insert( key, settings.value( key ) );
+    }
+    REQUIRE( settingsAfter == settingsBefore );
+}
+
+TEST_CASE( "Window inventory observes file and live metadata through existing output publication",
+           "[ui][tab-inventory]" )
+{
+    TabGroupCleanupGuard groups;
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    writeInventoryFixture( dir );
+    auto& sessionInfo = SessionInfo::getSynced();
+    SessionInfoRestoreGuard restore{ sessionInfo };
+    const auto previousWindows = sessionInfo.windows();
+    const auto persistedId = QStringLiteral( "InventoryLive" );
+    sessionInfo.add( persistedId );
+    for ( const auto& id : previousWindows ) {
+        if ( id != persistedId ) {
+            sessionInfo.remove( id );
+        }
+    }
+    const AdbLogcatSessionData sourceData{
+        QStringLiteral( "adb" ), QStringLiteral( "inventory-device" ),
+        QStringLiteral( "Inventory device" ), {},
+        QUuid::createUuid().toString( QUuid::WithoutBraces ), {} };
+    sessionInfo.setOpenFiles( persistedId,
+        { SessionInfo::OpenFile( sourceData.documentId(), 0, {}, sourceData.persistedSourceType(),
+                                sourceData.displayName(), klogg::livelog::serializeSpec(
+                                    klogg::livelog::sessionSpecFromSessionData( sourceData ) ) ) } );
+    sessionInfo.setCurrentFileIndex( persistedId, 0 );
+    sessionInfo.save();
+    auto session = std::make_shared<Session>();
+    MainWindow window{ WindowSession{ session, persistedId, 0 } };
+    window.reloadSession();
+    auto* const tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( tabs->count() == 1 );
+    auto* const live = qobject_cast<CrawlerWidget*>( tabs->widget( 0 ) );
+    REQUIRE( live != nullptr );
+    const auto initial = window.inventorySnapshot();
+    REQUIRE( initial.tabs.front().kind == DocumentKind::AdbLogcat );
+    REQUIRE( initial.tabs.front().documentId == sourceData.documentId() );
+    REQUIRE( initial.tabs.front().displayName == sourceData.displayName() );
+    REQUIRE( initial.tabs.front().associatedPath == sourceData.associatedPath() );
+
+    const auto outputPath = dir.filePath( QStringLiteral( "saved-live.log" ) );
+    MainWindowLiveSaveTestAccess::start( window, live, outputPath, LiveLogSaveAnsiMode::Strip );
+    QElapsedTimer deadline;
+    deadline.start();
+    auto* const source = session->getAdbLogcatSource( live );
+    REQUIRE( source != nullptr );
+    while ( source->sessionData().associatedPath() != outputPath && deadline.elapsed() < 10000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
+    }
+    REQUIRE( source->sessionData().associatedPath() == outputPath );
+    const auto saved = window.inventorySnapshot();
+    REQUIRE( saved.tabs.front().associatedPath == outputPath );
+    REQUIRE( saved.tabs.front().tabId == initial.tabs.front().tabId );
+    REQUIRE( saved.revision > initial.revision );
+    MainWindowLiveSaveTestAccess::start( window, live, outputPath, LiveLogSaveAnsiMode::Strip );
+    REQUIRE( window.inventorySnapshot().revision == saved.revision );
+
+    const auto filePath = dir.filePath( QStringLiteral( "inventory.log" ) );
+    window.loadInitialFile( filePath, false );
+    REQUIRE( tabs->count() == 2 );
+    const auto withFile = window.inventorySnapshot();
+    const auto& entry = withFile.tabs.back();
+    auto* const file = qobject_cast<CrawlerWidget*>( entry.widget.data() );
+    REQUIRE( file != nullptr );
+    REQUIRE( entry.kind == DocumentKind::File );
+    REQUIRE( entry.documentId == session->getDocumentId( file ) );
+    REQUIRE( entry.displayName == QStringLiteral( "inventory.log" ) );
+    REQUIRE( entry.associatedPath == filePath );
+    REQUIRE( withFile.currentTabId == entry.tabId );
+    deadline.restart();
+    while ( !file->isFirstLoadDone() && deadline.elapsed() < 10000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
+    }
+    REQUIRE( file->isFirstLoadDone() );
+}
 
 SCENARIO( "Main window tests", "[ui]" )
 {

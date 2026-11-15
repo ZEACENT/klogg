@@ -48,6 +48,7 @@
 #include <QTimer>
 
 #include <QTranslator>
+#include <QUuid>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -95,6 +96,35 @@ class MainWindow : public QMainWindow {
     {
         return iosLiveServices_;
     }
+
+    struct TabInventoryEntry {
+        QString tabId;
+        DocumentKind kind = DocumentKind::File;
+        QString documentId;
+        QString displayName;
+        QString associatedPath;
+        QString tabTitle;
+        QPointer<QWidget> widget;
+
+        bool operator==( const TabInventoryEntry& other ) const;
+    };
+
+    struct InventorySnapshot {
+        QString windowId;
+        uint64_t revision = 0;
+        QString currentTabId; // Empty when no document tab is current.
+        std::vector<TabInventoryEntry> tabs;
+    };
+
+    QString runtimeWindowId() const { return runtimeWindowId_; }
+    // GUI-owner-thread observation in actual widget order, including collapsed
+    // group members. displayName is document metadata; tabTitle is the rendered
+    // label (including custom names/group labels). Weak widgets are not leases:
+    // callers must revalidate current membership before later operations.
+    // Revision covers membership/order/current tab and the exposed metadata,
+    // not pane/source/result state. Legacy compound actions may advance it more
+    // than once; this does not claim workspace atomicity. Reads have no effects.
+    InventorySnapshot inventorySnapshot() const;
 
     // Re-install the geometry stored in config file
     // (should be done before 'Widget::show()')
@@ -334,6 +364,12 @@ class MainWindow : public QMainWindow {
     void abortWindowShutdown();
     void finalizeWindowShutdown();
 
+    InventorySnapshot readInventory() const;
+    void refreshInventory();
+
+    const QString runtimeWindowId_ = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    // Observation cache only: widgets and per-view Session metadata remain authoritative.
+    InventorySnapshot inventory_{ runtimeWindowId_, 0, {}, {} };
     WindowSession session_;
     AdbLiveServices* adbLiveServices_{ nullptr };
     klogg::livecapture::ios::IosLiveServices* iosLiveServices_{ nullptr };

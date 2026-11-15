@@ -20,6 +20,8 @@
 #ifndef SEARCHTOOLBAR_H
 #define SEARCHTOOLBAR_H
 
+#include <cstdint>
+
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -62,6 +64,31 @@ class SearchToolbar : public QWidget {
 
     SearchToolbar( const SearchToolbar& ) = delete;
     SearchToolbar& operator=( const SearchToolbar& ) = delete;
+
+    struct FilterSpec {
+        QString text;
+        bool matchCase = false;
+        bool useRegexp = false;
+        bool inverse = false;
+        bool boolean = false;
+        bool autoRefresh = false;
+        bool keepResults = false;
+
+        bool operator==( const FilterSpec& other ) const;
+        bool operator!=( const FilterSpec& other ) const { return !( *this == other ); }
+    };
+
+    struct FilterDraftSnapshot {
+        FilterSpec filter;
+        uint64_t revision = 0;
+    };
+
+    // Owner-thread value observation of the current toolbar draft, NOT the
+    // submitted query, a pane's applied query, or result readiness. Reads do not
+    // focus, edit, or request a search. Revision is local to this toolbar's
+    // lifetime and advances on semantic edits, including edits back to an old
+    // value; history repopulation and search busy/idle presentation are neutral.
+    FilterDraftSnapshot filterDraftSnapshot() const;
 
     // --- Pattern contract (verbatim move of crawlerwidget.cpp:1976-1978) ---
     // isPlainText = !useRegexp is preserved exactly.
@@ -173,6 +200,10 @@ class SearchToolbar : public QWidget {
   private:
     void setupWidgets();
     void setupConnections();
+    void updateFilterDraft();
+
+    FilterDraftSnapshot filterDraft_;
+    bool updatingHistoryItems_ = false;
 
     SavedSearches* savedSearches_ = nullptr;
 

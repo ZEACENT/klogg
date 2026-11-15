@@ -134,6 +134,17 @@ class LogFilteredData : public AbstractLogData {
     LineType lineTypeByIndex( LineNumber index ) const;
     LineType lineTypeByLine( LineNumber lineNumber ) const;
 
+    struct MarksSnapshot {
+        uint64_t revision = 0;
+        QList<LineNumber> marks;
+    };
+
+    // Owner-thread value read of this filtered model's stored marks, independent
+    // of result visibility. Indices refer to its source model, NOT stable row
+    // identities or evidence addresses. The owner-local revision advances only
+    // on stored mark changes. No search/source/presentation mutation.
+    MarksSnapshot marksSnapshot() const;
+
     // Marks interface (delegated to a Marks object)
 
     // Add a mark at the given line
@@ -254,6 +265,7 @@ class LogFilteredData : public AbstractLogData {
     // List of the matching line numbers
     SearchResultArray matching_lines_;
     SearchResultArray marks_;
+    uint64_t marksRevision_ = 0;
     SearchResultArray marks_and_matches_;
     bool allLinesVisible_ = false;
 
@@ -280,7 +292,8 @@ class LogFilteredData : public AbstractLogData {
     // Cached list of line numbers including context lines (mutable for lazy evaluation)
     mutable klogg::vector<LineNumber> contextLinesList_;
     mutable bool contextLinesListValid_ = false;
-    mutable LineLength maxLengthContext_ = 0_length;
+    // Widths can require decoding; row membership/count queries must not.
+    mutable std::optional<LineLength> maxLengthContext_;
 
     struct SearchResultsPayload {
         LinesCount nbMatches = 0_lcount;

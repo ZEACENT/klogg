@@ -46,6 +46,7 @@
 #include <QScreen>
 #include <QScrollBar>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSignalSpy>
 #include <QString>
 #include <QStyleOptionViewItem>
@@ -59,6 +60,7 @@
 #include <functional>
 #include <string_view>
 
+#include "configuration.h"
 #include "filterfavoritesmodel.h"
 #include "persistentinfo.h"
 #include "predefinedfilters.h"
@@ -69,13 +71,6 @@
 #include "uimessage.h"
 
 namespace {
-// Helper: drive the widget through the Qt event loop so queued autoRun searches
-// (if enabled) and signal delivery settle before assertions.
-void pumpEvents()
-{
-    QTest::qWait( 10 );
-}
-
 template <typename Predicate>
 bool processEventsUntil( Predicate predicate )
 {
@@ -279,6 +274,228 @@ void scheduleOverwriteFavoriteAcceptance( QObject* context, const QString& targe
                         } );
 }
 } // namespace
+
+TEST_CASE( "SearchToolbar draft snapshots capture detached edited values",
+           "[searchtoolbar][filter-draft]" )
+{
+    SearchToolbar toolbar;
+    const auto initial = toolbar.filterDraftSnapshot();
+    REQUIRE( initial.filter == SearchToolbar::FilterSpec{} );
+    REQUIRE( initial.revision == 0 );
+
+    // Preserve exact input, including whitespace and an unfinished expression.
+    toolbar.searchLineEdit()->setEditText( QStringLiteral( "  [unfinished  " ) );
+    toolbar.setMatchCase( true );
+    toolbar.setUseRegexp( true );
+    toolbar.setInverse( true );
+    toolbar.setBoolean( true );
+    toolbar.setAutoRefresh( true );
+    toolbar.setKeepResultsChecked( true );
+    const SearchToolbar::FilterSpec expected{ QStringLiteral( "  [unfinished  " ),
+                                            true, true, true, true, true, true };
+    auto snapshot = toolbar.filterDraftSnapshot();
+    REQUIRE( snapshot.filter == expected );
+    REQUIRE( snapshot.revision > initial.revision );
+    REQUIRE( initial.filter == SearchToolbar::FilterSpec{} );
+    snapshot.filter.text = QStringLiteral( "detached" );
+    REQUIRE( toolbar.filterDraftSnapshot().filter == expected );
+}
+
+TEST_CASE( "SearchToolbar draft revisions track each option through setters and GUI ABA",
+           "[searchtoolbar][filter-draft]" )
+{
+    SearchToolbar toolbar;
+    using Setter = void ( SearchToolbar::* )( bool );
+    using Button = QToolButton* ( SearchToolbar::* )() const;
+    using Flag = bool SearchToolbar::FilterSpec::*;
+    struct Option {
+        Setter setter;
+        Button button;
+        Flag flag;
+    };
+    const Option options[]{
+        { &SearchToolbar::setMatchCase, &SearchToolbar::matchCaseButton,
+          &SearchToolbar::FilterSpec::matchCase },
+        { &SearchToolbar::setUseRegexp, &SearchToolbar::useRegexpButton,
+          &SearchToolbar::FilterSpec::useRegexp },
+        { &SearchToolbar::setInverse, &SearchToolbar::inverseButton,
+          &SearchToolbar::FilterSpec::inverse },
+        { &SearchToolbar::setBoolean, &SearchToolbar::booleanButton,
+          &SearchToolbar::FilterSpec::boolean },
+        { &SearchToolbar::setAutoRefresh, &SearchToolbar::searchRefreshButton,
+          &SearchToolbar::FilterSpec::autoRefresh },
+        { &SearchToolbar::setKeepResultsChecked, &SearchToolbar::keepSearchResultsButton,
+          &SearchToolbar::FilterSpec::keepResults } };
+    for ( const auto& option : options ) {
+        const auto before = toolbar.filterDraftSnapshot();
+        ( toolbar.*option.setter )( true );
+        const auto changed = toolbar.filterDraftSnapshot();
+        REQUIRE( changed.filter.*option.flag );
+        REQUIRE( changed.revision == before.revision + 1 );
+        ( toolbar.*option.setter )( true );
+        REQUIRE( toolbar.filterDraftSnapshot().revision == changed.revision );
+
+        // Two actual GUI button clicks, with NO intervening snapshot read.
+        auto* const button = ( toolbar.*option.button )();
+        QTest::mouseClick( button, Qt::LeftButton );
+        QTest::mouseClick( button, Qt::LeftButton );
+        const auto returned = toolbar.filterDraftSnapshot();
+        REQUIRE( returned.filter == changed.filter );
+        REQUIRE( returned.revision == changed.revision + 2 );
+        ( toolbar.*option.setter )( false );
+        REQUIRE( toolbar.filterDraftSnapshot().revision == returned.revision + 1 );
+    }
+}
+
+TEST_CASE( "SearchToolbar draft revisions track text edits and blocked combo setters",
+           "[searchtoolbar][filter-draft]" )
+{
+    SearchToolbar toolbar;
+    auto* const combo = toolbar.searchLineEdit();
+    auto* const edit = combo->lineEdit();
+    toolbar.setSearchPattern( QStringLiteral( "A" ) );
+    const auto before = toolbar.filterDraftSnapshot();
+    REQUIRE( before.filter.text == QStringLiteral( "A" ) );
+    REQUIRE( before.revision == 1 );
+    toolbar.setSearchPattern( QStringLiteral( "A" ) );
+    REQUIRE( toolbar.filterDraftSnapshot().revision == before.revision );
+
+    // Both folder searchFor and session restoration block the combo's signals.
+    {
+        const QSignalBlocker blocker( combo );
+        combo->setEditText( QStringLiteral( "B" ) );
+        combo->setEditText( QStringLiteral( "A" ) );
+    }
+    const auto restored = toolbar.filterDraftSnapshot();
+    REQUIRE( restored.filter == before.filter );
+    REQUIRE( restored.revision == before.revision + 2 );
+
+    edit->end( false );
+    QTest::keyClick( edit, Qt::Key_B );
+    QTest::keyClick( edit, Qt::Key_Backspace );
+    const auto humanReturned = toolbar.filterDraftSnapshot();
+    REQUIRE( humanReturned.filter == restored.filter );
+    REQUIRE( humanReturned.revision == restored.revision + 2 );
+
+    edit->setText( QStringLiteral( "direct" ) );
+    REQUIRE( toolbar.filterDraftSnapshot().filter.text == QStringLiteral( "direct" ) );
+    REQUIRE( toolbar.filterDraftSnapshot().revision == humanReturned.revision + 1 );
+    toolbar.clearButton()->click();
+    const auto cleared = toolbar.filterDraftSnapshot();
+    REQUIRE( cleared.filter.text.isEmpty() );
+    REQUIRE( cleared.revision == humanReturned.revision + 2 );
+    toolbar.clearButton()->click();
+    REQUIRE( toolbar.filterDraftSnapshot().revision == cleared.revision );
+}
+
+TEST_CASE( "SearchToolbar draft is current inside existing owner notifications",
+           "[searchtoolbar][filter-draft]" )
+{
+    SearchToolbar toolbar;
+    auto observed = toolbar.filterDraftSnapshot();
+    QObject::connect( &toolbar, &SearchToolbar::searchTextChanged, &toolbar,
+                      [ & ] { observed = toolbar.filterDraftSnapshot(); } );
+    QTest::keyClick( toolbar.searchLineEdit()->lineEdit(), Qt::Key_A );
+    REQUIRE( observed.filter.text == QStringLiteral( "a" ) );
+    REQUIRE( observed.revision == 1 );
+    REQUIRE( toolbar.filterDraftSnapshot().revision == observed.revision );
+
+    QObject::connect( &toolbar, &SearchToolbar::optionsChanged, &toolbar,
+                      [ & ] { observed = toolbar.filterDraftSnapshot(); } );
+    toolbar.setMatchCase( true );
+    REQUIRE( observed.filter.matchCase );
+    REQUIRE( observed.revision == 2 );
+    toolbar.setUseRegexp( true );
+    REQUIRE( observed.filter.useRegexp );
+    REQUIRE( observed.revision == 3 );
+    toolbar.setBoolean( true );
+    REQUIRE( observed.filter.boolean );
+    REQUIRE( observed.revision == 4 );
+
+    QObject::connect( &toolbar, &SearchToolbar::autoRefreshChanged, &toolbar,
+                      [ & ] { observed = toolbar.filterDraftSnapshot(); } );
+    toolbar.setAutoRefresh( true );
+    REQUIRE( observed.filter.autoRefresh );
+    REQUIRE( observed.revision == 5 );
+}
+
+TEST_CASE( "SearchToolbar history maintenance and busy presentation are draft neutral",
+           "[searchtoolbar][filter-draft]" )
+{
+    SearchToolbar toolbar;
+    toolbar.searchLineEdit()->setEditText( QStringLiteral( "draft" ) );
+    const auto before = toolbar.filterDraftSnapshot();
+    toolbar.setItems( { QStringLiteral( "history" ), QStringLiteral( "draft" ) } );
+    toolbar.setItems( {} );
+    toolbar.setItems( { QStringLiteral( "history" ), QStringLiteral( "draft" ) } );
+    toolbar.setSearchHistory( nullptr );
+    toolbar.recordSearch();
+    toolbar.setSearchInProgress( true );
+    toolbar.setSearchInProgress( false );
+    toolbar.loadIcons();
+    REQUIRE( toolbar.filterDraftSnapshot().filter == before.filter );
+    REQUIRE( toolbar.filterDraftSnapshot().revision == before.revision );
+
+    auto selected = before;
+    QObject::connect( &toolbar, &SearchToolbar::predefinedFilterActivated, &toolbar,
+                      [ & ] { selected = toolbar.filterDraftSnapshot(); } );
+    toolbar.searchLineEdit()->setCurrentIndex( 1 ); // Same draft, different index.
+    REQUIRE( toolbar.filterDraftSnapshot().revision == before.revision );
+    toolbar.searchLineEdit()->setCurrentIndex( 0 );
+    REQUIRE( selected.filter.text == QStringLiteral( "history" ) );
+    REQUIRE( selected.revision == before.revision + 1 );
+    toolbar.searchLineEdit()->setCurrentIndex( 1 );
+    REQUIRE( toolbar.filterDraftSnapshot().filter == before.filter );
+    REQUIRE( toolbar.filterDraftSnapshot().revision == before.revision + 2 );
+}
+
+TEST_CASE( "SearchToolbar draft reads never focus edit notify or submit",
+           "[searchtoolbar][filter-draft]" )
+{
+    auto& config = Configuration::get();
+    const auto previousAutoRun = config.autoRunSearchOnPatternChange();
+    struct RestoreAutoRun {
+        bool previous;
+        ~RestoreAutoRun() { Configuration::get().setAutoRunSearchOnPatternChange( previous ); }
+    } restore{ previousAutoRun };
+    config.setAutoRunSearchOnPatternChange( true );
+
+    SearchToolbar toolbar;
+    toolbar.show();
+    auto* const edit = toolbar.searchLineEdit()->lineEdit();
+    edit->setText( QStringLiteral( "unsubmitted" ) );
+    edit->setSelection( 2, 4 );
+    toolbar.searchButton()->setFocus();
+    REQUIRE( processEventsUntil( [ & ] {
+        return QApplication::focusWidget() == toolbar.searchButton();
+    } ) );
+    const auto before = toolbar.filterDraftSnapshot();
+    const auto cursor = edit->cursorPosition();
+    const auto selectionStart = edit->selectionStart();
+    const auto selection = edit->selectedText();
+    QSignalSpy search( &toolbar, &SearchToolbar::searchRequested );
+    QSignalSpy text( &toolbar, &SearchToolbar::searchTextChanged );
+    QSignalSpy options( &toolbar, &SearchToolbar::optionsChanged );
+    QSignalSpy refresh( &toolbar, &SearchToolbar::autoRefreshChanged );
+    QSignalSpy input( edit, &QLineEdit::textChanged );
+    QSignalSpy focus( qApp, &QApplication::focusChanged );
+    const SearchToolbar& readOnly = toolbar;
+    for ( int read = 0; read < 3; ++read ) {
+        const auto snapshot = readOnly.filterDraftSnapshot();
+        REQUIRE( snapshot.filter == before.filter );
+        REQUIRE( snapshot.revision == before.revision );
+    }
+    REQUIRE( QApplication::focusWidget() == toolbar.searchButton() );
+    REQUIRE( edit->cursorPosition() == cursor );
+    REQUIRE( edit->selectionStart() == selectionStart );
+    REQUIRE( edit->selectedText() == selection );
+    REQUIRE( search.isEmpty() );
+    REQUIRE( text.isEmpty() );
+    REQUIRE( options.isEmpty() );
+    REQUIRE( refresh.isEmpty() );
+    REQUIRE( input.isEmpty() );
+    REQUIRE( focus.isEmpty() );
+}
 
 TEST_CASE( "SearchToolbar constructs with null SavedSearches (folder mode)",
            "[searchtoolbar]" )
@@ -502,7 +719,6 @@ TEST_CASE( "SearchToolbar emits the expected signals", "[searchtoolbar]" )
     {
         QSignalSpy spy( &toolbar, &SearchToolbar::searchRequested );
         toolbar.searchButton()->click();
-        pumpEvents();
         REQUIRE( spy.count() >= 1 );
     }
 
@@ -512,7 +728,6 @@ TEST_CASE( "SearchToolbar emits the expected signals", "[searchtoolbar]" )
         toolbar.setSearchInProgress( true );
         QSignalSpy spy( &toolbar, &SearchToolbar::stopRequested );
         toolbar.stopButton()->click();
-        pumpEvents();
         REQUIRE( spy.count() >= 1 );
     }
 
@@ -520,7 +735,6 @@ TEST_CASE( "SearchToolbar emits the expected signals", "[searchtoolbar]" )
     {
         QSignalSpy spy( &toolbar, &SearchToolbar::optionsChanged );
         toolbar.matchCaseButton()->toggle();
-        pumpEvents();
         REQUIRE( toolbar.isMatchCase() == true );
         REQUIRE( spy.count() >= 1 );
     }
@@ -529,7 +743,6 @@ TEST_CASE( "SearchToolbar emits the expected signals", "[searchtoolbar]" )
     {
         QSignalSpy spy( &toolbar, &SearchToolbar::autoRefreshChanged );
         toolbar.searchRefreshButton()->toggle();
-        pumpEvents();
         REQUIRE( toolbar.isAutoRefresh() == true );
         REQUIRE( spy.count() >= 1 );
     }

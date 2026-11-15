@@ -23,6 +23,7 @@
 
 #include <QDir>
 #include <QSettings>
+#include <QTemporaryDir>
 #include <QUuid>
 
 #include "configuration.h"
@@ -70,6 +71,30 @@ void writeShortcutArray( QSettings& settings, const std::map<std::string, QStrin
     settings.sync();
 }
 } // namespace
+
+TEST_CASE( "Local control defaults on and preserves an explicit disabled choice", "[control-settings]" )
+{
+    QTemporaryDir directory;
+    REQUIRE( directory.isValid() );
+    QSettings settings( directory.filePath( "settings.ini" ), QSettings::IniFormat );
+    Configuration config;
+    CHECK( config.localControlEnabled() );
+    config.setLocalControlEnabled( false );
+    config.saveToStorage( settings );
+    REQUIRE( settings.contains( "control.enabled" ) );
+    CHECK_FALSE( settings.value( "control.enabled" ).toBool() );
+    Configuration restored;
+    restored.retrieveFromStorage( settings );
+    CHECK_FALSE( restored.localControlEnabled() );
+    restored.setLocalControlEnabled( true );
+    restored.saveToStorage( settings );
+    config.retrieveFromStorage( settings );
+    CHECK( config.localControlEnabled() );
+    settings.remove( "control.enabled" );
+    restored.setLocalControlEnabled( false );
+    restored.retrieveFromStorage( settings );
+    CHECK( restored.localControlEnabled() );
+}
 
 TEST_CASE( "Portable config path honors the test isolation override" )
 {

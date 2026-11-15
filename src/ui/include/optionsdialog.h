@@ -46,14 +46,18 @@
 #include <QLabel>
 #include <QPushButton>
 
+#include <functional>
+#include <memory>
 #include <optional>
 
 #include "configuration.h"
+#include "controlinstall.h"
 
-#include "ui_optionsdialog.h"
+namespace Ui { class OptionsDialog; }
 
 class QCheckBox;
 class QGroupBox;
+class QSpinBox;
 
 class KeySequencePresenter : public QWidget {
     Q_OBJECT
@@ -76,11 +80,14 @@ private:
 };
 
 // Implements the main option dialog box
-class OptionsDialog : public QDialog, public Ui::OptionsDialog {
+class OptionsDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit OptionsDialog( QWidget* parent = nullptr );
+    using ControlInstaller = std::function<klogg::control::InstallResult(
+        klogg::control::InstallAction, const QStringList& approvedPaths )>;
+    explicit OptionsDialog( QWidget* parent = nullptr, ControlInstaller controlInstaller = {} );
+    ~OptionsDialog() override;
 
 Q_SIGNALS:
     // Is emitted when new settings must be used
@@ -93,6 +100,9 @@ private Q_SLOTS:
     // Update the content of the global Config() using parameters
     // from the dialog box.
     void updateConfigFromDialog();
+    void checkControlInstallation();
+    void installControlCli();
+    void removeControlCli();
     // Called when a ok/cancel/apply button is clicked.
     void onButtonBoxClicked( QAbstractButton* button );
 
@@ -109,6 +119,8 @@ private Q_SLOTS:
     void resetAdvancedDefaults();
 
 private:
+    void showControlInstallationResult( const klogg::control::InstallResult& result );
+    void changeControlInstallation( klogg::control::InstallAction action );
     void setupTabs();
     void setupFontList();
     void setupRegexp();
@@ -139,6 +151,9 @@ private:
 
     void updateDialogFromConfig();
 
+    // Generated Designer fields do not form part of the public class layout.
+    std::unique_ptr<Ui::OptionsDialog> ui_;
+    ControlInstaller controlInstaller_;
     QColor mainSearchColor_;
     QColor qfSearchColor_;
 

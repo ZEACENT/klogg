@@ -39,6 +39,8 @@
 #ifndef highlighterSet_H
 #define highlighterSet_H
 
+#include <cstdint>
+
 #include <QColor>
 #include <QList>
 #include <QMetaType>
@@ -101,6 +103,10 @@ class Highlighter {
 
     const QRegularExpression& compile() const;
 
+    // Semantic value equality; compiled matcher caches are not application state.
+    bool operator==( const Highlighter& other ) const;
+    bool operator!=( const Highlighter& other ) const { return !( *this == other ); }
+
   private:
     std::pair<QColor, QColor> vairateColors( const QString& match ) const;
 
@@ -133,6 +139,10 @@ class HighlighterSet {
 
     QString name() const;
     QString id() const;
+    QList<Highlighter> highlighters() const;
+
+    bool operator==( const HighlighterSet& other ) const;
+    bool operator!=( const HighlighterSet& other ) const { return !( *this == other ); }
 
     // Returns weither the passed line match a filter of the set,
     // if so, it returns the fore/back colors the line should use.
@@ -170,6 +180,9 @@ struct QuickHighlighter {
     QString name;
     HighlightColor color;
     bool useInCycle;
+
+    bool operator==( const QuickHighlighter& other ) const;
+    bool operator!=( const QuickHighlighter& other ) const { return !( *this == other ); }
 };
 
 struct QuickLabelEntry {
@@ -181,6 +194,12 @@ struct QuickLabelEntry {
 struct QuickHighlighterDefaults {
     bool ignoreCase = true;
     bool wholeWord = false;
+
+    bool operator==( const QuickHighlighterDefaults& other ) const
+    {
+        return ignoreCase == other.ignoreCase && wholeWord == other.wholeWord;
+    }
+    bool operator!=( const QuickHighlighterDefaults& other ) const { return !( *this == other ); }
 };
 
 class HighlighterSetCollection final : public Persistable<HighlighterSetCollection> {
@@ -189,6 +208,25 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
     {
         return "HighlighterSetCollection";
     }
+
+    HighlighterSetCollection() = default;
+    // A copy is an independent owner. Assignment commits semantic content to
+    // the recipient, never imports a dialog draft's revision or matcher cache.
+    HighlighterSetCollection( const HighlighterSetCollection& other );
+    HighlighterSetCollection& operator=( const HighlighterSetCollection& other );
+
+    struct Snapshot {
+        uint64_t revision = 0;
+        QList<HighlighterSet> sets;
+        QStringList activeSetIds;
+        QList<QuickHighlighter> quickHighlighters;
+        QuickHighlighterDefaults quickHighlighterDefaults;
+    };
+
+    // Owner-thread, detached value observation of committed global state. Does
+    // not synchronize storage, compile matchers, or publish/persist changes.
+    // The revision belongs to this collection instance, not its saved config.
+    Snapshot snapshot() const;
 
     QList<HighlighterSet> highlighterSets() const;
     void setHighlighterSets( const QList<HighlighterSet>& highlighters );
@@ -217,8 +255,10 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
     static constexpr int HighlighterSetCollection_VERSION = 3;
 
     void updateCombinedSet();
+    void loadFromStorage( QSettings& settings );
 
   private:
+    uint64_t revision_ = 0;
     QList<HighlighterSet> highlighters_;
     QStringList activeSets_;
     HighlighterSet combinedActiveSet_;

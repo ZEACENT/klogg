@@ -78,6 +78,7 @@ class HighlighterSetEdit : public QWidget, public Ui::HighlighterSetEdit {
     void updateHighlighterProperties();
 
   private:
+    void notifyChanged();
     void populateHighlighterList();
     void setCurrentRow( int row );
 

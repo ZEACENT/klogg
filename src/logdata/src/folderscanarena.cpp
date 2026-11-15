@@ -199,7 +199,7 @@ QString ScannedFileContent::readRecord( qint64 offset, qint64 length,
     return std::move( decoded.front() );
 }
 
-QString ScannedFileContent::readLine( LineNumber line, const QByteArray& displayCodec ) const
+std::pair<qint64, qint64> ScannedFileContent::lineByteRange( LineNumber line ) const
 {
     if ( line >= lineCount_ ) {
         throw SnapshotError( "Marked row is outside the accepted folder scan cutoff" );
@@ -216,7 +216,18 @@ QString ScannedFileContent::readLine( LineNumber line, const QByteArray& display
     if ( start < 0 || end < start || end > byteSize_ ) {
         throw SnapshotError( "Folder retained row boundaries are invalid" );
     }
-    return readRecord( start, end - start, displayCodec );
+    return { start, end - start };
+}
+
+uint64_t ScannedFileContent::sourceBytesForLine( LineNumber line ) const
+{
+    return static_cast<uint64_t>( lineByteRange( line ).second );
+}
+
+QString ScannedFileContent::readLine( LineNumber line, const QByteArray& displayCodec ) const
+{
+    const auto range = lineByteRange( line );
+    return readRecord( range.first, range.second, displayCodec );
 }
 
 } // namespace klogg::folder

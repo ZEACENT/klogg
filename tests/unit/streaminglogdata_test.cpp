@@ -125,6 +125,38 @@ TEST_CASE( "Live readers preserve payload CR after ingress has normalized record
                                           : QByteArray( "ERROR\r" ) ) );
 }
 
+TEST_CASE( "Live and filtered snapshots admit bounded rows from retained physical extents",
+           "[streaming][snapshot-bounded]" )
+{
+    const bool disk = GENERATE( false, true );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "short\n" );
+    data.appendUtf8( QByteArray( 1024, 'x' ) + '\n' );
+    data.appendUtf8( "sealed" );
+    data.finishInput();
+    if ( disk ) REQUIRE( data.persistCapture().complete() );
+    const auto snapshot = data.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot );
+    CHECK( snapshot->sourceBytesForLine( 0_lnum ) == std::optional<uint64_t>( 6 ) );
+    CHECK( snapshot->sourceBytesForLine( 1_lnum ) == std::optional<uint64_t>( 1025 ) );
+    CHECK( snapshot->sourceBytesForLine( 2_lnum ) == std::optional<uint64_t>( 6 ) );
+    CHECK_THROWS_AS( snapshot->readLineBounded( 1_lnum, 1024, 1024 ), klogg::SnapshotLimitError );
+    CHECK( snapshot->readLineBounded( 2_lnum, 6, 6 ).text == QStringLiteral( "sealed" ) );
+    auto filtered = data.getNewFilteredData();
+    filtered->addMark( 1_lnum );
+    filtered->setVisibility( LogFilteredData::VisibilityFlags::Marks );
+    const auto rows = filtered->createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( rows );
+    REQUIRE( rows->lineCount() == 1_lcount );
+    CHECK( rows->sourceBytesForLine( 0_lnum ) == std::optional<uint64_t>( 1025 ) );
+    CHECK_THROWS_AS( rows->readLineBounded( 0_lnum, 1024, 1024 ), klogg::SnapshotLimitError );
+    data.clearCapture();
+    CHECK( snapshot->readLineBounded( 0_lnum, 6, 5 ).text == QStringLiteral( "short" ) );
+    CHECK( rows->readLineBounded( 0_lnum, 1025, 1024 ).text.size() == 1024 );
+}
+
 TEST_CASE( "Live read snapshots freeze committed rows without finalizing ingress",
            "[streaming][live-read-snapshot]" )
 {

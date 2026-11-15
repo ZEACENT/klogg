@@ -1,6 +1,45 @@
 add_executable(adb_server_test_helper adb_server_test_helper.cpp)
 target_link_libraries(adb_server_test_helper PRIVATE project_options project_warnings)
 
+# Control tests need no display, GUI configuration, or log data.
+find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+function(klogg_add_control_console_test name runtime_target)
+  if(WIN32)
+    add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E env
+      "PATH=$<TARGET_FILE_DIR:${runtime_target}>$<SEMICOLON>$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>$<SEMICOLON>$ENV{PATH}"
+      ${ARGN})
+  else()
+    add_test(NAME ${name} COMMAND ${ARGN})
+  endif()
+  set_tests_properties(${name} PROPERTIES TIMEOUT 120)
+  klogg_set_test_isolation(${name})
+endfunction()
+add_executable(klogg_control_protocol_tests
+  controlframing_test.cpp controlrpc_test.cpp pure_catch_main.cpp
+)
+target_link_libraries(klogg_control_protocol_tests PRIVATE klogg_control Catch2)
+target_include_directories(klogg_control_protocol_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/utils/include")
+klogg_configure_test_target(klogg_control_protocol_tests)
+klogg_add_control_console_test(klogg_control_protocol_tests klogg_control_protocol_tests
+  $<TARGET_FILE:klogg_control_protocol_tests>)
+
+add_executable(klogg_control_tests
+  controltransport_main.cpp controltransport_test.cpp controlcli_test.cpp controlruntime_env_test.cpp
+)
+# These installer fixtures exercise POSIX homes, modes, and temporary shell
+# launchers. Native Windows registry/ACL acceptance has a separate platform gate.
+if(UNIX)
+  target_sources(klogg_control_tests PRIVATE controlinstall_test.cpp)
+endif()
+target_link_libraries(klogg_control_tests PRIVATE klogg_control Catch2 Qt${QT_VERSION_MAJOR}::Network)
+target_include_directories(klogg_control_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/utils/include")
+klogg_configure_test_target(klogg_control_tests)
+klogg_add_control_console_test(klogg_control_tests klogg_control_tests
+  $<TARGET_FILE:klogg_control_tests>)
+add_dependencies(klogg_control_tests kloggctl)
+klogg_add_control_console_test(klogg_control_cli_smoke kloggctl
+  "${Python3_EXECUTABLE}" -I "${CMAKE_CURRENT_SOURCE_DIR}/controlcli_smoke.py" $<TARGET_FILE:kloggctl>)
+
 # The native iOS protocol core is deliberately tested without Qt, a device, or
 # libimobiledevice. The production adapter owns that integration boundary.
 add_executable(
@@ -246,6 +285,10 @@ add_executable(klogg_tests
     capturestore_test.cpp
     cli_test.cpp
     colorlabelsmanager_test.cpp
+    colorlabelscontroller_test.cpp
+    reviewtransaction_test.cpp
+    reviewpanes_test.cpp
+    reviewcontent_test.cpp
     configuration_test.cpp
     encodingdetector_test.cpp
     droppathclassification_test.cpp
@@ -273,6 +316,7 @@ add_executable(klogg_tests
     searchtoolbar_test.cpp
     selection_test.cpp
     logfiltereddataworker_test.cpp
+    logsnapshot_bounded_test.cpp
     sessioninfo_test.cpp
     shortcut_bindings_test.cpp
     styles_test.cpp
