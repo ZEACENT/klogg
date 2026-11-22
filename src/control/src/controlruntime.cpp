@@ -135,20 +135,20 @@ bool ControlRuntime::prepare( const RuntimeOptions& requested, QString* error )
         clear();
         return fail( error, QStringLiteral( "Unsafe control discovery directory" ) );
     }
-    auto& descriptor = d_->descriptor;
-    descriptor.instanceId = QUuid::createUuid().toString( QUuid::Id128 );
-    descriptor.installationId = options.installationId;
-    descriptor.profileId = options.profileId;
-    descriptor.endpoint = pal::endpoint( options.socketRoot, descriptor.instanceId );
+    auto& instance = d_->descriptor;
+    instance.instanceId = QUuid::createUuid().toString( QUuid::Id128 );
+    instance.installationId = options.installationId;
+    instance.profileId = options.profileId;
+    instance.endpoint = pal::endpoint( options.socketRoot, instance.instanceId );
     QByteArray secret;
     secret.reserve( 32 );
     for ( int i = 0; i < 8; ++i ) {
         const auto random = QRandomGenerator::system()->generate();
         secret.append( reinterpret_cast<const char*>( &random ), sizeof( random ) );
     }
-    descriptor.token = QString::fromLatin1( secret.toHex() );
-    d_->name = descriptor.instanceId + QStringLiteral( ".json" );
-    const auto socketPath = pal::socketDirectory( options.socketRoot, descriptor.instanceId );
+    instance.token = QString::fromLatin1( secret.toHex() );
+    d_->name = instance.instanceId + QStringLiteral( ".json" );
+    const auto socketPath = pal::socketDirectory( options.socketRoot, instance.instanceId );
     if ( !socketPath.isEmpty() ) {
         d_->socket = std::make_unique<pal::PrivateDirectory>();
         // Random identity never reuses an existing endpoint directory.

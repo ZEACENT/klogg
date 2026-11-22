@@ -37,7 +37,7 @@ class FrameDecoder {
     FrameError error() const { return error_; }
 
   private:
-    Result fail( FrameError error );
+    Result fail( FrameError reason );
 
     QByteArray header_;
     QByteArray payload_;

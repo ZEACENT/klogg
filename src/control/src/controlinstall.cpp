@@ -172,9 +172,10 @@ InstallResult windowsInstall( const InstallOptions& options, InstallAction actio
     auto desired = *previous;
     auto parts = desired.value.split( ';' );
     if ( !desired.ownedDirectory.isEmpty() ) {
-        int equivalent = 0;
-        for ( const auto& part : parts )
-            if ( windowsKey( part ) == windowsKey( desired.ownedDirectory ) ) ++equivalent;
+        const auto ownedKey = windowsKey( desired.ownedDirectory );
+        const auto equivalent = std::count_if( parts.cbegin(), parts.cend(), [&]( const QString& part ) {
+            return windowsKey( part ) == ownedKey;
+        } );
         const auto exact = parts.count( desired.ownedDirectory );
         if ( equivalent > 1 || ( equivalent == 1 && exact != 1 ) )
             return fail( result, InstallStatus::Collision, "The owned PATH entry was edited ambiguously; no changes made" );

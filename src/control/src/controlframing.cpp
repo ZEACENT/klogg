@@ -24,9 +24,9 @@ std::optional<QByteArray> encodeFrame( const QByteArray& payload )
     return frame;
 }
 
-FrameDecoder::Result FrameDecoder::fail( FrameError error )
+FrameDecoder::Result FrameDecoder::fail( FrameError reason )
 {
-    error_ = error;
+    error_ = reason;
     header_.clear();
     payload_.clear();
     expected_ = 0;

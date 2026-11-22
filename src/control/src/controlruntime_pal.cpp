@@ -165,10 +165,10 @@ struct PrivateDirectory::Private {
 };
 PrivateDirectory::PrivateDirectory() : d_( std::make_unique<Private>() ) {}
 PrivateDirectory::~PrivateDirectory() = default;
-bool PrivateDirectory::open( const QString& path, bool create )
+bool PrivateDirectory::open( const QString& directoryPath, bool create )
 {
-    if ( !QDir::isAbsolutePath( path ) || path.contains( QChar( 0 ) ) ) return false;
-    const QString clean = QDir::cleanPath( QDir::fromNativeSeparators( path ) );
+    if ( !QDir::isAbsolutePath( directoryPath ) || directoryPath.contains( QChar( 0 ) ) ) return false;
+    const QString clean = QDir::cleanPath( QDir::fromNativeSeparators( directoryPath ) );
     if ( clean.startsWith( "//" ) || clean.size() < 3 || clean.at( 1 ) != ':' ) return false;
     QString current = clean.left( 3 );
     auto parts = clean.mid( 3 ).split( '/' );
@@ -363,7 +363,7 @@ FileIdentity fileIdentity( const struct stat& info )
     return { static_cast<quint64>( info.st_dev ), static_cast<quint64>( info.st_ino ), true };
 }
 using filesystemsecurity::ReadFlags;
-using filesystemsecurity::noExtendedGrants;
+using filesystemsecurity::accessIsSafe;
 using filesystemsecurity::safeAncestor;
 
 // fcntl's third argument depends on its command. Only expose the two socket
@@ -392,10 +392,10 @@ struct PrivateDirectory::Private {
 };
 PrivateDirectory::PrivateDirectory() : d_( std::make_unique<Private>() ) {}
 PrivateDirectory::~PrivateDirectory() = default;
-bool PrivateDirectory::open( const QString& path, bool create )
+bool PrivateDirectory::open( const QString& directoryPath, bool create )
 {
-    if ( !QDir::isAbsolutePath( path ) || path.contains( QChar( 0 ) ) ) return false;
-    auto parts = path.split( '/' );
+    if ( !QDir::isAbsolutePath( directoryPath ) || directoryPath.contains( QChar( 0 ) ) ) return false;
+    auto parts = directoryPath.split( '/' );
     parts.removeAll( QString{} );
     if ( parts.isEmpty() ) return false;
     int current = filesystemsecurity::openRootDirectory();
@@ -410,13 +410,12 @@ bool PrivateDirectory::open( const QString& path, bool create )
         ::close( anchor.value );
         anchor.value = next;
         struct stat info{};
-        if ( fstat( anchor.value, &info ) != 0 || !safeAncestor( info )
-             || !noExtendedGrants( anchor.value ) ) return false;
+        if ( fstat( anchor.value, &info ) != 0 || !safeAncestor( anchor.value, info ) ) return false;
     }
     struct stat info{};
     if ( fstat( anchor.value, &info ) != 0 || !privateDirectory( info ) ) return false;
     d_->fd.value = std::exchange( anchor.value, -1 );
-    d_->path = QDir::cleanPath( path );
+    d_->path = QDir::cleanPath( directoryPath );
     d_->identity = fileIdentity( info );
     return true;
 }
@@ -427,7 +426,7 @@ bool PrivateDirectory::unchanged() const
     struct stat opened{};
     return d_->fd.value >= 0 && lstat( QFile::encodeName( d_->path ).constData(), &info ) == 0
            && fstat( d_->fd.value, &opened ) == 0 && privateDirectory( info )
-           && privateDirectory( opened ) && noExtendedGrants( d_->fd.value )
+           && accessIsSafe( d_->fd.value, privateDirectory( opened ) )
            && same( d_->identity, fileIdentity( info ) );
 }
 QStringList PrivateDirectory::entries( int limit ) const
@@ -456,8 +455,8 @@ std::optional<QByteArray> PrivateDirectory::read( const QString& name, int limit
                                                 ReadFlags::NonBlocking ) );
     struct stat info{};
     if ( file.value < 0 || fstat( file.value, &info ) != 0 || !S_ISREG( info.st_mode )
-         || info.st_uid != geteuid() || ( info.st_mode & 0077 ) != 0 || info.st_nlink != 1
-         || info.st_size <= 0 || info.st_size > limit || !noExtendedGrants( file.value ) ) return {};
+         || info.st_uid != geteuid() || info.st_nlink != 1 || info.st_size <= 0 || info.st_size > limit
+         || !accessIsSafe( file.value, ( info.st_mode & 0077 ) == 0 ) ) return {};
     QByteArray bytes( static_cast<int>( info.st_size ), '\0' );
     qint64 offset = 0;
     while ( offset < bytes.size() ) {
@@ -568,6 +567,14 @@ struct LocalListener::Native {
     int fd = -1;
     std::unique_ptr<QSocketNotifier> notifier;
     std::deque<QLocalSocket*> pending;
+
+    QLocalSocket* takePending()
+    {
+        if ( pending.empty() ) return nullptr;
+        auto* socket = pending.front();
+        pending.pop_front();
+        return socket;
+    }
 };
 LocalListener::LocalListener() : native_( std::make_unique<Native>() ) {}
 LocalListener::~LocalListener() { close(); }
@@ -595,8 +602,7 @@ void LocalListener::close()
         native_->notifier.reset();
     }
     if ( native_->fd >= 0 ) ::close( std::exchange( native_->fd, -1 ) );
-    while ( !native_->pending.empty() ) {
-        auto* socket = nextPendingConnection();
+    while ( auto* socket = native_->takePending() ) {
         socket->abort();
         socket->deleteLater();
     }
@@ -605,10 +611,7 @@ void LocalListener::close()
 bool LocalListener::hasPendingConnections() const { return !native_->pending.empty(); }
 QLocalSocket* LocalListener::nextPendingConnection()
 {
-    if ( native_->pending.empty() ) return nullptr;
-    auto* socket = native_->pending.front();
-    native_->pending.pop_front();
-    return socket;
+    return native_->takePending();
 }
 void LocalListener::incomingConnection( quintptr descriptor )
 {

@@ -120,11 +120,14 @@ struct ControlServer::Private::Session : std::enable_shared_from_this<Session> {
             if ( const auto self = weak.lock() ) self->pump();
         } );
     }
+    // A handler or socket callback may stop this server epoch while a batch is being drained.
+    bool isActive( const Private& state ) const { return !closed && state.running; }
+
     bool send( const std::optional<QByteArray>& payload )
     {
         const auto state = owner.lock();
         const auto frame = payload ? encodeFrame( *payload ) : std::nullopt;
-        if ( closed || !state || !state->running || !frame
+        if ( !state || !isActive( *state ) || !frame
              || socket->bytesToWrite() + frame->size() > state->limits.maxQueuedWriteBytes
              || socket->write( *frame ) != frame->size() ) {
             close();
@@ -135,12 +138,12 @@ struct ControlServer::Private::Session : std::enable_shared_from_this<Session> {
     void pump()
     {
         const auto state = owner.lock();
-        if ( pumping || closed || !state || !state->running ) return;
+        if ( pumping || !state || !isActive( *state ) ) return;
         pumping = true;
         const auto result = decoder.feed( socket->read( ReadChunk ) );
         if ( result.error != FrameError::None ) { close(); return; }
         for ( const auto& payload : result.messages ) {
-            if ( closed || !state->running ) break;
+            if ( !isActive( *state ) ) break;
             if ( !authenticated ) {
                 if ( !pal::sameUserPeer( socket->socketDescriptor(), true )
                      || !matchesHello( payload, state->runtime.descriptor(), true ) ) { close(); break; }
@@ -165,7 +168,7 @@ struct ControlServer::Private::Session : std::enable_shared_from_this<Session> {
             catch ( ... ) {
                 response = internalError( request.id );
             }
-            if ( closed || !state->running ) break;
+            if ( !isActive( *state ) ) break;
             std::optional<QByteArray> encoded;
             if ( const auto* error = std::get_if<RpcError>( &response ) ) {
                 auto correlated = *error;
@@ -178,7 +181,7 @@ struct ControlServer::Private::Session : std::enable_shared_from_this<Session> {
             if ( !send( encoded ) ) break;
         }
         pumping = false;
-        if ( !closed && state->running && socket->bytesAvailable() > 0 ) schedule();
+        if ( isActive( *state ) && socket->bytesAvailable() > 0 ) schedule();
     }
 };
 
@@ -232,9 +235,9 @@ bool ControlServer::start( const RuntimeOptions& options, Handler handler, QStri
     state->handler = std::move( handler );
     if ( !state->runtime.prepare( options, error ) ) return false;
     state->listener.setMaxPendingConnections( limits.maxConnections );
-    const auto descriptor = state->runtime.createListener( error );
-    if ( !state->listener.open( state->runtime.descriptor().endpoint, descriptor ) ) {
-        ControlRuntime::closeListener( descriptor );
+    const auto listenerDescriptor = state->runtime.createListener( error );
+    if ( !state->listener.open( state->runtime.descriptor().endpoint, listenerDescriptor ) ) {
+        ControlRuntime::closeListener( listenerDescriptor );
         if ( error && error->isEmpty() ) *error = QStringLiteral( "Cannot listen on control endpoint" );
         return false;
     }

@@ -20,7 +20,7 @@ class PrivateDirectory {
   public:
     PrivateDirectory();
     ~PrivateDirectory();
-    bool open( const QString& path, bool create );
+    bool open( const QString& directoryPath, bool create );
     QString path() const;
     QStringList entries( int limit ) const;
     std::optional<QByteArray> read( const QString& name, int limit ) const;

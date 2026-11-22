@@ -43,15 +43,13 @@ class Fd {
 bool trustedAncestor( int descriptor )
 {
     struct stat info {};
-    return ::fstat( descriptor, &info ) == 0 && filesystemsecurity::safeAncestor( info )
-           && filesystemsecurity::noExtendedGrants( descriptor );
+    return ::fstat( descriptor, &info ) == 0 && filesystemsecurity::safeAncestor( descriptor, info );
 }
 bool ownedDirectory( int descriptor )
 {
     struct stat info {};
     return ::fstat( descriptor, &info ) == 0 && info.st_uid == ::geteuid()
-           && filesystemsecurity::safeAncestor( info )
-           && filesystemsecurity::noExtendedGrants( descriptor );
+           && filesystemsecurity::safeAncestor( descriptor, info );
 }
 InstallStatus openParent( const QString& path, Fd& parent, bool create, bool& touched )
 {
@@ -97,8 +95,7 @@ InstallStatus readAt( int parent, const QByteArray& name, FileState& state )
     struct stat before {};
     if ( ::fstat( file.get(), &before ) != 0 ) return InstallStatus::IoError;
     if ( !S_ISREG( before.st_mode ) || before.st_uid != ::geteuid() || before.st_nlink != 1
-         || ( before.st_mode & ( S_IWGRP | S_IWOTH ) ) != 0
-         || !filesystemsecurity::noExtendedGrants( file.get() )
+         || !filesystemsecurity::accessIsSafe( file.get(), ( before.st_mode & ( S_IWGRP | S_IWOTH ) ) == 0 )
          || before.st_size < 0 || before.st_size > MaxConfigBytes ) return InstallStatus::UnsafePath;
     state.exists = true;
     state.device = static_cast<quint64>( before.st_dev );

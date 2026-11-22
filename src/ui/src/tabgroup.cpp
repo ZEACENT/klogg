@@ -182,7 +182,7 @@ void TabGroupManager::toggleCollapsed( const QString& groupId )
     if ( auto* group = mutableGroupById( groupId ) ) {
         advanceMutationIdentity();
         group->collapsed = !group->collapsed;
-        Q_EMIT groupCollapsedChanged( groupId, group->collapsed );
+        Q_EMIT this->groupCollapsedChanged( groupId, group->collapsed );
         Q_EMIT groupsChanged();
     }
 }

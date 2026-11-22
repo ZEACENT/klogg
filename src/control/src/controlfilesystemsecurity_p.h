@@ -39,9 +39,10 @@ inline int createPrivateFileAt( int parent, const char* name )
     return ::openat( parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600 );
 }
 
-inline bool noExtendedGrants( int descriptor )
+inline bool accessIsSafe( int descriptor, bool allowedByMode )
 {
 #ifdef Q_OS_MACOS
+    if ( !allowedByMode ) return false;
     // Darwin ACL allows bypass mode bits. Refuse existing grants; never repair
     // security by removing an ACL that belongs to the user.
     acl_t acl = acl_get_fd_np( descriptor, ACL_TYPE_EXTENDED );
@@ -62,15 +63,16 @@ inline bool noExtendedGrants( int descriptor )
     // POSIX ACL effective permissions are masked by group mode bits. Callers
     // reject group/other writes; private transport objects reject all such access.
     Q_UNUSED( descriptor );
-    return true;
+    return allowedByMode;
 #endif
 }
 
-inline bool safeAncestor( const struct stat& info )
+inline bool safeAncestor( int descriptor, const struct stat& info )
 {
+    const bool safeMode = ( info.st_mode & 0022 ) == 0
+                          || ( info.st_uid == 0 && ( info.st_mode & S_ISVTX ) != 0 );
     return S_ISDIR( info.st_mode ) && ( info.st_uid == geteuid() || info.st_uid == 0 )
-           && ( ( info.st_mode & 0022 ) == 0
-                || ( info.st_uid == 0 && ( info.st_mode & S_ISVTX ) != 0 ) );
+           && accessIsSafe( descriptor, safeMode );
 }
 
 } // namespace klogg::control::filesystemsecurity

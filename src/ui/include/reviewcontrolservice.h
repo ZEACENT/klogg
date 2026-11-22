@@ -9,8 +9,8 @@
 // focus changes or a second window/tab registry.
 class ReviewControlService : public QObject {
   public:
-    ReviewControlService( ReviewControlAdapter::WindowProvider windows,
-                          klogg::control::RuntimeOptions runtime = {}, QObject* parent = nullptr );
+    explicit ReviewControlService( ReviewControlAdapter::WindowProvider windows,
+                                   klogg::control::RuntimeOptions runtime = {}, QObject* parent = nullptr );
     ~ReviewControlService() override;
     bool setEnabled( bool enabled );
     bool isRunning() const;
