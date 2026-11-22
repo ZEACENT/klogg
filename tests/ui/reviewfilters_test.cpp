@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDir>
 #include <QEvent>
 #include <QFile>
 #include <QJsonArray>
@@ -58,6 +59,13 @@ struct FilterControlFixture {
     QJsonObject call( const QString& method, const QJsonObject& params = {} )
     {
         return filterResult( raw( method, params ) );
+    }
+    QString openFolder( const QString& path )
+    {
+        const auto opened = await( call( "documents.open", { { "window_id", window.runtimeWindowId() },
+            { "path", path }, { "kind", "folder" } } ) );
+        REQUIRE( opened.value( "status" ) == "completed" );
+        return opened.value( "result" ).toObject().value( "tab_id" ).toString();
     }
     QJsonObject params( const QString& text ) const
     {
@@ -246,9 +254,12 @@ TEST_CASE( "Filter preparation bounds pending deliveries without publishing reje
 {
     FilterControlFixture fixture;
     const auto before = fixture.draft();
-    // No event turn: even a fast worker retains its permit until delivery retires.
+    auto folder = fixture.params( "INFO" );
+    folder.insert( "tab_id", fixture.openFolder( fixture.root.path() ) );
+    // File and folder share permits. No event turn: even a finished worker
+    // retains its permit until delivery retires.
     const auto first = fixture.call( "filter.apply", fixture.params( "ERROR" ) );
-    const auto second = fixture.call( "filter.apply", fixture.params( "INFO" ) );
+    const auto second = fixture.call( "filter.apply", folder );
     CHECK( filterError( fixture.raw( "filter.apply", fixture.params( "third" ) ) )
            == "RESOURCE_LIMIT" );
     for ( const auto& pending : { first, second } ) {
@@ -300,19 +311,90 @@ TEST_CASE( "Unsupported filter transaction aborts its staged annotation prefix",
     CHECK( fixture.draft().value( "text" ).toString().isEmpty() );
 }
 
-TEST_CASE( "Folder filter writes are rejected without changing the draft",
-           "[control-filters]" )
+TEST_CASE( "Folder filter distinguishes an empty directory from a vanished root",
+           "[control-filters][control-folder-root]" )
 {
     FilterControlFixture fixture;
-    const auto opened = fixture.await( fixture.call( "documents.open", {
-        { "window_id", fixture.window.runtimeWindowId() }, { "path", fixture.root.path() },
-        { "kind", "folder" } } ) );
-    REQUIRE( opened.value( "status" ) == "completed" );
-    fixture.tabId = opened.value( "result" ).toObject().value( "tab_id" ).toString();
+    QDir root{ fixture.root.path() };
+    REQUIRE( root.mkdir( "logs" ) );
+    const auto path = root.filePath( "logs" );
+    QFile member{ QDir{ path }.filePath( "previous.log" ) };
+    REQUIRE( member.open( QIODevice::WriteOnly ) );
+    REQUIRE( member.write( "before\n" ) == 7 );
+    member.close();
+    fixture.tabId = fixture.openFolder( path );
+    REQUIRE( fixture.await( fixture.call( "filter.apply", fixture.params( "before" ) ) ).value( "status" ) == "completed" );
+    const auto previous = fixture.draft();
+    bool missing = false;
+    SECTION( "last member removed" ) { REQUIRE( member.remove() ); }
+    SECTION( "directory moved" ) { REQUIRE( root.rename( "logs", "moved" ) ); missing = true; }
+    const auto outcome = fixture.await( fixture.call( "filter.apply", fixture.params( "after" ) ) );
+    CHECK( outcome.value( "status" ) == ( missing ? "failed" : "completed" ) );
+    if ( missing ) CHECK( fixture.draft() == previous );
+    const auto snapshot = fixture.call( "source.capture", { { "tab_id", fixture.tabId },
+        { "pane", "results" }, { "scope", "matches" } } );
+    CHECK( snapshot.value( "row_count" ) == ( missing ? "1" : "0" ) );
+}
+
+TEST_CASE( "Folder filter RPC publishes only the completed query and preserves other tabs",
+           "[control-filters][control-folder-filter]" )
+{
+    FilterControlFixture fixture;
+    fixture.tabId = fixture.openFolder( fixture.root.path() );
+    QWidget editorWindow;
+    QLineEdit editor{ &editorWindow };
+    editorWindow.show();
+    editor.setFocus();
+    REQUIRE( waitUiState( [&] { return QApplication::focusWidget() == &editor; } ) );
     const auto before = fixture.draft();
-    CHECK( filterError( fixture.raw( "filter.apply", fixture.params( "ERROR" ) ) )
-           == "UNSUPPORTED_SOURCE" );
+    const auto current = fixture.window.inventorySnapshot().currentTabId;
+    const auto pending = fixture.call( "filter.apply", fixture.params( "ERROR" ) );
     CHECK( fixture.draft() == before );
+    SECTION( "cancel before delivery" ) {
+        fixture.call( "operation.cancel", { { "operation_id", pending.value( "operation_id" ) } } );
+        CHECK( fixture.draft() == before );
+        CHECK( fixture.await( pending ).value( "status" ) != "completed" );
+    }
+    SECTION( "human edit before delivery" ) {
+        fixture.toolbar()->searchLineEdit()->setEditText( "human edit" );
+        CHECK( fixture.await( pending ).value( "error" ).toObject().value( "code" ) == "CONFLICT" );
+        CHECK( fixture.draft().value( "text" ) == "human edit" );
+    }
+    SECTION( "closed folder cannot publish" ) {
+        fixture.call( "documents.close", { { "window_id", fixture.window.runtimeWindowId() }, { "tab_id", fixture.tabId } } );
+        CHECK( fixture.await( pending ).value( "error" ).toObject().value( "code" ) == "TARGET_CLOSED" );
+    }
+    SECTION( "replace, keep and empty reset" ) {
+        const auto done = fixture.await( pending );
+        REQUIRE( done.value( "status" ) == "completed" );
+        CHECK_FALSE( QJsonDocument{ done }.toJson().contains( "PRIVATE BODY" ) );
+        const auto original = done.value( "result" ).toObject().value( "pane_id" );
+        const auto captured = fixture.call( "source.capture", { { "tab_id", fixture.tabId },
+            { "pane_id", original }, { "scope", "matches" } } );
+        CHECK( captured.value( "row_count" ) == "1" );
+        fixture.call( "source.release", { { "snapshot_id", captured.value( "snapshot_id" ) } } );
+        const auto beforeInvalid = fixture.draft();
+        const auto invalid = fixture.await( fixture.call( "filter.apply", fixture.params( "[" ) ) );
+        CHECK( invalid.value( "error" ).toObject().value( "code" ) == "FILTER_COMPILE_FAILED" );
+        CHECK( fixture.draft() == beforeInvalid );
+        const auto applyKeep = [&]( const QString& text ) {
+            return fixture.await( fixture.call( "filter.apply", { { "tab_id", fixture.tabId },
+                { "filter", QJsonObject{ { "text", text }, { "keep_results", true } } } } ) );
+        };
+        const auto kept = applyKeep( "INFO" );
+        REQUIRE( kept.value( "status" ) == "completed" );
+        const auto fresh = kept.value( "result" ).toObject().value( "pane_id" );
+        CHECK( fresh != original );
+        CHECK_FALSE( fixture.draft().value( "keep_results" ).toBool() );
+        CHECK( fixture.call( "pane.get", { { "tab_id", fixture.tabId }, { "pane_id", original } } )
+                   .value( "applied_filter" ).toObject().value( "text" ) == "ERROR" );
+        const auto cleared = applyKeep( "" );
+        REQUIRE( cleared.value( "status" ) == "completed" );
+        CHECK( cleared.value( "result" ).toObject().value( "pane_id" ) == fresh );
+        CHECK( fixture.draft().value( "keep_results" ).toBool() );
+        CHECK( fixture.window.inventorySnapshot().currentTabId == current );
+    }
+    CHECK( QApplication::focusWidget() == &editor );
 }
 
 TEST_CASE( "Control filter compile failure preserves the previous UI state",

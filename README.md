@@ -148,11 +148,12 @@ state observation does not read log lines. `documents.open` and `documents.close
 provide single-command file/folder lifecycle operations without activation;
 background preparation shares `operation.get` and `operation.cancel` with content
 reads and implicit `filter.apply` requests. Closing a document never deletes the
-file on disk. `filter.apply` replaces the current results pane's filter in file
-and live tabs, or privately prepares a new pane with `keep_results:true`, without
-returning log content. Empty text performs the native
-`NoSearch` reset, not a completed match-all regex search. Admission requires an
-unchanged source snapshot, so continuous appends can cause a conflict.
+file on disk. `filter.apply` works on file, live and folder tabs. It replaces the
+current pane's filter or prepares a kept pane without returning log content.
+Empty text resets the query rather than matching every row. File/live queries
+require an unchanged source snapshot, so continuous appends can cause a conflict.
+Folder queries retain the bytes scanned from each member; they do not freeze the
+filesystem.
 `capabilities.get` reports supported methods, feature flags and selected limits;
 it is an inventory, not a complete request/response schema.
 
@@ -171,10 +172,14 @@ Use IDs returned by the GUI and operation responses. The `filter` object is a
 strict patch: `text` is a string; `match_case`, `use_regexp`, `inverse`, `boolean`,
 `auto_refresh`, and `keep_results` are booleans. Omitted fields retain the current
 draft values. Optional top-level `expected_revision` is a canonical unsigned
-decimal string from `tab.get.filter_draft.revision`. `keep_results:true` retains
-the old pane and its marks, creates a fresh result model without copying those
-marks, and consumes the keep toggle on successful publication. Folder filter
-writes and explicit filter transactions are unsupported. `tab.get.filter_draft`
+decimal string from `tab.get.filter_draft.revision`. For file/live tabs,
+`keep_results:true` retains the old pane and starts a new model without copying
+its marks. For folder tabs the same command scans current folder membership;
+marks are shared across panes. A nonempty folder search consumes Keep and opens
+a new pane only if the previous pane has rows after revealing matches. Empty
+text clears matches in place without consuming Keep. If the human changes the
+relevant state before publication, the operation can fail with `CONFLICT` and
+leave their changes intact. Explicit filter transactions are unsupported. `tab.get.filter_draft`
 is draft-only. Use `pane.get` or `pane.list` to read each result pane's
 `applied_filter` (including retained file/live/folder results), independently of
 unsubmitted drafts and deferred painting. Its `complete` flag reports native
@@ -195,7 +200,7 @@ and partial failures are reported. Shell installation and control enablement are
 independent.
 
 **This is not the complete feature or packaged acceptance.** Composing lifecycle
-or filter changes with annotations in explicit transactions, folder filters,
+or filter changes with annotations in explicit transactions,
 continuous-append cutover, source-addressed navigation/selection,
 and full cross-platform package acceptance are still in progress.
 A relocated macOS Qt/CLI payload has passed native Cocoa startup checks; this is not

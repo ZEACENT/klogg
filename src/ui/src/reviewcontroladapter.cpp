@@ -51,8 +51,9 @@ QJsonObject capabilitiesJson()
             { "explicit_transaction_filter_draft_reads", true },
             { "implicit_document_kinds", QJsonArray{ "file", "folder" } },
             { "explicit_lifecycle_transactions", false }, { "applied_filters", true },
-            { "implicit_filter_kinds", QJsonArray{ "file", "live" } },
-            { "filter_source_policy", "unchanged-snapshot" },
+            { "implicit_filter_kinds", QJsonArray{ "file", "live", "folder" } },
+            { "filter_source_policy", "unchanged-snapshot" }, // File/live snapshot admission.
+            { "folder_filter_source_policy", "retained-scan" },
             { "filter_kept_pane_creation", true }, { "explicit_filter_transactions", false },
             { "applied_filter_observation", true },
             { "source_navigation", false }, { "live_lifecycle", false },
@@ -475,10 +476,8 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
         if ( !tabId.isString() || tabId.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
         const auto tab = resolveTab( windows_, tabId.toString() );
         if ( !tab ) return reject( "TARGET_NOT_FOUND" );
-        const QPointer<CrawlerWidget> widget{ qobject_cast<CrawlerWidget*>( tab->tab.widget.data() ) };
-        if ( !widget || !tab->controls.filter
-             || ( tab->tab.kind != DocumentKind::File && tab->tab.kind != DocumentKind::AdbLogcat ) )
-            return reject( "UNSUPPORTED_SOURCE" );
+        const auto widget = tab->tab.widget;
+        if ( !widget || !tab->controls.filter ) return reject( "UNSUPPORTED_SOURCE" );
         const auto draft = tab->controls.filter->filterDraftSnapshot();
         auto decoded = klogg::review::decodeFilterPatch( params.value( "filter" ), draft.filter );
         if ( const auto* error = std::get_if<klogg::review::FilterDecodeError>( &decoded ) )

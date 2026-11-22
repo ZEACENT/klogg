@@ -126,6 +126,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filterfavoritesmodel.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderenumeration.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderfilteredview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/folderfilterpublication.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/foldercrawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlightersdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlighteredit.cpp

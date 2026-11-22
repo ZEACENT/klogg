@@ -1125,6 +1125,7 @@ struct FolderSearchResults::PreparedSearchReplacement {
     QHash<QString, klogg::folder::ScannedFileContent::Ptr> sources;
     RetainedMembers members;
     QSet<QString> expectedFiles;
+    QSet<QString> pendingCollapsePaths;
     QSet<klogg::folder::FileId> collapsed;
     LayoutProjection projection;
     bool consumed = false;
@@ -1154,7 +1155,7 @@ bool FolderSearchResults::SearchReplacementPublication::install() noexcept
     owner.retentionError_.clear();
     owner.pendingByIndex_.clear();
     owner.nextExpectedIndex_ = 0;
-    owner.pendingCollapsePaths_.clear();
+    owner.pendingCollapsePaths_.swap( prepared.pendingCollapsePaths );
     owner.clearFileCaches();
     owner.installLayout( std::move( prepared.projection ) );
     prepared.consumed = true;
@@ -1217,6 +1218,21 @@ FolderSearchResults::prepareSearchReplacement(
         prepared->expectedFiles, true, context.candidateVisibility, &context.original } );
     return prepared;
 }
+std::shared_ptr<FolderSearchResults::PreparedSearchReplacement>
+FolderSearchResults::prepareSearchReset( const std::shared_ptr<const SearchReplacementCapture>& captured,
+                                        const QStringList& expectedFileOrder )
+{
+    if ( !captured || static_cast<size_t>( expectedFileOrder.size() ) > MaxPreparedLayoutRows ) return {};
+    auto prepared = std::make_shared<PreparedSearchReplacement>();
+    prepared->captured = captured;
+    prepared->pendingCollapsePaths = captured->collapsedPaths;
+    for ( const auto& path : expectedFileOrder ) prepared->expectedFiles.insert( path );
+    const auto& context = *captured->context;
+    prepared->projection = buildLayout( { prepared->groups, prepared->sources, prepared->collapsed,
+        prepared->expectedFiles, true, context.candidateVisibility, &context.original } );
+    return prepared;
+}
+
 std::unique_ptr<FolderSearchResults::SearchReplacementPublication>
 FolderSearchResults::lockSearchReplacement( const std::shared_ptr<PreparedSearchReplacement>& prepared )
 {

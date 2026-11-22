@@ -216,6 +216,10 @@ class FolderSearchResults : public AbstractLogData {
     static std::shared_ptr<PreparedSearchReplacement> prepareSearchReplacement(
         const std::shared_ptr<const SearchReplacementCapture>& captured,
         FolderSearchEngine::CompletedSearch completed );
+    // Native empty-query reset keeps enumerated membership for marks and the
+    // remembered collapse paths for the next search, but has no scan receipt.
+    static std::shared_ptr<PreparedSearchReplacement> prepareSearchReset(
+        const std::shared_ptr<const SearchReplacementCapture>& captured, const QStringList& expectedFileOrder );
     std::unique_ptr<SearchReplacementPublication> lockSearchReplacement(
         const std::shared_ptr<PreparedSearchReplacement>& prepared );
 

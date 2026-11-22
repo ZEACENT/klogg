@@ -27,6 +27,7 @@
 #include <QStringList>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -66,9 +67,9 @@ class FolderSearchEngine : public QObject {
     static constexpr int BinaryDetectionWindow = 32 * 1024;
 
     using StopPredicate = std::function<bool()>;
-    // A stalled request may overlap one replacement request. Implementations must
-    // therefore be safe for at most two concurrent invocations and must own any
-    // captured state until each invocation returns.
+    // One native engine can overlap a stalled enumeration with its replacement.
+    // Captures must outlive every invocation, including any calls made by
+    // independent preparation workers sharing the same enumerator.
     using FolderEnumerator
         = std::function<QStringList( const QString&, const StopPredicate& )>;
 
@@ -149,6 +150,16 @@ class FolderSearchEngine : public QObject {
         // or the folder engine's separate bounded file-worker pool size.
         ScanSettings requestSettings{};
     };
+    // Run entirely within the caller's worker lifetime: enumeration is inline,
+    // and all scanner threads join before return. The stop predicate can be
+    // called concurrently; an empty predicate means never stop.
+    static CompletedSearch prepareFolderSearch( const QString& folderPath,
+                                                const RegularExpressionPattern& pattern,
+                                                klogg::folder::ContextOptions context,
+                                                const ScanSettings& settings,
+                                                const FolderEnumerator& enumerate,
+                                                const StopPredicate& shouldStop );
+
     // Thread-safe, consume-once bulk handoff for the current generation. A
     // terminal signal alone is not success, and streaming drains must not turn
     // a partially consumed result into a successful complete search.
@@ -239,5 +250,13 @@ class FolderSearchEngine : public QObject {
     bool resultsConsumed_ = false;
     std::atomic<quint64> matchCount_{ 0 };
 };
+
+namespace klogg::folder::detail {
+// Explicit worker count and launcher keep partial native launch failure testable
+// independent of host core count. A failing task/launch stops and joins peers.
+using ScannerTask = std::function<void( std::size_t, const std::atomic<bool>& )>;
+using ScannerLauncher = std::function<std::thread( std::function<void()> )>;
+bool runScannerPool( std::size_t count, const ScannerTask& scan, const ScannerLauncher& launch );
+} // namespace klogg::folder::detail
 
 #endif // FOLDERSEARCHENGINE_H

@@ -9,7 +9,7 @@
 #include "controlrpc.h"
 #include "searchtoolbar.h"
 
-class CrawlerWidget;
+class QWidget;
 class ReviewContentAdapter;
 
 // Implicit filter writes and kept-pane creation, using the shared operation registry.
@@ -19,7 +19,7 @@ public:
     struct Target {
         QString windowId;
         QString tabId;
-        QPointer<CrawlerWidget> widget;
+        QPointer<QWidget> widget;
         std::function<bool()> current;
     };
     static constexpr int MaxConcurrentPreparations = 2;

@@ -1837,6 +1837,43 @@ Windows/Linux acceptance were not run.
 This extends internal publication primitives only; folder GUI staging and filter
 RPC are still unfinished.
 
+## Slice 50: implicit folder filter application
+
+`filter.apply` accepts folder tabs through the same strict patch decoder,
+revision check, two preparation permits and cancellable operation registry as
+file/live tabs. The worker re-enumerates nonempty queries. It owns enumeration
+directly (no detached private enumerator) and uses the same per-member scanner,
+serial matcher creation, bounded file pool and retained bytes as native folder
+search. Once cancellation is observed it stays latched; unexpected scanner and
+partial thread-launch failures join every started worker and cannot publish a
+partial success. A vanished root is a preparation failure, not an empty folder.
+Individual inaccessible/binary files still follow native folder scan semantics.
+
+The GUI validates the captured tab, pane, draft and relevant human changes
+before installing. Keep may require two models: reveal matches on the retained
+pane and install the destination layout. An empty query instead uses the prior
+membership for marks, remembers collapse by path and does not enumerate or
+consume Keep. No selection of a source file is synthesized. A focus transfer
+from the outgoing results or Stop control is rejected rather than forced. Native
+pane/query metadata is current immediately; inactive presentation remains
+deferred. The RPC result has the same IDs and no log content, regardless of tab
+kind. Folder scans have no filesystem-wide point-in-time guarantee.
+
+The integration regression drives a real `kloggctl` process against the GUI:
+apply to a background folder after adding a file, observe matched membership,
+keep a pane, reset in place, then inspect the retained pane's applied filter.
+Additional tests cover cancellation, human edits, closure, focus, budget sharing,
+partial launch, lost folder roots, retained marks and context. This is an
+implicit operation, not an explicit transaction composed with other RPCs.
+
+Local macOS Qt 6 acceptance: **162 unit / 137 GUI cases** passed normally
+and **162 unit / 138 GUI cases** with ASan+UBSan, including the subprocess CLI
+and coexisting file/live filters. Twelve affected translation units passed Qt 5
+syntax checks; five standalone headers passed on Qt 5 and Qt 6. Platform,
+determinism, repository hygiene and whitespace checks passed. Native Windows and
+Linux, linked Qt 5 GUI, Vectorscan-enabled runtime, LeakSanitizer and release
+package verification were not run for this slice.
+
 ## Developer CLI walkthrough (implemented surface only)
 
 Start the GUI normally and open the documents to review. The CLI never launches
@@ -1999,10 +2036,12 @@ required completion step. A pending response is not successful publication.
 
 `filter` is a strict patch, not a complete replacement object: omitted fields
 retain current draft values. Explicit `keep_results:false` selects replacement;
-`keep_results:true` prepares a new pane and retains the original results/marks.
-A successful Keep consumes the toggle, and the response identifies the new pane.
-Only file/live tabs are admitted; do not supply
-`transaction_id`, a folder target or a pane selector. The operation captures the
+`keep_results:true` requests a kept pane. File/live tabs retain the original
+model and marks; folder tabs share marks across panes. A nonempty folder search
+re-enumerates the directory and consumes Keep, creating a pane only if the
+old pane has visible rows after resetting Marks-only visibility. Empty folder
+filters reset in place and preserve Keep. The response identifies the destination
+pane. Supply a file/live/folder tab ID, not `transaction_id` or a pane selector. The operation captures the
 addressed tab's current results pane and rejects conflicting changes rather than
 following a later pane switch. Continuous append may prevent unchanged-snapshot
 admission; re-observe before deciding whether to retry.
@@ -2052,8 +2091,8 @@ the server's supported-method list.
 
 ## Remaining scope
 
-These slices do not constitute the complete product. Folder filter writes,
-source-addressed navigation and selection, mixed explicit lifecycle/filter
+These slices do not constitute the complete product. Source-addressed navigation
+and selection, mixed explicit lifecycle/filter
 transactions, full parameter/result schema discovery, and full release-artifact
 acceptance remain. `capabilities.get` provides method/feature/limit inventory.
 Implicit current-pane filter publication is delivered for file/live tabs, with
@@ -2062,7 +2101,7 @@ Relocated macOS Qt/CLI startup is verified in Slice 23; device sidecars,
 mounted/signed release artifacts and native Windows/Linux packaging are separate
 remaining gates.
 The developer CLI supports observation, bounded content reads, implicit file/folder
-open/close, file/live filter application/reset and private kept-pane creation, and mixed
+open/close, file/live/folder filter application/reset and private kept-pane creation, and mixed
 source-backed mark/label/global-highlighter transactions. `tab.get.filter_draft`
 is still draft-only. Explicit transactions do not yet compose lifecycle or
 filter-result changes with annotations. No operation promises global durability

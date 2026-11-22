@@ -188,6 +188,16 @@ class FolderCrawlerContext : public ViewContextInterface {
 FolderCrawlerWidget::ResultPane::ResultPane() = default;
 FolderCrawlerWidget::ResultPane::~ResultPane() = default;
 
+QStringList FolderCrawlerWidget::enumerateSearchFolder( const QString& path,
+    const FolderSearchEngine::StopPredicate& shouldStop )
+{
+    const auto files = enumerateFolderFiles( path, {}, shouldStop );
+    QStringList snapshot;
+    snapshot.reserve( static_cast<int>( files.size() ) );
+    for ( const auto& file : files ) snapshot.append( file );
+    return snapshot;
+}
+
 FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     : QWidget( parent )
     , colorLabelsController_( this, [ this ]() { return activeView(); } )
@@ -201,17 +211,7 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     quickFindPattern_ = std::make_shared<QuickFindPattern>();
     // QObject ownership is transferred to this widget.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
-    engine_ = new FolderSearchEngine(
-        []( const QString& folderPath, const FolderSearchEngine::StopPredicate& shouldStop ) {
-            const auto files = enumerateFolderFiles( folderPath, {}, shouldStop );
-            QStringList snapshot;
-            snapshot.reserve( static_cast<int>( files.size() ) );
-            for ( const auto& file : files ) {
-                snapshot.append( file );
-            }
-            return snapshot;
-        },
-        this ); // QObject-owned
+    engine_ = new FolderSearchEngine( enumerateSearchFolder, this );
 
     // --- toolbar ---
     // SearchToolbar (shared with CrawlerWidget) owns the search input + option
@@ -392,7 +392,7 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     // while panes_ is empty.
     {
         QSignalBlocker blocker( resultsTabs_ );
-        createPane( QString() );
+        createPane();
     }
 
     auto* root = new QVBoxLayout( this );
@@ -649,6 +649,7 @@ void FolderCrawlerWidget::changeEvent( QEvent* event )
 void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringList& filePaths )
 {
     if ( resourcesRetiring_ ) return;
+    ++filterStateRevision_;
     folderPath_ = folderPath;
     filePaths_ = filePaths;
     // Seed every pane's membership before session marks are restored. setFolder
@@ -913,6 +914,7 @@ void FolderCrawlerWidget::updateContextFromControls()
 
 void FolderCrawlerWidget::onContextControlsChanged()
 {
+    ++filterStateRevision_;
     // grep semantics: context is selected at scan time, so a control change must
     // re-scan (the engine captures context offsets while streaming). Re-run only
     // when a pattern is present so tweaking the controls before the first search
@@ -1117,31 +1119,27 @@ void FolderCrawlerWidget::refreshAllPanesForMarks()
     scheduleMainViewPresentationRefresh( true );
 }
 
-FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString& title )
+void FolderCrawlerWidget::createPane()
 {
-    // Build a self-contained pane: its own FolderSearchResults +
-    // FolderFilteredView + FolderFilteredMarkProvider (pointing at this pane's
-    // results + the shared folderMarks_), wired with the same connections the
-    // single pane used to get in the ctor. Parenting the view to resultsTabs_
-    // lets QTabWidget reparent it into its stack on addTab.
+    auto results = std::make_shared<FolderSearchResults>();
+    results->setMarksStore( &folderMarks_ );
+    appendPane( makePane( results ) );
+}
+
+std::unique_ptr<FolderCrawlerWidget::ResultPane> FolderCrawlerWidget::makePane(
+    const std::shared_ptr<FolderSearchResults>& results )
+{
     auto pane = std::make_unique<ResultPane>();
-    pane->results = std::make_shared<FolderSearchResults>();
-    pane->title = title;
-    auto* const view = new FolderFilteredView( pane->results.get(), quickFindPattern_.get(),
-                                               resultsTabs_ );
+    pane->results = results;
+    // Leave the view unparented until the pane is published in the tab stack.
+    auto viewOwner = std::make_unique<FolderFilteredView>( results.get(), quickFindPattern_.get() );
+    auto* const view = viewOwner.get();
     pane->view = view;
 
     pane->markProvider = std::make_unique<FolderFilteredMarkProvider>();
     pane->markProvider->marks = &folderMarks_;
     pane->markProvider->results = pane->results.get();
     view->setMarkProvider( pane->markProvider.get() );
-
-    // Inject the shared per-file marks store (widget-owned, read LIVE during
-    // rebuild) so the Marks / Marks-and-matches filter can ENUMERATE marked lines
-    // and inject marked non-match rows -- single-file LogFilteredData::marks_
-    // parity (a bookmark on a source line stays visible across filter changes).
-    // Same store for every pane; folderMarks_ outlives the pane (widget-owned).
-    pane->results->setMarksStore( &folderMarks_ );
 
     // Seed config so a pane created mid-session (Keep) matches the others.
     const auto& config = Configuration::get();
@@ -1160,6 +1158,13 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
     }
     view->setSearchPattern( currentSearchPattern_ );
 
+    viewOwner.release();
+    return pane;
+}
+
+void FolderCrawlerWidget::appendPane( std::unique_ptr<ResultPane> pane, const QString& title )
+{
+    auto* const view = pane->view;
     // Color labels: every pane's results view joins the tab's shared label set
     // (seeded with any labels already set before the pane existed).
     colorLabelsController_.watchView( view );
@@ -1170,7 +1175,6 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
     viewSignalWiring_->wireHover( view );
     view->setControlsSearchLimits( false );
 
-    ResultPane* const raw = pane.get();
     FolderSearchResults* const sourceResults = pane->results.get();
 
     // Per-pane signal wiring (self-contained: switching tabs needs no re-wiring).
@@ -1193,6 +1197,7 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
                      return;
                  }
                  auto* const sourcePane = paneIt->get();
+                 if ( sourceResults == activeResults() ) ++filterStateRevision_;
                  // The new layout is committed. Remap stable identities now,
                  // preserving the owned payload and any pending Copy; painting
                  // still follows the existing coalesced presentation cadence.
@@ -1210,7 +1215,6 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
     activePaneIndex_ = static_cast<int>( panes_.size() ) - 1;
     // Keep tab index == pane index (append-only; close erases same index).
     resultsTabs_->setCurrentIndex( tabIndex );
-    return raw;
 }
 
 void FolderCrawlerWidget::schedulePanePresentationRefresh( ResultPane* pane )
@@ -1397,6 +1401,7 @@ void FolderCrawlerWidget::setPresentationActive( bool active )
 void FolderCrawlerWidget::onActivePaneChanged( int tabIndex )
 {
     if ( resourcesRetiring_ ) return;
+    ++filterStateRevision_;
     // tab index == pane index (append-only + same-index erase). Re-apply the
     // global visibility combo to the now-active pane (all panes share the one
     // toolbar combo).
@@ -1418,6 +1423,7 @@ void FolderCrawlerWidget::onActivePaneChanged( int tabIndex )
 void FolderCrawlerWidget::onClosePane( int tabIndex )
 {
     if ( resourcesRetiring_ ) return;
+    ++filterStateRevision_;
     if ( panes_.empty() || tabIndex < 0 || tabIndex >= static_cast<int>( panes_.size() ) ) {
         return;
     }
@@ -2083,9 +2089,8 @@ std::shared_ptr<const ViewContextInterface> FolderCrawlerWidget::doGetViewContex
     return static_cast<std::shared_ptr<const ViewContextInterface>>( context );
 }
 
-void FolderCrawlerWidget::startSearch()
+void FolderCrawlerWidget::supersedeSearch()
 {
-    if ( resourcesRetiring_ ) return;
     // Progress text belongs to the superseded generation, but pane refreshes do
     // not: a Keep-results pane may still owe one presentation of model data that
     // was committed before this search started.
@@ -2102,7 +2107,12 @@ void FolderCrawlerWidget::startSearch()
     statusErrorActive_ = false;
     statusLabel_->setPalette( statusLabelDefaultPalette_ );
     statusLabel_->setAutoFillBackground( false );
+}
 
+void FolderCrawlerWidget::startSearch()
+{
+    if ( resourcesRetiring_ ) return;
+    supersedeSearch();
     // Parity with CrawlerWidget::replaceCurrentSearch: a new search returns a
     // marks-only view to "Marks and matches" so the fresh matches are visible.
     if ( visibilityBox_->currentIndex() == 1 ) {
@@ -2156,7 +2166,7 @@ void FolderCrawlerWidget::startSearch()
                     resultsTabs_->currentIndex(),
                     QStringLiteral( "Find \"%1\"" ).arg( currentSearchPattern_.pattern ) );
             }
-            createPane( QString() );
+            createPane();
         }
     }
 
@@ -2216,6 +2226,7 @@ void FolderCrawlerWidget::startSearch()
 void FolderCrawlerWidget::stopSearch()
 {
     if ( resourcesRetiring_ ) return;
+    ++filterStateRevision_;
     engine_->interrupt();
     flushFolderPresentation();
     statusRefreshTimer_.cancel();
@@ -2231,6 +2242,7 @@ void FolderCrawlerWidget::onFolderSnapshotReady( QStringList filePaths, quint64 
     if ( resourcesRetiring_ || generation != currentSearchGeneration_ ) {
         return;
     }
+    ++filterStateRevision_;
     filePaths_ = std::move( filePaths );
     if ( searchTargetResults_ != nullptr ) {
         searchTargetResults_->beginSearch( filePaths_ );
@@ -2242,6 +2254,7 @@ void FolderCrawlerWidget::onSearchStarted( quint64 generation )
     if ( resourcesRetiring_ || generation != currentSearchGeneration_ ) {
         return; // stale: a superseded scan (empty/invalid pattern replaced it)
     }
+    ++filterStateRevision_;
     statusLabel_->setText( tr( "Searching..." ) );
 }
 
@@ -2250,6 +2263,7 @@ void FolderCrawlerWidget::onSearchProgressed( quint64 nbMatches, int percent, qu
     if ( resourcesRetiring_ || generation != currentSearchGeneration_ ) {
         return; // stale: a superseded scan (empty/invalid pattern replaced it)
     }
+    ++filterStateRevision_;
     pendingProgressStatusText_
         = tr( "%1 match(es)  %2%" ).arg( static_cast<qulonglong>( nbMatches ) ).arg( percent );
     presentationDirty_ = true;
@@ -2264,6 +2278,7 @@ void FolderCrawlerWidget::onSearchFinished( quint64 generation )
         return; // stale: superseded by a newer search
     }
 
+    ++filterStateRevision_;
     // Defensive safety net: commit any groups still buffered (interrupted
     // scans may leave a predecessor that never arrived). Under normal
     // completion all per-file groups were already committed incrementally via
@@ -2288,7 +2303,11 @@ void FolderCrawlerWidget::onSearchFinished( quint64 generation )
     searchToolbar_->setSearchInProgress( false );
     searchActive_ = false;
 
-    const quint64 total = engine_->matchCount();
+    setFinishedStatus( engine_->matchCount() );
+}
+
+void FolderCrawlerWidget::setFinishedStatus( quint64 total )
+{
     if ( total == 0 ) {
         lastResultStatusText_ = tr( "No matches" );
     }

@@ -520,6 +520,93 @@ TEST_CASE( "Folder completion distinguishes empty success from invalid queries a
     CHECK( completed->groups.empty() );
 }
 
+TEST_CASE( "Worker-owned folder preparation returns ordered leases or a typed failure",
+           "[folder-preparation]" )
+{
+    using Status = FolderSearchEngine::CompletionStatus;
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto zero = writeFile( dir, "zero.log", "ordinary\n" );
+    const auto hit = writeFile( dir, "hit.log", toUtf16LE( "before\nMATCH\n", true ) );
+    const QStringList paths{ zero, hit };
+    FolderSearchEngine::ScanSettings settings;
+    settings.defaultEncodingMib = 4;
+    const auto owner = std::this_thread::get_id();
+    std::thread::id enumerationThread;
+    bool failEnumeration = false;
+    const FolderSearchEngine::FolderEnumerator enumerate = [&]( const QString& folder, const auto& stop ) {
+        enumerationThread = std::this_thread::get_id();
+        if ( failEnumeration ) throw std::runtime_error( "injected enumeration failure" );
+        if ( folder != dir.path() || stop() ) return QStringList{};
+        return paths;
+    };
+    const auto prepare = [&]( const FolderSearchEngine::StopPredicate& stop = {} ) {
+        return FolderSearchEngine::prepareFolderSearch( dir.path(), RegularExpressionPattern{ "MATCH" },
+                                                        { 1, 0 }, settings, enumerate, stop );
+    };
+    SECTION( "enumeration failure" ) {
+        failEnumeration = true;
+        const auto result = prepare();
+        CHECK( result.status == Status::EnumerationFailure );
+        CHECK( result.groups.empty() );
+        failEnumeration = false;
+    }
+    SECTION( "stop before enumeration" ) {
+        CHECK( prepare( [] { return true; } ).status == Status::Cancelled );
+        CHECK( enumerationThread == std::thread::id{} );
+    }
+    SECTION( "cancellation or exception during scan discards partial groups" ) {
+        // The UTF-16 BOM forces real detection even on a single-core host. Only
+        // trip the predicate once the scanner is inside this file, not while enumerating.
+        const auto& detections = EncodingDetector::uchardetInvocationsForTesting();
+        const auto before = detections.load();
+        bool fail = false;
+        SECTION( "cancellation" ) {}
+        SECTION( "unexpected scanner exception" ) { fail = true; }
+        std::atomic<bool> fired{ false };
+        const auto result = prepare( [&] {
+            if ( detections.load() == before ) return false;
+            // Trip once: the final status check must not be what notices a
+            // cancellation or exception already observed inside a member scan.
+            if ( fired.exchange( true ) ) return false;
+            if ( fail ) throw std::runtime_error( "injected scanner failure" );
+            return true;
+        } );
+        CHECK( result.status == ( fail ? Status::Failed : Status::Cancelled ) );
+        CHECK( result.groups.empty() );
+    }
+    const auto ready = prepare();
+    CHECK( enumerationThread == owner );
+    REQUIRE( ready.status == Status::Ready );
+    CHECK( ready.filePaths == paths );
+    CHECK( ready.requestSettings.defaultEncodingMib == settings.defaultEncodingMib );
+    REQUIRE( ready.groups.size() == 2 );
+    REQUIRE( ready.groups[ 0 ].content );
+    CHECK( ready.groups[ 0 ].content->readLine( 0_lnum, "UTF-8" ) == "ordinary" );
+    REQUIRE( ready.groups[ 1 ].matches.size() == 2 );
+    CHECK( ready.groups[ 1 ].matches.front().role == klogg::folder::RecordRole::Context );
+    CHECK( ready.groups[ 1 ].matches.back().localLine == 1_lnum );
+}
+
+TEST_CASE( "A partial scanner launch stops and joins previously launched workers", "[folder-preparation]" )
+{
+    std::atomic<bool> exitedAfterFailure{ false };
+    int launches = 0;
+    const auto launch = [&]( std::function<void()> task ) -> std::thread {
+        if ( ++launches == 1 ) return std::thread( std::move( task ) );
+        throw std::runtime_error( "injected launch failure" );
+    };
+    const auto worker = [&]( size_t, const std::atomic<bool>& failed ) {
+        QElapsedTimer deadline;
+        deadline.start();
+        while ( !failed.load() && !deadline.hasExpired( 3000 ) ) std::this_thread::yield();
+        exitedAfterFailure = failed.load();
+    };
+    CHECK_FALSE( klogg::folder::detail::runScannerPool( 2, worker, launch ) );
+    CHECK( launches == 2 );
+    CHECK( exitedAfterFailure.load() );
+}
+
 TEST_CASE( "Cancellation during folder enumeration is not a successful empty result",
            "[folder-completion]" )
 {

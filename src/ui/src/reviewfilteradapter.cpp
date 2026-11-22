@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <new>
+#include <type_traits>
 #include <utility>
 #include <QFutureWatcher>
 #include <QThread>
@@ -9,13 +10,14 @@
 
 #include "asyncworkbudget.h"
 #include "crawlerwidget.h"
+#include "foldercrawlerwidget.h"
 #include "reviewcontentadapter.h"
 
 namespace {
 using namespace klogg::control;
 using Completion = ReviewContentAdapter::PendingOperation;
-struct PreparedFilter {
-    CrawlerWidget::FilterUpdatePreparation outcome;
+template <class Widget> struct PreparedFilter {
+    typename Widget::FilterUpdatePreparation outcome;
     klogg::AsyncWorkBudget::Lease permit;
 };
 RpcError failure( const RpcRequest& request, const char* code )
@@ -31,9 +33,10 @@ QString preparationError( SearchPreparation::Status status )
     default: return QStringLiteral( "FILTER_PREPARATION_FAILED" );
     }
 }
+template <class Widget>
 void publishFilter( ReviewFilterAdapter::Target target, Completion operation,
-                    const std::shared_ptr<PreparedFilter>& prepared,
-                    const std::shared_ptr<CrawlerWidget::FilterUpdateStaging>& staging )
+                    const std::shared_ptr<PreparedFilter<Widget>>& prepared,
+                    const std::shared_ptr<typename Widget::FilterUpdateStaging>& staging )
 {
     try {
         if ( !operation.current() ) { operation.complete( {}, "OPERATION_CANCELLED" ); return; }
@@ -84,29 +87,42 @@ klogg::control::DecodedResponse ReviewFilterAdapter::apply( const klogg::control
     static const klogg::AsyncWorkBudget budget{ MaxConcurrentPreparations };
     auto permit = budget.tryAcquire();
     if ( !permit ) return failure( request, "RESOURCE_LIMIT" );
-    std::shared_ptr<CrawlerWidget::FilterUpdateStaging> staging;
+    // Dispatch only the native staging type. Admission budget, cancellation,
+    // operation lifetime and the publication boundary are shared by all tabs.
+    const auto start = [&]( auto* widget ) -> DecodedResponse {
+        using Widget = std::remove_pointer_t<decltype( widget )>;
+        using Prepared = PreparedFilter<Widget>;
+        std::shared_ptr<typename Widget::FilterUpdateStaging> staging = widget->stageFilterUpdate( candidate );
+        if ( !staging ) return failure( request, "FILTER_NOT_READY" );
+        const auto captured = staging->capture();
+        auto cancelled = std::make_shared<AtomicFlag>();
+        auto operation = operations_.beginOperation( [cancelled] { cancelled->set(); }, PreparationLifetimeMs );
+        if ( !operation ) return failure( request, "RESOURCE_LIMIT" );
+        try {
+            auto watcher = std::make_unique<QFutureWatcher<std::shared_ptr<Prepared>>>( this );
+            connect( watcher.get(), &QFutureWatcherBase::finished, this,
+                [delivery = watcher.get(), target, op = *operation, staging = std::move( staging )] {
+                    delivery->deleteLater();
+                    try { publishFilter( target, op, delivery->result(), staging ); }
+                    catch ( ... ) { op.complete( {}, "FILTER_PREPARATION_FAILED" ); }
+                } );
+            watcher->setFuture( QtConcurrent::run( [captured, cancelled, permit = std::move( permit )] {
+                auto prepared = std::make_shared<Prepared>();
+                prepared->permit = permit;
+                prepared->outcome = Widget::prepareFilterUpdate( captured, *cancelled );
+                return prepared;
+            } ) );
+            watcher.release(); // QObject parent owns delivery, worker owns only values.
+        } catch ( ... ) {
+            cancelled->set();
+            operation->complete( {}, "FILTER_PREPARATION_FAILED" );
+        }
+        return QJsonObject{ { "operation_id", operation->id }, { "status", "pending" } };
+    };
     try {
-        staging = target.widget->stageFilterUpdate( candidate );
+        if ( auto* file = qobject_cast<CrawlerWidget*>( target.widget.data() ) ) return start( file );
+        if ( auto* folder = qobject_cast<FolderCrawlerWidget*>( target.widget.data() ) ) return start( folder );
+        return failure( request, "UNSUPPORTED_SOURCE" );
     } catch ( const std::bad_alloc& ) { return failure( request, "RESOURCE_LIMIT" ); }
     catch ( ... ) { return failure( request, "FILTER_NOT_READY" ); }
-    if ( !staging ) return failure( request, "FILTER_NOT_READY" );
-    const auto captured = staging->capture();
-    auto cancelled = std::make_shared<AtomicFlag>();
-    auto operation = operations_.beginOperation( [cancelled] { cancelled->set(); }, PreparationLifetimeMs );
-    if ( !operation ) return failure( request, "RESOURCE_LIMIT" );
-    auto future = QtConcurrent::run( [captured, cancelled, permit = std::move( permit )] {
-        auto prepared = std::make_shared<PreparedFilter>();
-        prepared->permit = permit;
-        prepared->outcome = CrawlerWidget::prepareFilterUpdate( captured, *cancelled );
-        return prepared;
-    } );
-    auto* watcher = new QFutureWatcher<std::shared_ptr<PreparedFilter>>( this );
-    connect( watcher, &QFutureWatcherBase::finished, this,
-        [watcher, target = std::move( target ), operation = *operation, staging = std::move( staging )] {
-            watcher->deleteLater();
-            try { publishFilter( target, operation, watcher->result(), staging ); }
-            catch ( ... ) { operation.complete( {}, "FILTER_PREPARATION_FAILED" ); }
-        } );
-    watcher->setFuture( future );
-    return QJsonObject{ { "operation_id", operation->id }, { "status", "pending" } };
 }

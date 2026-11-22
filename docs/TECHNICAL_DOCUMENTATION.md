@@ -624,11 +624,22 @@ document lifecycle work; `operation.get` observes completion and
 nor creates a content lease: reading requires explicit `source.capture` and
 `source.read`. No polling is required to drive publication.
 
-`capabilities.get` advertises `applied_filters:true`, file/live
-`implicit_filter_kinds`, `filter_kept_pane_creation:true`, and
-`filter_source_policy:"unchanged-snapshot"`. Folder filter writes and explicit
-filter transactions remain unsupported. `tab.get.filter_draft` describes only
-editor state.
+Folder requests use the same RPC, operation registry and two preparation permits.
+A worker enumerates the folder on each nonempty query, using the captured scan
+settings and native match/context pipeline. A blocked filesystem call retains its
+permit until it exits; cancellation prevents publication without joining on the
+GUI thread. Results retain the bytes actually scanned, not a filesystem-wide
+atomic snapshot. Empty text resets matches without enumerating, consuming Keep,
+adding history or deleting shared marks. On a nonempty Keep, the native order is
+important: reveal matches first, then create a pane only if the previous pane
+has rows. All affected models are prepared before publishing the draft, panes
+and membership together. If selecting a kept pane would take keyboard focus
+from the outgoing results, publication reports `CONFLICT` instead.
+
+`capabilities.get` advertises `implicit_filter_kinds:["file","live","folder"]`,
+`filter_kept_pane_creation:true`, the file/live `filter_source_policy` above and
+`folder_filter_source_policy:"retained-scan"`. Explicit filter transactions
+remain unsupported. `tab.get.filter_draft` describes only editor state.
 
 `FilterUpdateStaging` owns unpublished resources on the GUI thread; workers
 receive only immutable capture values. For Keep, staging creates a fresh
@@ -1074,13 +1085,13 @@ transactions, explicit runtime pipeline ownership, and settings-based shell
 integration. The [implementation record](AGENT_CONTROL_IMPLEMENTATION.md) tracks
 the experimental `kloggctl`, local transport, payload-free pane observation,
 bounded asynchronous snapshot reads, implicit file/folder open and close,
-file/live filter application and kept-pane creation, per-pane applied-query
+file/live/folder filter application and kept-pane creation, per-pane applied-query
 observation, mixed source-backed
 mark/label/global-highlighter transactions, explicit shell installation and
 package-payload contracts. `capabilities.get` supplies protocol version, method
 names, feature flags and selected limits without log content; it is not full
-parameter/result schema discovery. Folder filter writes, source-addressed
-navigation/selection and mixed explicit lifecycle/filter transactions remain
+parameter/result schema discovery. Source-addressed navigation/selection and
+mixed explicit lifecycle/filter transactions remain
 undelivered. Remaining mutation domains and native packaged acceptance are not
 complete. Launcher,
 headless search and test-runner entrypoints remain separate. The single-instance

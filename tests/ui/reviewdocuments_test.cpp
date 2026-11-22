@@ -80,7 +80,8 @@ TEST_CASE( "Control capability discovery reports only delivered domains without 
     const auto features = capabilities.value( "features" ).toObject();
     CHECK_FALSE( features.value( "explicit_lifecycle_transactions" ).toBool( true ) );
     CHECK_FALSE( features.value( "live_lifecycle" ).toBool( true ) );
-    CHECK( features.value( "implicit_filter_kinds" ).toArray() == QJsonArray{ "file", "live" } );
+    CHECK( features.value( "implicit_filter_kinds" ).toArray() == QJsonArray{ "file", "live", "folder" } );
+    CHECK( features.value( "folder_filter_source_policy" ) == "retained-scan" );
     CHECK( features.value( "filter_source_policy" ) == "unchanged-snapshot" );
     CHECK_FALSE( features.value( "explicit_filter_transactions" ).toBool( true ) );
     CHECK( features.value( "applied_filter_observation" ).toBool() );

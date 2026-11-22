@@ -43,6 +43,8 @@
 #include "viewsignalwiring.h"
 #include "abstractcrawlerwidget.h"
 #include "reviewmarks.h"
+#include "searchpreparation.h"
+#include "searchtoolbar.h"
 
 #include <QWidget>
 
@@ -64,7 +66,6 @@ class QComboBox;
 class QSpinBox;
 class QTabWidget;
 class SavedSearches;
-class SearchToolbar;
 
 enum class DataStatus;
 
@@ -109,6 +110,49 @@ class FolderCrawlerWidget : public QWidget,
 
     // Identify the folder + its (already enumerated, natural-sorted) files.
     void setFolder( const QString& folderPath, const QStringList& filePaths );
+
+    struct FilterUpdateCapture;
+    struct PreparedFilterUpdate;
+    struct FilterUpdatePreparation {
+        SearchPreparation::Status status = SearchPreparation::Status::InvalidInput;
+        std::shared_ptr<PreparedFilterUpdate> update;
+    };
+    class FilterUpdateStaging;
+    class FilterUpdatePublication {
+      public:
+        ~FilterUpdatePublication();
+        bool install();
+        QString paneId() const;
+        void release();
+        void notify();
+      private:
+        friend class FolderCrawlerWidget;
+        friend class FilterUpdateStaging;
+        struct State;
+        explicit FilterUpdatePublication( std::unique_ptr<State> state );
+        std::unique_ptr<State> state_;
+    };
+    // GUI-owned resources never enter the worker capture or prepared payload.
+    // Keep this staging handle on the owner thread through acquisition.
+    class FilterUpdateStaging {
+      public:
+        ~FilterUpdateStaging();
+        FilterUpdateStaging( const FilterUpdateStaging& ) = delete;
+        FilterUpdateStaging& operator=( const FilterUpdateStaging& ) = delete;
+        std::shared_ptr<const FilterUpdateCapture> capture() const;
+        std::unique_ptr<FilterUpdatePublication> lock(
+            const std::shared_ptr<PreparedFilterUpdate>& prepared );
+      private:
+        friend class FolderCrawlerWidget;
+        friend class FilterUpdatePublication;
+        struct State;
+        explicit FilterUpdateStaging( std::shared_ptr<State> state );
+        std::shared_ptr<State> state_;
+    };
+    std::unique_ptr<FilterUpdateStaging> stageFilterUpdate(
+        const SearchToolbar::FilterSpec& candidate );
+    static FilterUpdatePreparation prepareFilterUpdate(
+        const std::shared_ptr<const FilterUpdateCapture>& captured, const AtomicFlag& cancelled );
 
     struct MarksSnapshot {
         uint64_t revision = 0;
@@ -419,7 +463,6 @@ class FolderCrawlerWidget : public QWidget,
         std::shared_ptr<FolderSearchResults> results;
         FolderFilteredView* view = nullptr;
         std::unique_ptr<FolderFilteredMarkProvider> markProvider;
-        QString title;
         bool presentationRefreshPending = false;
         bool searchComplete = false;
         // Attribution survives pane switches and deferred presentation updates.
@@ -710,7 +753,15 @@ class FolderCrawlerWidget : public QWidget,
     // is present, re-run the search (context is a scan-time property).
     void onContextControlsChanged();
     // Results-pane management (Keep results in a new window).
-    ResultPane* createPane( const QString& title );
+    void createPane();
+    std::unique_ptr<ResultPane> makePane( const std::shared_ptr<FolderSearchResults>& results );
+    void appendPane( std::unique_ptr<ResultPane> pane, const QString& title = {} );
+    static QStringList enumerateSearchFolder( const QString& path,
+        const FolderSearchEngine::StopPredicate& shouldStop );
+    bool filterUpdateCurrent( const FilterUpdateStaging::State& staging ) const;
+    void supersedeSearch();
+    void setFinishedStatus( quint64 matches );
+    quint64 filterStateRevision_ = 0;
     void schedulePanePresentationRefresh( ResultPane* pane );
     void scheduleMainViewPresentationRefresh( bool refreshOverview,
                                               bool updateOverviewLineCount = false );

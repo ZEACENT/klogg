@@ -1309,6 +1309,34 @@ TEST_CASE( "The real console executable stages GUI evidence and observes human c
         .value( "result" ).toObject();
     CHECK( closed.value( "status" ) == QLatin1String( "completed" ) );
     CHECK( fixture.window.inventorySnapshot().currentTabId == currentBeforeOpen );
+    // Exercise the same client executable and private transport against a
+    // background folder tab, including fresh enumeration of cli-lifecycle.log.
+    const auto folderId = fixture.tabId();
+    const auto folderApply = [&]( const QString& text, bool keep ) {
+        const auto started = call( "filter.apply", { { "tab_id", folderId }, { "filter", QJsonObject{
+            { "text", text }, { "use_regexp", false }, { "inverse", false }, { "boolean", false },
+            { "keep_results", keep } } } } ).value( "result" ).toObject();
+        QJsonObject operation;
+        REQUIRE( waitUiState( [&] {
+            operation = call( "operation.get", { { "operation_id", started.value( "operation_id" ) } } )
+                            .value( "result" ).toObject();
+            return operation.value( "status" ) != "pending";
+        } ) );
+        REQUIRE( operation.value( "status" ) == "completed" );
+        CHECK( fixture.window.inventorySnapshot().currentTabId == currentBeforeOpen );
+        return operation.value( "result" ).toObject().value( "pane_id" ).toString();
+    };
+    const auto folderPane = folderApply( "CLI lifecycle", false );
+    REQUIRE_FALSE( folderPane.isEmpty() );
+    const auto folderSnapshot = call( "source.capture", { { "tab_id", folderId }, { "pane_id", folderPane },
+        { "scope", "matches" } } ).value( "result" ).toObject();
+    REQUIRE( folderSnapshot.value( "row_count" ) == "1" );
+    call( "source.release", { { "snapshot_id", folderSnapshot.value( "snapshot_id" ) } } );
+    const auto keptFolderPane = folderApply( "Evidence", true );
+    REQUIRE( keptFolderPane != folderPane );
+    CHECK( folderApply( QString{}, true ) == keptFolderPane );
+    CHECK( call( "pane.get", { { "tab_id", folderId }, { "pane_id", folderPane } } )
+               .value( "result" ).toObject().value( "applied_filter" ).toObject().value( "text" ) == "CLI lifecycle" );
     REQUIRE( service.setEnabled( false ) );
     const auto unavailable = run( target + QStringList{ "state", "get" }, 3 );
     CHECK( unavailable.contains( "error" ) );

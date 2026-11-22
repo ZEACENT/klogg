@@ -226,6 +226,37 @@ TEST_CASE( "Complete folder replacement preserves collapse by path and discards 
     CHECK( results.getNbLine() == 3_lcount );
 }
 
+TEST_CASE( "Private empty query retains mark membership and remembers collapse for the next search",
+           "[folder][folder-search-publication]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", { "MATCH", "bookmark" } );
+    FolderSearchResults::MarksStore marks{ { path, { 1 } }, { "excluded.log", { 0 } } };
+    FolderSearchEngine engine;
+    engine.scanSynchronously( { path }, RegularExpressionPattern{ "MATCH" } );
+    auto groups = engine.takeResults();
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.setResults( groups );
+    results.setCollapsed( 0, true );
+    QSignalSpy changed{ &results, &FolderSearchResults::layoutChanged };
+    const auto reset = FolderSearchResults::prepareSearchReset( results.captureSearchReplacement(), { path } );
+    REQUIRE( reset );
+    auto publication = results.lockSearchReplacement( reset );
+    REQUIRE( publication );
+    REQUIRE( publication->install() );
+    publication.reset();
+    CHECK( changed.count() == 0 );
+    CHECK( results.groupCount() == 0 );
+    REQUIRE( results.getNbLine() == 2_lcount ); // Mark-only header and its row.
+    CHECK( results.getLineString( 1_lnum ) == "bookmark" );
+    CHECK( marks.size() == 2 );
+    results.beginSearch( { path } );
+    results.addFileGroup( 0, groups.front() );
+    CHECK( results.isCollapsed( 0 ) );
+}
+
 TEST_CASE( "Finishing an empty folder search invalidates its pending collapse capture",
            "[folder][folder-search-publication][folder-collapse-capture]" )
 {

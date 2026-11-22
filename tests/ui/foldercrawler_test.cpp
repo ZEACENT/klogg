@@ -2794,6 +2794,94 @@ TEST_CASE( "Folder search resets Marks-only visibility before deciding whether t
     }
 }
 
+TEST_CASE( "Prepared folder Keep reveals the old pane and publishes complete context rows before notifying",
+           "[folder][folder-filter-publication]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", QByteArray( "first\nnext\ncontext\n" ) );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { path } );
+    widget.contextLinesSpinBox()->setValue( 1 );
+    widget.contextLinesComboBox()->setCurrentIndex( 2 ); // after
+    widget.searchFor( "first" );
+    REQUIRE( waitFor( [&] { return !widget.isSearchActive(); } ) );
+    widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    auto* const original = widget.folderResults();
+    REQUIRE( original->getNbLine() == 0_lcount );
+    auto filter = widget.searchToolbar()->filterDraftSnapshot().filter;
+    filter.text = QStringLiteral( "next" );
+    filter.keepResults = true;
+    auto staging = widget.stageFilterUpdate( filter );
+    REQUIRE( staging );
+    AtomicFlag cancelled;
+    const auto prepared = FolderCrawlerWidget::prepareFilterUpdate( staging->capture(), cancelled );
+    REQUIRE( prepared.status == SearchPreparation::Status::Ready );
+    QSignalSpy oldLayouts( original, &FolderSearchResults::layoutChanged );
+    QSignalSpy membership( &widget, &FolderCrawlerWidget::searchablesChanged );
+    SECTION( "a later collapse supersedes the captured old layout" ) {
+        original->collapseAll();
+        CHECK_FALSE( staging->lock( prepared.update ) );
+        CHECK( widget.paneCount() == 1 );
+        CHECK( widget.searchToolbar()->currentSearchText() == "first" );
+    }
+    SECTION( "Keep installs both models before native notifications" ) {
+        auto guard = staging->lock( prepared.update );
+        REQUIRE( guard );
+        CHECK( widget.paneCount() == 1 );
+        CHECK( widget.searchToolbar()->currentSearchText() == "first" );
+        CHECK( oldLayouts.isEmpty() );
+        CHECK( membership.isEmpty() );
+        REQUIRE( guard->install() );
+        CHECK( widget.paneCount() == 2 );
+        CHECK( widget.filteredView()->runtimePaneId() == guard->paneId() );
+        CHECK( original->getNbLine() == 3_lcount );
+        CHECK( widget.folderResults()->getNbLine() == 3_lcount );
+        CHECK_FALSE( widget.folderResults()->isMatchRow( 2_lnum ) );
+        CHECK( widget.statusText() == QStringLiteral( "1 match(es)" ) );
+        CHECK( widget.currentMainFilePath().isEmpty() );
+        CHECK( oldLayouts.isEmpty() );
+        CHECK( membership.isEmpty() );
+        QSignalSpy newLayouts( widget.folderResults(), &FolderSearchResults::layoutChanged );
+        guard->notify(); // not released
+        CHECK( newLayouts.isEmpty() );
+        guard->release();
+        guard->notify();
+        guard->notify();
+        CHECK( oldLayouts.count() == 1 );
+        CHECK( membership.count() == 1 );
+        CHECK( newLayouts.count() == 1 );
+    }
+}
+
+TEST_CASE( "Private folder filtering can finish after the GUI owner closes, but cannot publish",
+           "[folder][folder-filter-publication]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", QByteArray( "match\n" ) );
+    auto widget = std::make_unique<FolderCrawlerWidget>();
+    widget->setFolder( dir.path(), { path } );
+    auto filter = widget->searchToolbar()->filterDraftSnapshot().filter;
+    filter.text = QStringLiteral( "match" );
+    auto staging = widget->stageFilterUpdate( filter );
+    REQUIRE( staging );
+    const auto captured = staging->capture();
+    widget.reset();
+    AtomicFlag cancelled;
+    SECTION( "the worker has only detached input" ) {
+        const auto result = FolderCrawlerWidget::prepareFilterUpdate( captured, cancelled );
+        REQUIRE( result.status == SearchPreparation::Status::Ready );
+        CHECK_FALSE( staging->lock( result.update ) );
+    }
+    SECTION( "cancellation produces no candidate" ) {
+        cancelled.set();
+        const auto result = FolderCrawlerWidget::prepareFilterUpdate( captured, cancelled );
+        CHECK( result.status == SearchPreparation::Status::Cancelled );
+        CHECK_FALSE( result.update );
+    }
+}
+
 TEST_CASE( "FolderCrawlerWidget closing the active search pane finalizes its search state",
            "[folder][keep][stop]" )
 {
