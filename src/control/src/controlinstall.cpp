@@ -17,8 +17,8 @@ const QByteArray ShimHeader = "#!/bin/sh\n# kloggctl managed launcher v1\n# targ
 
 bool safeText( const QString& text )
 {
-    return !text.isEmpty() && std::none_of( text.cbegin(), text.cend(), []( QChar ch ) {
-        return ch.unicode() < 32 || ch.unicode() == 127;
+    return !text.isEmpty() && std::none_of( text.cbegin(), text.cend(), []( QChar character ) {
+        return character.unicode() < 32 || character.unicode() == 127;
     } );
 }
 bool absolutePath( const QString& path )
@@ -46,7 +46,7 @@ std::optional<QString> ownedLauncher( const QByteArray& bytes )
     if ( end < 0 ) return {};
     const auto encoded = bytes.mid( ShimHeader.size(), end - ShimHeader.size() );
     const auto decoded = QByteArray::fromBase64( encoded );
-    const auto target = QString::fromUtf8( decoded );
+    auto target = QString::fromUtf8( decoded );
     if ( decoded.toBase64() != encoded || target.toUtf8() != decoded || !absolutePath( target )
          || launcher( target ) != bytes ) return {};
     return target;
@@ -131,11 +131,17 @@ QString expandWindowsPath( QString value, const QProcessEnvironment& environment
 bool pathContains( const QString& path, const QString& directory, bool windows,
                    const QProcessEnvironment& environment )
 {
-    for ( const auto& part : path.split( windows ? ';' : ':' ) ) {
-        if ( windows ? windowsKey( expandWindowsPath( part, environment ) ) == windowsKey( directory )
-                     : QDir::cleanPath( part ) == directory ) return true;
-    }
-    return false;
+    const auto parts = path.split( windows ? ';' : ':' );
+    return std::any_of( parts.cbegin(), parts.cend(), [&]( const QString& part ) {
+        return windows ? windowsKey( expandWindowsPath( part, environment ) ) == windowsKey( directory )
+                       : QDir::cleanPath( part ) == directory;
+    } );
+}
+InstallStatus previewStatus( bool removing, bool changed, bool managed )
+{
+    if ( removing ) return changed ? InstallStatus::Installed : InstallStatus::NotInstalled;
+    if ( !changed ) return InstallStatus::Installed;
+    return managed ? InstallStatus::NeedsRepair : InstallStatus::NotInstalled;
 }
 InstallResult fail( InstallResult result, InstallStatus status, const QString& message )
 {
@@ -204,11 +210,9 @@ InstallResult windowsInstall( const InstallOptions& options, InstallAction actio
     const bool changed = desired.value != previous->value || desired.ownedDirectory != previous->ownedDirectory;
     if ( desired.value != previous->value ) result.plannedPaths.push_back( "HKCU\\Environment\\Path" );
     if ( desired.ownedDirectory != previous->ownedDirectory )
-        result.plannedPaths.push_back( "HKCU\\Software\\klogg\\ShellIntegration\\OwnedPath" );
+        result.plannedPaths.push_back( R"(HKCU\Software\klogg\ShellIntegration\OwnedPath)" );
     if ( checking ) {
-        result.status = removing ? ( changed ? InstallStatus::Installed : InstallStatus::NotInstalled )
-            : ( changed ? ( previous->ownedDirectory.isEmpty() ? InstallStatus::NotInstalled : InstallStatus::NeedsRepair )
-                        : InstallStatus::Installed );
+        result.status = previewStatus( removing, changed, !previous->ownedDirectory.isEmpty() );
         result.message = removing ? "Owned per-user PATH removal preview; no changes made"
                                   : "Per-user PATH check completed; no changes made";
         return result;
@@ -376,9 +380,7 @@ InstallResult configureControlInstallation( const InstallOptions& options, Insta
     result.restartRequired = removing ? !changes.empty() : !alreadyInPath;
     for ( const auto& change : changes ) result.plannedPaths.push_back( change.path );
     if ( checking ) {
-        result.status = removing ? ( changes.empty() ? InstallStatus::NotInstalled : InstallStatus::Installed )
-            : ( changes.empty() ? InstallStatus::Installed
-                                : ( managed ? InstallStatus::NeedsRepair : InstallStatus::NotInstalled ) );
+        result.status = previewStatus( removing, !changes.empty(), managed );
         result.message = removing ? "Owned shell integration removal preview; no changes made"
                                   : "Shell integration check completed; no changes made";
         return result;

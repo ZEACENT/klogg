@@ -1,6 +1,7 @@
 #ifndef KLOGG_CONTROLRUNTIME_H
 #define KLOGG_CONTROLRUNTIME_H
 
+#include <cstddef>
 #include <memory>
 #include <vector>
 
@@ -36,11 +37,11 @@ struct InstanceDescriptor {
 struct DiscoveryResult {
     std::vector<InstanceDescriptor> instances;
     QString error;
-    size_t rejectedDescriptors = 0;
+    std::size_t rejectedDescriptors = 0;
 };
 
 // No liveness probes, stale-file deletion, or execution of descriptor contents.
-DiscoveryResult discoverInstances( const RuntimeOptions& options = {} );
+DiscoveryResult discoverInstances( const RuntimeOptions& requested = {} );
 
 // Owns one enable epoch. Internal transport resource owner; public so the
 // transport's pimpl does not depend on platform-specific types.
@@ -51,7 +52,7 @@ class ControlRuntime {
     ControlRuntime( const ControlRuntime& ) = delete;
     ControlRuntime& operator=( const ControlRuntime& ) = delete;
 
-    bool prepare( const RuntimeOptions& options, QString* error );
+    bool prepare( const RuntimeOptions& requested, QString* error );
     bool publish( QString* error );
     void clear();
     const InstanceDescriptor& descriptor() const;

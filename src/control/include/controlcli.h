@@ -1,6 +1,7 @@
 #ifndef KLOGG_CONTROLCLI_H
 #define KLOGG_CONTROLCLI_H
 
+#include <cstdint>
 #include <functional>
 
 #include <QByteArray>
@@ -13,7 +14,7 @@ class QIODevice;
 namespace klogg::control {
 
 // Stable process exit statuses; domain failures remain in error.data.code.
-enum class CliExit : int {
+enum class CliExit : std::uint8_t {
     Success = 0,
     InvalidArguments = 2,
     Unavailable = 3,

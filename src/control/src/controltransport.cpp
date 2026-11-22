@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 namespace klogg::control {
 namespace {
@@ -39,9 +40,9 @@ bool matchesHello( const QByteArray& payload, const InstanceDescriptor& descript
            && value.value( "instance" ) == QJsonValue( descriptor.instanceId )
            && ( !credential || value.value( "token" ) == QJsonValue( descriptor.token ) );
 }
-RpcError internalError( const QString& id )
+RpcError internalError( const QString& requestId )
 {
-    return { id, -32603, QStringLiteral( "Control request failed" ),
+    return { requestId, -32603, QStringLiteral( "Control request failed" ),
              QJsonObject{ { QStringLiteral( "code" ), QStringLiteral( "INTERNAL_ERROR" ) } }, true, false };
 }
 QByteArray requestBytes( const RpcRequest& request )
@@ -188,7 +189,7 @@ void ControlServer::Private::accept()
     while ( running && listener.hasPendingConnections() && accepted++ < limits.maxConnections ) {
         auto* socket = listener.nextPendingConnection();
         if ( !socket ) break;
-        if ( sessions.size() >= static_cast<size_t>( limits.maxConnections ) ) {
+        if ( sessions.size() >= static_cast<std::size_t>( limits.maxConnections ) ) {
             socket->abort();
             socket->deleteLater();
             continue;
@@ -253,7 +254,7 @@ void ControlServer::stop()
     d_.reset();
 }
 bool ControlServer::isRunning() const { return d_ && d_->running; }
-size_t ControlServer::connectionCount() const { return d_ ? d_->sessions.size() : 0; }
+std::size_t ControlServer::connectionCount() const { return d_ ? d_->sessions.size() : 0; }
 InstanceDescriptor ControlServer::descriptor() const { return d_ ? d_->runtime.descriptor() : InstanceDescriptor{}; }
 QString ControlServer::descriptorPath() const { return d_ ? d_->runtime.descriptorPath() : QString{}; }
 

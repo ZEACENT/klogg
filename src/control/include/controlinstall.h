@@ -1,6 +1,7 @@
 #ifndef KLOGG_CONTROLINSTALL_H
 #define KLOGG_CONTROLINSTALL_H
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 
@@ -9,9 +10,9 @@
 
 namespace klogg::control {
 
-enum class InstallShell { Zsh, Bash, Fish, Windows };
-enum class InstallAction { Check, Install, Remove, CheckRemoval };
-enum class InstallStatus {
+enum class InstallShell : std::uint8_t { Zsh, Bash, Fish, Windows };
+enum class InstallAction : std::uint8_t { Check, Install, Remove, CheckRemoval };
+enum class InstallStatus : std::uint8_t {
     Available, Installed, NotInstalled, NeedsRepair, Removed,
     InvalidInput, UnsafePath, Collision, ConcurrentChange, IoError,
     Unsupported, PartialFailure

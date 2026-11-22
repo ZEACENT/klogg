@@ -1,6 +1,7 @@
 #include "controlrpc.h"
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <utility>
 
@@ -14,21 +15,21 @@ namespace klogg::control {
 namespace {
 constexpr int MaxIdentifierUnits = 128;
 
-bool validId( const QString& id )
+bool validId( const QString& requestId )
 {
-    return !id.isEmpty() && id.size() <= MaxIdentifierUnits;
+    return !requestId.isEmpty() && requestId.size() <= MaxIdentifierUnits;
 }
 
 RpcError failure( int code, const QString& message, const QString& symbol,
-                  QJsonValue id = QJsonValue( QJsonValue::Null ), bool replyAllowed = true )
+                  QJsonValue requestId = QJsonValue( QJsonValue::Null ), bool replyAllowed = true )
 {
-    return { std::move( id ), code, message,
+    return { std::move( requestId ), code, message,
              QJsonObject{ { QStringLiteral( "code" ), symbol } }, replyAllowed, false };
 }
 
 std::variant<QJsonObject, RpcError> parseObject( const QByteArray& payload )
 {
-    if ( static_cast<uint64_t>( payload.size() ) > MaxFrameBytes ) {
+    if ( static_cast<std::uint64_t>( payload.size() ) > MaxFrameBytes ) {
         return failure( -32000, QStringLiteral( "Control message exceeds its size limit" ),
                         QStringLiteral( "RESOURCE_LIMIT" ) );
     }
@@ -60,7 +61,7 @@ std::variant<QJsonObject, RpcError> parseObject( const QByteArray& payload )
 std::optional<QByteArray> serialize( const QJsonObject& response )
 {
     auto bytes = QJsonDocument( response ).toJson( QJsonDocument::Compact );
-    if ( static_cast<uint64_t>( bytes.size() ) > MaxFrameBytes ) {
+    if ( static_cast<std::uint64_t>( bytes.size() ) > MaxFrameBytes ) {
         return {};
     }
     return bytes;
@@ -74,7 +75,7 @@ DecodedRequest decodeRequest( const QByteArray& payload )
         return *error;
     }
     const auto& object = std::get<QJsonObject>( parsed );
-    const auto id = object.value( QStringLiteral( "id" ) );
+    const auto requestId = object.value( QStringLiteral( "id" ) );
     const auto method = object.value( QStringLiteral( "method" ) );
     // A notification must never get an error response either. The application
     // dispatcher accepts only RpcRequest, so it cannot execute this rejection.
@@ -84,18 +85,18 @@ DecodedRequest decodeRequest( const QByteArray& payload )
                              && method.toString().size() <= MaxIdentifierUnits;
     const bool notification = !object.contains( QStringLiteral( "id" ) )
                               && supportedVersion && validMethod;
-    const auto responseId = id.isString() && validId( id.toString() )
-                                ? id : QJsonValue( QJsonValue::Null );
-    if ( !supportedVersion || !id.isString() || !validId( id.toString() ) || !validMethod ) {
+    const auto responseId = requestId.isString() && validId( requestId.toString() )
+                                ? requestId : QJsonValue( QJsonValue::Null );
+    if ( !supportedVersion || !requestId.isString() || !validId( requestId.toString() ) || !validMethod ) {
         return failure( -32600, QStringLiteral( "Expected JSON-RPC 2.0, string id, and method" ),
                         QStringLiteral( "INVALID_REQUEST" ), responseId, !notification );
     }
     const auto params = object.value( QStringLiteral( "params" ) );
     if ( !params.isUndefined() && !params.isObject() ) {
         return failure( -32602, QStringLiteral( "Control parameters must be a named object" ),
-                        QStringLiteral( "INVALID_PARAMS" ), id );
+                        QStringLiteral( "INVALID_PARAMS" ), requestId );
     }
-    return RpcRequest{ id.toString(), method.toString(), params.toObject() };
+    return RpcRequest{ requestId.toString(), method.toString(), params.toObject() };
 }
 
 DecodedResponse decodeResponse( const QByteArray& payload, const QString& expectedId )
@@ -110,8 +111,8 @@ DecodedResponse decodeResponse( const QByteArray& payload, const QString& expect
                         QStringLiteral( "INVALID_RESPONSE" ), expectedId );
     };
     const auto& object = std::get<QJsonObject>( parsed );
-    const auto id = object.value( QStringLiteral( "id" ) );
-    if ( !validId( expectedId ) || !id.isString() || id.toString() != expectedId
+    const auto requestId = object.value( QStringLiteral( "id" ) );
+    if ( !validId( expectedId ) || !requestId.isString() || requestId.toString() != expectedId
          || object.value( QStringLiteral( "jsonrpc" ) ).toString() != QStringLiteral( "2.0" )
          || object.contains( QStringLiteral( "result" ) )
                 == object.contains( QStringLiteral( "error" ) ) ) {
@@ -132,18 +133,18 @@ DecodedResponse decodeResponse( const QByteArray& payload, const QString& expect
          || !error.value( QStringLiteral( "message" ) ).isString() ) {
         return invalid();
     }
-    return RpcError{ id, static_cast<int>( code ),
+    return RpcError{ requestId, static_cast<int>( code ),
                      error.value( QStringLiteral( "message" ) ).toString(),
                      error.value( QStringLiteral( "data" ) ), true, true };
 }
 
-std::optional<QByteArray> encodeSuccess( const QString& id, const QJsonValue& result )
+std::optional<QByteArray> encodeSuccess( const QString& requestId, const QJsonValue& result )
 {
-    if ( !validId( id ) || result.isUndefined() ) {
+    if ( !validId( requestId ) || result.isUndefined() ) {
         return {};
     }
     return serialize( { { QStringLiteral( "jsonrpc" ), QStringLiteral( "2.0" ) },
-                        { QStringLiteral( "id" ), id }, { QStringLiteral( "result" ), result } } );
+                        { QStringLiteral( "id" ), requestId }, { QStringLiteral( "result" ), result } } );
 }
 
 std::optional<QByteArray> encodeError( const RpcError& error )

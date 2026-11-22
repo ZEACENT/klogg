@@ -14,15 +14,16 @@
 #include <windows.h>
 #else
 #include <cerrno>
-#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
 
 namespace klogg::control::installpal {
 namespace {
-constexpr qint64 MaxConfigBytes = 4 * 1024 * 1024;
+constexpr qint64 MaxConfigBytes = 4LL * 1024 * 1024;
 #ifndef Q_OS_WIN
+using filesystemsecurity::ReadFlags;
+
 class Fd {
   public:
     explicit Fd( int value = -1 ) : value_( value ) {}
@@ -58,18 +59,18 @@ InstallStatus openParent( const QString& path, Fd& parent, bool create, bool& to
     auto parts = path.split( '/' );
     parts.removeAll( QString{} );
     if ( parts.isEmpty() ) return InstallStatus::UnsafePath;
-    parent.reset( ::open( "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC ) );
+    parent.reset( filesystemsecurity::openRootDirectory() );
     if ( parent.get() < 0 ) return InstallStatus::IoError;
     if ( !trustedAncestor( parent.get() ) ) return InstallStatus::UnsafePath;
     for ( ContainerIndex i = 0; i + 1 < parts.size(); ++i ) {
         const auto name = QFile::encodeName( parts.at( i ) );
-        int next = ::openat( parent.get(), name.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
+        int next = filesystemsecurity::openReadOnlyAt( parent.get(), name.constData(), ReadFlags::Directory );
         if ( next < 0 && errno == ENOENT ) {
             if ( !ownedDirectory( parent.get() ) ) return InstallStatus::UnsafePath;
             if ( !create ) { parent.reset(); return InstallStatus::Available; }
             if ( ::mkdirat( parent.get(), name.constData(), 0700 ) != 0 ) return InstallStatus::ConcurrentChange;
             touched = true;
-            next = ::openat( parent.get(), name.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
+            next = filesystemsecurity::openReadOnlyAt( parent.get(), name.constData(), ReadFlags::Directory );
         }
         if ( next < 0 ) return ( errno == ELOOP || errno == ENOTDIR ) ? InstallStatus::UnsafePath : InstallStatus::IoError;
         parent.reset( next );
@@ -88,7 +89,7 @@ qint64 nanos( const struct stat& info )
 InstallStatus readAt( int parent, const QByteArray& name, FileState& state )
 {
     state = {};
-    Fd file( ::openat( parent, name.constData(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC ) );
+    Fd file( filesystemsecurity::openReadOnlyAt( parent, name.constData(), ReadFlags::NonBlocking ) );
     if ( file.get() < 0 ) {
         if ( errno == ENOENT ) return InstallStatus::Available;
         return errno == ELOOP ? InstallStatus::UnsafePath : InstallStatus::IoError;
@@ -129,7 +130,7 @@ bool sameFile( const FileState& first, const FileState& second )
 }
 bool createFile( int parent, const QByteArray& name, const QByteArray& bytes, unsigned mode )
 {
-    Fd file( ::openat( parent, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600 ) );
+    Fd file( filesystemsecurity::createPrivateFileAt( parent, name.constData() ) );
     if ( file.get() < 0 ) return false;
     ContainerIndex offset = 0;
     while ( offset < bytes.size() ) {
@@ -204,7 +205,7 @@ UserPathMutation replaceUserPath( const UserPathState& expected, const UserPathS
     };
     if ( !matches( readUserPath() ) ) return { InstallStatus::ConcurrentChange, {} };
     UserPathMutation result;
-    const auto backup = QStringLiteral( "Software\\klogg\\ShellIntegration\\Backups\\" )
+    const auto backup = QStringLiteral( R"(Software\klogg\ShellIntegration\Backups\)" )
                         + QUuid::createUuid().toString( QUuid::WithoutBraces );
     const auto* backupKey = reinterpret_cast<LPCWSTR>( backup.utf16() );
     Key created;
@@ -307,13 +308,13 @@ bool executableIsSafe( const QString& path )
     auto parts = path.split( '/' );
     parts.removeAll( QString{} );
     if ( parts.isEmpty() || !QDir::isAbsolutePath( path ) ) return false;
-    Fd parent( ::open( "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC ) );
+    Fd parent( filesystemsecurity::openRootDirectory() );
     if ( parent.get() < 0 ) return false;
     for ( ContainerIndex i = 0; i < parts.size(); ++i ) {
         const auto name = QFile::encodeName( parts.at( i ) );
         const bool last = i + 1 == parts.size();
-        const auto next = ::openat( parent.get(), name.constData(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
-                                   | ( last ? 0 : O_DIRECTORY ) );
+        const auto next = filesystemsecurity::openReadOnlyAt( parent.get(), name.constData(),
+            last ? ReadFlags::NonBlocking : ReadFlags::NonBlockingDirectory );
         if ( next < 0 ) return false;
         parent.reset( next );
     }

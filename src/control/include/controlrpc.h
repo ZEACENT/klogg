@@ -34,7 +34,7 @@ using DecodedResponse = std::variant<QJsonValue, RpcError>;
 
 DecodedRequest decodeRequest( const QByteArray& payload );
 DecodedResponse decodeResponse( const QByteArray& payload, const QString& expectedId );
-std::optional<QByteArray> encodeSuccess( const QString& id, const QJsonValue& result );
+std::optional<QByteArray> encodeSuccess( const QString& requestId, const QJsonValue& result );
 std::optional<QByteArray> encodeError( const RpcError& error );
 
 } // namespace klogg::control

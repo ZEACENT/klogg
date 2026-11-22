@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <optional>
+#include <variant>
 
 #include <QFile>
 #include <QJsonArray>
@@ -47,16 +48,16 @@ CliResult jsonResult( CliExit exit, const QJsonObject& object )
     return { exit, QJsonDocument( object ).toJson( QJsonDocument::Compact ) + '\n', {} };
 }
 
-CliResult success( const QJsonValue& result, const QJsonValue& id = QJsonValue::Null )
+CliResult success( const QJsonValue& result, const QJsonValue& requestId = QJsonValue::Null )
 {
     return jsonResult( CliExit::Success,
-        { { "jsonrpc", "2.0" }, { "id", id }, { "result", result } } );
+        { { "jsonrpc", "2.0" }, { "id", requestId }, { "result", result } } );
 }
 
 CliResult failure( CliExit exit, const QString& symbol, const QString& message,
-                   const QJsonValue& id = QJsonValue::Null, int code = -32000 )
+                   const QJsonValue& requestId = QJsonValue::Null, int code = -32000 )
 {
-    return jsonResult( exit, { { "jsonrpc", "2.0" }, { "id", id },
+    return jsonResult( exit, { { "jsonrpc", "2.0" }, { "id", requestId },
         { "error", QJsonObject{ { "code", code }, { "message", message },
             { "data", QJsonObject{ { "code", symbol } } } } } } );
 }
@@ -116,12 +117,12 @@ std::optional<Command> parse( const QStringList& arguments, QIODevice& standardI
     }
     if ( options.contains( "--timeout-ms" ) ) {
         const auto value = options.take( "--timeout-ms" );
-        if ( value.isEmpty() || !std::all_of( value.cbegin(), value.cend(), []( QChar ch ) {
-                 return ch >= QLatin1Char( '0' ) && ch <= QLatin1Char( '9' );
+        if ( value.isEmpty() || !std::all_of( value.cbegin(), value.cend(), []( QChar character ) {
+                 return character >= QLatin1Char( '0' ) && character <= QLatin1Char( '9' );
              } ) ) return {};
-        bool ok = false;
-        const auto timeout = value.toULongLong( &ok );
-        if ( !ok || timeout == 0 || timeout > static_cast<qulonglong>( std::numeric_limits<int>::max() ) )
+        bool parsed = false;
+        const auto timeout = value.toULongLong( &parsed );
+        if ( !parsed || timeout == 0 || timeout > static_cast<qulonglong>( std::numeric_limits<int>::max() ) )
             return {};
         command.timeoutMs = static_cast<int>( timeout );
     }
@@ -185,13 +186,13 @@ std::optional<Command> parse( const QStringList& arguments, QIODevice& standardI
 
 QString remoteSymbol( const RpcError& error, const QString& token )
 {
-    const auto code = error.data.toObject().value( "code" ).toString();
+    auto code = error.data.toObject().value( "code" ).toString();
     // Copy only the machine-readable symbol, never remote messages or payloads.
     if ( code.isEmpty() || code.size() > 64 || ( !token.isEmpty() && code.contains( token ) )
-         || !std::all_of( code.cbegin(), code.cend(), []( QChar ch ) {
-                return ( ch >= QLatin1Char( 'A' ) && ch <= QLatin1Char( 'Z' ) )
-                       || ( ch >= QLatin1Char( '0' ) && ch <= QLatin1Char( '9' ) )
-                       || ch == QLatin1Char( '_' );
+         || !std::all_of( code.cbegin(), code.cend(), []( QChar character ) {
+                return ( character >= QLatin1Char( 'A' ) && character <= QLatin1Char( 'Z' ) )
+                       || ( character >= QLatin1Char( '0' ) && character <= QLatin1Char( '9' ) )
+                       || character == QLatin1Char( '_' );
             } ) ) return QStringLiteral( "REMOTE_REJECTED" );
     return code;
 }

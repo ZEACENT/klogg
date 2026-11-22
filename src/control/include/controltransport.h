@@ -1,6 +1,8 @@
 #ifndef KLOGG_CONTROLTRANSPORT_H
 #define KLOGG_CONTROLTRANSPORT_H
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -15,7 +17,7 @@ namespace klogg::control {
 struct TransportLimits {
     int maxConnections = 16;
     int handshakeTimeoutMs = 3000;
-    qint64 maxQueuedWriteBytes = 2 * 1024 * 1024;
+    qint64 maxQueuedWriteBytes = 2LL * 1024 * 1024;
 };
 
 // All server operations and callbacks run on the QObject's owner thread.
@@ -30,7 +32,7 @@ class ControlServer : public QObject {
                 TransportLimits limits = {} );
     void stop();
     bool isRunning() const;
-    size_t connectionCount() const;
+    std::size_t connectionCount() const;
     InstanceDescriptor descriptor() const;
     QString descriptorPath() const;
 
@@ -39,7 +41,7 @@ class ControlServer : public QObject {
     std::shared_ptr<Private> d_;
 };
 
-enum class ClientStatus {
+enum class ClientStatus : std::uint8_t {
     Success,
     Rejected,       // correlated server RPC rejection, no transport ambiguity
     NotSent,        // application request was never submitted

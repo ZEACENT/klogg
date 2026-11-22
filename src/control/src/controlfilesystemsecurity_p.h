@@ -5,6 +5,7 @@
 
 #ifndef Q_OS_WIN
 #include <cerrno>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef Q_OS_MACOS
@@ -13,12 +14,37 @@
 
 namespace klogg::control::filesystemsecurity {
 
-inline bool noExtendedGrants( int fd )
+// Keep POSIX's variadic open/openat behind fixed-arity, no-follow operations.
+inline int openRootDirectory()
+{
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::open( "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC );
+}
+
+enum class ReadFlags : int {
+    Directory = O_DIRECTORY,
+    NonBlocking = O_NONBLOCK,
+    NonBlockingDirectory = O_NONBLOCK | O_DIRECTORY
+};
+inline int openReadOnlyAt( int parent, const char* name, ReadFlags flags )
+{
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::openat( parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | static_cast<int>( flags ) );
+}
+
+inline int createPrivateFileAt( int parent, const char* name )
+{
+    // O_CREAT requires the mode argument; no existing file may be opened.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::openat( parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600 );
+}
+
+inline bool noExtendedGrants( int descriptor )
 {
 #ifdef Q_OS_MACOS
     // Darwin ACL allows bypass mode bits. Refuse existing grants; never repair
     // security by removing an ACL that belongs to the user.
-    acl_t acl = acl_get_fd_np( fd, ACL_TYPE_EXTENDED );
+    acl_t acl = acl_get_fd_np( descriptor, ACL_TYPE_EXTENDED );
     if ( !acl ) return errno == ENOENT;
     acl_entry_t entry = nullptr;
     bool safe = true;
@@ -35,7 +61,7 @@ inline bool noExtendedGrants( int fd )
 #else
     // POSIX ACL effective permissions are masked by group mode bits. Callers
     // reject group/other writes; private transport objects reject all such access.
-    Q_UNUSED( fd );
+    Q_UNUSED( descriptor );
     return true;
 #endif
 }

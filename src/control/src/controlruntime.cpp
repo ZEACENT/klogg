@@ -1,6 +1,8 @@
 #include "controlruntime.h"
 #include "controlruntime_pal.h"
 
+#include <algorithm>
+
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -24,12 +26,10 @@ RuntimeOptions resolved( RuntimeOptions options )
 }
 bool hex( const QString& value, int length )
 {
-    if ( value.size() != length ) return false;
-    for ( const auto character : value ) {
-        if ( !( character >= QLatin1Char( '0' ) && character <= QLatin1Char( '9' ) )
-             && !( character >= QLatin1Char( 'a' ) && character <= QLatin1Char( 'f' ) ) ) return false;
-    }
-    return true;
+    return value.size() == length && std::all_of( value.cbegin(), value.cend(), []( QChar character ) {
+        return ( character >= QLatin1Char( '0' ) && character <= QLatin1Char( '9' ) )
+               || ( character >= QLatin1Char( 'a' ) && character <= QLatin1Char( 'f' ) );
+    } );
 }
 bool identityText( const QString& value )
 {

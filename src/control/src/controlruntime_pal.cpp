@@ -40,9 +40,9 @@ bool safeName( const QString& name )
     return !name.isEmpty() && name != QStringLiteral( "." ) && name != QStringLiteral( ".." )
            && !name.contains( '/' ) && !name.contains( '\\' ) && !name.contains( QChar( 0 ) );
 }
-bool same( FileIdentity a, FileIdentity b )
+bool same( FileIdentity first, FileIdentity second )
 {
-    return a.valid && b.valid && a.device == b.device && a.file == b.file;
+    return first.valid && second.valid && first.device == second.device && first.file == second.file;
 }
 } // namespace
 
@@ -353,7 +353,7 @@ namespace {
 class Fd {
   public:
     int value = -1;
-    explicit Fd( int fd = -1 ) : value( fd ) {}
+    explicit Fd( int descriptor = -1 ) : value( descriptor ) {}
     ~Fd() { if ( value >= 0 ) ::close( value ); }
     Fd( const Fd& ) = delete;
     Fd& operator=( const Fd& ) = delete;
@@ -362,8 +362,24 @@ FileIdentity fileIdentity( const struct stat& info )
 {
     return { static_cast<quint64>( info.st_dev ), static_cast<quint64>( info.st_ino ), true };
 }
+using filesystemsecurity::ReadFlags;
 using filesystemsecurity::noExtendedGrants;
 using filesystemsecurity::safeAncestor;
+
+// fcntl's third argument depends on its command. Only expose the two socket
+// operations used by the listener, preserving status flags for F_SETFL.
+bool setCloseOnExec( int descriptor )
+{
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::fcntl( descriptor, F_SETFD, FD_CLOEXEC ) == 0;
+}
+bool setNonBlocking( int descriptor )
+{
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    const auto flags = ::fcntl( descriptor, F_GETFL );
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return flags >= 0 && ::fcntl( descriptor, F_SETFL, flags | O_NONBLOCK ) == 0;
+}
 bool privateDirectory( const struct stat& info )
 {
     return S_ISDIR( info.st_mode ) && info.st_uid == geteuid() && ( info.st_mode & 0077 ) == 0;
@@ -382,14 +398,14 @@ bool PrivateDirectory::open( const QString& path, bool create )
     auto parts = path.split( '/' );
     parts.removeAll( QString{} );
     if ( parts.isEmpty() ) return false;
-    int current = ::open( "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC );
+    int current = filesystemsecurity::openRootDirectory();
     if ( current < 0 ) return false;
     Fd anchor( current );
     for ( const auto& part : parts ) {
         if ( !safeName( part ) ) return false;
         const auto name = QFile::encodeName( part );
         if ( create && mkdirat( anchor.value, name.constData(), 0700 ) != 0 && errno != EEXIST ) return false;
-        const int next = openat( anchor.value, name.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
+        const int next = filesystemsecurity::openReadOnlyAt( anchor.value, name.constData(), ReadFlags::Directory );
         if ( next < 0 ) return false;
         ::close( anchor.value );
         anchor.value = next;
@@ -436,7 +452,8 @@ QStringList PrivateDirectory::entries( int limit ) const
 std::optional<QByteArray> PrivateDirectory::read( const QString& name, int limit ) const
 {
     if ( !safeName( name ) || !unchanged() ) return {};
-    Fd file( openat( d_->fd.value, QFile::encodeName( name ).constData(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC ) );
+    Fd file( filesystemsecurity::openReadOnlyAt( d_->fd.value, QFile::encodeName( name ).constData(),
+                                                ReadFlags::NonBlocking ) );
     struct stat info{};
     if ( file.value < 0 || fstat( file.value, &info ) != 0 || !S_ISREG( info.st_mode )
          || info.st_uid != geteuid() || ( info.st_mode & 0077 ) != 0 || info.st_nlink != 1
@@ -464,7 +481,7 @@ bool PrivateDirectory::publish( const QString& name, const QByteArray& bytes, Fi
 {
     if ( !safeName( name ) || !unchanged() ) return false;
     const auto temporary = QFile::encodeName( QStringLiteral( "." ) + QUuid::createUuid().toString( QUuid::Id128 ) );
-    Fd file( openat( d_->fd.value, temporary.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600 ) );
+    Fd file( filesystemsecurity::createPrivateFileAt( d_->fd.value, temporary.constData() ) );
     if ( file.value < 0 ) return false;
     bool okay = true;
     qint64 offset = 0;
@@ -492,13 +509,13 @@ void PrivateDirectory::removeDirectory()
 {
     if ( unchanged() ) rmdir( QFile::encodeName( d_->path ).constData() );
 }
-QString socketDirectory( const QString& root, const QString& instance )
+QString socketDirectory( const QString& socketRoot, const QString& instance )
 {
-    return QDir( root ).filePath( QStringLiteral( "kg-" ) + instance );
+    return QDir( socketRoot ).filePath( QStringLiteral( "kg-" ) + instance );
 }
-QString endpoint( const QString& root, const QString& instance )
+QString endpoint( const QString& socketRoot, const QString& instance )
 {
-    return socketDirectory( root, instance ) + QStringLiteral( "/s" );
+    return socketDirectory( socketRoot, instance ) + QStringLiteral( "/s" );
 }
 bool privateEndpoint( const QString& name, const QString& instance ) // lint-allow: platform-fragile (external PAL; controltransport.cpp calls this)
 {
@@ -531,17 +548,17 @@ qintptr createListener( const QString& name, FileIdentity* ownedSocket ) // lint
     const auto path = QFile::encodeName( name );
     sockaddr_un address{};
     if ( path.size() >= static_cast<qint64>( sizeof( address.sun_path ) ) ) return -1;
-    Fd fd( socket( AF_UNIX, SOCK_STREAM, 0 ) );
-    if ( fd.value < 0 || fcntl( fd.value, F_SETFD, FD_CLOEXEC ) != 0 ) return -1;
+    Fd listener( socket( AF_UNIX, SOCK_STREAM, 0 ) );
+    if ( listener.value < 0 || !setCloseOnExec( listener.value ) ) return -1;
     address.sun_family = AF_UNIX;
     std::memcpy( address.sun_path, path.constData(), static_cast<size_t>( path.size() ) + 1 );
-    if ( bind( fd.value, reinterpret_cast<sockaddr*>( &address ), sizeof( address ) ) != 0 ) return -1;
+    if ( bind( listener.value, reinterpret_cast<sockaddr*>( &address ), sizeof( address ) ) != 0 ) return -1;
     struct stat info{};
     if ( lstat( path.constData(), &info ) != 0 || !S_ISSOCK( info.st_mode ) || info.st_uid != geteuid() ) return -1;
     // Claim cleanup ownership only after our bind succeeded, never on EADDRINUSE.
     *ownedSocket = fileIdentity( info );
-    if ( ::listen( fd.value, 16 ) != 0 ) return -1;
-    return std::exchange( fd.value, -1 );
+    if ( ::listen( listener.value, 16 ) != 0 ) return -1;
+    return std::exchange( listener.value, -1 );
 }
 void closeListener( qintptr descriptor ) // lint-allow: platform-fragile (external PAL; controlruntime.cpp calls this)
 {
@@ -557,17 +574,16 @@ LocalListener::~LocalListener() { close(); }
 bool LocalListener::open( const QString&, qintptr listener )
 {
     if ( listener < 0 ) return false;
-    const auto fd = static_cast<int>( listener );
-    const auto flags = fcntl( fd, F_GETFL );
-    if ( flags < 0 || fcntl( fd, F_SETFL, flags | O_NONBLOCK ) != 0 ) return false;
-    native_->fd = fd;
+    const auto descriptor = static_cast<int>( listener );
+    if ( !setNonBlocking( descriptor ) ) return false;
+    native_->fd = descriptor;
     native_->notifier = std::make_unique<QSocketNotifier>( listener, QSocketNotifier::Read );
     QObject::connect( native_->notifier.get(), &QSocketNotifier::activated, this, [this] {
         if ( native_->fd < 0 ) return;
         // One accept per readiness notification bounds work even under a flood.
         const int client = ::accept( native_->fd, nullptr, nullptr );
         if ( client < 0 ) return;
-        if ( fcntl( client, F_SETFD, FD_CLOEXEC ) != 0 ) { ::close( client ); return; }
+        if ( !setCloseOnExec( client ) ) { ::close( client ); return; }
         incomingConnection( static_cast<quintptr>( client ) );
     } );
     return true;
@@ -600,19 +616,20 @@ void LocalListener::incomingConnection( quintptr descriptor )
         ::close( static_cast<int>( descriptor ) );
         return;
     }
-    auto* socket = new QLocalSocket( this );
+    auto socket = std::make_unique<QLocalSocket>( this );
     if ( !socket->setSocketDescriptor( static_cast<qintptr>( descriptor ) ) ) {
-        delete socket;
+        socket.reset();
         ::close( static_cast<int>( descriptor ) );
         return;
     }
-    native_->pending.push_back( socket );
+    // The Qt parent owns the adopted socket; the pending queue only exposes it.
+    native_->pending.push_back( socket.release() );
     Q_EMIT newConnection();
 }
 #endif
 
-bool validEndpoint( const QString& value, const QString& root, const QString& instance )
+bool validEndpoint( const QString& value, const QString& socketRoot, const QString& instance )
 {
-    return !value.contains( QChar( 0 ) ) && value == endpoint( root, instance );
+    return !value.contains( QChar( 0 ) ) && value == endpoint( socketRoot, instance );
 }
 } // namespace klogg::control::pal

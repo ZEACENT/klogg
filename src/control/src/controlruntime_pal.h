@@ -24,9 +24,9 @@ class PrivateDirectory {
     QString path() const;
     QStringList entries( int limit ) const;
     std::optional<QByteArray> read( const QString& name, int limit ) const;
-    bool publish( const QString& name, const QByteArray& bytes, FileIdentity* identity );
+    bool publish( const QString& name, const QByteArray& bytes, FileIdentity* identityOut );
     FileIdentity identity( const QString& name ) const;
-    void removeOwned( const QString& name, FileIdentity identity );
+    void removeOwned( const QString& name, FileIdentity expected );
     void removeDirectory();
     bool unchanged() const;
 
@@ -39,8 +39,8 @@ QString defaultDescriptorRoot();
 QString defaultSocketRoot();
 QString socketDirectory( const QString& socketRoot, const QString& instance );
 QString endpoint( const QString& socketRoot, const QString& instance );
-bool validEndpoint( const QString& endpoint, const QString& socketRoot, const QString& instance );
-bool privateEndpoint( const QString& endpoint, const QString& instance );
+bool validEndpoint( const QString& value, const QString& socketRoot, const QString& instance );
+bool privateEndpoint( const QString& name, const QString& instance );
 // Client: verify before sending credentials. Server: verify after reading the
 // first frame, before acknowledging hello or dispatching (Windows pipe token).
 bool sameUserPeer( qintptr descriptor, bool serverSide );
@@ -51,7 +51,7 @@ class LocalListener : public QLocalServer {
   public:
     LocalListener();
     ~LocalListener() override;
-    bool open( const QString& endpoint, qintptr listener );
+    bool open( const QString& name, qintptr listener );
     void close();
     bool hasPendingConnections() const override;
     QLocalSocket* nextPendingConnection() override;
@@ -63,7 +63,7 @@ class LocalListener : public QLocalServer {
     struct Native;
     std::unique_ptr<Native> native_;
 };
-qintptr createListener( const QString& endpoint, FileIdentity* ownedSocket );
+qintptr createListener( const QString& name, FileIdentity* ownedSocket );
 void closeListener( qintptr descriptor );
 } // namespace klogg::control::pal
 #endif
