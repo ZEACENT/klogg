@@ -1,8 +1,10 @@
 """Control CLI distribution contracts without Qt builds or user installation."""
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -12,6 +14,11 @@ APP = ROOT / "src/app/CMakeLists.txt"
 
 def read(relative):
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def cli_install_rules():
+    text = APP.read_text(encoding="utf-8")
+    return text[text.index("install(\n  TARGETS klogg"):text.index("if(WIN32)\n  if(TARGET tbb)")]
 
 
 def action_run(name):
@@ -27,8 +34,6 @@ class ControlCliPackagingTest(unittest.TestCase):
         cmake = shutil.which("cmake")
         if not cmake:
             self.skipTest("requires CMake")
-        text = APP.read_text(encoding="utf-8")
-        install = text[text.index("install(\n  TARGETS klogg"):text.index("if(WIN32)\n  if(TARGET tbb)")]
         with tempfile.TemporaryDirectory(prefix="control package ") as directory:
             root = Path(directory)
             source = root / "source"
@@ -43,7 +48,7 @@ class ControlCliPackagingTest(unittest.TestCase):
                 "foreach(target klogg kloggctl)\n"
                 "  add_executable(${target} dummy.c)\n"
                 "  set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)\n"
-                "endforeach()\n" + install, encoding="utf-8")
+                "endforeach()\n" + cli_install_rules(), encoding="utf-8")
             build = root / "build"
             result = subprocess.run([cmake, "-S", str(source), "-B", str(build)],
                                     capture_output=True, text=True, timeout=30)
@@ -114,16 +119,94 @@ class ControlCliPackagingTest(unittest.TestCase):
             self.assertIn("%KLOGG_QT%" + module + ".dll", prepare)
             self.assertIn("File release\\${QT_MAJOR}" + module + ".dll", installer)
 
-    def test_appimage_deploys_cli_dependencies_and_runs_final_cli_directly(self):
-        text = read("packaging/linux/appimage/generate_appimage.sh")
-        deploys = [line for line in text.splitlines()
-                   if line.startswith("VERSION=") and "linuxdeployqt" in line]
-        self.assertEqual(len(deploys), 2)
-        for line in deploys:
-            self.assertIn("-executable=appdir/usr/bin/kloggctl", line)
-        final = text.split('"$package" --appimage-extract', 1)[1]
-        self.assertRegex(final, r"(?m)^\./squashfs-root/usr/bin/kloggctl --version$")
-        self.assertRegex(final, r"(?m)^\./squashfs-root/usr/bin/kloggctl --help")
+    def test_cli_uses_relocatable_install_rpath_only_for_linux_usr_bin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "install.cmake"
+            script.write_text("cmake_minimum_required(VERSION 3.14)\nset(APPLE FALSE)\n"
+                              "function(install)\nendfunction()\n"
+                              "function(set_target_properties)\nmessage(STATUS \"properties=${ARGV}\")\n"
+                              "endfunction()\n" + cli_install_rules())
+            for system, prefix, bindir, expected in (("Linux", "/usr", "bin", True),
+                                                     ("Darwin", "/usr", "bin", False),
+                                                     ("Linux", "/opt", "bin", False),
+                                                     ("Linux", "/usr", "tools", False)):
+                with self.subTest(system=system, prefix=prefix, bindir=bindir):
+                    result = subprocess.run(["cmake", "-DCMAKE_SYSTEM_NAME=" + system,
+                                             "-DCMAKE_INSTALL_PREFIX=" + prefix, "-DCMAKE_INSTALL_BINDIR=" + bindir,
+                                             "-P", str(script)], check=True, capture_output=True, text=True, timeout=10)
+                    props = [line for line in result.stdout.splitlines() if "properties=" in line]
+                    self.assertEqual(props, ["-- properties=kloggctl;PROPERTIES;INSTALL_RPATH;$ORIGIN/../lib"]
+                                     if expected else [])
+
+    def test_linux_consumer_checks_the_final_appimage_before_upload(self):
+        from test_ci_environment_workflow import QUALITY
+        steps = QUALITY.workflow_job_steps(read(".github/workflows/ci-build.yml"))["LinuxPackages"]
+        rows = [QUALITY.workflow_step_fields(step) for step in steps]
+        package = next(i for i, (f, _) in enumerate(rows) if f.get("uses") == "./.github/actions/docker-package")
+        check, = [i for i, (f, _) in enumerate(rows) if f.get("name") == "Verify packaged AppImage control CLI"]
+        upload = next(i for i, (_, c) in enumerate(rows) if c.get("with", {}).get("name", "").startswith("packages-"))
+        self.assertLess(package, check)
+        self.assertLess(check, upload)
+        fields, _ = rows[check]
+        self.assertEqual(fields["if"], "${{ env.KLOGG_PACKAGE_ENABLED == 'true' && "
+                                       "env.KLOGG_CONFIG_OS == 'ubuntu_appimage' }}")
+        self.assertNotIn("continue-on-error", fields)
+        args = shlex.split(fields["run"].replace("\\\n", ""), comments=True)
+        self.assertEqual(args[:2], ["docker", "run"])
+        mounts = [args[i + 1] for i, arg in enumerate(args) if arg == "-v"]
+        self.assertCountEqual(mounts, ["$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/packages:/packages:ro",
+                                       "$KLOGG_WORKSPACE/scripts/verify_appimage_cli.py:/verify_appimage_cli.py:ro"])
+        self.assertEqual(args[-5:], ["${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}",
+                                     "python3", "-I", "/verify_appimage_cli.py",
+                                     "/packages/klogg-${KLOGG_VERSION}-appimage-${KLOGG_PACKAGE_TAG}.AppImage"])
+
+    @unittest.skipIf(os.name == "nt", "Linux AppImage uses POSIX executables")
+    def test_appimage_smoke_requires_extracted_cli_and_bundled_qt(self):
+        with tempfile.TemporaryDirectory(prefix="control smoke ") as directory:
+            root = Path(directory)
+            def executable(name, shell):
+                path = root / name
+                path.write_text("#!/bin/sh\nset -eu\n" + shell, encoding="utf-8")
+                path.chmod(0o755)
+                return path
+
+            package = executable("shipping.AppImage", '''
+[ "$1" = --appimage-extract ]
+mkdir -p squashfs-root/usr/bin squashfs-root/usr/lib
+cp "$(dirname "$0")/case" squashfs-root/case
+if [ "$(cat squashfs-root/case)" != missing-cli ]; then
+    cp "$(dirname "$0")/control" squashfs-root/usr/bin/kloggctl
+fi
+touch squashfs-root/usr/lib/libQt5Core.so.5 squashfs-root/usr/lib/libQt5Network.so.5
+''')
+            executable("control", '''
+[ -z "${LD_LIBRARY_PATH:-}" ]
+[ "$1" != "$(cat squashfs-root/case)" ]
+case "$1" in
+    --version) echo '{"result":{"version":"1"}}';;
+    --help) echo 'Usage: kloggctl COMMAND';;
+    *) exit 1;;
+esac
+''')
+            executable("ldd", '''
+[ -z "${LD_LIBRARY_PATH:-}" ]
+lib=$(dirname "$1")/../lib
+core="$lib/libQt5Core.so.5"
+mode=$(cat squashfs-root/case)
+case "$mode" in
+    host-qt) core="$(dirname "$0")/control";;
+    symlink-escape) ln -sf "$(dirname "$0")/control" "$core";;
+esac
+echo "libQt5Core.so.5 => $core (0x01)"
+if [ "$mode" != missing-network ]; then echo "libQt5Network.so.5 => $lib/libQt5Network.so.5 (0x02)"; fi
+''')
+            environment = dict(os.environ, PATH=str(root) + os.pathsep + os.defpath, LD_LIBRARY_PATH="/host/qt")
+            for mode in ("bundled", "host-qt", "symlink-escape", "missing-network", "missing-cli", "--help", "--version"):
+                with self.subTest(mode=mode):
+                    (root / "case").write_text(mode, encoding="utf-8")
+                    result = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/verify_appimage_cli.py"),
+                                             str(package)], env=environment, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode == 0, mode == "bundled", result.stderr)
 
 
 if __name__ == "__main__":

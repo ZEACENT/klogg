@@ -313,6 +313,13 @@ install(
 # macOS installs the already-staged CLI as part of the application bundle.
 # Other platforms share the GUI's runtime component and relocatable bindir.
 if(NOT APPLE)
+  # The AppImage relocates the /usr install tree. A direct console invocation
+  # (without AppRun) must use its sibling Qt libraries. For the same layout in
+  # a system package the only added directory is the system-owned /usr/lib.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_INSTALL_PREFIX STREQUAL "/usr"
+     AND CMAKE_INSTALL_BINDIR STREQUAL "bin")
+    set_target_properties(kloggctl PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+  endif()
   install(
     TARGETS kloggctl
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
