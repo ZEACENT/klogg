@@ -15,26 +15,34 @@ std::vector<AbstractCrawlerWidget::PaneInventoryEntry> AbstractCrawlerWidget::pa
     return result;
 }
 
-const AbstractLogView* AbstractCrawlerWidget::findReviewPane( const QString& paneId ) const
+std::optional<AbstractCrawlerWidget::PaneReference> AbstractCrawlerWidget::findReviewPane( const QString& paneId ) const
 {
-    if ( paneId.isEmpty() ) return nullptr;
     for ( const auto& pane : reviewPanes() ) {
-        if ( pane.view && pane.available && pane.view->runtimePaneId() == paneId ) return pane.view;
+        if ( pane.view && pane.view->runtimePaneId() == paneId ) return pane;
     }
-    return nullptr;
+    return {};
+}
+
+klogg::ReviewNavigation AbstractCrawlerWidget::navigateReviewPane( const QString& paneId,
+                                                                   const klogg::LogRowId& identity )
+{
+    const auto pane = findReviewPane( paneId );
+    if ( !pane ) return NavigationError::PaneNotFound;
+    if ( !pane->available ) return NavigationError::NotAvailable;
+    return pane->view->navigateReviewRow( identity );
 }
 
 AbstractCrawlerWidget::PaneMetadata AbstractCrawlerWidget::paneMetadata( const QString& paneId ) const
 {
-    const auto* view = findReviewPane( paneId );
-    return view ? view->paneMetadata() : PaneMetadata{};
+    const auto pane = findReviewPane( paneId );
+    return pane && pane->available ? pane->view->paneMetadata() : PaneMetadata{};
 }
 
 klogg::LogSnapshot::Ptr AbstractCrawlerWidget::createPaneSnapshot( const QString& paneId,
                                                                 klogg::SnapshotScope scope ) const
 {
-    const auto* view = findReviewPane( paneId );
-    return view ? view->createPaneSnapshot( scope ) : klogg::LogSnapshot::Ptr{};
+    const auto pane = findReviewPane( paneId );
+    return pane && pane->available ? pane->view->createPaneSnapshot( scope ) : klogg::LogSnapshot::Ptr{};
 }
 
 AbstractCrawlerWidget::PaneMetadata AbstractCrawlerWidget::paneMetadata( Pane pane ) const

@@ -638,8 +638,7 @@ from the outgoing results, publication reports `CONFLICT` instead.
 
 `capabilities.get` advertises `implicit_filter_kinds:["file","live","folder"]`,
 `filter_kept_pane_creation:true`, the file/live `filter_source_policy` above and
-`folder_filter_source_policy:"retained-scan"`. Explicit filter transactions
-remain unsupported. `tab.get.filter_draft` describes only editor state.
+`folder_filter_source_policy:"retained-scan"`. Explicit staging uses the same preparation and publication paths as implicit requests. `tab.get.filter_draft` describes only editor state.
 
 `FilterUpdateStaging` owns unpublished resources on the GUI thread; workers
 receive only immutable capture values. For Keep, staging creates a fresh
@@ -1089,12 +1088,12 @@ file/live/folder filter application and kept-pane creation, per-pane applied-que
 observation, mixed source-backed
 mark/label/global-highlighter transactions, explicit shell installation and
 package-payload contracts. `capabilities.get` supplies protocol version, method
-names, feature flags and selected limits without log content; it is not full
-parameter/result schema discovery. Source-addressed navigation/selection and
-mixed explicit lifecycle/filter transactions remain
-undelivered. Remaining mutation domains and native packaged acceptance are not
-complete. Launcher,
-headless search and test-runner entrypoints remain separate. The single-instance
+names, feature flags and selected limits without log content. `schema.get` returns parameter/result schemas per method.
+`pane.navigate` resolves a public snapshot ordinal to a currently presented identity
+without activating another tab. Explicit open/filter/annotation transactions
+stage private targets through the same native publication APIs. Device/capture
+lifecycle control remains outside the protocol. Launcher, headless search and
+test-runner entrypoints remain separate. The single-instance
 file-forwarding channel is not reused as a general control API.
 The Chart Panel and persistent Filters Panel are proposed features, not
 shipped UI. [WRAP_TEXT_ANALYSIS.md](WRAP_TEXT_ANALYSIS.md) preserves historical

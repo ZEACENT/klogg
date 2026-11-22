@@ -75,6 +75,7 @@
 #include <QRect>
 #include <QScrollBar>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QStringView>
 #include <QStyle>
 #include <QtCore>
@@ -2077,11 +2078,40 @@ AbstractLogView::PaneMetadata AbstractLogView::paneMetadata() const
             state.topPresentedRow = getTopLine();
         }
     }
+    state.selectedRow = selection_.selectedLine();
+    if ( state.selectedRow ) state.selectionKind = "line";
+    else if ( selection_.isPortion() ) state.selectionKind = "portion";
+    else if ( !selection_.isEmpty() ) state.selectionKind = "lines";
     state.follow = isFollowEnabled();
     state.wrap = isTextWrapEnabled();
     state.visible = isVisible();
     state.focused = hasFocus();
     return state;
+}
+
+klogg::ReviewNavigation AbstractLogView::navigateReviewRow( const klogg::LogRowId& identity )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    using Error = klogg::ReviewNavigationError;
+    // Native selection disables Follow and can cancel a user's pending copy.
+    // Neither is a pane-local side effect: decline rather than interrupt either.
+    if ( !logData_ || searchesRetiring_ || followMode_ || selectionStarted_ || matchSelection_
+         || ( quickFind_ && quickFind_->isSearchRunning() ) ) return Error::NotAvailable;
+    OptionalLineNumber row;
+    try {
+        row = logData_->rowForIdentity( identity );
+        if ( !row || *row >= logData_->getNbLine() || !logData_->isLineCopyable( *row ) )
+            return Error::RowNotPresent;
+    }
+    catch ( ... ) { return Error::NotAvailable; }
+
+    // A human result click forwards newSelection to the main pane, and a
+    // scrollbar move can forward mouse hover to its overview. Keep native
+    // selection/scroll behavior but do not route those gestures to a peer.
+    const QSignalBlocker paneSignals{ this };
+    acceptQuickFindResults_ = false;
+    selectAndDisplayLine( *row );
+    return *row;
 }
 
 klogg::LogSnapshot::Ptr AbstractLogView::createPaneSnapshot( klogg::SnapshotScope scope ) const

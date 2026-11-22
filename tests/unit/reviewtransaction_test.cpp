@@ -36,6 +36,87 @@ struct Owners {
 };
 } // namespace
 
+TEST_CASE( "An asynchronous stage reservation blocks prefix publication without closing the transaction",
+           "[review-transaction]" )
+{
+    Owners owners;
+    ReviewTransaction transaction;
+    REQUIRE( transaction.stageLabels( owners.first, { label( "pending" ) } ) == Status::Open );
+    int cancellations = 0;
+    REQUIRE( transaction.beginAsyncStage( [&] {
+        ++cancellations;
+        CHECK_FALSE( transaction.asyncStagePending() );
+        CHECK( transaction.abort() == transaction.status() );
+    } ) == Status::Open );
+    CHECK( transaction.asyncStagePending() );
+    CHECK( transaction.beginAsyncStage() == Status::ResourceLimit );
+    CHECK( transaction.commit() == Status::Open );
+    CHECK( owners.first.snapshot().revision == 0 );
+    SECTION( "completed staging can commit" ) {
+        transaction.finishAsyncStage();
+        CHECK( transaction.commit() == Status::Committed );
+        CHECK( owners.first.snapshot().revision == 1 );
+    }
+    SECTION( "failed staging rejects the prefix" ) {
+        transaction.failAsyncStage( Status::TargetClosed );
+        CHECK( transaction.commit() == Status::TargetClosed );
+        CHECK( owners.first.snapshot().revision == 0 );
+    }
+    SECTION( "late completion does not reopen an aborted transaction" ) {
+        CHECK( transaction.abort() == Status::Aborted );
+        transaction.finishAsyncStage();
+        transaction.failAsyncStage( Status::TargetClosed );
+        CHECK( transaction.commit() == Status::Aborted );
+    }
+    CHECK_FALSE( transaction.asyncStagePending() );
+    CHECK( cancellations == ( transaction.status() == Status::Committed ? 0 : 1 ) );
+}
+
+TEST_CASE( "Only one fallible participant can publish a transaction-visible filter draft",
+           "[review-transaction]" )
+{
+    Owners owners;
+    int releases = 0;
+    int validations = 0;
+    ReviewTransaction transaction;
+    const auto base = transaction.filterDraft( owners.filter );
+    REQUIRE( base );
+    auto filter = base->filter;
+    filter.matchCase = !filter.matchCase;
+    ReviewTransaction::Participant participant{
+        [&] { ++validations; return Status::Open; },
+        [&] { return owners.filter.installFilterDraft( *base, filter ); },
+        [&] { ++releases; }, [] {} };
+    REQUIRE( transaction.stageParticipant( participant ) == Status::Open );
+    REQUIRE( transaction.stageFilterDraft( owners.filter, filter ) == Status::Open );
+    const auto staged = transaction.filterDraft( owners.filter );
+    REQUIRE( staged );
+    CHECK( staged->filter == filter );
+    CHECK( staged->revision == base->revision );
+    CHECK( owners.filter.filterDraftSnapshot().filter == base->filter );
+    SECTION( "original dependency is still checked" ) {
+        owners.filter.setMatchCase( filter.matchCase );
+        owners.filter.setMatchCase( base->filter.matchCase );
+        CHECK( transaction.commit() == Status::Conflict );
+        CHECK( validations == 0 );
+    }
+    SECTION( "second participant rejects whole candidate" ) {
+        CHECK( transaction.stageParticipant( participant ) == Status::ResourceLimit );
+        CHECK( transaction.commit() == Status::ResourceLimit );
+        CHECK( validations == 0 );
+    }
+    SECTION( "abort before validation releases staged resources" ) {
+        CHECK( transaction.abort() == Status::Aborted );
+        CHECK( validations == 0 );
+    }
+    SECTION( "only the participant installs the original dependency's draft" ) {
+        CHECK( transaction.commit() == Status::Committed );
+        CHECK( validations == 1 );
+        CHECK( owners.filter.filterDraftSnapshot().filter == filter );
+    }
+    CHECK( releases == 1 );
+}
+
 TEST_CASE( "Mark read dependencies are repeatable and reject ABA edits before label publication",
            "[review-transaction][review-marks-transaction]" )
 {

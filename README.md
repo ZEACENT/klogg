@@ -155,7 +155,7 @@ require an unchanged source snapshot, so continuous appends can cause a conflict
 Folder queries retain the bytes scanned from each member; they do not freeze the
 filesystem.
 `capabilities.get` reports supported methods, feature flags and selected limits;
-it is an inventory, not a complete request/response schema.
+use `schema.get` with `{"method":"filter.apply"}` for a method's parameter and result schemas.
 
 ```sh
 kloggctl instance list
@@ -179,8 +179,7 @@ marks are shared across panes. A nonempty folder search consumes Keep and opens
 a new pane only if the previous pane has rows after revealing matches. Empty
 text clears matches in place without consuming Keep. If the human changes the
 relevant state before publication, the operation can fail with `CONFLICT` and
-leave their changes intact. Explicit filter transactions are unsupported. `tab.get.filter_draft`
-is draft-only. Use `pane.get` or `pane.list` to read each result pane's
+leave their changes intact. `tab.get.filter_draft` describes the editor draft, not result membership. Use `pane.get` or `pane.list` to read each result pane's
 `applied_filter` (including retained file/live/folder results), independently of
 unsubmitted drafts and deferred painting. Its `complete` flag reports native
 result readiness, not a running/stopped/error classification. Main panes omit
@@ -199,10 +198,23 @@ opening settings or enabling control does not alter shell configuration. Backups
 and partial failures are reported. Shell installation and control enablement are
 independent.
 
-**This is not the complete feature or packaged acceptance.** Composing lifecycle
-or filter changes with annotations in explicit transactions,
-continuous-append cutover, source-addressed navigation/selection,
-and full cross-platform package acceptance are still in progress.
+Use `transaction.begin` to stage an open, filter and annotations privately. Wait
+for each `documents.open` or `filter.apply` staging operation via `operation.get`
+without `transaction_id`, then address the staged tab using its ID **and** the
+transaction ID. `source.capture` and `source.read` inside the transaction produce
+private IDs: pass the same transaction ID when reading or polling that read.
+`transaction.commit` publishes; `transaction.abort` discards. A transaction may
+adopt one private document or publish one visible document/filter change. It may
+also publish labels and highlighters, and marks on the private document. Visible
+mark writes cannot be combined with a visible document/filter change. These
+bounds are enforced before publication, not simulated by sequential GUI calls.
+
+To select a whole row without activating a tab, call `pane.navigate` with
+`tab_id`, `pane_id`, a public `snapshot_id` and a decimal `row` in that snapshot.
+A missing/stale or non-presented row is rejected, not guessed. `pane.get`
+reports `selection_kind` and `selected_row` without returning selected text.
+Device lifecycle control, durable transactions and event subscriptions are not
+part of this local API.
 A relocated macOS Qt/CLI payload has passed native Cocoa startup checks; this is not
 full release-artifact acceptance. Existing launcher and headless-search command-line
 roles are unchanged.

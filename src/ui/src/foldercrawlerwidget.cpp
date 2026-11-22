@@ -686,7 +686,7 @@ std::vector<AbstractCrawlerWidget::PaneReference> FolderCrawlerWidget::reviewPan
     if ( mainView_ ) result.push_back( { mainView_, Pane::Main, tr( "Main view" ),
         currentMainData_ != nullptr && currentMainData_ != placeholderData_, reviewMarksId() } );
     for ( int index = 0; resultsTabs_ && index < resultsTabs_->count(); ++index ) {
-        const auto* view = qobject_cast<FolderFilteredView*>( resultsTabs_->widget( index ) );
+        auto* view = qobject_cast<FolderFilteredView*>( resultsTabs_->widget( index ) );
         if ( !view ) continue;
         // removeTab emits synchronously before panes_ erases its old entry.
         // Resolve ownership by view identity even during that transient order.

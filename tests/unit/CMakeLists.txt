@@ -15,7 +15,7 @@ function(klogg_add_control_console_test name runtime_target)
   klogg_set_test_isolation(${name})
 endfunction()
 add_executable(klogg_control_protocol_tests
-  controlframing_test.cpp controlrpc_test.cpp pure_catch_main.cpp
+  controlframing_test.cpp controlrpc_test.cpp controlschema_test.cpp pure_catch_main.cpp
 )
 target_link_libraries(klogg_control_protocol_tests PRIVATE klogg_control Catch2)
 target_include_directories(klogg_control_protocol_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/utils/include")

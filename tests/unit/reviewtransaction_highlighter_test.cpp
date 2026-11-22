@@ -115,6 +115,65 @@ TEST_CASE( "Highlighters and labels publish together after private asynchronous 
     CHECK( HighlighterSetCollection::get().snapshot().revision == before.revision + 1 );
 }
 
+TEST_CASE( "A fallible participant and prepared annotations publish all or none",
+           "[review-transaction][review-highlighter-transaction]" )
+{
+    Owners owners;
+    DeferredPreparation deferred;
+    const auto before = HighlighterSetCollection::get().revision();
+    Status validation = Status::Open;
+    bool installable = true;
+    QStringList phases;
+    ReviewTransaction transaction{ deferred.callback() };
+    REQUIRE( transaction.stageLabels( owners.labels, { Owners::label() } ) == Status::Open );
+    REQUIRE( transaction.stageHighlighters( { owners.proposed }, { owners.proposed.id() } ) == Status::Open );
+    auto permit = std::make_shared<int>( 1 );
+    const std::weak_ptr<int> retained = permit;
+    REQUIRE( transaction.stageParticipant( {
+        [&, permit = std::move( permit )] { CHECK( permit ); phases << "validate"; return validation; },
+        [&] {
+            phases << "install";
+            CHECK( transaction.commit() == Status::Preparing );
+            CHECK( transaction.abort() == Status::Preparing );
+            CHECK( HighlighterSetCollection::get().revision() == before );
+            CHECK( owners.labels.snapshot().revision == 0 );
+            return installable;
+        },
+        [&] { phases << "release"; },
+        [&] {
+            phases << "notify";
+            CHECK_FALSE( retained.expired() ); // No early admission for reentrant observers.
+            CHECK( transaction.abort() == Status::Committed );
+            CHECK( owners.labels.snapshot().revision == 1 );
+            CHECK( HighlighterSetCollection::get().revision() == before + 1 );
+        } } ) == Status::Open );
+    REQUIRE( transaction.commit() == Status::Preparing );
+    REQUIRE( transaction.commit() == Status::Preparing );
+    CHECK( phases.isEmpty() ); // Never acquire a native guard across event-loop turns.
+    deferred.finish();
+    SECTION( "validation failure releases even without installation" ) {
+        validation = Status::TargetClosed;
+        CHECK( transaction.commit() == validation );
+        CHECK( phases == QStringList{ "validate", "release" } );
+    }
+    SECTION( "fallible adoption leaves annotations untouched" ) {
+        installable = false;
+        CHECK( transaction.commit() == Status::Conflict );
+        CHECK( phases == QStringList{ "validate", "install", "release" } );
+    }
+    SECTION( "terminal observers can see all owners" ) {
+        CHECK( transaction.commit( [&] {
+            CHECK( transaction.status() == Status::Committed );
+            phases << "published";
+        } ) == Status::Committed );
+        CHECK( phases == QStringList{ "validate", "install", "release", "published", "notify" } );
+    }
+    if ( transaction.status() != Status::Committed ) {
+        CHECK( owners.labels.snapshot().revision == 0 );
+        CHECK( HighlighterSetCollection::get().revision() == before );
+    }
+}
+
 TEST_CASE( "Human edits during highlighter preparation reject every staged owner",
            "[review-transaction][review-highlighter-transaction]" )
 {

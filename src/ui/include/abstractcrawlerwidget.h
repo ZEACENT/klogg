@@ -93,6 +93,8 @@ class AbstractCrawlerWidget : public ViewInterface {
     virtual std::vector<klogg::ReviewMarksOwner*> reviewMarksOwners() { return {}; }
     std::vector<PaneInventoryEntry> paneInventory() const;
     PaneMetadata paneMetadata( const QString& paneId ) const;
+    using NavigationError = klogg::ReviewNavigationError;
+    klogg::ReviewNavigation navigateReviewPane( const QString& paneId, const klogg::LogRowId& identity );
     klogg::LogSnapshot::Ptr createPaneSnapshot( const QString& paneId, klogg::SnapshotScope scope ) const;
 
     // Owner-thread reads of the actual main/active-results pane. Unavailable
@@ -205,7 +207,7 @@ class AbstractCrawlerWidget : public ViewInterface {
     // Borrowed only for the synchronous owner-thread call, never retained.
     virtual const AbstractLogView* reviewPane( Pane ) const { return nullptr; }
     struct PaneReference {
-        const AbstractLogView* view = nullptr;
+        AbstractLogView* view = nullptr;
         Pane kind = Pane::Main;
         QString title;
         bool available = true;
@@ -214,9 +216,9 @@ class AbstractCrawlerWidget : public ViewInterface {
     };
     // Enumerate the actual widget hierarchy, never a parallel pane registry.
     virtual std::vector<PaneReference> reviewPanes() const { return {}; }
-    const AbstractLogView* findReviewPane( const QString& paneId ) const;
 
   private:
+    std::optional<PaneReference> findReviewPane( const QString& paneId ) const;
     const QString runtimeTabId_ = QUuid::createUuid().toString( QUuid::WithoutBraces );
 };
 

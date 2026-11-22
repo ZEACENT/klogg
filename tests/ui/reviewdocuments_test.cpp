@@ -12,6 +12,7 @@
 #include "mainwindow.h"
 #include "reviewcontroladapter.h"
 #include "session.h"
+#include "tabgroup.h"
 #include "test_utils.h"
 
 namespace {
@@ -68,7 +69,13 @@ TEST_CASE( "Control capability discovery reports only delivered domains without 
     CHECK( methods.contains( "documents.close" ) );
     CHECK( methods.contains( "source.read" ) );
     CHECK( methods.contains( "filter.apply" ) );
+    REQUIRE( methods.contains( "schema.get" ) );
+    REQUIRE( methods.contains( "pane.navigate" ) );
     for ( const auto& method : methods ) {
+        const auto schema = fixture.call( "schema.get", { { "method", method } } );
+        CHECK( schema.value( "method" ) == method );
+        CHECK( schema.value( "params" ).isObject() );
+        CHECK( schema.value( "result" ).isObject() );
         const auto response = fixture.adapter.dispatch( { "advertised", method.toString(), {} } );
         if ( const auto* error = std::get_if<klogg::control::RpcError>( &response ) ) {
             CHECK( error->data.toObject().value( "code" ) != "METHOD_NOT_FOUND" );
@@ -77,13 +84,17 @@ TEST_CASE( "Control capability discovery reports only delivered domains without 
             fixture.call( "transaction.abort", { { "transaction_id", id } } );
         }
     }
+    const auto catalog = fixture.call( "schema.get", { { "method", "schema.get" } } )
+        .value( "params" ).toObject().value( "properties" ).toObject().value( "method" ).toObject().value( "enum" ).toArray();
+    REQUIRE( catalog.size() == methods.size() );
+    for ( const auto& name : methods ) CHECK( catalog.contains( name ) );
     const auto features = capabilities.value( "features" ).toObject();
-    CHECK_FALSE( features.value( "explicit_lifecycle_transactions" ).toBool( true ) );
+    CHECK( features.value( "explicit_lifecycle_transactions" ).toBool() );
     CHECK_FALSE( features.value( "live_lifecycle" ).toBool( true ) );
     CHECK( features.value( "implicit_filter_kinds" ).toArray() == QJsonArray{ "file", "live", "folder" } );
     CHECK( features.value( "folder_filter_source_policy" ) == "retained-scan" );
     CHECK( features.value( "filter_source_policy" ) == "unchanged-snapshot" );
-    CHECK_FALSE( features.value( "explicit_filter_transactions" ).toBool( true ) );
+    CHECK( features.value( "explicit_filter_transactions" ).toBool() );
     CHECK( features.value( "applied_filter_observation" ).toBool() );
     CHECK( features.value( "filter_kept_pane_creation" ).toBool() );
     CHECK( capabilities.value( "limits" ).toObject().value( "read_rows" ).toInt() == 256 );
@@ -199,6 +210,105 @@ TEST_CASE( "Document preparation does not retain or recreate a closed target win
     CHECK( result.value( "status" ) == "failed" );
     CHECK( result.value( "error" ).toObject().value( "code" ) == "TARGET_CLOSED" );
     CHECK( fixture.session->openedDocuments().empty() );
+}
+
+TEST_CASE( "Explicit lifecycle operations stage native documents without publishing membership",
+           "[control-documents][control-staged-documents]" )
+{
+    DocumentControlFixture fixture;
+    auto tx = fixture.call( "transaction.begin", {} ).value( "transaction_id" );
+    const auto windowId = fixture.window.runtimeWindowId();
+    const bool folder = GENERATE( false, true );
+    const auto started = fixture.call( "documents.open", { { "window_id", windowId },
+        { "path", folder ? fixture.root.path() : fixture.path }, { "kind", folder ? "folder" : "file" },
+        { "transaction_id", tx } } );
+    const auto operation = fixture.await( started );
+    REQUIRE( operation.value( "status" ) == "completed" );
+    const auto tabId = operation.value( "result" ).toObject().value( "tab_id" );
+    REQUIRE_FALSE( tabId.toString().isEmpty() );
+    CHECK( fixture.window.inventorySnapshot().tabs.empty() );
+    CHECK( fixture.session->openedDocuments().empty() );
+    SECTION( "abort leaves no membership" ) {
+        CHECK( fixture.call( "transaction.abort", { { "transaction_id", tx } } ).value( "status" ) == "aborted" );
+        CHECK( fixture.session->openedDocuments().empty() );
+        CHECK( fixture.window.inventorySnapshot().tabs.empty() );
+    }
+    SECTION( "commit adopts the same tab and close waits for its own commit" ) {
+        CHECK( fixture.call( "transaction.commit", { { "transaction_id", tx } } ).value( "status" ) == "committed" );
+        REQUIRE( fixture.window.inventorySnapshot().tabs.size() == 1 );
+        CHECK( fixture.window.inventorySnapshot().tabs.front().tabId == tabId.toString() );
+        tx = fixture.call( "transaction.begin", {} ).value( "transaction_id" );
+        fixture.call( "documents.close", { { "window_id", windowId }, { "tab_id", tabId }, { "transaction_id", tx } } );
+        CHECK( fixture.session->openedDocuments().size() == 1 );
+        CHECK( fixture.call( "transaction.commit", { { "transaction_id", tx } } ).value( "status" ) == "committed" );
+        CHECK( fixture.session->openedDocuments().empty() );
+        CHECK( fixture.window.inventorySnapshot().tabs.empty() );
+    }
+}
+
+TEST_CASE( "An explicit open never binds to a replacement document or leaves a committable failed stage",
+           "[control-documents][control-staged-documents]" )
+{
+    DocumentControlFixture fixture;
+    const auto tx = fixture.call( "transaction.begin", {} ).value( "transaction_id" );
+    QJsonObject args{ { "window_id", fixture.window.runtimeWindowId() }, { "path", fixture.path }, { "transaction_id", tx } };
+    SECTION( "human opens the same path before the worker is delivered" ) {
+        const auto started = fixture.call( "documents.open", args );
+        fixture.window.loadFileNonInteractive( fixture.path );
+        CHECK( fixture.await( started ).value( "status" ) == "failed" );
+        REQUIRE( fixture.window.inventorySnapshot().tabs.size() == 1 );
+    }
+    SECTION( "human opens the same path after staging" ) {
+        REQUIRE( fixture.await( fixture.call( "documents.open", args ) ).value( "status" ) == "completed" );
+        fixture.window.loadFileNonInteractive( fixture.path );
+    }
+    SECTION( "cancellation poisons the prefix" ) {
+        const auto started = fixture.call( "documents.open", args );
+        fixture.call( "operation.cancel", { { "operation_id", started.value( "operation_id" ) } } );
+        CHECK( fixture.await( started ).value( "status" ) == "cancelled" );
+    }
+    SECTION( "unavailable source poisons the prefix" ) {
+        args.insert( "path", fixture.root.filePath( "missing.log" ) );
+        CHECK( fixture.await( fixture.call( "documents.open", args ) ).value( "status" ) == "failed" );
+    }
+    const auto commit = fixture.adapter.dispatch( { "document-test", "transaction.commit", { { "transaction_id", tx } } } );
+    CHECK( std::holds_alternative<klogg::control::RpcError>( commit ) );
+}
+
+TEST_CASE( "Explicit reuse and close validate the original tab and its group update",
+           "[control-documents][control-staged-documents]" )
+{
+    DocumentControlFixture fixture;
+    const auto opened = fixture.await( fixture.open( fixture.path ) );
+    REQUIRE( opened.value( "status" ) == "completed" );
+    const auto tabId = opened.value( "result" ).toObject().value( "tab_id" );
+    const auto tx = fixture.call( "transaction.begin", {} ).value( "transaction_id" );
+    const QJsonObject close{ { "window_id", fixture.window.runtimeWindowId() }, { "tab_id", tabId } };
+    QString groupId;
+    SECTION( "a reused path is not a lease on its next tab" ) {
+        fixture.call( "documents.open", { { "transaction_id", tx }, { "window_id", fixture.window.runtimeWindowId() },
+                                           { "path", fixture.path } } );
+        fixture.call( "documents.close", close );
+        const auto replacement = fixture.await( fixture.open( fixture.path ) );
+        REQUIRE( replacement.value( "status" ) == "completed" );
+        REQUIRE( replacement.value( "result" ).toObject().value( "tab_id" ) != tabId );
+    }
+    SECTION( "a human grouping the tab after staging is not overwritten" ) {
+        auto stagedClose = close;
+        stagedClose.insert( "transaction_id", tx );
+        fixture.call( "documents.close", stagedClose );
+        auto& groups = TabGroupManager::get();
+        groups.createGroup( "Human group", Qt::red );
+        groupId = groups.groups().last().id;
+        groups.addTabToGroup( groupId, fixture.path );
+    }
+    const auto commit = fixture.adapter.dispatch( { "document-test", "transaction.commit", { { "transaction_id", tx } } } );
+    CHECK( std::holds_alternative<klogg::control::RpcError>( commit ) );
+    CHECK( fixture.window.inventorySnapshot().tabs.size() == 1 );
+    if ( !groupId.isEmpty() ) {
+        CHECK( TabGroupManager::get().groupIdForTab( fixture.path ) == groupId );
+        TabGroupManager::get().deleteGroup( groupId );
+    }
 }
 
 TEST_CASE( "Document control opens folders without a modal native open flow",

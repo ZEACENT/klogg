@@ -17,11 +17,13 @@
 #include "mainwindow.h"
 #include "preparedfilesource.h"
 #include "reviewcontentadapter.h"
+#include "reviewtransaction.h"
 #include "tabgroup.h"
 
 namespace {
 using namespace klogg::control;
 using Completion = ReviewContentAdapter::PendingOperation;
+using Status = ReviewTransaction::Status;
 
 RpcError failure( const RpcRequest& request, const char* code )
 {
@@ -37,9 +39,11 @@ bool onlyKeys( const QJsonObject& params, std::initializer_list<const char*> all
     }
     return true;
 }
-QJsonObject outcome( const QString& windowId, const QString& tabId, bool opened )
+QJsonObject outcome( const QString& windowId, const QString& tabId, bool opened, bool staged = false )
 {
-    return { { "window_id", windowId }, { "tab_id", tabId }, { "opened", opened } };
+    QJsonObject result{ { "window_id", windowId }, { "tab_id", tabId }, { "opened", opened } };
+    if ( staged ) result.insert( "staged", true );
+    return result;
 }
 QJsonObject completed( const Completion& operation, const QJsonObject& result )
 {
@@ -47,13 +51,24 @@ QJsonObject completed( const Completion& operation, const QJsonObject& result )
 }
 QString acquisitionError( FileSourcePreparation::Status status )
 {
-    using Status = FileSourcePreparation::Status;
+    using SourceStatus = FileSourcePreparation::Status;
     switch ( status ) {
-    case Status::Missing: return QStringLiteral( "SOURCE_NOT_FOUND" );
-    case Status::NotRegular: return QStringLiteral( "SOURCE_NOT_REGULAR" );
-    case Status::ResourceLimit: return QStringLiteral( "RESOURCE_LIMIT" );
-    case Status::Cancelled: return QStringLiteral( "OPERATION_CANCELLED" );
+    case SourceStatus::Missing: return QStringLiteral( "SOURCE_NOT_FOUND" );
+    case SourceStatus::NotRegular: return QStringLiteral( "SOURCE_NOT_REGULAR" );
+    case SourceStatus::ResourceLimit: return QStringLiteral( "RESOURCE_LIMIT" );
+    case SourceStatus::Cancelled: return QStringLiteral( "OPERATION_CANCELLED" );
     default: return QStringLiteral( "SOURCE_PREPARATION_FAILED" );
+    }
+}
+const char* stageError( Status status )
+{
+    switch ( status ) {
+    case Status::TargetClosed: return "TARGET_CLOSED";
+    case Status::ResourceLimit: return "RESOURCE_LIMIT";
+    case Status::Aborted: return "TRANSACTION_ABORTED";
+    case Status::InvalidArgument: return "INVALID_PARAMS";
+    case Status::PreparationFailed: return "SOURCE_PREPARATION_FAILED";
+    default: return "CONFLICT";
     }
 }
 struct PreparedOpen {
@@ -63,65 +78,146 @@ struct PreparedOpen {
     klogg::AsyncWorkBudget::Lease permit;
 };
 
-void publishOpen( QPointer<MainWindow> window, const std::shared_ptr<Session>& session,
-                  const QString& path, DocumentKind kind, bool follow, const Completion& operation,
-                  const std::shared_ptr<PreparedOpen>& prepared )
+QFuture<std::shared_ptr<PreparedOpen>> acquire( const QString& path, DocumentKind kind,
+    const std::shared_ptr<AtomicFlag>& cancelled, klogg::AsyncWorkBudget::Lease permit )
 {
-    std::unique_ptr<Session::PreparedDocument> document;
-    try {
-        if ( !operation.current() ) { operation.complete( {}, "OPERATION_CANCELLED" ); return; }
-        if ( !window ) { operation.complete( {}, "TARGET_CLOSED" ); return; }
-        // A human may have opened the path while preparation ran. Preserve that
-        // document and its selection rather than inserting an unwanted duplicate.
-        for ( const auto& tab : window->inventorySnapshot().tabs ) {
-            if ( tab.widget && tab.kind == kind && tab.documentId == path ) {
-                operation.complete( outcome( window->runtimeWindowId(), tab.tabId, true ), {} );
-                return;
-            }
+    return QtConcurrent::run( [path, kind, settings = IndexingSettings::capture(), cancelled, permit = std::move( permit )] {
+        auto result = std::make_shared<PreparedOpen>();
+        result->permit = permit;
+        if ( kind == DocumentKind::File ) {
+            auto source = prepareFileSource( path, settings, *cancelled );
+            if ( source.status != FileSourcePreparation::Status::Ready ) result->error = acquisitionError( source.status );
+            result->file = std::move( source.source );
+        } else if ( !QFileInfo( path ).isDir() ) result->error = "SOURCE_NOT_FOUND";
+        else {
+            result->members = enumerateFolderFiles( path, {}, [cancelled] { return static_cast<bool>( *cancelled ); } );
+            if ( result->members.empty() ) result->error = "EMPTY_FOLDER";
         }
-        if ( !prepared->error.isEmpty() ) { operation.complete( {}, prepared->error ); return; }
-        document = kind == DocumentKind::File
-            ? window->prepareFile( prepared->file, follow )
-            : window->prepareFolder( path, prepared->members );
-        if ( !document ) { operation.complete( {}, "SOURCE_PREPARATION_FAILED" ); return; }
-        if ( kind == DocumentKind::File && !document->startLoading() ) {
-            session->retirePrepared( document );
-            operation.complete( {}, "SOURCE_PREPARATION_FAILED" );
-            return;
-        }
-        if ( !operation.current() || !window ) {
-            session->retirePrepared( document );
-            operation.complete( {}, "TARGET_CLOSED" );
-            return;
-        }
-        QPointer<QWidget> widget{ dynamic_cast<QWidget*>( document->view() ) };
-        auto* crawler = dynamic_cast<AbstractCrawlerWidget*>( document->view() );
-        QPointer<LogData> source{ dynamic_cast<LogData*>( document->source() ) };
-        const auto result = outcome( window->runtimeWindowId(), crawler->runtimeTabId(), true );
-        auto publication = window->beginPublication();
-        if ( !publication || !publication->install( document ) ) {
-            session->retirePrepared( document );
-            operation.complete( {}, "CONFLICT" );
-            return;
-        }
-        publication->finalize();
-        publication->release();
-        operation.complete( result, {} ); // Terminal before any native observer.
-        publication->notify();
-        if ( window && widget && source ) {
-            const auto inventory = window->inventorySnapshot();
-            if ( std::any_of( inventory.tabs.begin(), inventory.tabs.end(), [&]( const auto& tab ) {
-                     return tab.widget == widget;
-                 } ) ) source->activatePrepared();
-        }
-        if ( window ) window->recordPublishedDocument( path, kind, true );
-    } catch ( const std::bad_alloc& ) {
-        if ( document ) session->retirePrepared( document );
-        operation.complete( {}, "RESOURCE_LIMIT" );
-    } catch ( ... ) {
-        if ( document ) session->retirePrepared( document );
-        operation.complete( {}, "SOURCE_PREPARATION_FAILED" );
+        return result;
+    } );
+}
+
+std::optional<MainWindow::TabInventoryEntry> findPath( const MainWindow& window, DocumentKind kind,
+                                                       const QString& path )
+{
+    for ( const auto& tab : window.inventorySnapshot().tabs ) {
+        if ( tab.widget && tab.kind == kind && tab.documentId == path ) return tab;
     }
+    return {};
+}
+
+// Held by the participant, never by the staged-tab lookup or a worker. Until
+// adoption the entire native graph is private; after extraction it follows the
+// same retirement path. No GUI barrier is held while waiting for a commit.
+struct Lifecycle {
+    enum class Action { Open, Close, Reuse };
+    Lifecycle( Action action_, MainWindow& window_, const QString& path_, DocumentKind kind_ )
+        : action( action_ ), window( &window_ ), session( window_.sessionOwner() ), path( path_ ), kind( kind_ ),
+          groupId( TabGroupManager::get().groupIdForTab( path ) ) {}
+    ~Lifecycle() { if ( document ) session->retirePrepared( document ); }
+
+    Status validate() const
+    {
+        if ( !window ) return Status::TargetClosed;
+        if ( action == Action::Open ) {
+            if ( findPath( *window, kind, path ) || TabGroupManager::get().groupIdForTab( path ) != groupId )
+                return Status::Conflict;
+        } else {
+            const auto tabs = window->inventorySnapshot().tabs;
+            const auto member = std::find_if( tabs.begin(), tabs.end(), [&]( const auto& entry ) {
+                return widget && entry.widget == widget && entry.tabId == tabId && entry.kind == kind && entry.documentId == path;
+            } );
+            if ( member == tabs.end() ) return Status::TargetClosed;
+            if ( groups && !groups->isCurrent() ) return Status::Conflict;
+        }
+        return Status::Open;
+    }
+    bool install()
+    {
+        if ( action == Action::Reuse ) return true;
+        const auto owners = action == Action::Close ? windows() : std::vector<QPointer<MainWindow>>{ window };
+        MainWindow::Publication* target = nullptr;
+        publications.reserve( owners.size() );
+        for ( const auto& owner : owners ) {
+            if ( !owner ) continue;
+            auto publication = owner->beginPublication();
+            if ( !publication ) return false;
+            if ( owner == window ) target = publication.get();
+            publications.push_back( std::move( publication ) );
+        }
+        if ( !target ) return false;
+        if ( action == Action::Open ) {
+            if ( !target->install( document ) ) return false;
+        } else {
+            document = target->extract( dynamic_cast<AbstractCrawlerWidget*>( widget.data() ) );
+            if ( !document ) return false;
+            groups->install(); // Validated on this GUI turn; no intervening notification.
+        }
+        for ( const auto& publication : publications ) publication->finalize();
+        return true;
+    }
+    void release()
+    {
+        for ( const auto& publication : publications ) publication->release();
+    }
+    void notify()
+    {
+        for ( const auto& publication : publications ) publication->notify();
+        if ( action == Action::Reuse ) return;
+        if ( groups ) {
+            groups->notify();
+            session->retirePrepared( document );
+            TabGroupManager::get().save();
+        } else if ( window && widget && source ) {
+            const auto tabs = window->inventorySnapshot().tabs;
+            if ( std::any_of( tabs.begin(), tabs.end(), [&]( const auto& entry ) { return entry.widget == widget; } ) )
+                source->activatePrepared();
+        }
+        if ( window ) window->recordPublishedDocument( path, kind, action == Action::Open );
+    }
+
+    Action action;
+    klogg::AsyncWorkBudget::Lease privateDocumentPermit;
+    QPointer<MainWindow> window;
+    std::shared_ptr<Session> session;
+    QString path;
+    DocumentKind kind;
+    QString groupId;
+    QString tabId;
+    QPointer<QWidget> widget;
+    QPointer<LogData> source;
+    std::unique_ptr<Session::PreparedDocument> document;
+    ReviewDocumentAdapter::WindowProvider windows;
+    std::unique_ptr<TabGroupManager::PreparedRemoval> groups;
+    std::vector<std::unique_ptr<MainWindow::Publication>> publications;
+};
+
+// The operation certifies staging in an explicit transaction. An implicit
+// command additionally commits here and is terminal before native observers.
+Status stage( const std::shared_ptr<Lifecycle>& candidate, const std::shared_ptr<ReviewTransaction>& transaction,
+              const Completion& operation, const QJsonObject& result )
+{
+    ReviewTransaction::Participant participant{ [candidate] { return candidate->validate(); },
+        [candidate] { return candidate->install(); }, [candidate] { candidate->release(); },
+        [candidate] { candidate->notify(); } };
+    Status status;
+    if ( transaction ) {
+        status = transaction->stageParticipant( std::move( participant ) );
+        if ( status == Status::Open ) {
+            transaction->finishAsyncStage();
+            operation.complete( result, {} );
+        }
+    } else {
+        ReviewTransaction implicit;
+        participant.notify = [&] {
+            operation.complete( result, {} );
+            candidate->notify();
+        };
+        status = implicit.stageParticipant( std::move( participant ) );
+        if ( status == Status::Open ) status = implicit.commit();
+    }
+    if ( status != Status::Open && status != Status::Committed ) operation.complete( {}, stageError( status ) );
+    return status;
 }
 }
 
@@ -132,15 +228,25 @@ ReviewDocumentAdapter::ReviewDocumentAdapter( WindowProvider windows, ReviewCont
 ReviewDocumentAdapter::~ReviewDocumentAdapter() { reset(); }
 void ReviewDocumentAdapter::reset()
 {
-    // The shared operation registry owns cancellation. Workers own only values;
-    // disconnecting completion delivery never joins one on the GUI thread.
+    staged_.clear();
     for ( auto* child : children() ) {
         child->disconnect( this );
         child->deleteLater();
     }
 }
 
-DecodedResponse ReviewDocumentAdapter::dispatch( const RpcRequest& request )
+std::optional<ReviewDocumentAdapter::StagedDocument> ReviewDocumentAdapter::stagedDocument(
+    const std::shared_ptr<ReviewTransaction>& transaction, const QString& tabId ) const
+{
+    if ( !transaction || ( transaction->status() != Status::Open && transaction->status() != Status::Preparing ) ) return {};
+    for ( const auto& entry : staged_ ) {
+        if ( entry.tabId == tabId && entry.window && entry.document.widget && entry.transaction.lock() == transaction )
+            return entry.document;
+    }
+    return {};
+}
+
+DecodedResponse ReviewDocumentAdapter::dispatch( const RpcRequest& request, const std::shared_ptr<ReviewTransaction>& transaction )
 {
     Q_ASSERT( QThread::currentThread() == thread() );
     const bool opening = request.method == QLatin1String( "documents.open" );
@@ -150,56 +256,35 @@ DecodedResponse ReviewDocumentAdapter::dispatch( const RpcRequest& request )
                  : !onlyKeys( params, { "window_id", "tab_id" } ) ) return failure( request, "INVALID_PARAMS" );
     const auto windowId = params.value( "window_id" );
     if ( !windowId.isString() || windowId.toString().isEmpty() ) return failure( request, "INVALID_PARAMS" );
-    const auto windows = windows_();
     QPointer<MainWindow> window;
-    for ( const auto& candidate : windows ) {
+    for ( const auto& candidate : windows_() ) {
         if ( candidate && candidate->runtimeWindowId() == windowId.toString() ) window = candidate;
     }
     if ( !window ) return failure( request, "TARGET_NOT_FOUND" );
-    const auto session = window->sessionOwner();
+    const auto stageExisting = [&]( const MainWindow::TabInventoryEntry& tab, Lifecycle::Action action ) -> DecodedResponse {
+        auto candidate = std::make_shared<Lifecycle>( action, *window, tab.documentId, tab.kind );
+        candidate->tabId = tab.tabId;
+        candidate->widget = tab.widget;
+        if ( action == Lifecycle::Action::Close ) {
+            candidate->windows = windows_;
+            candidate->groups = TabGroupManager::get().prepareTabRemovals( { tab.documentId } );
+        }
+        auto operation = operations_.beginOperation( {} );
+        if ( !operation ) return failure( request, "RESOURCE_LIMIT" );
+        const auto result = outcome( window->runtimeWindowId(), tab.tabId, opening, bool( transaction ) );
+        const auto status = stage( candidate, transaction, *operation, result );
+        if ( status != Status::Open && status != Status::Committed ) return failure( request, stageError( status ) );
+        return completed( *operation, result );
+    };
     if ( !opening ) {
         const auto tabId = params.value( "tab_id" );
         if ( !tabId.isString() || tabId.toString().isEmpty() ) return failure( request, "INVALID_PARAMS" );
-        const auto inventory = window->inventorySnapshot();
-        const auto target = std::find_if( inventory.tabs.begin(), inventory.tabs.end(), [&]( const auto& tab ) {
-            return tab.tabId == tabId.toString();
-        } );
-        if ( target == inventory.tabs.end() || !target->widget ) return failure( request, "TARGET_NOT_FOUND" );
-        if ( target->kind == DocumentKind::AdbLogcat ) return failure( request, "UNSUPPORTED_SOURCE" );
-        auto operation = operations_.beginOperation( {} );
-        if ( !operation ) return failure( request, "RESOURCE_LIMIT" );
-        auto groups = TabGroupManager::get().prepareTabRemovals( { target->documentId } );
-        std::vector<std::unique_ptr<MainWindow::Publication>> publications;
-        MainWindow::Publication* targetPublication = nullptr;
-        for ( const auto& owner : windows ) {
-            if ( !owner ) continue;
-            auto publication = owner->beginPublication();
-            if ( !publication ) {
-                operation->complete( {}, "CONFLICT" );
-                return QJsonObject{ { "operation_id", operation->id }, { "status", "failed" },
-                                    { "error", QJsonObject{ { "code", "CONFLICT" } } } };
-            }
-            if ( owner == window ) targetPublication = publication.get();
-            publications.push_back( std::move( publication ) );
+        for ( const auto& tab : window->inventorySnapshot().tabs ) {
+            if ( tab.tabId != tabId.toString() || !tab.widget ) continue;
+            if ( tab.kind == DocumentKind::AdbLogcat ) return failure( request, "UNSUPPORTED_SOURCE" );
+            return stageExisting( tab, Lifecycle::Action::Close );
         }
-        if ( !targetPublication || !groups->isCurrent() || !operation->current() ) {
-            operation->complete( {}, "CONFLICT" );
-            return failure( request, "CONFLICT" );
-        }
-        auto detached = targetPublication->extract( dynamic_cast<AbstractCrawlerWidget*>( target->widget.data() ) );
-        if ( !detached ) { operation->complete( {}, "CONFLICT" ); return failure( request, "CONFLICT" ); }
-        groups->install();
-        for ( const auto& publication : publications ) publication->finalize();
-        for ( const auto& publication : publications ) publication->release();
-        const auto result = outcome( windowId.toString(), tabId.toString(), false );
-        const auto response = completed( *operation, result );
-        operation->complete( result, {} );
-        for ( const auto& publication : publications ) publication->notify();
-        groups->notify();
-        session->retirePrepared( detached );
-        TabGroupManager::get().save();
-        if ( window ) window->recordPublishedDocument( target->documentId, target->kind, false );
-        return response;
+        return failure( request, "TARGET_NOT_FOUND" );
     }
 
     const auto pathValue = params.value( "path" );
@@ -212,46 +297,90 @@ DecodedResponse ReviewDocumentAdapter::dispatch( const RpcRequest& request )
     const auto path = QDir::cleanPath( pathValue.toString() );
     const auto kind = kindValue == "folder" ? DocumentKind::Folder : DocumentKind::File;
     if ( kind == DocumentKind::Folder && !followValue.isUndefined() ) return failure( request, "INVALID_PARAMS" );
-    for ( const auto& tab : window->inventorySnapshot().tabs ) {
-        if ( tab.widget && tab.kind == kind && tab.documentId == path ) {
-            auto operation = operations_.beginOperation( {} );
-            if ( !operation ) return failure( request, "RESOURCE_LIMIT" );
-            const auto result = outcome( window->runtimeWindowId(), tab.tabId, true );
-            operation->complete( result, {} );
-            return completed( *operation, result );
-        }
-    }
+    if ( const auto existing = findPath( *window, kind, path ) ) return stageExisting( *existing, Lifecycle::Action::Reuse );
+
     static const klogg::AsyncWorkBudget budget{ MaxConcurrentPreparations };
     auto permit = budget.tryAcquire();
     if ( !permit ) return failure( request, "RESOURCE_LIMIT" );
     auto cancelled = std::make_shared<AtomicFlag>();
-    auto operation = operations_.beginOperation( [cancelled] { cancelled->set(); }, PreparationLifetimeMs );
+    const std::weak_ptr<ReviewTransaction> weakTx = transaction;
+    auto operation = operations_.beginOperation( [cancelled, weakTx] {
+        cancelled->set();
+        if ( const auto tx = weakTx.lock() ) tx->failAsyncStage( Status::Aborted );
+    }, PreparationLifetimeMs );
     if ( !operation ) return failure( request, "RESOURCE_LIMIT" );
-    const auto settings = IndexingSettings::capture();
-    auto future = QtConcurrent::run( [path, kind, settings, cancelled, permit = std::move( permit )] {
-        auto result = std::make_shared<PreparedOpen>();
-        result->permit = permit;
+    auto candidate = std::make_shared<Lifecycle>( Lifecycle::Action::Open, *window, path, kind );
+    if ( transaction ) {
+        const auto status = transaction->beginAsyncStage( [cancelled] { cancelled->set(); } );
+        if ( status != Status::Open ) {
+            operation->complete( {}, stageError( status ) );
+            return failure( request, stageError( status ) );
+        }
+    }
+    using Watcher = QFutureWatcher<std::shared_ptr<PreparedOpen>>;
+    const auto finishOpen = [this, pending = std::move( candidate ), weakTx, explicitTx = bool( transaction ),
+                             follow = followValue.toBool(), operation = *operation]( Watcher& watcher ) mutable {
+        auto candidate = std::move( pending ); // The watcher does not retain the private graph after delivery.
+        auto tx = weakTx.lock();
+        const auto reject = [&]( Status reason, const QString& code ) {
+            if ( tx ) tx->failAsyncStage( reason );
+            operation.complete( {}, code );
+        };
         try {
-            if ( kind == DocumentKind::File ) {
-                auto source = prepareFileSource( path, settings, *cancelled );
-                if ( source.status != FileSourcePreparation::Status::Ready ) result->error = acquisitionError( source.status );
-                result->file = std::move( source.source );
-            } else if ( !QFileInfo( path ).isDir() ) result->error = "SOURCE_NOT_FOUND";
-            else {
-                result->members = enumerateFolderFiles( path, {}, [cancelled] { return static_cast<bool>( *cancelled ); } );
-                if ( result->members.empty() ) result->error = "EMPTY_FOLDER";
+            const auto window = candidate->window;
+            if ( !operation.current() || ( explicitTx && ( !tx || !tx->asyncStagePending() ) ) ) {
+                reject( Status::Aborted, "OPERATION_CANCELLED" ); return;
             }
-        } catch ( const std::bad_alloc& ) { result->error = "RESOURCE_LIMIT"; }
-        catch ( ... ) { result->error = "SOURCE_PREPARATION_FAILED"; }
-        return result;
-    } );
-    auto* watcher = new QFutureWatcher<std::shared_ptr<PreparedOpen>>( this );
-    connect( watcher, &QFutureWatcher<std::shared_ptr<PreparedOpen>>::finished, this,
-             [watcher, window, session, path, kind, follow = followValue.toBool(), operation = *operation] {
-        watcher->deleteLater();
-        try { publishOpen( window, session, path, kind, follow, operation, watcher->result() ); }
-        catch ( ... ) { operation.complete( {}, "SOURCE_PREPARATION_FAILED" ); }
-    } );
-    watcher->setFuture( future );
-    return QJsonObject{ { "operation_id", operation->id }, { "status", "pending" } };
+            if ( !window ) { reject( Status::TargetClosed, "TARGET_CLOSED" ); return; }
+            if ( const auto existing = findPath( *window, candidate->kind, candidate->path ) ) {
+                if ( explicitTx ) reject( Status::Conflict, "CONFLICT" );
+                else operation.complete( outcome( window->runtimeWindowId(), existing->tabId, true ), {} );
+                return;
+            }
+            const auto prepared = watcher.result();
+            if ( !prepared->error.isEmpty() ) {
+                reject( prepared->error == "RESOURCE_LIMIT" ? Status::ResourceLimit : Status::PreparationFailed, prepared->error );
+                return;
+            }
+            auto& document = candidate->document;
+            document = candidate->kind == DocumentKind::File
+                ? window->prepareFile( prepared->file, follow ) : window->prepareFolder( candidate->path, prepared->members );
+            if ( !document || ( candidate->kind == DocumentKind::File && !document->startLoading() ) ) {
+                reject( Status::PreparationFailed, "SOURCE_PREPARATION_FAILED" ); return;
+            }
+            if ( !operation.current() || ( tx && !tx->asyncStagePending() ) ) { reject( Status::Aborted, "OPERATION_CANCELLED" ); return; }
+            const auto valid = candidate->validate();
+            if ( valid != Status::Open ) { reject( valid, stageError( valid ) ); return; }
+            candidate->widget = dynamic_cast<QWidget*>( document->view() );
+            candidate->source = dynamic_cast<LogData*>( document->source() );
+            candidate->tabId = dynamic_cast<AbstractCrawlerWidget*>( document->view() )->runtimeTabId();
+            const auto id = window->runtimeWindowId();
+            if ( tx ) {
+                candidate->privateDocumentPermit = prepared->permit;
+                staged_.erase( std::remove_if( staged_.begin(), staged_.end(), []( const auto& entry ) {
+                    const auto owner = entry.transaction.lock();
+                    return !owner || ( owner->status() != Status::Open && owner->status() != Status::Preparing );
+                } ), staged_.end() );
+                staged_.push_back( { tx, window, candidate->tabId, { id, candidate->kind, candidate->path, candidate->widget } } );
+            }
+            stage( candidate, tx, operation, outcome( id, candidate->tabId, true, bool( tx ) ) );
+        } catch ( const std::bad_alloc& ) { reject( Status::ResourceLimit, "RESOURCE_LIMIT" ); }
+        catch ( ... ) { reject( Status::PreparationFailed, "SOURCE_PREPARATION_FAILED" ); }
+    };
+    Status launchFailure = Status::PreparationFailed;
+    try {
+        auto watcher = std::make_unique<Watcher>( this );
+        connect( watcher.get(), &Watcher::finished, this, [raw = watcher.get(), finish = std::move( finishOpen )]() mutable {
+            raw->deleteLater();
+            finish( *raw );
+        } );
+        watcher->setFuture( acquire( path, kind, cancelled, std::move( permit ) ) );
+        watcher.release(); // QObject parent owns completion delivery.
+        return QJsonObject{ { "operation_id", operation->id }, { "status", "pending" } };
+    } catch ( const std::bad_alloc& ) { launchFailure = Status::ResourceLimit; }
+    catch ( ... ) {}
+    cancelled->set();
+    if ( transaction ) transaction->failAsyncStage( launchFailure );
+    operation->complete( {}, stageError( launchFailure ) );
+    return failure( request, stageError( launchFailure ) );
 }

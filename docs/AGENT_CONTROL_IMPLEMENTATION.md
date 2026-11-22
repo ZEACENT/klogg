@@ -1874,6 +1874,39 @@ determinism, repository hygiene and whitespace checks passed. Native Windows and
 Linux, linked Qt 5 GUI, Vectorscan-enabled runtime, LeakSanitizer and release
 package verification were not run for this slice.
 
+## Slice 51: explicit private document publication and client discovery
+
+A transaction can hold one visible lifecycle or filter publication. An unpublished
+new file or folder is addressable only with the creating transaction. Filtering
+that private tab does not consume a second publication slot. Use a transaction-
+scoped result snapshot to stage source-backed marks before exposing the tab.
+Labels and precompiled highlighters can accompany publication. Do not combine a
+visible marks write with a visible filter or lifecycle operation: view insertion
+and layout changes can synchronously read model data. Unsupported combinations
+reject the transaction rather than publishing a staged prefix.
+
+Staging operations are asynchronous and registered in the ordinary operation
+registry. A completed staging receipt is not a commit. While one is outstanding,
+`transaction.commit` returns retryable `TRANSACTION_BUSY`; wait for its operation
+then commit explicitly. Abort, expiry, target closure and conflicting edits
+prevent adoption. Staged snapshot/content-read IDs require the same transaction
+for reads and polling, and cannot be used after termination. An idle timer retires
+abandoned private documents even if the client never makes another request.
+
+The coordinator validates and acquires native resources before visible mutation.
+Only marks on a disposable private graph may install before adoption. Validation
+and installation do not yield to the event loop. Application and per-model
+notifications follow release; source activation is deferred until adoption.
+This is bounded GUI-state atomicity, not filesystem durability. A later append
+can still conflict with a captured file/live source.
+
+`schema.get` returns a method's parameter and result schemas without log content.
+`pane.navigate` resolves a public snapshot ordinal to a live presented row
+identity, selects that whole row and scrolls only the addressed view. It rejects
+hidden/stale rows and active follow/selection conflicts instead of changing
+panes, opening files or cancelling the human's work. Pane metadata reports the
+kind of selection and, for a single whole row, its presented ordinal.
+
 ## Developer CLI walkthrough (implemented surface only)
 
 Start the GUI normally and open the documents to review. The CLI never launches
@@ -2041,7 +2074,7 @@ model and marks; folder tabs share marks across panes. A nonempty folder search
 re-enumerates the directory and consumes Keep, creating a pane only if the
 old pane has visible rows after resetting Marks-only visibility. Empty folder
 filters reset in place and preserve Keep. The response identifies the destination
-pane. Supply a file/live/folder tab ID, not `transaction_id` or a pane selector. The operation captures the
+pane. Supply a file/live/folder tab ID, not a pane selector. Omit `transaction_id` for immediate publication. The operation captures the
 addressed tab's current results pane and rejects conflicting changes rather than
 following a later pane switch. Continuous append may prevent unchanged-snapshot
 admission; re-observe before deciding whether to retry.
@@ -2083,26 +2116,25 @@ kloggctl --instance "$INSTANCE" call documents.close --params \
 
 Close returns a completed operation with `opened:false`; it closes the tab, never
 the file on disk. Closing the current tab allows native replacement selection;
-a surviving current tab is preserved. Live capture tabs are rejected. These
-commands are implicit transactions and do not accept `transaction_id` yet.
+a surviving current tab is preserved. Live capture tabs are rejected. Without
+`transaction_id` these commands publish implicitly. Supply it to stage instead.
 
-Source-addressed navigation/selection is not yet exposed. `call` does not bypass
-the server's supported-method list.
+### Private open, filter and bookmark
 
-## Remaining scope
+1. Call `transaction.begin` and save its `transaction_id`. Call `documents.open`
+   with that ID, `window_id`, `path`, and `kind:"folder"`.
+2. Poll `operation.get` **without** `transaction_id`. On success take the private
+   `tab_id` from `result`. Use it with `transaction_id` in `filter.apply`; await
+   the filter operation the same way. The ordinary `state.get` remains unchanged.
+3. Use `pane.get` (`pane:"results"`) and `source.capture` (`scope:"matches"`) with
+   both IDs. Use the returned `marks_owner_id`, `snapshot_id` and row ordinals in
+   `mark.add` with the same transaction. Use `transaction_id` when polling any
+   `source.read` operation on that private snapshot.
+4. Call `transaction.commit`. If it returns `preparing`, observe `transaction.get`
+   until terminal. Only `committed` publishes the tab and annotations together.
+   Use `transaction.abort` to discard the entire unpublished graph instead.
 
-These slices do not constitute the complete product. Source-addressed navigation
-and selection, mixed explicit lifecycle/filter
-transactions, full parameter/result schema discovery, and full release-artifact
-acceptance remain. `capabilities.get` provides method/feature/limit inventory.
-Implicit current-pane filter publication is delivered for file/live tabs, with
-unchanged-snapshot admission rather than continuous-append cutover guarantees.
-Relocated macOS Qt/CLI startup is verified in Slice 23; device sidecars,
-mounted/signed release artifacts and native Windows/Linux packaging are separate
-remaining gates.
-The developer CLI supports observation, bounded content reads, implicit file/folder
-open/close, file/live/folder filter application/reset and private kept-pane creation, and mixed
-source-backed mark/label/global-highlighter transactions. `tab.get.filter_draft`
-is still draft-only. Explicit transactions do not yet compose lifecycle or
-filter-result changes with annotations. No operation promises global durability
-or event subscription.
+For wire fields use `kloggctl call schema.get --params '{"method":"mark.add"}'`.
+`call` cannot bypass native target or budget checks. Continuous-append cutover,
+device lifecycle, event subscriptions and durability are not promised. Native
+package/CI evidence should be read for the exact tested commit.

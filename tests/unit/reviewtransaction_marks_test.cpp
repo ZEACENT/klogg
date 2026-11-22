@@ -77,6 +77,36 @@ TEST_CASE( "Mark transactions read their staged source-backed edits without chan
     CHECK( fixture.marks->reviewMarksRevision() == 1 );
 }
 
+TEST_CASE( "A private document can read its marks during adoption without leaking visible marks",
+           "[review-transaction][review-mark-writes]" )
+{
+    Fixture hidden;
+    Fixture visible;
+    const bool adopted = GENERATE( false, true );
+    QSignalSpy hiddenNotifications( hidden.marks.get(), &LogFilteredData::marksChanged );
+    QSignalSpy visibleNotifications( visible.marks.get(), &LogFilteredData::marksChanged );
+    ReviewTransaction transaction;
+    REQUIRE( transaction.stageParticipant( {
+        [] { return Status::Open; }, [&] {
+            // GUI insertion can synchronously read the newly exposed native model.
+            const auto rows = hidden.marks->getMarks();
+            CHECK( rows == QList<LineNumber>{ 1_lnum } );
+            // A fresh native guard is admissible only after the private one was released.
+            const auto noop = LogFilteredData::prepareMarksUpdate( hidden.marks->captureMarksUpdate( rows ) );
+            CHECK( hidden.marks->lockMarksUpdate( noop ) );
+            CHECK( hiddenNotifications.isEmpty() );
+            return adopted;
+        }, [] {}, [] {} } ) == Status::Open );
+    REQUIRE( transaction.stageMarks( *hidden.marks, { Kind::Add, { hidden.identity( 1_lnum ) } }, true ) == Status::Open );
+    REQUIRE( transaction.stageMarks( *visible.marks, { Kind::Add, { visible.identity( 2_lnum ) } } ) == Status::Open );
+    REQUIRE( transaction.commit() == Status::Preparing );
+    waitPreparation( transaction );
+    CHECK( transaction.commit() == ( adopted ? Status::Committed : Status::Conflict ) );
+    CHECK( hiddenNotifications.count() == ( adopted ? 1 : 0 ) );
+    CHECK( visibleNotifications.count() == ( adopted ? 1 : 0 ) );
+    CHECK( visible.marks->getNbMarks() == ( adopted ? 1_lcount : 0_lcount ) );
+}
+
 TEST_CASE( "File folder labels and global highlighters install before the first mixed observer",
            "[review-transaction][review-mark-writes]" )
 {

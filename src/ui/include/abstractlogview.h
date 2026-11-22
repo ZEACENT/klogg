@@ -192,6 +192,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // source addresses. No visible-line map or selection text is materialized.
     using PaneMetadata = klogg::ReviewPaneMetadata;
     PaneMetadata paneMetadata() const;
+    // Select and reveal one current source identity in this view only. Unlike
+    // interactive result selection this never asks the host to navigate a peer.
+    klogg::ReviewNavigation navigateReviewRow( const klogg::LogRowId& identity );
     // Runtime widget identity, independent of source generation and tab order.
     QString runtimePaneId() const { return runtimePaneId_; }
     // Explicit owner-thread capture, separate from metadata. The provider owns

@@ -102,6 +102,11 @@ CrawlerWidget::FilterUpdateStaging::capture() const
     return state_->captured;
 }
 
+SearchToolbar::FilterSpec CrawlerWidget::FilterUpdateStaging::effectiveFilter() const
+{
+    return capture()->candidate;
+}
+
 std::unique_ptr<CrawlerWidget::FilterUpdatePublication> CrawlerWidget::FilterUpdateStaging::lock(
     const std::shared_ptr<PreparedFilterUpdate>& prepared )
 {

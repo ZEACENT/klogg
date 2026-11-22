@@ -102,6 +102,78 @@ struct FilterControlFixture {
 };
 }
 
+TEST_CASE( "Pane navigation resolves evidence in today's presentation without driving another pane",
+           "[control-navigation]" )
+{
+    FilterControlFixture fixture;
+    const bool folder = GENERATE( false, true );
+    if ( folder ) fixture.tabId = fixture.openFolder( fixture.root.path() );
+    const auto filter = [&]( const QString& pattern ) {
+        REQUIRE( fixture.await( fixture.call( "filter.apply", fixture.params( pattern ) ) )
+                     .value( "status" ) == "completed" );
+    };
+    filter( folder ? "ERROR" : "INFO|ERROR" );
+    const QJsonObject main{ { "tab_id", fixture.tabId }, { "pane", "main" } };
+    const auto resultId = fixture.call( "pane.get", { { "tab_id", fixture.tabId }, { "pane", "results" } } )
+                              .value( "pane_id" );
+    const QJsonObject target{ { "tab_id", fixture.tabId }, { "pane_id", resultId } };
+    auto capture = target;
+    capture.insert( "scope", "matches" );
+    const auto lease = fixture.call( "source.capture", capture );
+    REQUIRE( lease.value( "row_count" ) == ( folder ? "1" : "2" ) );
+    if ( !folder ) filter( "ERROR" );
+    const auto mainBefore = fixture.call( "pane.get", main );
+    const auto tabBefore = fixture.window.inventorySnapshot().currentTabId;
+    const auto* focus = QApplication::focusWidget();
+    auto navigate = target;
+    navigate.insert( "snapshot_id", lease.value( "snapshot_id" ) );
+    navigate.insert( "row", folder ? "0" : "1" );
+    // Folder ordinal zero follows a synthetic header. File ordinal one moved
+    // to zero, and the previous occupant of zero must no longer be selectable.
+    const auto expected = folder ? "1" : "0";
+    CHECK( fixture.call( "pane.navigate", navigate ).value( "presented_row" ) == expected );
+    const auto selected = fixture.call( "pane.get", target );
+    CHECK( selected.value( "selection_kind" ) == "line" );
+    CHECK( selected.value( "selected_row" ) == expected );
+    CHECK_FALSE( QJsonDocument{ selected }.toJson().contains( "PRIVATE BODY" ) );
+    if ( !folder ) {
+        navigate.insert( "row", "0" );
+        CHECK( filterError( fixture.raw( "pane.navigate", navigate ) ) == "ROW_NOT_PRESENT" );
+        CHECK( fixture.call( "pane.get", target ) == selected );
+    }
+    CHECK( fixture.call( "pane.get", main ) == mainBefore );
+    CHECK( fixture.window.inventorySnapshot().currentTabId == tabBefore );
+    CHECK( QApplication::focusWidget() == focus );
+}
+
+TEST_CASE( "Pane navigation rejects malformed, private and unaddressed commands without selecting",
+           "[control-navigation]" )
+{
+    FilterControlFixture fixture;
+    const auto pane = fixture.call( "pane.get", { { "tab_id", fixture.tabId }, { "pane", "main" } } );
+    const QJsonObject target{ { "tab_id", fixture.tabId }, { "pane_id", pane.value( "pane_id" ) } };
+    auto capture = target;
+    capture.insert( "scope", "presented" );
+    auto params = target;
+    params.insert( "snapshot_id", fixture.call( "source.capture", capture ).value( "snapshot_id" ) );
+    params.insert( "row", "0" );
+    const auto before = fixture.call( "pane.get", target );
+    QString expected = QStringLiteral( "INVALID_PARAMS" );
+    SECTION( "integer row" ) { params.insert( "row", 1 ); }
+    SECTION( "noncanonical row" ) { params.insert( "row", "01" ); }
+    SECTION( "unaddressed alias" ) { params.remove( "pane_id" ); params.insert( "pane", "main" ); }
+    SECTION( "unstaged navigation" ) {
+        params.insert( "transaction_id", fixture.call( "transaction.begin" ).value( "transaction_id" ) );
+    }
+    SECTION( "private evidence" ) {
+        capture.insert( "transaction_id", fixture.call( "transaction.begin" ).value( "transaction_id" ) );
+        params.insert( "snapshot_id", fixture.call( "source.capture", capture ).value( "snapshot_id" ) );
+        expected = QStringLiteral( "SNAPSHOT_NOT_FOUND" );
+    }
+    CHECK( filterError( fixture.raw( "pane.navigate", params ) ) == expected );
+    CHECK( fixture.call( "pane.get", target ) == before );
+}
+
 TEST_CASE( "Control applies a filter privately and reads its matches only explicitly",
            "[control-filters]" )
 {
@@ -181,6 +253,13 @@ TEST_CASE( "Control publishes a new kept pane while preserving the previous quer
     const auto retained = fixture.call( "source.capture", { { "tab_id", fixture.tabId },
         { "pane_id", oldPaneId }, { "scope", "matches" } } );
     CHECK( retained.value( "row_count" ) == "1" );
+    const QJsonObject main{ { "tab_id", fixture.tabId }, { "pane", "main" } };
+    const auto mainBefore = fixture.call( "pane.get", main );
+    CHECK( fixture.call( "pane.navigate", { { "tab_id", fixture.tabId }, { "pane_id", oldPaneId },
+        { "snapshot_id", retained.value( "snapshot_id" ) }, { "row", "0" } } ).value( "presented_row" ) == "0" );
+    CHECK( fixture.call( "pane.get", { { "tab_id", fixture.tabId }, { "pane", "results" } } ) == newPane );
+    CHECK( fixture.call( "pane.get", main ) == mainBefore );
+    CHECK( QApplication::focusWidget() == &editor );
 }
 
 TEST_CASE( "Pane observations distinguish applied query values from unsubmitted filter drafts",
@@ -292,23 +371,117 @@ TEST_CASE( "Expired filter work cannot publish even without operation polling",
         { "operation_id", pending.value( "operation_id" ) } } } ) ) == "OPERATION_NOT_FOUND" );
 }
 
-TEST_CASE( "Unsupported filter transaction aborts its staged annotation prefix",
-           "[control-filters]" )
+TEST_CASE( "Explicit filter edits stay private until a successful transaction commit",
+           "[control-filters][control-explicit-filter]" )
+{
+    const bool folder = GENERATE( false, true );
+    FilterControlFixture fixture;
+    if ( folder ) fixture.tabId = fixture.openFolder( fixture.root.path() );
+    const auto before = fixture.draft();
+    const QJsonObject tab{ { "tab_id", fixture.tabId } };
+    const auto labels = fixture.call( "label.list", tab );
+    const auto tx = fixture.call( "transaction.begin" ).value( "transaction_id" );
+    const QJsonObject transaction{ { "transaction_id", tx } };
+    auto scopedTab = tab;
+    scopedTab.insert( "transaction_id", tx );
+    auto label = scopedTab;
+    label.insert( "label", 1 );
+    label.insert( "texts", QJsonArray{ "staged" } );
+    fixture.call( "label.set", label );
+    auto params = fixture.params( "ERROR" );
+    auto filter = params.value( "filter" ).toObject();
+    filter.insert( "keep_results", true );
+    params.insert( "filter", filter );
+    params.insert( "transaction_id", tx );
+    const auto pending = fixture.call( "filter.apply", params );
+    SECTION( "cancel before delivery" ) {
+        fixture.call( "operation.cancel", { { "operation_id", pending.value( "operation_id" ) } } );
+        CHECK_FALSE( filterError( fixture.raw( "transaction.commit", transaction ) ).isEmpty() );
+        REQUIRE( fixture.await( pending ).value( "status" ) == "cancelled" );
+    }
+    SECTION( "delivered but unpublished" ) {
+        const auto done = fixture.await( pending );
+        REQUIRE( done.value( "status" ) == "completed" );
+        const auto result = done.value( "result" ).toObject();
+        CHECK( result.value( "staged" ).toBool() );
+        CHECK_FALSE( result.value( "updated" ).toBool() );
+        CHECK( fixture.draft() == before );
+        CHECK( fixture.call( "pane.list", tab ).value( "panes" ).toArray().size() == 2 );
+        const auto visiblePane = fixture.call( "pane.get", { { "tab_id", fixture.tabId }, { "pane", "results" } } );
+        CHECK( visiblePane.value( "applied_filter" ).toObject().value( "text" ).toString().isEmpty() );
+        const auto stagedDraft = fixture.call( "tab.get", scopedTab ).value( "filter_draft" ).toObject();
+        CHECK( stagedDraft.value( "text" ) == "ERROR" );
+        CHECK( stagedDraft.value( "keep_results" ) == false );
+        CHECK( fixture.call( "label.list", tab ) == labels );
+        SECTION( "commit" ) {
+            REQUIRE( fixture.call( "transaction.commit", transaction ).value( "status" ) == "committed" );
+            CHECK( fixture.draft().value( "text" ) == "ERROR" );
+            CHECK( fixture.call( "source.capture", { { "tab_id", fixture.tabId },
+                { "pane", "results" }, { "scope", "matches" } } ).value( "row_count" ) == "1" );
+            CHECK( fixture.call( "label.list", tab ) != labels );
+            return;
+        }
+        SECTION( "late conflict leaves human state intact" ) {
+            fixture.toolbar()->searchLineEdit()->setEditText( "human draft" );
+            CHECK( filterError( fixture.raw( "transaction.commit", transaction ) ) == "REVISION_CONFLICT" );
+            CHECK( fixture.draft().value( "text" ) == "human draft" );
+        }
+        SECTION( "abort discards the filter" ) {
+            fixture.call( "transaction.abort", transaction );
+            CHECK( fixture.draft() == before );
+        }
+    }
+    CHECK( fixture.call( "label.list", tab ) == labels );
+}
+
+TEST_CASE( "A failed explicit filter discards earlier transaction edits", "[control-filters][control-explicit-filter]" )
 {
     FilterControlFixture fixture;
-    const auto before = fixture.call( "label.list", { { "tab_id", fixture.tabId } } );
-    const auto transaction = fixture.call( "transaction.begin" ).value( "transaction_id" );
-    fixture.call( "label.set", { { "transaction_id", transaction }, { "tab_id", fixture.tabId },
-        { "label", 1 }, { "texts", QJsonArray{ "unpublished" } } } );
-    auto params = fixture.params( "ERROR" );
-    params.insert( "transaction_id", transaction );
-    CHECK( filterError( fixture.raw( "filter.apply", params ) ) == "INVALID_PARAMS" );
-    CHECK( fixture.call( "transaction.get", { { "transaction_id", transaction } } )
-               .value( "status" ) == "invalid_argument" );
-    CHECK( filterError( fixture.raw( "transaction.commit", { { "transaction_id", transaction } } ) )
-           == "INVALID_PARAMS" );
-    CHECK( fixture.call( "label.list", { { "tab_id", fixture.tabId } } ) == before );
-    CHECK( fixture.draft().value( "text" ).toString().isEmpty() );
+    const QJsonObject tab{ { "tab_id", fixture.tabId } };
+    const auto before = fixture.call( "label.list", tab );
+    const auto tx = fixture.call( "transaction.begin" ).value( "transaction_id" );
+    fixture.call( "label.set", { { "transaction_id", tx }, { "tab_id", fixture.tabId },
+        { "label", 1 }, { "texts", QJsonArray{ "prefix" } } } );
+    auto params = fixture.params( "[" );
+    params.insert( "transaction_id", tx );
+    const auto done = fixture.await( fixture.call( "filter.apply", params ) );
+    CHECK( done.value( "error" ).toObject().value( "code" ) == "FILTER_COMPILE_FAILED" );
+    CHECK_FALSE( filterError( fixture.raw( "transaction.commit", { { "transaction_id", tx } } ) ).isEmpty() );
+    CHECK( fixture.call( "label.list", tab ) == before );
+}
+
+TEST_CASE( "Visible filter and mark writes exclude one another in either order",
+           "[control-filters][control-explicit-filter]" )
+{
+    const bool sameTab = GENERATE( true, false );
+    FilterControlFixture fixture;
+    const auto marksTab = fixture.tabId;
+    if ( !sameTab ) fixture.tabId = fixture.openFolder( fixture.root.path() );
+    const auto pane = fixture.call( "pane.get", { { "tab_id", marksTab }, { "pane", "results" } } );
+    const auto owner = pane.value( "marks_owner_id" );
+    const auto snapshot = fixture.call( "source.capture", { { "tab_id", marksTab },
+        { "pane", "main" }, { "scope", "presented" } } );
+    const QJsonObject readMarks{ { "tab_id", marksTab }, { "owner_id", owner } };
+    const auto marksBefore = fixture.call( "mark.list", readMarks );
+    const auto draftBefore = fixture.draft();
+    const auto tx = fixture.call( "transaction.begin" ).value( "transaction_id" );
+    auto filter = fixture.params( "ERROR" );
+    filter.insert( "transaction_id", tx );
+    auto mark = readMarks;
+    mark.insert( "transaction_id", tx );
+    mark.insert( "snapshot_id", snapshot.value( "snapshot_id" ) );
+    mark.insert( "rows", QJsonArray{ "0" } );
+    SECTION( "filter first" ) {
+        REQUIRE( fixture.await( fixture.call( "filter.apply", filter ) ).value( "status" ) == "completed" );
+        CHECK( filterError( fixture.raw( "mark.add", mark ) ) == "INVALID_PARAMS" );
+    }
+    SECTION( "marks first" ) {
+        REQUIRE( fixture.call( "mark.add", mark ).value( "status" ) == "open" );
+        CHECK( filterError( fixture.raw( "filter.apply", filter ) ) == "INVALID_PARAMS" );
+    }
+    CHECK( filterError( fixture.raw( "transaction.commit", { { "transaction_id", tx } } ) ) == "INVALID_PARAMS" );
+    CHECK( fixture.call( "mark.list", readMarks ) == marksBefore );
+    CHECK( fixture.draft() == draftBefore );
 }
 
 TEST_CASE( "Folder filter distinguishes an empty directory from a vanished root",

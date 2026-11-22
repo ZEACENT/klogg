@@ -119,6 +119,7 @@ ReadOutcome readRows( const klogg::LogSnapshot::Ptr& snapshot, const QString& sn
 struct Lease {
     klogg::LogSnapshot::Ptr source;
     qint64 created;
+    QString scope;
 };
 struct Operation {
     QFuture<ReadOutcome> future;
@@ -126,6 +127,7 @@ struct Operation {
     qint64 created;
     qint64 lifetime = Limits::LifetimeMs;
     std::function<void()> onCancel{};
+    QString scope{};
     void cancel()
     {
         if ( future.isFinished() ) return;
@@ -237,15 +239,30 @@ std::optional<ReviewContentAdapter::PendingOperation> ReviewContentAdapter::begi
         } };
 }
 
+void ReviewContentAdapter::discardScope( const QString& scope )
+{
+    if ( scope.isEmpty() ) return;
+    for ( auto it = state_->snapshots.begin(); it != state_->snapshots.end(); ) {
+        if ( it->second.scope == scope ) it = state_->snapshots.erase( it );
+        else ++it;
+    }
+    for ( auto it = state_->operations.begin(); it != state_->operations.end(); ) {
+        if ( it->second.scope != scope ) { ++it; continue; }
+        it->second.cancel();
+        it = state_->operations.erase( it );
+    }
+}
+
 ReviewContentAdapter::ResolvedRows ReviewContentAdapter::resolveRows(
-    const QString& snapshotId, const std::vector<LineNumber>& ordinals )
+    const QString& snapshotId, const std::vector<LineNumber>& ordinals, const QString& scope )
 {
     Q_ASSERT( QThread::currentThread() == thread() );
     state_->expire();
     if ( ordinals.size() > MaxRows ) return RowResolutionError::ResourceLimit;
     if ( ordinals.empty() ) return RowResolutionError::InvalidArgument;
     const auto found = state_->snapshots.find( snapshotId );
-    if ( found == state_->snapshots.end() ) return RowResolutionError::SnapshotNotFound;
+    if ( found == state_->snapshots.end() || ( !found->second.scope.isEmpty() && found->second.scope != scope ) )
+        return RowResolutionError::SnapshotNotFound;
     const auto source = found->second.source;
     try {
         const auto count = source->lineCount();
@@ -264,7 +281,8 @@ ReviewContentAdapter::ResolvedRows ReviewContentAdapter::resolveRows(
     catch ( ... ) { return RowResolutionError::SourceUnavailable; }
 }
 
-DecodedResponse ReviewContentAdapter::capture( const RpcRequest& request, klogg::LogSnapshot::Ptr snapshot )
+DecodedResponse ReviewContentAdapter::capture( const RpcRequest& request, klogg::LogSnapshot::Ptr snapshot,
+                                              const QString& scope )
 {
     Q_ASSERT( QThread::currentThread() == thread() );
     state_->expire();
@@ -272,13 +290,13 @@ DecodedResponse ReviewContentAdapter::capture( const RpcRequest& request, klogg:
     if ( state_->snapshots.size() >= MaxSnapshots ) return failure( request, "RESOURCE_LIMIT" );
     const auto id = QUuid::createUuid().toString( QUuid::WithoutBraces );
     const auto count = snapshot->lineCount().get();
-    state_->snapshots.emplace( id, Lease{ std::move( snapshot ), state_->now() } );
+    state_->snapshots.emplace( id, Lease{ std::move( snapshot ), state_->now(), scope } );
     state_->timer.start();
     return QJsonObject{ { "snapshot_id", id }, { "row_count", QString::number( count ) },
                         { "lifetime_ms", static_cast<int>( LifetimeMs ) } };
 }
 
-DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request )
+DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request, const QString& scope )
 {
     Q_ASSERT( QThread::currentThread() == thread() );
     state_->expire();
@@ -287,7 +305,7 @@ DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request )
         const auto id = params.value( "operation_id" ).toString();
         if ( !onlyKeys( params, { "operation_id" } ) || id.isEmpty() ) return failure( request, "INVALID_PARAMS" );
         const auto found = state_->operations.find( id );
-        if ( found == state_->operations.end() ) return failure( request, "OPERATION_NOT_FOUND" );
+        if ( found == state_->operations.end() || found->second.scope != scope ) return failure( request, "OPERATION_NOT_FOUND" );
         if ( request.method == QLatin1String( "operation.cancel" ) ) found->second.cancel();
         return operationJson( id, found->second );
     }
@@ -298,7 +316,7 @@ DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request )
     const auto id = params.value( "snapshot_id" ).toString();
     if ( id.isEmpty() ) return failure( request, "INVALID_PARAMS" );
     const auto lease = state_->snapshots.find( id );
-    if ( lease == state_->snapshots.end() ) return failure( request, "SNAPSHOT_NOT_FOUND" );
+    if ( lease == state_->snapshots.end() || lease->second.scope != scope ) return failure( request, "SNAPSHOT_NOT_FOUND" );
     if ( release ) {
         state_->snapshots.erase( lease );
         return QJsonObject{ { "snapshot_id", id }, { "status", "released" } };
@@ -322,7 +340,8 @@ DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request )
         permit.reset();
         return result;
     } );
-    state_->operations.emplace( operationId, Operation{ std::move( future ), std::move( cancelled ), state_->now() } );
+    state_->operations.emplace( operationId, Operation{ std::move( future ), std::move( cancelled ), state_->now(),
+                                                       LifetimeMs, {}, scope } );
     state_->timer.start();
     return QJsonObject{ { "operation_id", operationId }, { "status", "pending" } };
 }

@@ -283,6 +283,11 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
     void retrieveFromStorage( QSettings& settings );
 
   private:
+    // Only the owner-thread coordinator may separate approval from installation,
+    // within one non-yielding publication and with no intervening global writes.
+    friend class ReviewTransaction;
+    UpdateResult preflightPrepared( const PreparedUpdate& prepared, uint64_t expectedRevision ) const;
+    void installApproved( PreparedUpdate&& prepared, UpdateResult approval ) noexcept;
     static constexpr int HighlighterSetCollection_VERSION = 3;
     static bool withinSnapshotLimits( const Snapshot& state );
 

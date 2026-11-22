@@ -145,6 +145,113 @@ QJsonObject replacement( const QString& pattern = QStringLiteral( "Evidence" ) )
 }
 } // namespace
 
+TEST_CASE( "An abandoned transaction releases its unpublished document without another RPC",
+           "[control-mixed-document]" )
+{
+    ReviewFixture fixture;
+    QTemporaryDir unopened;
+    REQUIRE( unopened.isValid() );
+    QFile log{ unopened.filePath( "hidden.log" ) };
+    REQUIRE( log.open( QIODevice::WriteOnly ) );
+    log.close();
+    qint64 clock = 0;
+    ReviewControlAdapter adapter{ [&] { return std::vector<QPointer<MainWindow>>{ &fixture.window }; },
+                                  [&] { return clock; } };
+    const auto tx = resultObject( adapter.dispatch( { "id", "transaction.begin", {} } ) ).value( "transaction_id" );
+    const auto opened = resultObject( adapter.dispatch( { "id", "documents.open", {
+        { "window_id", fixture.window.runtimeWindowId() }, { "path", unopened.path() },
+        { "kind", "folder" }, { "transaction_id", tx } } } ) );
+    QJsonObject receipt;
+    REQUIRE( waitUiState( [&] {
+        receipt = resultObject( adapter.dispatch( { "id", "operation.get", { { "operation_id", opened.value( "operation_id" ) } } } ) );
+        return receipt.value( "status" ) != "pending";
+    } ) );
+    REQUIRE( receipt.value( "status" ) == "completed" );
+    QPointer<FolderCrawlerWidget> staged;
+    const auto id = receipt.value( "result" ).toObject().value( "tab_id" );
+    for ( auto* widget : QApplication::allWidgets() ) {
+        auto* folder = qobject_cast<FolderCrawlerWidget*>( widget );
+        if ( folder && folder->runtimeTabId() == id ) staged = folder;
+    }
+    REQUIRE( staged );
+    clock = ReviewControlAdapter::TransactionLifetimeMs + 1;
+    REQUIRE( waitUiState( [&] { return staged.isNull(); } ) );
+    CHECK( fixture.window.inventorySnapshot().tabs.size() == 2 );
+}
+
+TEST_CASE( "A private folder, query and source-backed bookmark publish as a single transaction",
+           "[control-mixed-document]" )
+{
+    ReviewFixture fixture;
+    QTemporaryDir unopened;
+    REQUIRE( unopened.isValid() );
+    QFile log{ unopened.filePath( "new.log" ) };
+    REQUIRE( log.open( QIODevice::WriteOnly ) );
+    REQUIRE( log.write( "before\nPRIVATE MATCH\nafter\n" ) == 27 );
+    log.close();
+    const auto call = [&]( const QString& method, const QJsonObject& params = {} ) {
+        return resultObject( fixture.call( method, params ) );
+    };
+    const auto await = [&]( const QJsonObject& started, QJsonObject scope = {} ) {
+        scope.insert( "operation_id", started.value( "operation_id" ) );
+        QJsonObject receipt;
+        REQUIRE( waitUiState( [&] {
+            receipt = call( "operation.get", scope );
+            return receipt.value( "status" ) != "pending";
+        } ) );
+        REQUIRE( receipt.value( "status" ) == "completed" );
+        return receipt.value( "result" ).toObject();
+    };
+    const auto before = call( "state.get" );
+    const auto tx = call( "transaction.begin" ).value( "transaction_id" );
+    const QJsonObject scope{ { "transaction_id", tx } };
+    const auto open = call( "documents.open", { { "window_id", fixture.window.runtimeWindowId() },
+        { "path", unopened.path() }, { "kind", "folder" }, { "transaction_id", tx } } );
+    CHECK( errorCode( fixture.call( "transaction.commit", scope ) ) == "TRANSACTION_BUSY" );
+    const auto tab = await( open ).value( "tab_id" );
+    const QJsonObject scopedTab{ { "tab_id", tab }, { "transaction_id", tx } };
+    CHECK( errorCode( fixture.call( "tab.get", { { "tab_id", tab } } ) ) == "TARGET_NOT_FOUND" );
+    REQUIRE( call( "tab.get", scopedTab ).value( "kind" ) == "folder" );
+    auto apply = scopedTab;
+    apply.insert( "filter", QJsonObject{ { "text", "MATCH" }, { "inverse", false }, { "boolean", false } } );
+    await( call( "filter.apply", apply ) );
+    auto pane = scopedTab;
+    pane.insert( "pane", "results" );
+    const auto owner = call( "pane.get", pane ).value( "marks_owner_id" );
+    pane.insert( "scope", "matches" );
+    const auto snap = call( "source.capture", pane );
+    REQUIRE( snap.value( "row_count" ) == "1" );
+    QJsonObject read{ { "snapshot_id", snap.value( "snapshot_id" ) }, { "start", "0" }, { "count", 1 } };
+    CHECK( errorCode( fixture.call( "source.read", read ) ) == "SNAPSHOT_NOT_FOUND" );
+    read.insert( "transaction_id", tx );
+    const auto reading = call( "source.read", read );
+    CHECK( errorCode( fixture.call( "operation.get", { { "operation_id", reading.value( "operation_id" ) } } ) )
+           == "OPERATION_NOT_FOUND" );
+    CHECK( await( reading, scope ).value( "rows" ).toArray().first().toObject().value( "text" ) == "PRIVATE MATCH" );
+    call( "mark.add", { { "transaction_id", tx }, { "tab_id", tab }, { "owner_id", owner },
+        { "snapshot_id", snap.value( "snapshot_id" ) }, { "rows", QJsonArray{ "0" } } } );
+    CHECK( call( "state.get" ) == before );
+    SECTION( "abort publishes nothing" ) {
+        call( "transaction.abort", scope );
+        CHECK( call( "state.get" ) == before );
+        CHECK( errorCode( fixture.call( "pane.list", { { "tab_id", tab } } ) ) == "TARGET_NOT_FOUND" );
+    }
+    SECTION( "commit publishes the configured folder with its bookmark" ) {
+        call( "transaction.commit", scope );
+        QJsonObject receipt;
+        REQUIRE( waitUiState( [&] {
+            receipt = call( "transaction.get", scope );
+            return receipt.value( "status" ) != "preparing";
+        } ) );
+        REQUIRE( receipt.value( "status" ) == "committed" );
+        CHECK( fixture.window.inventorySnapshot().tabs.size() == 3 );
+        CHECK( call( "tab.get", { { "tab_id", tab } } ).value( "filter_draft" ).toObject().value( "text" ) == "MATCH" );
+        const auto groups = call( "mark.list", { { "tab_id", tab }, { "owner_id", owner } } ).value( "groups" ).toArray();
+        REQUIRE( groups.size() == 1 );
+        CHECK( groups.first().toObject().value( "rows" ) == QJsonArray{ "1" } );
+    }
+}
+
 TEST_CASE( "Control global highlighters and labels publish together after private preparation",
            "[ui][control-adapter][control-highlighter-rpc]" )
 {

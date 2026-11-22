@@ -923,6 +923,8 @@ TEST_CASE( "Review pane metadata reads widget state without payload or presentat
         const auto state = view.paneMetadata();
         CHECK( state.available );
         CHECK( state.sourceRowCount == 3_lcount );
+        CHECK( QLatin1String( state.selectionKind ) == QLatin1String( "line" ) );
+        CHECK( state.selectedRow == 1_lnum );
         REQUIRE( state.topPresentedRow );
         CHECK( *state.topPresentedRow == top );
         CHECK( state.follow == view.isFollowEnabled() );
@@ -1086,10 +1088,18 @@ TEST_CASE( "Review panes expose live owner state while captured rows stay frozen
         widget.textWrapSet( true );
         CHECK( owner.paneMetadata( Pane::Main ).follow );
         CHECK( owner.paneMetadata( Pane::Main ).wrap );
+        const auto mainId = owner.paneInventory().front().paneId;
+        const auto identity = retained->row( 0_lnum ).identity;
+        const auto following = widget.navigateReviewPane( mainId, identity );
+        CHECK( std::get<AbstractCrawlerWidget::NavigationError>( following )
+               == AbstractCrawlerWidget::NavigationError::NotAvailable );
+        CHECK( owner.paneMetadata( Pane::Main ).follow );
         widget.followSet( false );
         widget.textWrapSet( false );
         CHECK_FALSE( owner.paneMetadata( Pane::Main ).follow );
         CHECK_FALSE( owner.paneMetadata( Pane::Main ).wrap );
+        CHECK( std::get<LineNumber>( widget.navigateReviewPane( mainId, identity ) ) == 0_lnum );
+        CHECK( owner.paneMetadata( Pane::Main ).selectedRow == 0_lnum );
     }
     CHECK( retained->lineString( 0_lnum ) == QStringLiteral( "before" ) );
 }
@@ -1122,6 +1132,11 @@ TEST_CASE( "Review folder pane counts headers while snapshots retain scoped sour
         CHECK( retained->lineCount() == 2_lcount );
         widget.folderResults()->setCollapsed( 0, true );
         CHECK( owner.paneMetadata( Pane::Results ).sourceRowCount == 1_lcount );
+        const auto hidden = widget.navigateReviewPane( owner.paneInventory().back().paneId,
+                                                        retained->row( 0_lnum ).identity );
+        CHECK( std::get<AbstractCrawlerWidget::NavigationError>( hidden )
+               == AbstractCrawlerWidget::NavigationError::RowNotPresent );
+        CHECK_FALSE( owner.paneMetadata( Pane::Results ).selectedRow );
         const auto collapsed = owner.createPaneSnapshot( Pane::Results, Scope::PresentedRows );
         const auto matches = owner.createPaneSnapshot( Pane::Results, Scope::Matches );
         REQUIRE( collapsed );

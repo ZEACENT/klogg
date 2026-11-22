@@ -19,6 +19,14 @@ using Status = ReviewTransaction::Status;
 using Preparation = ReviewTransaction::Preparation;
 using UpdateResult = HighlighterSetCollection::UpdateResult;
 
+Status stageFailure( Status status )
+{
+    switch ( status ) {
+    case Status::Open: case Status::Preparing: case Status::Committed: return Status::PreparationFailed;
+    default: return status;
+    }
+}
+
 Status updateFailure( UpdateResult error )
 {
     switch ( error ) {
@@ -78,7 +86,43 @@ ReviewTransaction::~ReviewTransaction() { abort(); }
 
 size_t ReviewTransaction::ownerCount() const
 {
-    return labels_.size() + filters_.size() + marks_.size() + ( highlighters_ ? 1U : 0U );
+    return labels_.size() + filters_.size() + marks_.size() + ( highlighters_ ? 1U : 0U ) + ( participant_ ? 1U : 0U );
+}
+
+ReviewTransaction::Status ReviewTransaction::stageParticipant( Participant participant )
+{
+    if ( status_ != Status::Open ) return status_;
+    if ( !participant.validate || !participant.install || !participant.release || !participant.notify )
+        return finish( Status::InvalidArgument );
+    if ( participant_ || ownerCount() >= MaxOwners || commandCount_ >= ColorLabelsController::MaxEdits )
+        return finish( Status::ResourceLimit );
+    participant_ = std::move( participant );
+    ++commandCount_;
+    return Status::Open;
+}
+
+ReviewTransaction::Status ReviewTransaction::beginAsyncStage( std::function<void()> cancel )
+{
+    if ( status_ != Status::Open ) return status_;
+    if ( asyncStagePending_ ) return Status::ResourceLimit;
+    // Private filters may append kept panes without adding visible participants.
+    // Count those stages too, so one private document has bounded command growth.
+    if ( commandCount_ >= ColorLabelsController::MaxEdits ) return finish( Status::ResourceLimit );
+    ++commandCount_;
+    asyncStagePending_ = true;
+    cancelAsyncStage_ = std::move( cancel );
+    return Status::Open;
+}
+
+void ReviewTransaction::finishAsyncStage()
+{
+    asyncStagePending_ = false;
+    cancelAsyncStage_ = {};
+}
+
+void ReviewTransaction::failAsyncStage( Status failure )
+{
+    if ( asyncStagePending_ ) finish( stageFailure( failure ) );
 }
 
 std::optional<klogg::ReviewMarksSnapshot> ReviewTransaction::marks( klogg::ReviewMarksOwner& owner )
@@ -109,13 +153,15 @@ ReviewTransaction::Marks* ReviewTransaction::captureMarks( klogg::ReviewMarksOwn
         finish( Status::ResourceLimit );
         return {};
     }
-    marks_.push_back( { &owner, lifetime, *snapshot, *snapshot, {} } );
+    marks_.push_back( { &owner, lifetime, *snapshot, *snapshot, {}, {} } );
     return &marks_.back();
 }
 
-ReviewTransaction::Status ReviewTransaction::stageMarks( klogg::ReviewMarksOwner& owner, const MarkEdit& edit )
+ReviewTransaction::Status ReviewTransaction::stageMarks(
+    klogg::ReviewMarksOwner& owner, const MarkEdit& edit, bool privateOwner )
 {
     if ( status_ != Status::Open ) return status_;
+    if ( privateOwner && !participant_ ) return finish( Status::InvalidArgument );
     using Kind = MarkEdit::Kind;
     switch ( edit.kind ) {
     case Kind::Add: case Kind::Remove:
@@ -132,6 +178,8 @@ ReviewTransaction::Status ReviewTransaction::stageMarks( klogg::ReviewMarksOwner
     try {
         auto* entry = captureMarks( owner );
         if ( !entry ) return status_;
+        if ( entry->privateOwner && *entry->privateOwner != privateOwner ) return finish( Status::InvalidArgument );
+        entry->privateOwner = privateOwner;
         std::map<QString, std::set<uint64_t>> groups;
         if ( edit.kind == Kind::Add || edit.kind == Kind::Remove ) {
             for ( const auto& group : entry->candidate.groups )
@@ -259,20 +307,39 @@ std::optional<ColorLabelsController::Snapshot> ReviewTransaction::labels( ColorL
     return ColorLabelsController::Snapshot{ entry->revision, entry->candidate.colorLabels() };
 }
 
-std::optional<SearchToolbar::FilterDraftSnapshot> ReviewTransaction::filterDraft( SearchToolbar& owner )
+ReviewTransaction::Filter* ReviewTransaction::captureFilter( SearchToolbar& owner )
 {
     Q_ASSERT( QThread::currentThread() == owner.thread() );
-    if ( status_ != Status::Open ) return {};
-    const auto found = std::find_if( filters_.cbegin(), filters_.cend(),
+    if ( status_ != Status::Open ) return nullptr;
+    const auto found = std::find_if( filters_.begin(), filters_.end(),
                                     [ &owner ]( const auto& entry ) { return entry.owner == &owner; } );
-    if ( found != filters_.cend() ) return found->snapshot;
+    if ( found != filters_.end() ) return &*found;
     if ( ownerCount() >= MaxOwners ) {
         finish( Status::ResourceLimit );
-        return {};
+        return nullptr;
     }
-    const auto snapshot = owner.filterDraftSnapshot();
-    filters_.push_back( { &owner, snapshot } );
-    return snapshot;
+    filters_.push_back( { &owner, owner.filterDraftSnapshot() } );
+    return &filters_.back();
+}
+
+std::optional<SearchToolbar::FilterDraftSnapshot> ReviewTransaction::filterDraft( SearchToolbar& owner )
+{
+    const auto* entry = captureFilter( owner );
+    if ( !entry ) return {};
+    return entry->snapshot;
+}
+
+ReviewTransaction::Status ReviewTransaction::stageFilterDraft(
+    SearchToolbar& owner, const SearchToolbar::FilterSpec& candidate )
+{
+    if ( status_ != Status::Open ) return status_;
+    if ( !participant_ ) return finish( Status::InvalidArgument );
+    if ( commandCount_ >= ColorLabelsController::MaxEdits ) return finish( Status::ResourceLimit );
+    auto* entry = captureFilter( owner );
+    if ( !entry ) return status_;
+    entry->snapshot.filter = candidate; // Keep the captured revision for final validation.
+    ++commandCount_;
+    return status_;
 }
 
 ReviewTransaction::Status ReviewTransaction::stageLabels(
@@ -299,7 +366,7 @@ ReviewTransaction::Status ReviewTransaction::stageLabels(
 
 ReviewTransaction::Status ReviewTransaction::commit( const std::function<void()>& published )
 {
-    if ( status_ != Status::Open && status_ != Status::Preparing ) return status_;
+    if ( asyncStagePending_ || publishing_ || ( status_ != Status::Open && status_ != Status::Preparing ) ) return status_;
     // Validate before starting costly work and again after it completes. No
     // event-loop turn or callback occurs between final validation and install.
     size_t changedMarks = 0;
@@ -404,7 +471,21 @@ ReviewTransaction::Status ReviewTransaction::commit( const std::function<void()>
     using Prepared = ColorLabelsController::PreparedPublication;
     std::vector<std::pair<QPointer<ColorLabelsController>, Prepared>> prepared;
     std::vector<QPointer<ColorLabelsController>> notifications;
-    std::vector<std::unique_ptr<klogg::ReviewMarksPublication>> markPublications;
+    struct MarkPublication {
+        std::unique_ptr<klogg::ReviewMarksPublication> guard;
+        bool privateOwner;
+    };
+    std::vector<MarkPublication> markPublications;
+    // On failure destroy model guards before releasing the participant: the
+    // latter may be the final owner of a disposable document and its models.
+    const auto fail = [&]( Status reason ) {
+        markPublications.clear();
+        return finish( reason );
+    };
+    HighlighterSetCollection* global = nullptr;
+    UpdateResult approval = UpdateResult::Unchanged;
+    publishing_ = true;
+    status_ = Status::Preparing;
     try {
         prepared.reserve( labels_.size() );
         notifications.reserve( labels_.size() );
@@ -413,38 +494,69 @@ ReviewTransaction::Status ReviewTransaction::commit( const std::function<void()>
             if ( publication.changed ) notifications.push_back( entry.owner );
             prepared.emplace_back( entry.owner, std::move( publication ) );
         }
-        markPublications.reserve( markUpdates.size() );
-        for ( const auto& update : markUpdates ) {
-            auto publication = update->acquire();
-            if ( !publication ) return finish( Status::Conflict );
-            markPublications.push_back( std::move( publication ) );
+        if ( highlighterUpdate ) {
+            global = &HighlighterSetCollection::get();
+            approval = global->preflightPrepared( *highlighterUpdate, highlighters_->base.revision );
+            if ( approval != UpdateResult::Applied && approval != UpdateResult::Unchanged )
+                return fail( updateFailure( approval ) );
         }
+        if ( participant_ ) {
+            const auto validation = participant_->validate();
+            if ( validation != Status::Open ) return fail( stageFailure( validation ) );
+        }
+        markPublications.reserve( markUpdates.size() );
+        for ( const auto& entry : marks_ ) {
+            if ( entry.candidate.groups == entry.snapshot.groups ) continue;
+            auto guard = markUpdates[ markPublications.size() ]->acquire();
+            if ( !guard ) return fail( Status::Conflict );
+            markPublications.push_back( { std::move( guard ), entry.privateOwner.value() } );
+        }
+        // Only disposable, unexposed models may change before fallible adoption.
+        // Inserting a tab can read its projection synchronously, so unlock first.
+        for ( const auto& publication : markPublications ) {
+            if ( publication.privateOwner ) {
+                publication.guard->install();
+                publication.guard->release();
+            }
+        }
+        if ( participant_ && !participant_->install() ) return fail( Status::Conflict );
     }
-    catch ( const std::bad_alloc& ) { return finish( Status::ResourceLimit ); }
-    catch ( ... ) { return finish( Status::PreparationFailed ); }
+    catch ( const std::bad_alloc& ) { return fail( Status::ResourceLimit ); }
+    catch ( ... ) { return fail( Status::PreparationFailed ); }
+    // All fallible decisions precede the first visible publication. The rest is
+    // installation of preapproved state, then guard release and notifications.
     if ( highlighterUpdate ) {
-        const auto result = HighlighterSetCollection::get().applyPrepared(
-            std::move( *highlighterUpdate ), highlighters_->base.revision );
-        if ( result != UpdateResult::Applied && result != UpdateResult::Unchanged ) return finish( updateFailure( result ) );
-        highlightersCommitted_ = result == UpdateResult::Applied;
+        global->installApproved( std::move( *highlighterUpdate ), approval );
+        highlightersCommitted_ = approval == UpdateResult::Applied;
     }
     for ( auto& entry : prepared ) entry.first->install( std::move( entry.second ) );
-    for ( const auto& publication : markPublications ) publication->install();
-    for ( const auto& publication : markPublications ) publication->release();
-    // Terminal before notification: reentrant commit/abort cannot replay or undo
-    // any owner. Application publication runs before per-tab observer callbacks.
+    for ( const auto& publication : markPublications ) {
+        if ( !publication.privateOwner ) publication.guard->install();
+    }
+    for ( const auto& publication : markPublications ) {
+        if ( !publication.privateOwner ) publication.guard->release();
+    }
+    // Retain the participant's private payload and admission through observers,
+    // just like publicationPermit above. Release native guards, not ownership.
+    auto participant = std::exchange( participant_, {} );
     finish( Status::Committed );
-    if ( published ) published();
+    if ( participant ) participant->release();
+    if ( published ) published(); // Complete the operation before native observers can reenter.
+    if ( participant ) participant->notify();
     for ( const auto& owner : notifications ) {
         if ( owner ) Q_EMIT owner->labelsChanged();
     }
-    for ( const auto& publication : markPublications ) publication->notify();
+    for ( const auto& publication : markPublications ) publication.guard->notify();
     return Status::Committed;
 }
 
 ReviewTransaction::Status ReviewTransaction::finish( Status status )
 {
     status_ = status;
+    publishing_ = false;
+    asyncStagePending_ = false;
+    auto cancel = std::exchange( cancelAsyncStage_, {} );
+    if ( cancel ) cancel();
     if ( status != Status::Committed && preparationCancelled_ ) *preparationCancelled_ = true;
     preparation_.reset();
     preparationCancelled_.reset();
@@ -454,10 +566,15 @@ ReviewTransaction::Status ReviewTransaction::finish( Status status )
     filters_.clear();
     marks_.clear();
     highlighters_.reset();
+    if ( participant_ ) {
+        participant_->release();
+        participant_.reset();
+    }
     return status_;
 }
 
 ReviewTransaction::Status ReviewTransaction::abort()
 {
+    if ( publishing_ ) return status_;
     return status_ == Status::Open || status_ == Status::Preparing ? finish( Status::Aborted ) : status_;
 }

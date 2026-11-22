@@ -589,24 +589,38 @@ HighlighterSetCollection::PreparedUpdate HighlighterSetCollection::prepareUpdate
 HighlighterSetCollection::UpdateResult HighlighterSetCollection::applyPrepared(
     PreparedUpdate&& prepared, uint64_t expectedRevision )
 {
+    const auto result = preflightPrepared( prepared, expectedRevision );
+    if ( result == UpdateResult::Applied || result == UpdateResult::Unchanged )
+        installApproved( std::move( prepared ), result );
+    return result;
+}
+
+HighlighterSetCollection::UpdateResult HighlighterSetCollection::preflightPrepared(
+    const PreparedUpdate& prepared, uint64_t expectedRevision ) const
+{
     if ( prepared.error_ ) return *prepared.error_;
     if ( revision_ != expectedRevision ) return UpdateResult::Conflict;
-    auto& candidate = prepared.state_;
+    const auto& candidate = prepared.state_;
     if ( highlighters_ == candidate.sets && activeSets_ == candidate.activeSetIds
          && quickHighlighters_ == candidate.quickHighlighters
          && quickHighlighterDefaults_ == candidate.quickHighlighterDefaults ) {
-        prepared.error_ = UpdateResult::InvalidArgument; // A prepared update is single-use.
         return UpdateResult::Unchanged;
     }
-    if ( revision_ == std::numeric_limits<uint64_t>::max() ) return UpdateResult::ResourceLimit;
+    return revision_ == std::numeric_limits<uint64_t>::max() ? UpdateResult::ResourceLimit : UpdateResult::Applied;
+}
+
+void HighlighterSetCollection::installApproved( PreparedUpdate&& prepared, UpdateResult approval ) noexcept
+{
+    prepared.error_ = UpdateResult::InvalidArgument; // A prepared update is single-use.
+    if ( approval == UpdateResult::Unchanged ) return;
+    Q_ASSERT( approval == UpdateResult::Applied );
+    auto& candidate = prepared.state_;
     highlighters_.swap( candidate.sets );
     activeSets_.swap( candidate.activeSetIds );
     quickHighlighters_.swap( candidate.quickHighlighters );
     std::swap( quickHighlighterDefaults_, candidate.quickHighlighterDefaults );
     std::swap( combinedActiveSet_, prepared.combined_ );
     ++revision_;
-    prepared.error_ = UpdateResult::InvalidArgument;
-    return UpdateResult::Applied;
 }
 
 QList<HighlighterSet> HighlighterSetCollection::highlighterSets() const

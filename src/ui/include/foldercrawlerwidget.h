@@ -140,6 +140,7 @@ class FolderCrawlerWidget : public QWidget,
         FilterUpdateStaging( const FilterUpdateStaging& ) = delete;
         FilterUpdateStaging& operator=( const FilterUpdateStaging& ) = delete;
         std::shared_ptr<const FilterUpdateCapture> capture() const;
+        SearchToolbar::FilterSpec effectiveFilter() const;
         std::unique_ptr<FilterUpdatePublication> lock(
             const std::shared_ptr<PreparedFilterUpdate>& prepared );
       private:

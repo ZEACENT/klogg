@@ -5,6 +5,8 @@ add_library(klogg_control
   src/controlframing.cpp
   include/controlrpc.h
   src/controlrpc.cpp
+  include/controlschema.h
+  src/controlschema.cpp
   include/controlruntime.h
   include/controltransport.h
   include/controlcli.h

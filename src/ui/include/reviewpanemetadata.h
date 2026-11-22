@@ -4,7 +4,13 @@
 #include "linetypes.h"
 #include "regularexpressionpattern.h"
 
+#include <cstdint>
+#include <variant>
+
 namespace klogg {
+
+enum class ReviewNavigationError : std::uint8_t { PaneNotFound, NotAvailable, RowNotPresent };
+using ReviewNavigation = std::variant<LineNumber, ReviewNavigationError>;
 
 // Query attribution belongs to the result model, not the toolbar draft or a
 // deferred view-paint pattern. Completion is native result readiness, not a
@@ -24,6 +30,10 @@ struct ReviewPaneMetadata {
     // Stored scroll anchor, absent for an empty source. It may lag a source
     // update: observation never scrolls or rebuilds the visible-line map.
     OptionalLineNumber topPresentedRow;
+    // Selection shape only. A presented ordinal is available for a single
+    // whole row; observing a range or fragments never enumerates their text.
+    const char* selectionKind = "none";
+    OptionalLineNumber selectedRow;
     bool follow = false;
     bool wrap = false;
     // Qt widget state only, not a guarantee about painted rows or source identity.

@@ -2,6 +2,7 @@
 #define KLOGG_REVIEWFILTERADAPTER_H
 
 #include <functional>
+#include <memory>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -11,8 +12,9 @@
 
 class QWidget;
 class ReviewContentAdapter;
+class ReviewTransaction;
 
-// Implicit filter writes and kept-pane creation, using the shared operation registry.
+// Filter writes and kept-pane creation, using the shared operation registry.
 // Target resolution and strict wire decoding belong to ReviewControlAdapter.
 class ReviewFilterAdapter : public QObject {
 public:
@@ -28,6 +30,9 @@ public:
     ~ReviewFilterAdapter() override;
     klogg::control::DecodedResponse apply( const klogg::control::RpcRequest& request,
                                          Target target, const SearchToolbar::FilterSpec& candidate );
+    klogg::control::DecodedResponse apply( const klogg::control::RpcRequest& request,
+                                         Target target, const SearchToolbar::FilterSpec& candidate,
+                                         std::shared_ptr<ReviewTransaction> transaction, bool privateDocument );
     void reset();
 private:
     ReviewContentAdapter& operations_;

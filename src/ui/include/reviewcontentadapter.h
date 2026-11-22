@@ -29,8 +29,9 @@ class ReviewContentAdapter : public QObject {
     explicit ReviewContentAdapter( Clock now, QObject* parent = nullptr );
     ~ReviewContentAdapter() override;
     klogg::control::DecodedResponse capture( const klogg::control::RpcRequest& request,
-                                            klogg::LogSnapshot::Ptr snapshot );
-    klogg::control::DecodedResponse dispatch( const klogg::control::RpcRequest& request );
+                                            klogg::LogSnapshot::Ptr snapshot, const QString& scope = {} );
+    klogg::control::DecodedResponse dispatch( const klogg::control::RpcRequest& request, const QString& scope = {} );
+    void discardScope( const QString& scope );
     void reset();
     // Shared bounded operation records for GUI-published work as well as reads.
     // Call current() immediately before installation and complete() before any
@@ -47,7 +48,8 @@ class ReviewContentAdapter : public QObject {
     using ResolvedRows = std::variant<RowMetadata, RowResolutionError>;
     // Resolve admitted lease ordinals without decoding. Returned values do not
     // pin content after release; mutation owners must revalidate each identity.
-    ResolvedRows resolveRows( const QString& snapshotId, const std::vector<LineNumber>& ordinals );
+    ResolvedRows resolveRows( const QString& snapshotId, const std::vector<LineNumber>& ordinals,
+                              const QString& scope = {} );
 
   private:
     struct State;

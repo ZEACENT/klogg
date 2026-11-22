@@ -88,6 +88,11 @@ FolderCrawlerWidget::FilterUpdateStaging::capture() const
     return state_->captured;
 }
 
+SearchToolbar::FilterSpec FolderCrawlerWidget::FilterUpdateStaging::effectiveFilter() const
+{
+    return capture()->candidate;
+}
+
 std::unique_ptr<FolderCrawlerWidget::FilterUpdateStaging> FolderCrawlerWidget::stageFilterUpdate(
     const SearchToolbar::FilterSpec& candidate )
 {
