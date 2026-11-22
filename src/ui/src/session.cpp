@@ -592,14 +592,18 @@ bool Session::PreparedDocument::startLoading()
 {
     if ( state_->started || state_->failed || state_->retiring ) return false;
     state_->started = true;
+    const auto source = std::dynamic_pointer_cast<LogData>( state_->file.logData );
+    if ( !source ) {
+        state_->failed = true;
+        return false;
+    }
     if ( state_->sourceReady ) {
-        const auto source = state_->file.logData;
         // The initial notification uses native view setup, but never acquires
         // the path again. Observers may destroy this private document.
-        return static_cast<LogData*>( source.get() )->completePreparedLoading();
+        return source->completePreparedLoading();
     }
     try {
-        static_cast<LogData*>( state_->file.logData.get() )->attachFile( state_->file.fileName );
+        source->attachFile( state_->file.fileName );
     }
     catch ( ... ) { state_->failed = true; throw; }
     return true;
@@ -607,8 +611,8 @@ bool Session::PreparedDocument::startLoading()
 QFuture<void> Session::PreparedDocument::retire()
 {
     state_->retiring = true;
-    if ( state_->file.logData ) {
-        return static_cast<LogData*>( state_->file.logData.get() )->retire();
+    if ( const auto source = std::dynamic_pointer_cast<LogData>( state_->file.logData ) ) {
+        return source->retire();
     }
     // An unpublished folder has only enumerated membership, not running scans.
     QFutureInterface<void> completion;
@@ -786,7 +790,7 @@ bool Session::retirePrepared( std::unique_ptr<PreparedDocument>& prepared )
     state.retiring = true;
     // Capture all non-widget dependencies before cancellation can notify view
     // observers. Keep the entry locally owned across that callback boundary.
-    const auto source = state.file.logData;
+    const auto source = std::dynamic_pointer_cast<LogData>( state.file.logData );
     const auto filtered = state.file.logFilteredData;
     std::vector<QFuture<void>> pending;
     if ( auto* crawler = dynamic_cast<AbstractCrawlerWidget*>( state.view.get() ) ) {
@@ -794,7 +798,7 @@ bool Session::retirePrepared( std::unique_ptr<PreparedDocument>& prepared )
     }
     // Also cover non-widget ViewInterface implementations and unbound sources.
     if ( filtered ) pending.push_back( filtered->retire() );
-    if ( source ) pending.push_back( static_cast<LogData*>( source.get() )->retire() );
+    if ( source ) pending.push_back( source->retire() );
     entry->watch( std::move( pending ) );
     if ( owner ) entry.release()->setParent( owner );
     // If shutdown destroyed the owner reentrantly, local destruction is the

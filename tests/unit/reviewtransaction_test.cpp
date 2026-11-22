@@ -2,6 +2,7 @@
 
 #include <QWidget>
 #include <memory>
+#include <stdexcept>
 
 #include "colorlabelscontroller.h"
 #include "reviewtransaction.h"
@@ -70,6 +71,25 @@ TEST_CASE( "An asynchronous stage reservation blocks prefix publication without 
     }
     CHECK_FALSE( transaction.asyncStagePending() );
     CHECK( cancellations == ( transaction.status() == Status::Committed ? 0 : 1 ) );
+}
+
+TEST_CASE( "Destroying an unfinished transaction releases its participant even if cancellation throws",
+           "[review-transaction]" )
+{
+    int cancellations = 0;
+    int releases = 0;
+    {
+        ReviewTransaction transaction;
+        REQUIRE( transaction.stageParticipant( {
+            [] { return Status::Open; }, [] { return true; },
+            [&] { ++releases; throw std::runtime_error( "release" ); }, [] {} } ) == Status::Open );
+        REQUIRE( transaction.beginAsyncStage( [&] {
+            ++cancellations;
+            throw std::runtime_error( "cancel" );
+        } ) == Status::Open );
+    }
+    CHECK( cancellations == 1 );
+    CHECK( releases == 1 );
 }
 
 TEST_CASE( "Only one fallible participant can publish a transaction-visible filter draft",

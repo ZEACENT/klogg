@@ -478,10 +478,10 @@ std::optional<HighlighterSetCollection::Snapshot> HighlighterSetCollection::boun
     return snapshot();
 }
 
-HighlighterSet HighlighterSet::fromDescription( QString id, QString name, QList<Highlighter> rules )
+HighlighterSet HighlighterSet::fromDescription( QString setId, QString name, QList<Highlighter> rules )
 {
     HighlighterSet result;
-    result.id_ = std::move( id );
+    result.id_ = std::move( setId );
     result.name_ = std::move( name );
     result.highlighterList_ = std::move( rules );
     return result;
@@ -524,9 +524,9 @@ bool HighlighterSetCollection::withinSnapshotLimits( const Snapshot& candidate )
         for ( const auto& highlighter : set.highlighterList_ )
             if ( !admitText( highlighter.pattern() ) ) return false;
     }
-    for ( const auto& id : candidate.activeSetIds ) if ( !admitText( id ) ) return false;
-    for ( const auto& label : candidate.quickHighlighters ) if ( !admitText( label.name ) ) return false;
-    return true;
+    return std::all_of( candidate.activeSetIds.cbegin(), candidate.activeSetIds.cend(), admitText )
+        && std::all_of( candidate.quickHighlighters.cbegin(), candidate.quickHighlighters.cend(),
+                        [&]( const auto& label ) { return admitText( label.name ); } );
 }
 
 std::optional<HighlighterSetCollection::UpdateResult>
@@ -543,9 +543,9 @@ HighlighterSetCollection::validateUpdate( const Snapshot& candidate )
         }
     }
     QSet<QString> active;
-    for ( const auto& id : candidate.activeSetIds ) {
-        if ( !ids.contains( id ) || active.contains( id ) ) return UpdateResult::InvalidArgument;
-        active.insert( id );
+    for ( const auto& setId : candidate.activeSetIds ) {
+        if ( !ids.contains( setId ) || active.contains( setId ) ) return UpdateResult::InvalidArgument;
+        active.insert( setId );
     }
     return {};
 }
@@ -559,7 +559,7 @@ HighlighterSetCollection::PreparedUpdate HighlighterSetCollection::prepareUpdate
     result.error_ = validateUpdate( candidate );
     if ( result.error_ ) return result;
     QSet<QString> active;
-    for ( const auto& id : klogg::as_const( candidate.activeSetIds ) ) active.insert( id );
+    for ( const auto& setId : klogg::as_const( candidate.activeSetIds ) ) active.insert( setId );
 
     // Qt container copies share element storage. Detach both levels before
     // touching mutable matcher caches on a worker; a const copy alone is not
@@ -591,7 +591,7 @@ HighlighterSetCollection::UpdateResult HighlighterSetCollection::applyPrepared(
 {
     const auto result = preflightPrepared( prepared, expectedRevision );
     if ( result == UpdateResult::Applied || result == UpdateResult::Unchanged )
-        installApproved( std::move( prepared ), result );
+        std::move( prepared ).installApproved( *this, result );
     return result;
 }
 
@@ -609,18 +609,18 @@ HighlighterSetCollection::UpdateResult HighlighterSetCollection::preflightPrepar
     return revision_ == std::numeric_limits<uint64_t>::max() ? UpdateResult::ResourceLimit : UpdateResult::Applied;
 }
 
-void HighlighterSetCollection::installApproved( PreparedUpdate&& prepared, UpdateResult approval ) noexcept
+void HighlighterSetCollection::PreparedUpdate::installApproved(
+    HighlighterSetCollection& owner, UpdateResult approval ) && noexcept
 {
-    prepared.error_ = UpdateResult::InvalidArgument; // A prepared update is single-use.
+    error_ = UpdateResult::InvalidArgument; // A prepared update is single-use.
     if ( approval == UpdateResult::Unchanged ) return;
     Q_ASSERT( approval == UpdateResult::Applied );
-    auto& candidate = prepared.state_;
-    highlighters_.swap( candidate.sets );
-    activeSets_.swap( candidate.activeSetIds );
-    quickHighlighters_.swap( candidate.quickHighlighters );
-    std::swap( quickHighlighterDefaults_, candidate.quickHighlighterDefaults );
-    std::swap( combinedActiveSet_, prepared.combined_ );
-    ++revision_;
+    owner.highlighters_.swap( state_.sets );
+    owner.activeSets_.swap( state_.activeSetIds );
+    owner.quickHighlighters_.swap( state_.quickHighlighters );
+    std::swap( owner.quickHighlighterDefaults_, state_.quickHighlighterDefaults );
+    std::swap( owner.combinedActiveSet_, combined_ );
+    ++owner.revision_;
 }
 
 QList<HighlighterSet> HighlighterSetCollection::highlighterSets() const

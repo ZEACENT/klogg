@@ -12,6 +12,7 @@ HighlighterStatePublisher& HighlighterStatePublisher::instance()
     auto* application = QCoreApplication::instance();
     Q_ASSERT( application && QThread::currentThread() == application->thread() );
     static QPointer<HighlighterStatePublisher> publisher;
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): the application owns its QObject child.
     if ( !publisher ) publisher = new HighlighterStatePublisher( application );
     return *publisher;
 }

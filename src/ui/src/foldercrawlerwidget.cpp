@@ -1132,8 +1132,8 @@ std::unique_ptr<FolderCrawlerWidget::ResultPane> FolderCrawlerWidget::makePane(
     auto pane = std::make_unique<ResultPane>();
     pane->results = results;
     // Leave the view unparented until the pane is published in the tab stack.
-    auto viewOwner = std::make_unique<FolderFilteredView>( results.get(), quickFindPattern_.get() );
-    auto* const view = viewOwner.get();
+    pane->unpublishedView = std::make_unique<FolderFilteredView>( results.get(), quickFindPattern_.get() );
+    auto* const view = pane->unpublishedView.get();
     pane->view = view;
 
     pane->markProvider = std::make_unique<FolderFilteredMarkProvider>();
@@ -1158,7 +1158,6 @@ std::unique_ptr<FolderCrawlerWidget::ResultPane> FolderCrawlerWidget::makePane(
     }
     view->setSearchPattern( currentSearchPattern_ );
 
-    viewOwner.release();
     return pane;
 }
 
@@ -1210,7 +1209,7 @@ void FolderCrawlerWidget::appendPane( std::unique_ptr<ResultPane> pane, const QS
                  }
              } );
 
-    const int tabIndex = resultsTabs_->addTab( view, title );
+    const int tabIndex = resultsTabs_->addTab( pane->unpublishedView.release(), title );
     panes_.push_back( std::move( pane ) );
     activePaneIndex_ = static_cast<int>( panes_.size() ) - 1;
     // Keep tab index == pane index (append-only; close erases same index).

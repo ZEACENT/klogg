@@ -41,6 +41,7 @@
 #define CRAWLERWIDGET_H
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 
 #include <QButtonGroup>
@@ -89,7 +90,7 @@ class CrawlerWidget : public QSplitter,
     Q_OBJECT
 
   public:
-    enum class InitialFocusPolicy { FocusMainView, Preserve };
+    enum class InitialFocusPolicy : std::uint8_t { FocusMainView, Preserve };
     CrawlerWidget( QWidget* parent = nullptr,
                    InitialFocusPolicy initialFocus = InitialFocusPolicy::FocusMainView );
     ~CrawlerWidget() override;

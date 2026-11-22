@@ -23,8 +23,9 @@ using Limits = ReviewContentAdapter;
 RpcError failure( const RpcRequest& request, const char* code )
 {
     const auto symbol = QLatin1String( code );
-    const auto number = symbol == QLatin1String( "INVALID_PARAMS" ) ? -32602
-                      : symbol == QLatin1String( "METHOD_NOT_FOUND" ) ? -32601 : -32000;
+    int number = -32000;
+    if ( symbol == QLatin1String( "INVALID_PARAMS" ) ) number = -32602;
+    else if ( symbol == QLatin1String( "METHOD_NOT_FOUND" ) ) number = -32601;
     return { request.id, number, QStringLiteral( "Content request rejected" ),
              QJsonObject{ { "code", code } }, true, false };
 }
@@ -126,18 +127,21 @@ struct Operation {
     std::shared_ptr<std::atomic<bool>> cancelled;
     qint64 created;
     qint64 lifetime = Limits::LifetimeMs;
-    std::function<void()> onCancel{};
-    QString scope{};
-    void cancel()
+    std::function<void()> onCancel;
+    QString scope;
+    void cancel() const
     {
         if ( future.isFinished() ) return;
         *cancelled = true;
-        if ( onCancel ) onCancel();
+        if ( onCancel ) {
+            try { onCancel(); }
+            catch ( ... ) { qWarning( "Review operation cancellation callback failed" ); }
+        }
     }
 };
-QJsonObject operationJson( const QString& id, const Operation& operation )
+QJsonObject operationJson( const QString& operationId, const Operation& operation )
 {
-    QJsonObject value{ { "operation_id", id }, { "status", "pending" },
+    QJsonObject value{ { "operation_id", operationId }, { "status", "pending" },
                        { "cancel_requested", operation.cancelled->load() } };
     if ( !operation.future.isFinished() ) return value;
     try {
@@ -215,20 +219,20 @@ std::optional<ReviewContentAdapter::PendingOperation> ReviewContentAdapter::begi
     Q_ASSERT( QThread::currentThread() == thread() );
     state_->expire();
     if ( !state_->makeRoom() ) return {};
-    const auto id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    const auto operationId = QUuid::createUuid().toString( QUuid::WithoutBraces );
     auto cancelled = std::make_shared<std::atomic<bool>>( false );
     auto completed = std::make_shared<std::atomic<bool>>( false );
     auto promise = std::make_shared<QFutureInterface<ReadOutcome>>();
     promise->reportStarted();
-    state_->operations.emplace( id, Operation{ promise->future(), cancelled, state_->now(),
-                                              lifetimeMs, std::move( cancel ) } );
+    state_->operations.emplace( operationId, Operation{ promise->future(), cancelled, state_->now(),
+                                                       lifetimeMs, std::move( cancel ), {} } );
     state_->timer.start();
     const QPointer<ReviewContentAdapter> owner{ this };
-    return PendingOperation{ id,
-        [owner, id, cancelled] {
+    return PendingOperation{ operationId,
+        [owner, operationId, cancelled] {
             if ( !owner ) return false;
             owner->state_->expire();
-            const auto found = owner->state_->operations.find( id );
+            const auto found = owner->state_->operations.find( operationId );
             return found != owner->state_->operations.end() && found->second.cancelled == cancelled
                 && !cancelled->load() && !found->second.future.isFinished();
         },
@@ -288,11 +292,11 @@ DecodedResponse ReviewContentAdapter::capture( const RpcRequest& request, klogg:
     state_->expire();
     if ( !snapshot ) return failure( request, "TARGET_NOT_READY" );
     if ( state_->snapshots.size() >= MaxSnapshots ) return failure( request, "RESOURCE_LIMIT" );
-    const auto id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    const auto snapshotId = QUuid::createUuid().toString( QUuid::WithoutBraces );
     const auto count = snapshot->lineCount().get();
-    state_->snapshots.emplace( id, Lease{ std::move( snapshot ), state_->now(), scope } );
+    state_->snapshots.emplace( snapshotId, Lease{ std::move( snapshot ), state_->now(), scope } );
     state_->timer.start();
-    return QJsonObject{ { "snapshot_id", id }, { "row_count", QString::number( count ) },
+    return QJsonObject{ { "snapshot_id", snapshotId }, { "row_count", QString::number( count ) },
                         { "lifetime_ms", static_cast<int>( LifetimeMs ) } };
 }
 
@@ -302,24 +306,24 @@ DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request, const
     state_->expire();
     const auto& params = request.params;
     if ( request.method == QLatin1String( "operation.get" ) || request.method == QLatin1String( "operation.cancel" ) ) {
-        const auto id = params.value( "operation_id" ).toString();
-        if ( !onlyKeys( params, { "operation_id" } ) || id.isEmpty() ) return failure( request, "INVALID_PARAMS" );
-        const auto found = state_->operations.find( id );
+        const auto operationId = params.value( "operation_id" ).toString();
+        if ( !onlyKeys( params, { "operation_id" } ) || operationId.isEmpty() ) return failure( request, "INVALID_PARAMS" );
+        const auto found = state_->operations.find( operationId );
         if ( found == state_->operations.end() || found->second.scope != scope ) return failure( request, "OPERATION_NOT_FOUND" );
         if ( request.method == QLatin1String( "operation.cancel" ) ) found->second.cancel();
-        return operationJson( id, found->second );
+        return operationJson( operationId, found->second );
     }
     const bool release = request.method == QLatin1String( "source.release" );
     if ( !release && request.method != QLatin1String( "source.read" ) ) return failure( request, "METHOD_NOT_FOUND" );
     if ( release ? !onlyKeys( params, { "snapshot_id" } )
                  : !onlyKeys( params, { "snapshot_id", "start", "count" } ) ) return failure( request, "INVALID_PARAMS" );
-    const auto id = params.value( "snapshot_id" ).toString();
-    if ( id.isEmpty() ) return failure( request, "INVALID_PARAMS" );
-    const auto lease = state_->snapshots.find( id );
+    const auto snapshotId = params.value( "snapshot_id" ).toString();
+    if ( snapshotId.isEmpty() ) return failure( request, "INVALID_PARAMS" );
+    const auto lease = state_->snapshots.find( snapshotId );
     if ( lease == state_->snapshots.end() || lease->second.scope != scope ) return failure( request, "SNAPSHOT_NOT_FOUND" );
     if ( release ) {
         state_->snapshots.erase( lease );
-        return QJsonObject{ { "snapshot_id", id }, { "status", "released" } };
+        return QJsonObject{ { "snapshot_id", snapshotId }, { "status", "released" } };
     }
     const auto start = ordinal( params.value( "start" ) );
     const auto countValue = params.value( "count" );
@@ -333,9 +337,9 @@ DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request, const
     if ( !permit ) return failure( request, "RESOURCE_LIMIT" );
     const auto operationId = QUuid::createUuid().toString( QUuid::WithoutBraces );
     auto cancelled = std::make_shared<std::atomic<bool>>( false );
-    auto future = QtConcurrent::run( [source = lease->second.source, id, start = *start,
+    auto future = QtConcurrent::run( [source = lease->second.source, snapshotId, start = *start,
         count, cancelled, permit = std::move( permit )]() mutable {
-        auto result = readRows( source, id, start, static_cast<uint64_t>( count ), *cancelled );
+        auto result = readRows( source, snapshotId, start, static_cast<uint64_t>( count ), *cancelled );
         source.reset();
         permit.reset();
         return result;

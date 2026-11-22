@@ -13,15 +13,18 @@ std::unique_ptr<Session::PreparedDocument> MainWindow::prepareFile(
 {
     if ( !source ) return {};
     const auto context = previousFileContext( source->path() );
-    auto document = session_.prepareFile( source, [] {
-        return new CrawlerWidget( nullptr, CrawlerWidget::InitialFocusPolicy::Preserve );
+    CrawlerWidget* crawler = nullptr;
+    auto document = session_.prepareFile( source, [&crawler] {
+        // The session factory adopts the view immediately on return.
+        crawler = std::make_unique<CrawlerWidget>( nullptr, CrawlerWidget::InitialFocusPolicy::Preserve ).release();
+        return crawler;
     } );
     if ( !document ) return {};
     try {
         if ( !context.isEmpty() ) document->view()->setViewContext( context );
         const auto& config = Configuration::get();
         if ( config.anyFileWatchEnabled() && ( followFile || config.followFileOnLoad() ) )
-            static_cast<CrawlerWidget*>( document->view() )->followSet( true );
+            crawler->followSet( true );
     } catch ( ... ) {
         session_.owner()->retirePrepared( document );
         throw;

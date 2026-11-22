@@ -172,7 +172,7 @@ klogg::control::DecodedResponse ReviewFilterAdapter::apply( const klogg::control
             const auto captured = staging->capture();
             auto operation = operations_.beginOperation( [cancelled, weak = std::weak_ptr<ReviewTransaction>( transaction )] {
                 cancelled->set();
-                if ( const auto tx = weak.lock() ) tx->failAsyncStage( Status::Aborted );
+                if ( const auto stagedEdits = weak.lock() ) stagedEdits->failAsyncStage( Status::Aborted );
             }, PreparationLifetimeMs );
             if ( !operation ) return reject( Status::ResourceLimit, "RESOURCE_LIMIT" );
             try {

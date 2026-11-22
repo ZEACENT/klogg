@@ -287,14 +287,14 @@ struct ResolvedTab {
 };
 
 std::optional<ResolvedTab> resolveTab( const ReviewControlAdapter::WindowProvider& windows,
-                                       const QString& id, ReviewDocumentAdapter& documents,
+                                       const QString& tabId, ReviewDocumentAdapter& documents,
                                        const std::shared_ptr<ReviewTransaction>& edits = {} )
 {
     if ( edits ) {
-        if ( const auto staged = documents.stagedDocument( edits, id ) ) {
+        if ( const auto staged = documents.stagedDocument( edits, tabId ) ) {
             if ( auto* crawler = dynamic_cast<AbstractCrawlerWidget*>( staged->widget.data() ) ) {
                 return ResolvedTab{ staged->windowId,
-                    { id, staged->kind, staged->documentId, {}, staged->documentId, {}, staged->widget },
+                    { tabId, staged->kind, staged->documentId, {}, staged->documentId, {}, staged->widget },
                     crawler->reviewControls(), true };
             }
         }
@@ -303,7 +303,7 @@ std::optional<ResolvedTab> resolveTab( const ReviewControlAdapter::WindowProvide
         if ( !window ) continue;
         const auto snapshot = window->inventorySnapshot();
         for ( const auto& tab : snapshot.tabs ) {
-            if ( tab.tabId != id || !tab.widget ) continue;
+            if ( tab.tabId != tabId || !tab.widget ) continue;
             auto* document = dynamic_cast<AbstractCrawlerWidget*>( tab.widget.data() );
             if ( document ) return ResolvedTab{ snapshot.windowId, tab, document->reviewControls() };
         }
@@ -469,8 +469,9 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             transaction->error = code;
             transaction->edits->abort();
         }
-        const auto number = code == QLatin1String( "INVALID_PARAMS" ) ? -32602
-            : code == QLatin1String( "METHOD_NOT_FOUND" ) ? -32601 : -32000;
+        int number = -32000;
+        if ( code == QLatin1String( "INVALID_PARAMS" ) ) number = -32602;
+        else if ( code == QLatin1String( "METHOD_NOT_FOUND" ) ) number = -32601;
         return failure( request, number, code, QStringLiteral( "Control request rejected" ) );
     };
     // Bind explicit transaction context before every route, including malformed
@@ -561,10 +562,10 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             transaction->hasVisibleParticipant = true;
         }
         ReviewFilterAdapter::Target target{ tab->windowId, tab->tab.tabId, widget,
-            [windows = windows_, id = tab->tab.tabId, windowId = tab->windowId, widget,
+            [windows = windows_, targetTabId = tab->tab.tabId, windowId = tab->windowId, widget,
              owner = QPointer<ReviewControlAdapter>( this ), weak = std::weak_ptr<ReviewTransaction>( edits )] {
                 if ( !owner ) return false;
-                const auto current = resolveTab( windows, id, owner->state_->documents, weak.lock() );
+                const auto current = resolveTab( windows, targetTabId, owner->state_->documents, weak.lock() );
                 return widget && current && current->windowId == windowId
                     && current->tab.widget.data() == widget.data();
             } };
@@ -602,9 +603,11 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
     if ( method == QLatin1String( "pane.get" ) || captureSource || listPanes ) {
         // The aliases remain convenient live observations. An explicit pane ID
         // resolves actual membership and never follows a human page switch.
-        const bool keysValid = listPanes ? onlyKeys( params, { "tab_id", "transaction_id" } )
-            : captureSource ? onlyKeys( params, { "tab_id", "pane", "pane_id", "scope", "transaction_id" } )
-                            : onlyKeys( params, { "tab_id", "pane", "pane_id", "transaction_id" } );
+        const auto keysValid = [&] {
+            if ( listPanes ) return onlyKeys( params, { "tab_id", "transaction_id" } );
+            if ( captureSource ) return onlyKeys( params, { "tab_id", "pane", "pane_id", "scope", "transaction_id" } );
+            return onlyKeys( params, { "tab_id", "pane", "pane_id", "transaction_id" } );
+        }();
         if ( !keysValid ) return reject( "INVALID_PARAMS" );
         const auto tabId = params.value( "tab_id" );
         if ( !tabId.isString() || tabId.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
@@ -617,17 +620,17 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             if ( panes.size() > MaxObservedPanes ) return reject( "RESOURCE_LIMIT" );
             QJsonArray items;
             for ( const auto& pane : panes ) items.append( paneJson( pane ) );
-            const QJsonObject result{ { "tab_id", tabId }, { "panes", items } };
+            QJsonObject result{ { "tab_id", tabId }, { "panes", items } };
             if ( !fitsObservationResponse( result ) ) return reject( "RESOURCE_LIMIT" );
             return result;
         }
         if ( params.contains( "pane" ) == params.contains( "pane_id" ) ) return reject( "INVALID_PARAMS" );
         AbstractCrawlerWidget::PaneInventoryEntry selected;
         if ( params.contains( "pane_id" ) ) {
-            const auto id = params.value( "pane_id" );
-            if ( !id.isString() || id.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
+            const auto paneId = params.value( "pane_id" );
+            if ( !paneId.isString() || paneId.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
             const auto found = std::find_if( panes.begin(), panes.end(), [&]( const auto& pane ) {
-                return pane.paneId == id.toString();
+                return pane.paneId == paneId.toString();
             } );
             if ( found == panes.end() ) return reject( "PANE_NOT_FOUND" );
             selected = *found;
@@ -679,6 +682,7 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             // A reentrant observer may see the non-yielding publication phase;
             // only worker preparation has a future that needs a watcher.
             if ( !future ) return response;
+            // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): the adapter parents the asynchronous watcher.
             auto* watcher = new QFutureWatcher<ReviewTransaction::Preparation>( self );
             QPointer<QObject> watcherGuard( watcher );
             candidate->observingPreparation = true;
@@ -740,7 +744,7 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             const auto state = transaction ? transaction->edits->highlighters()
                 : HighlighterSetCollection::get().boundedSnapshot();
             if ( !state ) return reject( "RESOURCE_LIMIT" );
-            const auto result = klogg::review::encodeHighlighters( *state );
+            auto result = klogg::review::encodeHighlighters( *state );
             if ( !fitsObservationResponse( result ) ) return reject( "RESOURCE_LIMIT" );
             return result;
         }
@@ -774,9 +778,11 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             if ( transaction->hasVisibleParticipant ) return reject( "INVALID_PARAMS" );
             transaction->writesVisibleMarks = true;
         }
-        const bool validKeys = markList ? onlyKeys( params, { "tab_id", "owner_id", "transaction_id" } )
-            : markClear ? onlyKeys( params, { "tab_id", "owner_id", "transaction_id", "expected_revision" } )
-            : onlyKeys( params, { "tab_id", "owner_id", "transaction_id", "expected_revision", "snapshot_id", "rows" } );
+        const auto validKeys = [&] {
+            if ( markList ) return onlyKeys( params, { "tab_id", "owner_id", "transaction_id" } );
+            if ( markClear ) return onlyKeys( params, { "tab_id", "owner_id", "transaction_id", "expected_revision" } );
+            return onlyKeys( params, { "tab_id", "owner_id", "transaction_id", "expected_revision", "snapshot_id", "rows" } );
+        }();
         if ( !validKeys ) return reject( "INVALID_PARAMS" );
         const auto ownerId = params.value( "owner_id" );
         if ( !ownerId.isString() || ownerId.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
@@ -790,7 +796,10 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
         ReviewTransaction::MarkEdit edit;
         if ( markWrite ) {
             using Kind = ReviewTransaction::MarkEdit::Kind;
-            edit.kind = markAdd ? Kind::Add : markRemove ? Kind::Remove : markReplace ? Kind::Replace : Kind::Clear;
+            if ( markAdd ) edit.kind = Kind::Add;
+            else if ( markRemove ) edit.kind = Kind::Remove;
+            else if ( markReplace ) edit.kind = Kind::Replace;
+            else edit.kind = Kind::Clear;
             if ( !markClear ) {
                 const auto snapshotId = params.value( "snapshot_id" );
                 const auto rows = params.value( "rows" );
@@ -866,17 +875,19 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
         return value;
     }
 
-    const bool validKeys = labelSet
-        ? onlyKeys( params, { "tab_id", "transaction_id", "expected_revision", "label", "texts",
-                             "ignore_case", "whole_word" } )
-        : labelRemove ? onlyKeys( params, { "tab_id", "transaction_id", "expected_revision", "texts" } )
-                      : onlyKeys( params, { "tab_id", "transaction_id", "expected_revision" } );
+    const auto validKeys = [&] {
+        if ( labelSet ) return onlyKeys( params, { "tab_id", "transaction_id", "expected_revision", "label", "texts",
+                                                   "ignore_case", "whole_word" } );
+        if ( labelRemove ) return onlyKeys( params, { "tab_id", "transaction_id", "expected_revision", "texts" } );
+        return onlyKeys( params, { "tab_id", "transaction_id", "expected_revision" } );
+    }();
     if ( !validKeys ) return reject( "INVALID_PARAMS" );
     if ( !controls.labels ) return reject( "TARGET_NOT_READY" );
     ColorLabelsController::Edit edit;
-    edit.kind = labelSet ? ColorLabelsController::Edit::Kind::Set
-              : labelRemove ? ColorLabelsController::Edit::Kind::Remove
-                            : ColorLabelsController::Edit::Kind::Clear;
+    using LabelKind = ColorLabelsController::Edit::Kind;
+    if ( labelSet ) edit.kind = LabelKind::Set;
+    else if ( labelRemove ) edit.kind = LabelKind::Remove;
+    else edit.kind = LabelKind::Clear;
     if ( labelSet ) {
         const auto slot = params.value( "label" );
         const int number = slot.toInt( -1 );

@@ -60,8 +60,6 @@ struct FolderCrawlerWidget::FilterUpdateStaging::State {
     ~State()
     {
         Q_ASSERT( QThread::currentThread() == thread );
-        // An unpublished view is not in the widget's Qt child tree.
-        if ( newPane ) delete newPane->view;
     }
 };
 
@@ -199,33 +197,33 @@ FolderCrawlerWidget::FilterUpdatePreparation FolderCrawlerWidget::prepareFilterU
     }
 }
 
-bool FolderCrawlerWidget::filterUpdateCurrent( const FilterUpdateStaging::State& s ) const
+bool FolderCrawlerWidget::filterUpdateCurrent( const FilterUpdateStaging::State& staging ) const
 {
     // No model-locking getters here: install also rechecks GUI admission while
     // holding the destination model's write guard.
-    const auto& c = *s.captured;
-    if ( resourcesRetiring_ || s.consumed || filterStateRevision_ != s.revision
-         || activeResults() != s.original.get() || resultsTabs_->currentWidget() != activeFilteredView()
-         || currentSearchGeneration_ != s.generation || searchActive_ != s.searchActive
-         || searchTargetResults_ != s.searchTarget || marksRevision_ != s.marksRevision
-         || mainViewOpenRequestRevision_ != s.openRevision || currentMainFilePath_ != s.mainFile
+    const auto& captured = *staging.captured;
+    if ( resourcesRetiring_ || staging.consumed || filterStateRevision_ != staging.revision
+         || activeResults() != staging.original.get() || resultsTabs_->currentWidget() != activeFilteredView()
+         || currentSearchGeneration_ != staging.generation || searchActive_ != staging.searchActive
+         || searchTargetResults_ != staging.searchTarget || marksRevision_ != staging.marksRevision
+         || mainViewOpenRequestRevision_ != staging.openRevision || currentMainFilePath_ != staging.mainFile
          || mainView_->matchSelectionPending() || activeFilteredView()->matchSelectionPending()
-         || mainView_->matchSelectionRevision() != s.mainSelection
-         || activeFilteredView()->matchSelectionRevision() != s.resultSelection
-         || contextLinesComboBox_->currentIndex() != s.contextMode || contextLinesSpinBox_->value() != s.contextValue
-         || visibilityBox_->currentIndex() != s.visibility || folderPath_ != c.folder || filePaths_ != c.filePaths
-         || ( s.newPane && s.quickFind != quickFindPattern_ )
-         || !searchToolbar_->canInstallFilterDraft( s.draft, c.candidate ) ) return false;
-    if ( !c.candidate.text.isEmpty() ) {
+         || mainView_->matchSelectionRevision() != staging.mainSelection
+         || activeFilteredView()->matchSelectionRevision() != staging.resultSelection
+         || contextLinesComboBox_->currentIndex() != staging.contextMode || contextLinesSpinBox_->value() != staging.contextValue
+         || visibilityBox_->currentIndex() != staging.visibility || folderPath_ != captured.folder || filePaths_ != captured.filePaths
+         || ( staging.newPane && staging.quickFind != quickFindPattern_ )
+         || !searchToolbar_->canInstallFilterDraft( staging.draft, captured.candidate ) ) return false;
+    if ( !captured.candidate.text.isEmpty() ) {
         const auto current = FolderSearchEngine::ScanSettings::capture();
-        if ( c.settings.search.backend != current.search.backend
-             || c.settings.defaultEncodingMib != current.defaultEncodingMib ) return false;
+        if ( captured.settings.search.backend != current.search.backend
+             || captured.settings.defaultEncodingMib != current.defaultEncodingMib ) return false;
     }
     // Hiding the focused Stop button or switching away from a focused results
     // pane would transfer keyboard focus. Do not steal it, even transiently.
     const auto* focus = QApplication::focusWidget();
     if ( focus == searchToolbar_->stopButton() ) return false;
-    return s.destination == s.original || !focus
+    return staging.destination == staging.original || !focus
         || ( focus != activeFilteredView() && !activeFilteredView()->isAncestorOf( focus ) );
 }
 
@@ -264,9 +262,9 @@ QString FolderCrawlerWidget::FilterUpdatePublication::paneId() const { return st
 
 bool FolderCrawlerWidget::FilterUpdatePublication::install()
 {
-    auto& s = *state_->staging;
-    auto* owner = s.owner.data();
-    if ( state_->released || !owner || !owner->filterUpdateCurrent( s ) ) return false;
+    auto& staging = *state_->staging;
+    auto* owner = staging.owner.data();
+    if ( state_->released || !owner || !owner->filterUpdateCurrent( staging ) ) return false;
     // Both guards have exclusive, consume-once admission. No callbacks between
     // model swaps. Drop writer locks before Qt can synchronously resize/show a
     // newly attached view: geometry queries read the installed model.
@@ -278,11 +276,11 @@ bool FolderCrawlerWidget::FilterUpdatePublication::install()
     }
     state_->revealOldPane.reset();
     state_->replacement.reset();
-    s.consumed = true;
-    const auto& candidate = s.captured->candidate;
+    staging.consumed = true;
+    const auto& candidate = staging.captured->candidate;
     const bool empty = candidate.text.isEmpty();
     const auto pattern = empty ? RegularExpressionPattern{} : candidate.regularExpressionPattern();
-    const bool draftInstalled = owner->searchToolbar_->installFilterDraft( s.draft, candidate );
+    const bool draftInstalled = owner->searchToolbar_->installFilterDraft( staging.draft, candidate );
     Q_ASSERT( draftInstalled );
     Q_UNUSED( draftInstalled )
     owner->supersedeSearch();
@@ -297,20 +295,20 @@ bool FolderCrawlerWidget::FilterUpdatePublication::install()
     } else {
         owner->setFinishedStatus( state_->prepared->matches );
     }
-    if ( s.visibility == 1 ) {
+    if ( staging.visibility == 1 ) {
         const QSignalBlocker blocker{ owner->visibilityBox_ };
         owner->visibilityBox_->setCurrentIndex( 0 );
     }
     const auto title = QStringLiteral( "Find \"%1\"" ).arg( candidate.text );
     const QSignalBlocker tabSignals{ owner->resultsTabs_ };
-    if ( s.newPane ) {
+    if ( staging.newPane ) {
         if ( !owner->currentSearchPattern_.pattern.isEmpty() ) {
             owner->resultsTabs_->setTabText( owner->activePaneIndex_,
                 QStringLiteral( "Find \"%1\"" ).arg( owner->currentSearchPattern_.pattern ) );
         }
-        s.newPane->appliedPattern = pattern;
-        s.newPane->searchComplete = !empty;
-        owner->appendPane( std::move( s.newPane ), title );
+        staging.newPane->appliedPattern = pattern;
+        staging.newPane->searchComplete = !empty;
+        owner->appendPane( std::move( staging.newPane ), title );
         if ( owner->qfSavedFocus_ != owner->mainView_ ) owner->qfSavedFocus_.clear();
     } else {
         auto& pane = *owner->panes_[ static_cast<size_t>( owner->activePaneIndex_ ) ];

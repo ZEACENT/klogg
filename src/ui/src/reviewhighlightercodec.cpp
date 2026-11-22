@@ -36,7 +36,7 @@ QJsonObject encodeHighlighters( const HighlighterSetCollection::Snapshot& state 
         sets.append( QJsonObject{ { "id", set.id() }, { "name", set.name() }, { "rules", rules } } );
     }
     QJsonArray active;
-    for ( const auto& id : state.activeSetIds ) active.append( id );
+    for ( const auto& setId : state.activeSetIds ) active.append( setId );
     QJsonArray palette;
     for ( const auto& label : state.quickHighlighters ) {
         palette.append( QJsonObject{ { "name", label.name }, { "foreground", colorJson( label.color.foreColor ) },
@@ -73,9 +73,9 @@ DecodedHighlighterReplacement decodeHighlighters( const QJsonValue& setsValue, c
         if ( !onlyKeys( set, { "id", "name", "rules" } ) || !set.value( "id" ).isString()
              || set.value( "id" ).toString().isEmpty() || !set.value( "name" ).isString()
              || !set.value( "rules" ).isArray() ) return Error::InvalidArgument;
-        const auto id = set.value( "id" ).toString();
+        const auto setId = set.value( "id" ).toString();
         const auto name = set.value( "name" ).toString();
-        if ( !admitText( id ) || !admitText( name ) ) return Error::ResourceLimit;
+        if ( !admitText( setId ) || !admitText( name ) ) return Error::ResourceLimit;
         const auto values = set.value( "rules" ).toArray();
         if ( static_cast<size_t>( values.size() ) > HighlighterSetCollection::MaxPreparedRules - ruleCount )
             return Error::ResourceLimit;
@@ -112,7 +112,7 @@ DecodedHighlighterReplacement decodeHighlighters( const QJsonValue& setsValue, c
             decoded.setColorVariance( variance );
             rules.append( std::move( decoded ) );
         }
-        replacement.sets.append( HighlighterSet::fromDescription( id, name, std::move( rules ) ) );
+        replacement.sets.append( HighlighterSet::fromDescription( setId, name, std::move( rules ) ) );
     }
     for ( const auto& value : active ) {
         if ( !value.isString() ) return Error::InvalidArgument;

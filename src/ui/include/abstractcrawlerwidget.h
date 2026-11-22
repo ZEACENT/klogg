@@ -75,7 +75,7 @@ class AbstractCrawlerWidget : public ViewInterface {
     };
     virtual ReviewControls reviewControls() { return {}; }
 
-    enum class Pane { Main, Results };
+    enum class Pane : std::uint8_t { Main, Results };
     using PaneMetadata = klogg::ReviewPaneMetadata;
     struct PaneInventoryEntry {
         QString paneId;
@@ -204,6 +204,7 @@ class AbstractCrawlerWidget : public ViewInterface {
     }
 
   protected:
+    AbstractCrawlerWidget() = default;
     // Borrowed only for the synchronous owner-thread call, never retained.
     virtual const AbstractLogView* reviewPane( Pane ) const { return nullptr; }
     struct PaneReference {
@@ -218,6 +219,7 @@ class AbstractCrawlerWidget : public ViewInterface {
     virtual std::vector<PaneReference> reviewPanes() const { return {}; }
 
   private:
+    Q_DISABLE_COPY( AbstractCrawlerWidget )
     std::optional<PaneReference> findReviewPane( const QString& paneId ) const;
     const QString runtimeTabId_ = QUuid::createUuid().toString( QUuid::WithoutBraces );
 };

@@ -22,7 +22,7 @@ class ReviewDocumentAdapter : public QObject {
 public:
     using WindowProvider = std::function<std::vector<QPointer<MainWindow>>() >;
     static constexpr int MaxConcurrentPreparations = 2;
-    static constexpr qint64 PreparationLifetimeMs = 5 * 60000;
+    static constexpr qint64 PreparationLifetimeMs = qint64{ 5 } * 60000;
     struct StagedDocument {
         QString windowId;
         DocumentKind kind;

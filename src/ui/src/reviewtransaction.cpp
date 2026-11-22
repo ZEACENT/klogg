@@ -243,7 +243,7 @@ ReviewTransaction::Status ReviewTransaction::stageMarks(
     catch ( ... ) { return finish( Status::PreparationFailed ); }
 }
 
-std::optional<HighlighterSetCollection::Snapshot> ReviewTransaction::highlighters()
+ReviewTransaction::Highlighters* ReviewTransaction::captureHighlighters()
 {
     Q_ASSERT( !QCoreApplication::instance()
               || QThread::currentThread() == QCoreApplication::instance()->thread() );
@@ -260,15 +260,23 @@ std::optional<HighlighterSetCollection::Snapshot> ReviewTransaction::highlighter
         }
         highlighters_ = Highlighters{ *base, *base };
     }
-    return highlighters_->candidate;
+    return &*highlighters_;
+}
+
+std::optional<HighlighterSetCollection::Snapshot> ReviewTransaction::highlighters()
+{
+    const auto* entry = captureHighlighters();
+    if ( !entry ) return {};
+    return entry->candidate;
 }
 
 ReviewTransaction::Status ReviewTransaction::stageHighlighters(
     QList<HighlighterSet> sets, QStringList activeSetIds )
 {
-    if ( !highlighters() ) return status_;
+    auto* entry = captureHighlighters();
+    if ( !entry ) return status_;
     if ( commandCount_ >= ColorLabelsController::MaxEdits ) return finish( Status::ResourceLimit );
-    auto candidate = highlighters_->candidate;
+    auto candidate = entry->candidate;
     candidate.sets = std::move( sets );
     candidate.activeSetIds = std::move( activeSetIds );
     if ( const auto error = HighlighterSetCollection::validateUpdate( candidate ) )
@@ -280,7 +288,7 @@ ReviewTransaction::Status ReviewTransaction::stageHighlighters(
         rules.detach();
         set = HighlighterSet::fromDescription( set.id(), set.name(), std::move( rules ) );
     }
-    highlighters_->candidate = std::move( candidate );
+    entry->candidate = std::move( candidate );
     ++commandCount_;
     return status_;
 }
@@ -495,6 +503,7 @@ ReviewTransaction::Status ReviewTransaction::commit( const std::function<void()>
             prepared.emplace_back( entry.owner, std::move( publication ) );
         }
         if ( highlighterUpdate ) {
+            if ( !highlighters_ ) return fail( Status::PreparationFailed );
             global = &HighlighterSetCollection::get();
             approval = global->preflightPrepared( *highlighterUpdate, highlighters_->base.revision );
             if ( approval != UpdateResult::Applied && approval != UpdateResult::Unchanged )
@@ -507,9 +516,10 @@ ReviewTransaction::Status ReviewTransaction::commit( const std::function<void()>
         markPublications.reserve( markUpdates.size() );
         for ( const auto& entry : marks_ ) {
             if ( entry.candidate.groups == entry.snapshot.groups ) continue;
+            if ( !entry.privateOwner ) return fail( Status::PreparationFailed );
             auto guard = markUpdates[ markPublications.size() ]->acquire();
             if ( !guard ) return fail( Status::Conflict );
-            markPublications.push_back( { std::move( guard ), entry.privateOwner.value() } );
+            markPublications.push_back( { std::move( guard ), *entry.privateOwner } );
         }
         // Only disposable, unexposed models may change before fallible adoption.
         // Inserting a tab can read its projection synchronously, so unlock first.
@@ -526,7 +536,7 @@ ReviewTransaction::Status ReviewTransaction::commit( const std::function<void()>
     // All fallible decisions precede the first visible publication. The rest is
     // installation of preapproved state, then guard release and notifications.
     if ( highlighterUpdate ) {
-        global->installApproved( std::move( *highlighterUpdate ), approval );
+        std::move( *highlighterUpdate ).installApproved( *global, approval );
         highlightersCommitted_ = approval == UpdateResult::Applied;
     }
     for ( auto& entry : prepared ) entry.first->install( std::move( entry.second ) );
@@ -556,7 +566,10 @@ ReviewTransaction::Status ReviewTransaction::finish( Status status )
     publishing_ = false;
     asyncStagePending_ = false;
     auto cancel = std::exchange( cancelAsyncStage_, {} );
-    if ( cancel ) cancel();
+    if ( cancel ) {
+        try { cancel(); }
+        catch ( ... ) { qWarning( "Review stage cancellation callback failed" ); }
+    }
     if ( status != Status::Committed && preparationCancelled_ ) *preparationCancelled_ = true;
     preparation_.reset();
     preparationCancelled_.reset();
@@ -567,7 +580,8 @@ ReviewTransaction::Status ReviewTransaction::finish( Status status )
     marks_.clear();
     highlighters_.reset();
     if ( participant_ ) {
-        participant_->release();
+        try { participant_->release(); }
+        catch ( ... ) { qWarning( "Review participant cleanup callback failed" ); }
         participant_.reset();
     }
     return status_;

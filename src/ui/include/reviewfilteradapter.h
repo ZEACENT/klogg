@@ -25,7 +25,7 @@ public:
         std::function<bool()> current;
     };
     static constexpr int MaxConcurrentPreparations = 2;
-    static constexpr qint64 PreparationLifetimeMs = 5 * 60000;
+    static constexpr qint64 PreparationLifetimeMs = qint64{ 5 } * 60000;
     explicit ReviewFilterAdapter( ReviewContentAdapter& operations );
     ~ReviewFilterAdapter() override;
     klogg::control::DecodedResponse apply( const klogg::control::RpcRequest& request,

@@ -268,7 +268,7 @@ void SearchToolbar::setupConnections()
 
 RegularExpressionPattern SearchToolbar::FilterSpec::regularExpressionPattern() const
 {
-    return RegularExpressionPattern( text, matchCase, inverse, boolean, !useRegexp );
+    return { text, matchCase, inverse, boolean, !useRegexp };
 }
 
 bool SearchToolbar::canInstallFilterDraft( const FilterDraftSnapshot& expected,

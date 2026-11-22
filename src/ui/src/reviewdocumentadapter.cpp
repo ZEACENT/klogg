@@ -1,6 +1,7 @@
 #include "reviewdocumentadapter.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <new>
 #include <utility>
@@ -110,7 +111,7 @@ std::optional<MainWindow::TabInventoryEntry> findPath( const MainWindow& window,
 // adoption the entire native graph is private; after extraction it follows the
 // same retirement path. No GUI barrier is held while waiting for a commit.
 struct Lifecycle {
-    enum class Action { Open, Close, Reuse };
+    enum class Action : std::uint8_t { Open, Close, Reuse };
     Lifecycle( Action action_, MainWindow& window_, const QString& path_, DocumentKind kind_ )
         : action( action_ ), window( &window_ ), session( window_.sessionOwner() ), path( path_ ), kind( kind_ ),
           groupId( TabGroupManager::get().groupIdForTab( path ) ) {}
@@ -306,7 +307,7 @@ DecodedResponse ReviewDocumentAdapter::dispatch( const RpcRequest& request, cons
     const std::weak_ptr<ReviewTransaction> weakTx = transaction;
     auto operation = operations_.beginOperation( [cancelled, weakTx] {
         cancelled->set();
-        if ( const auto tx = weakTx.lock() ) tx->failAsyncStage( Status::Aborted );
+        if ( const auto stagedEdits = weakTx.lock() ) stagedEdits->failAsyncStage( Status::Aborted );
     }, PreparationLifetimeMs );
     if ( !operation ) return failure( request, "RESOURCE_LIMIT" );
     auto candidate = std::make_shared<Lifecycle>( Lifecycle::Action::Open, *window, path, kind );
@@ -321,14 +322,14 @@ DecodedResponse ReviewDocumentAdapter::dispatch( const RpcRequest& request, cons
     const auto finishOpen = [this, pending = std::move( candidate ), weakTx, explicitTx = bool( transaction ),
                              follow = followValue.toBool(), operation = *operation]( Watcher& watcher ) mutable {
         auto candidate = std::move( pending ); // The watcher does not retain the private graph after delivery.
-        auto tx = weakTx.lock();
+        auto stagedEdits = weakTx.lock();
         const auto reject = [&]( Status reason, const QString& code ) {
-            if ( tx ) tx->failAsyncStage( reason );
+            if ( stagedEdits ) stagedEdits->failAsyncStage( reason );
             operation.complete( {}, code );
         };
         try {
             const auto window = candidate->window;
-            if ( !operation.current() || ( explicitTx && ( !tx || !tx->asyncStagePending() ) ) ) {
+            if ( !operation.current() || ( explicitTx && ( !stagedEdits || !stagedEdits->asyncStagePending() ) ) ) {
                 reject( Status::Aborted, "OPERATION_CANCELLED" ); return;
             }
             if ( !window ) { reject( Status::TargetClosed, "TARGET_CLOSED" ); return; }
@@ -348,37 +349,37 @@ DecodedResponse ReviewDocumentAdapter::dispatch( const RpcRequest& request, cons
             if ( !document || ( candidate->kind == DocumentKind::File && !document->startLoading() ) ) {
                 reject( Status::PreparationFailed, "SOURCE_PREPARATION_FAILED" ); return;
             }
-            if ( !operation.current() || ( tx && !tx->asyncStagePending() ) ) { reject( Status::Aborted, "OPERATION_CANCELLED" ); return; }
+            if ( !operation.current() || ( stagedEdits && !stagedEdits->asyncStagePending() ) ) { reject( Status::Aborted, "OPERATION_CANCELLED" ); return; }
             const auto valid = candidate->validate();
             if ( valid != Status::Open ) { reject( valid, stageError( valid ) ); return; }
             candidate->widget = dynamic_cast<QWidget*>( document->view() );
             candidate->source = dynamic_cast<LogData*>( document->source() );
             candidate->tabId = dynamic_cast<AbstractCrawlerWidget*>( document->view() )->runtimeTabId();
-            const auto id = window->runtimeWindowId();
-            if ( tx ) {
+            const auto windowId = window->runtimeWindowId();
+            if ( stagedEdits ) {
                 candidate->privateDocumentPermit = prepared->permit;
                 staged_.erase( std::remove_if( staged_.begin(), staged_.end(), []( const auto& entry ) {
                     const auto owner = entry.transaction.lock();
                     return !owner || ( owner->status() != Status::Open && owner->status() != Status::Preparing );
                 } ), staged_.end() );
-                staged_.push_back( { tx, window, candidate->tabId, { id, candidate->kind, candidate->path, candidate->widget } } );
+                staged_.push_back( { stagedEdits, window, candidate->tabId, { windowId, candidate->kind, candidate->path, candidate->widget } } );
             }
-            stage( candidate, tx, operation, outcome( id, candidate->tabId, true, bool( tx ) ) );
+            stage( candidate, stagedEdits, operation, outcome( windowId, candidate->tabId, true, bool( stagedEdits ) ) );
         } catch ( const std::bad_alloc& ) { reject( Status::ResourceLimit, "RESOURCE_LIMIT" ); }
         catch ( ... ) { reject( Status::PreparationFailed, "SOURCE_PREPARATION_FAILED" ); }
     };
-    Status launchFailure = Status::PreparationFailed;
+    Status launchFailure;
     try {
-        auto watcher = std::make_unique<Watcher>( this );
+        auto watcher = std::make_unique<Watcher>();
         connect( watcher.get(), &Watcher::finished, this, [raw = watcher.get(), finish = std::move( finishOpen )]() mutable {
             raw->deleteLater();
             finish( *raw );
         } );
         watcher->setFuture( acquire( path, kind, cancelled, std::move( permit ) ) );
-        watcher.release(); // QObject parent owns completion delivery.
+        watcher.release()->setParent( this ); // The adapter owns completion delivery after launch.
         return QJsonObject{ { "operation_id", operation->id }, { "status", "pending" } };
     } catch ( const std::bad_alloc& ) { launchFailure = Status::ResourceLimit; }
-    catch ( ... ) {}
+    catch ( ... ) { launchFailure = Status::PreparationFailed; }
     cancelled->set();
     if ( transaction ) transaction->failAsyncStage( launchFailure );
     operation->complete( {}, stageError( launchFailure ) );

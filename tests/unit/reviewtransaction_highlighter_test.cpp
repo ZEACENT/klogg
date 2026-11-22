@@ -60,7 +60,7 @@ struct DeferredPreparation {
         REQUIRE( captured );
         auto update = std::make_shared<HighlighterSetCollection::PreparedUpdate>(
             HighlighterSetCollection::prepareUpdate( *captured, engine ) );
-        completion.reportResult( Preparation{ std::move( update ), Status::Open } );
+        completion.reportResult( Preparation{ std::move( update ), Status::Open, {}, {} } );
         completion.reportFinished();
     }
 };

@@ -1,6 +1,7 @@
 #ifndef KLOGG_REVIEWCONTENTADAPTER_H
 #define KLOGG_REVIEWCONTENTADAPTER_H
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -22,9 +23,9 @@ class ReviewContentAdapter : public QObject {
     static constexpr int MaxConcurrentReads = 4;
     static constexpr qint64 LifetimeMs = 60000;
     static constexpr uint64_t MaxRows = 256;
-    static constexpr uint64_t MaxSourceBytes = 1024 * 1024;
-    static constexpr uint64_t MaxTextUnits = 256 * 1024;
-    static constexpr uint64_t MaxOutputBytes = 512 * 1024;
+    static constexpr uint64_t MaxSourceBytes = std::uint64_t{ 1024 } * 1024;
+    static constexpr uint64_t MaxTextUnits = std::uint64_t{ 256 } * 1024;
+    static constexpr uint64_t MaxOutputBytes = std::uint64_t{ 512 } * 1024;
 
     explicit ReviewContentAdapter( Clock now, QObject* parent = nullptr );
     ~ReviewContentAdapter() override;

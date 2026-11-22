@@ -34,15 +34,15 @@ class ReviewTransaction {
     struct Preparation {
         std::shared_ptr<HighlighterSetCollection::PreparedUpdate> update;
         Status failure = Status::PreparationFailed;
-        std::vector<std::shared_ptr<klogg::PreparedReviewMarks>> marks{};
-        klogg::AsyncWorkBudget::Lease permit{};
+        std::vector<std::shared_ptr<klogg::PreparedReviewMarks>> marks;
+        klogg::AsyncWorkBudget::Lease permit;
     };
     struct PreparationInput {
         std::optional<HighlighterSetCollection::Snapshot> highlighters;
         RegexpEngine engine{};
         std::shared_ptr<std::atomic<bool>> cancelled;
-        std::vector<klogg::ReviewMarksPreparer> marks{};
-        klogg::AsyncWorkBudget::Lease permit{};
+        std::vector<klogg::ReviewMarksPreparer> marks;
+        klogg::AsyncWorkBudget::Lease permit;
     };
     using Preparer = std::function<std::optional<QFuture<Preparation>>( PreparationInput )>;
 
@@ -132,6 +132,7 @@ class ReviewTransaction {
     };
     Labels* captureLabels( ColorLabelsController& owner );
     Filter* captureFilter( SearchToolbar& owner );
+    Highlighters* captureHighlighters();
     Marks* captureMarks( klogg::ReviewMarksOwner& owner );
     size_t ownerCount() const;
     Status finish( Status status );

@@ -135,7 +135,7 @@ class HighlighterSet {
     }
 
     static HighlighterSet createNewSet( const QString& name );
-    static HighlighterSet fromDescription( QString id, QString name, QList<Highlighter> rules );
+    static HighlighterSet fromDescription( QString setId, QString name, QList<Highlighter> rules );
 
     HighlighterSet() = default;
 
@@ -234,11 +234,11 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
     std::optional<Snapshot> boundedSnapshot() const;
     uint64_t revision() const { return revision_; }
 
-    enum class UpdateResult { Applied, Unchanged, Conflict, InvalidArgument, ResourceLimit };
+    enum class UpdateResult : std::uint8_t { Applied, Unchanged, Conflict, InvalidArgument, ResourceLimit };
     static constexpr std::size_t MaxPreparedSets = 128;
     static constexpr std::size_t MaxPreparedRules = 1024;
     static constexpr std::size_t MaxSnapshotPalette = 128;
-    static constexpr std::size_t MaxPreparedTextUnits = 1024 * 1024;
+    static constexpr std::size_t MaxPreparedTextUnits = std::size_t{ 1024 } * 1024;
     class PreparedUpdate {
       public:
         PreparedUpdate( PreparedUpdate&& other ) noexcept;
@@ -248,14 +248,16 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
         std::optional<UpdateResult> error() const { return error_; }
       private:
         friend class HighlighterSetCollection;
+        friend class ReviewTransaction;
         PreparedUpdate() = default;
+        void installApproved( HighlighterSetCollection& owner, UpdateResult approval ) && noexcept;
         Snapshot state_;
         HighlighterSet combined_;
         std::optional<UpdateResult> error_;
     };
     // Pure private preparation: callers capture the backend on the owner thread
     // and may build this sealed value on a worker. Installation never compiles.
-    static std::optional<UpdateResult> validateUpdate( const Snapshot& state );
+    static std::optional<UpdateResult> validateUpdate( const Snapshot& candidate );
     static PreparedUpdate prepareUpdate( Snapshot state, RegexpEngine engine );
     UpdateResult applyPrepared( PreparedUpdate&& prepared, uint64_t expectedRevision );
 
@@ -287,9 +289,8 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
     // within one non-yielding publication and with no intervening global writes.
     friend class ReviewTransaction;
     UpdateResult preflightPrepared( const PreparedUpdate& prepared, uint64_t expectedRevision ) const;
-    void installApproved( PreparedUpdate&& prepared, UpdateResult approval ) noexcept;
     static constexpr int HighlighterSetCollection_VERSION = 3;
-    static bool withinSnapshotLimits( const Snapshot& state );
+    static bool withinSnapshotLimits( const Snapshot& candidate );
 
     void updateCombinedSet();
     void loadFromStorage( QSettings& settings );

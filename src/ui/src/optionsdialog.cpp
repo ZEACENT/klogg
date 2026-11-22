@@ -368,12 +368,14 @@ void OptionsDialog::setupIosLogSettings()
     // transports. Preferences expose presentation policy only; executable
     // paths, environment detection and free-form arguments are compatibility-
     // backend concerns and have no editable UI.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): parent widget owns this control.
     adbAnsiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), ui_->adbGroupBox );
     adbAnsiOutputCheckBox_->setObjectName( QStringLiteral( "adbAnsiOutputCheckBox" ) );
     if ( auto* adbLayout = qobject_cast<QVBoxLayout*>( ui_->adbGroupBox->layout() ) ) {
         adbLayout->addWidget( adbAnsiOutputCheckBox_ );
     }
 
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): parent widget owns this control.
     iosLogGroupBox_ = new QGroupBox( tr( "iOS Log Stream" ), ui_->liveSourceTab );
     iosLogGroupBox_->setObjectName( QStringLiteral( "iosLogGroupBox" ) );
 
@@ -397,6 +399,7 @@ void OptionsDialog::setupLiveSourceSettings()
     // These settings control the behavior of live log streams (ADB logcat, iOS log).
     // Inserted on the File tab alongside the ADB and iOS log stream settings.
 
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): parent widget owns this control.
     liveSourceGroupBox_ = new QGroupBox( tr( "Live Source" ), ui_->liveSourceTab );
     liveSourceGroupBox_->setObjectName( QStringLiteral( "liveSourceGroupBox" ) );
 
@@ -866,9 +869,9 @@ void OptionsDialog::updateFontSizePreservingSelection( const QString& fontFamily
     }
 
     // Now restore the size we had before
-    int i = ui_->fontSizeBox->findText( QString::number( preferredPointSize ) );
-    if ( i != -1 ) {
-        ui_->fontSizeBox->setCurrentIndex( i );
+    const int sizeIndex = ui_->fontSizeBox->findText( QString::number( preferredPointSize ) );
+    if ( sizeIndex != -1 ) {
+        ui_->fontSizeBox->setCurrentIndex( sizeIndex );
     }
 }
 
@@ -1225,10 +1228,10 @@ void OptionsDialog::updateConfigFromDialog()
         QStringList actionKeys;
 
         auto primaryKeySequence
-            = static_cast<KeySequencePresenter*>( ui_->shortcutsTable->cellWidget( shortcutRow, 1 ) )
+            = qobject_cast<KeySequencePresenter*>( ui_->shortcutsTable->cellWidget( shortcutRow, 1 ) )
                   ->keySequence();
         auto secondaryKeySequence
-            = static_cast<KeySequencePresenter*>( ui_->shortcutsTable->cellWidget( shortcutRow, 2 ) )
+            = qobject_cast<KeySequencePresenter*>( ui_->shortcutsTable->cellWidget( shortcutRow, 2 ) )
                   ->keySequence();
         actionKeys << primaryKeySequence << secondaryKeySequence;
 
@@ -1373,6 +1376,7 @@ void OptionsDialog::buildShortcutsTable( bool useDefaultsOnly )
 
         auto primaryKeySequence = new KeySequencePresenter(
             shortCut.keySequence.size() > 0 ? shortCut.keySequence[ 0 ] : "" );
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): setItem transfers ownership to the table.
         ui_->shortcutsTable->setItem( currentRow, 1, new QTableWidgetItem );
         ui_->shortcutsTable->setCellWidget( currentRow, 1, primaryKeySequence );
         connect( primaryKeySequence, &KeySequencePresenter::edited, this,
@@ -1380,6 +1384,7 @@ void OptionsDialog::buildShortcutsTable( bool useDefaultsOnly )
 
         auto secondaryKeySequence = new KeySequencePresenter(
             shortCut.keySequence.size() > 1 ? shortCut.keySequence[ 1 ] : "" );
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): setItem transfers ownership to the table.
         ui_->shortcutsTable->setItem( currentRow, 2, new QTableWidgetItem );
         ui_->shortcutsTable->setCellWidget( currentRow, 2, secondaryKeySequence );
         connect( secondaryKeySequence, &KeySequencePresenter::edited, this,
@@ -1390,10 +1395,8 @@ void OptionsDialog::buildShortcutsTable( bool useDefaultsOnly )
     ui_->shortcutsTable->horizontalHeader()->setSectionResizeMode( 0, QHeaderView::Interactive );
     ui_->shortcutsTable->horizontalHeader()->setMinimumSectionSize( 150 );
     ui_->shortcutsTable->resizeColumnToContents( 0 );
-    ui_->shortcutsTable->setHorizontalHeaderItem( 0, new QTableWidgetItem( tr( "Action" ) ) );
-    ui_->shortcutsTable->setHorizontalHeaderItem( 1, new QTableWidgetItem( tr( "Primary shortcut" ) ) );
-    ui_->shortcutsTable->setHorizontalHeaderItem( 2,
-                                             new QTableWidgetItem( tr( "Secondary shortcut" ) ) );
+    ui_->shortcutsTable->setHorizontalHeaderLabels(
+        { tr( "Action" ), tr( "Primary shortcut" ), tr( "Secondary shortcut" ) } );
 
     // in case if user set duplicate keys and after restores defaults
     // it is need to enable back standard buttons

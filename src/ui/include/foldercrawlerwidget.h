@@ -464,6 +464,8 @@ class FolderCrawlerWidget : public QWidget,
         std::shared_ptr<FolderSearchResults> results;
         FolderFilteredView* view = nullptr;
         std::unique_ptr<FolderFilteredMarkProvider> markProvider;
+        // Own the view until addTab reparents it. Destroy it before its models.
+        std::unique_ptr<FolderFilteredView> unpublishedView;
         bool presentationRefreshPending = false;
         bool searchComplete = false;
         // Attribution survives pane switches and deferred presentation updates.
@@ -761,7 +763,7 @@ class FolderCrawlerWidget : public QWidget,
         const FolderSearchEngine::StopPredicate& shouldStop );
     bool filterUpdateCurrent( const FilterUpdateStaging::State& staging ) const;
     void supersedeSearch();
-    void setFinishedStatus( quint64 matches );
+    void setFinishedStatus( quint64 total );
     quint64 filterStateRevision_ = 0;
     void schedulePanePresentationRefresh( ResultPane* pane );
     void scheduleMainViewPresentationRefresh( bool refreshOverview,
