@@ -42,6 +42,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -361,6 +362,239 @@ TEST_CASE( "FolderSearchEngine emits searchStarted and searchFinished", "[folder
 
     REQUIRE( startedGenerations == std::vector<quint64>{ gen } );
     REQUIRE( finishedGenerations == std::vector<quint64>{ gen } );
+}
+
+TEST_CASE( "Folder scan retirement returns before a blocked worker and closes admission",
+           "[folder][folder-retirement]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto path = writeFile( root, QStringLiteral( "retire.log" ), "ERROR one\n" );
+    const RegularExpressionPattern pattern{ QStringLiteral( "ERROR" ) };
+    QObject observer;
+    QSemaphore entered;
+    QSemaphore resume;
+    std::atomic<int> starts{ 0 };
+    FolderSearchEngine engine;
+    struct Release {
+        QSemaphore& semaphore;
+        ~Release() { semaphore.release(); }
+    } release{ resume };
+    QObject::connect( &engine, &FolderSearchEngine::searchStarted, &observer, [&] {
+        if ( starts.fetch_add( 1 ) == 0 ) {
+            entered.release();
+            resume.acquire();
+        }
+    }, Qt::DirectConnection );
+    const auto initial = engine.startSearch( { path }, pattern );
+    REQUIRE( entered.tryAcquire( 1, 5000 ) );
+    const auto retired = engine.retire();
+    CHECK_FALSE( retired.isFinished() );
+    const auto closed = engine.currentGeneration();
+    CHECK( closed > initial );
+    CHECK( engine.startSearch( { path }, pattern ) == closed );
+    CHECK( engine.startFolderSearch( root.path(), pattern ) == closed );
+    CHECK( engine.scanSynchronously( { path }, pattern ) == closed );
+    resume.release();
+    REQUIRE( waitUiState( [&] { return retired.isFinished(); } ) );
+    CHECK( engine.retire().isFinished() );
+    CHECK( starts.load() == 1 );
+    CHECK( engine.takeResults().empty() );
+}
+
+TEST_CASE( "Folder teardown completes an outstanding retirement future", "[folder-retirement]" )
+{
+    QFuture<void> retired;
+    {
+        FolderSearchEngine engine;
+        retired = engine.retire();
+    }
+    CHECK( retired.isFinished() );
+}
+
+TEST_CASE( "Complete folder results retain membership order and zero-match content exactly once",
+           "[folder-completion]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto zero = writeFile( dir, "z.log", "ordinary\n" );
+    const auto matched = writeFile( dir, "a.log", "MATCH\n" );
+    const QStringList paths{ zero, matched };
+    FolderSearchEngine engine;
+    CHECK_FALSE( engine.takeCompletedSearch( engine.currentGeneration() ) );
+    const auto generation = engine.scanSynchronously( paths, RegularExpressionPattern{ "MATCH" } );
+    auto completed = engine.takeCompletedSearch( generation );
+    REQUIRE( completed );
+    CHECK( completed->generation == generation );
+    CHECK( completed->status == FolderSearchEngine::CompletionStatus::Ready );
+    CHECK( completed->filePaths == paths );
+    REQUIRE( completed->groups.size() == 2 );
+    CHECK( completed->groups.at( 0 ).filePath == zero );
+    CHECK( completed->groups.at( 0 ).matches.empty() );
+    CHECK( completed->groups.at( 0 ).content );
+    CHECK( completed->groups.at( 1 ).filePath == matched );
+    CHECK( completed->groups.at( 1 ).matches.size() == 1 );
+    CHECK_FALSE( engine.takeCompletedSearch( generation ) );
+    CHECK( engine.takeResults().empty() );
+}
+
+TEST_CASE( "Complete folder handoff rejects drained or superseded result ownership",
+           "[folder-completion]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "one.log", "MATCH\n" );
+    FolderSearchEngine engine;
+    const auto generation = engine.scanSynchronously( { path }, RegularExpressionPattern{ "MATCH" } );
+    SECTION( "streaming consumer already owns a group" ) {
+        REQUIRE( engine.takeCompletedGroup( 0 ) );
+        const auto completed = engine.takeCompletedSearch( generation );
+        REQUIRE( completed );
+        CHECK( completed->status == FolderSearchEngine::CompletionStatus::ResultsConsumed );
+        CHECK( completed->groups.empty() );
+    }
+    SECTION( "legacy bulk consumer already owns the groups" ) {
+        REQUIRE( engine.takeResults().size() == 1 );
+        const auto completed = engine.takeCompletedSearch( generation );
+        REQUIRE( completed );
+        CHECK( completed->status == FolderSearchEngine::CompletionStatus::ResultsConsumed );
+    }
+    SECTION( "superseded generation cannot take current results" ) {
+        const auto next = engine.scanSynchronously( { path }, RegularExpressionPattern{ "other" } );
+        CHECK_FALSE( engine.takeCompletedSearch( generation ) );
+        const auto completed = engine.takeCompletedSearch( next );
+        REQUIRE( completed );
+        CHECK( completed->status == FolderSearchEngine::CompletionStatus::Ready );
+        REQUIRE( completed->groups.size() == 1 );
+        CHECK( completed->groups.front().matches.empty() );
+    }
+}
+
+TEST_CASE( "Rejected complete handoff preserves the streaming consumer's remaining groups",
+           "[folder-completion][folder-completion-ownership]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto first = writeFile( dir, "first.log", "MATCH first\n" );
+    const auto second = writeFile( dir, "second.log", "MATCH second\n" );
+    FolderSearchEngine engine;
+    const auto generation = engine.scanSynchronously( { first, second }, RegularExpressionPattern{ "MATCH" } );
+    REQUIRE( engine.takeCompletedGroup( 0 ) );
+    const auto rejected = engine.takeCompletedSearch( generation );
+    REQUIRE( rejected );
+    CHECK( rejected->status == FolderSearchEngine::CompletionStatus::ResultsConsumed );
+    CHECK( rejected->groups.empty() );
+    const auto remaining = engine.takeCompletedGroup( 1 );
+    REQUIRE( remaining );
+    CHECK( remaining->filePath == second );
+    CHECK( remaining->matches.size() == 1 );
+    CHECK_FALSE( engine.takeCompletedSearch( generation ) );
+}
+
+TEST_CASE( "Folder completion distinguishes empty success from invalid queries and enumeration failure",
+           "[folder-completion]" )
+{
+    using Status = FolderSearchEngine::CompletionStatus;
+    Status expected = Status::Ready;
+    FolderSearchEngine::FolderEnumerator enumerator = []( const QString&, const auto& ) { return QStringList{}; };
+    QString pattern{ "MATCH" };
+    SECTION( "empty success" ) {}
+    SECTION( "enumeration throws" ) {
+        expected = Status::EnumerationFailure;
+        enumerator = []( const QString&, const auto& ) -> QStringList {
+            throw std::runtime_error{ "injected enumeration failure" };
+        };
+    }
+    SECTION( "enumerator unavailable" ) { expected = Status::EnumerationFailure; enumerator = {}; }
+    SECTION( "invalid pattern" ) { expected = Status::CompileFailure; pattern = "["; }
+    bool finished = false;
+    QObject observer;
+    FolderSearchEngine engine{ std::move( enumerator ) };
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &observer,
+                      [&]( quint64 ) { finished = true; }, Qt::QueuedConnection );
+    const auto generation = engine.startFolderSearch( "unused", RegularExpressionPattern{ pattern } );
+    REQUIRE( waitUntil( [&] { return finished; } ) );
+    const auto completed = engine.takeCompletedSearch( generation );
+    REQUIRE( completed );
+    CHECK( completed->status == expected );
+    CHECK( completed->groups.empty() );
+}
+
+TEST_CASE( "Cancellation during folder enumeration is not a successful empty result",
+           "[folder-completion]" )
+{
+    QSemaphore entered;
+    bool finished = false;
+    QObject observer;
+    FolderSearchEngine engine{ [&]( const QString&, const FolderSearchEngine::StopPredicate& stop ) {
+        entered.release();
+        while ( !stop() ) std::this_thread::yield();
+        return QStringList{};
+    } };
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &observer,
+                      [&]( quint64 ) { finished = true; }, Qt::QueuedConnection );
+    const auto generation = engine.startFolderSearch( "unused", RegularExpressionPattern{ "MATCH" } );
+    REQUIRE( entered.tryAcquire( 1, 3000 ) );
+    engine.interrupt();
+    REQUIRE( waitUntil( [&] { return finished; } ) );
+    const auto completed = engine.takeCompletedSearch( generation );
+    REQUIRE( completed );
+    CHECK( completed->status == FolderSearchEngine::CompletionStatus::Cancelled );
+    CHECK( completed->groups.empty() );
+}
+
+TEST_CASE( "Folder requests retain caller policy while enumeration is pending",
+           "[folder-completion][folder-request-settings]" )
+{
+    struct RestorePolicy {
+        RegexpEngine backend = Configuration::get().regexpEngine();
+        bool blockScan = Configuration::get().useBlockScan();
+        int defaultMib = Configuration::get().defaultEncodingMib();
+        ~RestorePolicy()
+        {
+            Configuration::get().setRegexpEnging( backend );
+            Configuration::get().setUseBlockScan( blockScan );
+            Configuration::get().setDefaultEncodingMib( defaultMib );
+        }
+    } restore;
+    constexpr int Latin1Mib = 4;
+    constexpr int Utf8Mib = 106;
+    Configuration::get().setRegexpEnging( RegexpEngine::Vectorscan );
+    Configuration::get().setUseBlockScan( false );
+    Configuration::get().setDefaultEncodingMib( Latin1Mib );
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "policy.log", "MATCH\n" );
+    struct Gate { QSemaphore entered; QSemaphore proceed; };
+    const auto gate = std::make_shared<Gate>();
+    bool finished = false;
+    QObject observer;
+    FolderSearchEngine engine{ [gate, path]( const QString&, const auto& ) {
+        gate->entered.release();
+        gate->proceed.acquire();
+        return QStringList{ path };
+    } };
+    struct Release {
+        std::shared_ptr<Gate> gate;
+        ~Release() { gate->proceed.release(); }
+    } release{ gate }; // Release before the engine joins on assertion failure.
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &observer,
+                      [&]( quint64 ) { finished = true; }, Qt::QueuedConnection );
+    const auto generation = engine.startFolderSearch( dir.path(), RegularExpressionPattern{ "MATCH" } );
+    REQUIRE( gate->entered.tryAcquire( 1, 3000 ) );
+    Configuration::get().setRegexpEnging( RegexpEngine::QRegularExpression );
+    Configuration::get().setUseBlockScan( true );
+    Configuration::get().setDefaultEncodingMib( Utf8Mib );
+    gate->proceed.release();
+    REQUIRE( waitUntil( [&] { return finished; } ) );
+    const auto completed = engine.takeCompletedSearch( generation );
+    REQUIRE( completed );
+    REQUIRE( completed->status == FolderSearchEngine::CompletionStatus::Ready );
+    CHECK( completed->requestSettings.search.backend == RegexpEngine::Vectorscan );
+    CHECK_FALSE( completed->requestSettings.search.useBlockScan );
+    CHECK( completed->requestSettings.defaultEncodingMib == Latin1Mib );
+    REQUIRE( completed->groups.size() == 1 );
+    CHECK( completed->groups.front().matches.size() == 1 );
 }
 
 TEST_CASE( "FolderSearchEngine enumerates folder requests off the caller thread",

@@ -36,10 +36,12 @@
 class PatternMatcher;
 class MultiPatternMatcher;
 class BooleanExpressionEvaluator;
+enum class RegexpEngine;
 
 class RegularExpression {
   public:
     explicit RegularExpression( const RegularExpressionPattern& pattern );
+    RegularExpression( const RegularExpressionPattern& pattern, RegexpEngine engine );
 
     std::unique_ptr<PatternMatcher> createMatcher() const;
 
@@ -47,6 +49,7 @@ class RegularExpression {
     QString errorString() const;
 
   private:
+    RegexpEngine engine_;
     bool isInverse_ = false;
     bool isBooleanCombination_ = false;
 
@@ -99,6 +102,10 @@ class PatternMatcher {
 class MultiRegularExpression {
   public:
     explicit MultiRegularExpression( const klogg::vector<RegularExpressionPattern>& patterns );
+    // Explicit policy permits private worker preparation without reading mutable
+    // application preferences. Matchers retain this compiled backend choice.
+    MultiRegularExpression( const klogg::vector<RegularExpressionPattern>& patterns,
+                            RegexpEngine engine );
 
     std::unique_ptr<MultiPatternMatcher> createMatcher() const;
 
@@ -107,6 +114,7 @@ class MultiRegularExpression {
 
   private:
     klogg::vector<RegularExpressionPattern> patterns_;
+    RegexpEngine engine_;
 
     bool isValid_ = false;
     QString errorString_;

@@ -386,8 +386,12 @@ class KloggApp : public QApplication {
                 for ( const auto& item : mainWindows_ ) windows.emplace_back( item.second );
                 return windows;
             }, std::move( runtime ), this );
-            connect( this, &QCoreApplication::aboutToQuit, this,
-                     [ this ] { localControl_->setEnabled( false ); } );
+            connect( this, &QCoreApplication::aboutToQuit, this, [ this ] {
+                localControl_->setEnabled( false );
+                // Cancellation may enqueue private graphs. Drain them while Qt's
+                // GUI infrastructure still exists, after closing IPC admission.
+                session_->drainRetiredDocuments();
+            } );
         }
         connect( window, &MainWindow::optionsChanged, this,
                  &KloggApp::synchronizeLocalControl );

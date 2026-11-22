@@ -20,9 +20,12 @@
 #ifndef TABBEDCRAWLERWIDGET_H
 #define TABBEDCRAWLERWIDGET_H
 
+#include <cstdint>
+#include <memory>
 #include <optional>
 
 #include <QList>
+#include <QPointer>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -87,28 +90,43 @@ class TabbedCrawlerWidget : public QTabWidget {
     Q_OBJECT
   public:
     TabbedCrawlerWidget();
+    enum class SelectionPolicy : std::uint8_t { Activate, PreserveCurrent };
+
+    // A notification barrier, not a rollback transaction. The coordinator must
+    // finish installation and release every owner's barrier before notifying.
+    class Publication {
+      public:
+        ~Publication();
+        Publication( const Publication& ) = delete;
+        Publication& operator=( const Publication& ) = delete;
+        void release() noexcept;
+        void notify();
+      private:
+        friend class TabbedCrawlerWidget;
+        struct State;
+        explicit Publication( TabbedCrawlerWidget& owner );
+        std::unique_ptr<State> state_;
+    };
+    std::unique_ptr<Publication> beginPublication();
 
     template <typename T>
     int addCrawler( T* crawler, const QString& documentId, const QString& displayName = {},
                     const QString& toolTip = {},
-                    std::optional<QString> associatedPath = std::nullopt )
+                    std::optional<QString> associatedPath = std::nullopt,
+                    SelectionPolicy selection = SelectionPolicy::Activate )
     {
         const auto index = QTabWidget::addTab( crawler, QString{} );
 
         connect( crawler, &T::dataStatusChanged, this,
-                 [ this, documentId ]( DataStatus status ) {
-                     const auto tabsCount = count();
-                     for ( int i = 0; i < tabsCount; ++i ) {
-                         if ( tabPathAt( i ) == documentId ) {
-                             setTabDataStatus( i, status );
-                             return;
-                         }
-                     }
+                 [ this, owner = QPointer<T>{ crawler } ]( DataStatus status ) {
+                     if ( !owner ) return;
+                     const auto ownerIndex = indexOf( owner.data() );
+                     if ( ownerIndex >= 0 ) setTabDataStatus( ownerIndex, status );
                  } );
 
         addTabBarItem( index, documentId, displayName, toolTip,
-                       associatedPath.value_or( toolTip ) );
-        Q_EMIT crawlerAdded();
+                       associatedPath.value_or( toolTip ), selection );
+        notifyCrawlerAdded();
 
         return index;
     }
@@ -142,8 +160,13 @@ class TabbedCrawlerWidget : public QTabWidget {
     void changeEvent( QEvent* event ) override;
 
   private:
+      void notifyCrawlerAdded();
+      void notifyInventoryChanged();
+      void notifyTabsReordered();
+      void notifySelectionChanged();
+      Publication* publication_ = nullptr;
       void addTabBarItem( int index, const QString& documentId, const QString& displayName,
-                          const QString& toolTip, const QString& associatedPath );
+                          const QString& toolTip, const QString& associatedPath, SelectionPolicy selection );
       QString tabPathAt( int index ) const;
       int tabIndexForPath( const QString& tabPath ) const;
       void setTabVisibleCompat( int index, bool visible );

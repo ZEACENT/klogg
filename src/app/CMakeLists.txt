@@ -109,6 +109,10 @@ if(APPLE)
       VERBATIM)
     add_dependencies(${target} ${target}_control_cli_stage)
   endforeach()
+else()
+  foreach(target IN ITEMS klogg klogg_portable)
+    add_dependencies(${target} kloggctl)
+  endforeach()
 endif()
 
 add_dependencies(klogg klogg_adb_helper)
@@ -305,6 +309,16 @@ install(
   BUNDLE DESTINATION .
          COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
 )
+
+# macOS installs the already-staged CLI as part of the application bundle.
+# Other platforms share the GUI's runtime component and relocatable bindir.
+if(NOT APPLE)
+  install(
+    TARGETS kloggctl
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
+  )
+endif()
 
 if(WIN32)
   if(TARGET tbb)

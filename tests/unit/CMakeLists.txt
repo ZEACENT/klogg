@@ -287,8 +287,12 @@ add_executable(klogg_tests
     colorlabelsmanager_test.cpp
     colorlabelscontroller_test.cpp
     reviewtransaction_test.cpp
+    reviewtransaction_highlighter_test.cpp
+    reviewtransaction_marks_test.cpp
+    reviewhighlightercodec_test.cpp
     reviewpanes_test.cpp
     reviewcontent_test.cpp
+    asyncworkbudget_test.cpp
     configuration_test.cpp
     encodingdetector_test.cpp
     droppathclassification_test.cpp
@@ -296,6 +300,8 @@ add_executable(klogg_tests
     filterfavoritesmodel_test.cpp
     recentfolders_test.cpp
     highlighter_vectorscan_test.cpp
+    highlighterpublication_test.cpp
+    highlighterstatepublisher_test.cpp
     linehighlight_compose_test.cpp
     match_projection_test.cpp
     match_selection_test.cpp
@@ -309,15 +315,30 @@ add_executable(klogg_tests
     overview_test.cpp
     optionsdialog_test.cpp
     pathutils_test.cpp
+    platform_file_preparation_test.cpp
+    fileholder_preparation_test.cpp
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
     qt_event_queue_test.cpp
     searchgeneration_test.cpp
     searchtoolbar_test.cpp
+    filterdraftpublication_test.cpp
+    crawlerfilterpublication_test.cpp
     selection_test.cpp
     logfiltereddataworker_test.cpp
+    searchpreparation_test.cpp
+    preparedsearchpublication_test.cpp
+    logdataretirement_test.cpp
+    indexingpreparation_test.cpp
+    preparedindexoperation_test.cpp
+    preparedfilesource_test.cpp
+    preparedsourcelifecycle_test.cpp
+    indexhashsnapshot_test.cpp
+    indexedlinelength_test.cpp
     logsnapshot_bounded_test.cpp
     sessioninfo_test.cpp
+    sessionpreparation_test.cpp
+    sessionpreparedsource_test.cpp
     shortcut_bindings_test.cpp
     styles_test.cpp
     streaminglogdata_test.cpp
@@ -342,9 +363,12 @@ add_executable(klogg_tests
 
 target_link_libraries(klogg_tests klogg_ui klogg_utils klogg_logging klogg_versioncheck klogg_livecapture klogg_adb_smartsocket Catch2 Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Test test_utils test_crash_trace)
 add_dependencies(klogg_tests adb_server_test_helper)
-add_dependencies(klogg_tests search_start_empty_env_launcher)
+add_dependencies(klogg_tests search_start_empty_env_launcher regular_file_open_helper)
 target_compile_definitions(
   klogg_tests PRIVATE KLOGG_ADB_SERVER_TEST_HELPER_PATH="$<TARGET_FILE:adb_server_test_helper>"
+)
+set_property(SOURCE platform_file_preparation_test.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+  KLOGG_REGULAR_FILE_HELPER_PATH="$<TARGET_FILE:regular_file_open_helper>"
 )
 target_include_directories(klogg_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/app")
 target_include_directories(klogg_tests PRIVATE "${CMAKE_BINARY_DIR}/src/ui/klogg_ui_autogen/include")

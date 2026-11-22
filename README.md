@@ -139,18 +139,47 @@ from architecture, build instructions, benchmarks, and future plans.
 
 Developer builds now include an experimental, provider-neutral `kloggctl` client
 for the running GUI. The current surface discovers instances, reads window/tab
-inventory, pane metadata and filter drafts, and reads or changes shared color
-labels. Explicit label transactions stage changes without touching the GUI,
+inventory, stable pane/mark-owner metadata and filter drafts, and reads or changes
+shared marks, color labels and global highlighter sets. Mark additions/removals use
+retained source snapshots rather than unverified paths or row guesses. Mixed transactions stage changes privately,
 detect relevant human edits, and publish together without changing application
 focus. Explicit snapshot reads return bounded log content asynchronously; ordinary
-state observation does not read log lines.
+state observation does not read log lines. `documents.open` and `documents.close`
+provide single-command file/folder lifecycle operations without activation;
+background preparation shares `operation.get` and `operation.cancel` with content
+reads and implicit `filter.apply` requests. Closing a document never deletes the
+file on disk. `filter.apply` replaces the current results pane's filter in file
+and live tabs, or privately prepares a new pane with `keep_results:true`, without
+returning log content. Empty text performs the native
+`NoSearch` reset, not a completed match-all regex search. Admission requires an
+unchanged source snapshot, so continuous appends can cause a conflict.
+`capabilities.get` reports supported methods, feature flags and selected limits;
+it is an inventory, not a complete request/response schema.
 
 ```sh
 kloggctl instance list
+kloggctl --instance INSTANCE call capabilities.get --params '{}'
 kloggctl --instance INSTANCE state get
 kloggctl --instance INSTANCE tab get --tab TAB
+kloggctl --instance INSTANCE call filter.apply --params \
+  '{"tab_id":"TAB","filter":{"text":"ERROR","keep_results":false}}'
+kloggctl --instance INSTANCE call operation.get --params '{"operation_id":"OPERATION"}'
 kloggctl --help
 ```
+
+Use IDs returned by the GUI and operation responses. The `filter` object is a
+strict patch: `text` is a string; `match_case`, `use_regexp`, `inverse`, `boolean`,
+`auto_refresh`, and `keep_results` are booleans. Omitted fields retain the current
+draft values. Optional top-level `expected_revision` is a canonical unsigned
+decimal string from `tab.get.filter_draft.revision`. `keep_results:true` retains
+the old pane and its marks, creates a fresh result model without copying those
+marks, and consumes the keep toggle on successful publication. Folder filter
+writes and explicit filter transactions are unsupported. `tab.get.filter_draft`
+is draft-only. Use `pane.get` or `pane.list` to read each result pane's
+`applied_filter` (including retained file/live/folder results), independently of
+unsubmitted drafts and deferred painting. Its `complete` flag reports native
+result readiness, not a running/stopped/error classification. Main panes omit
+this field. Request content separately with `source.capture` and `source.read`.
 
 Local control is enabled by default. **Options > General > Local command-line
 control** disables it for all windows and clients in that GUI instance and
@@ -165,10 +194,13 @@ opening settings or enabling control does not alter shell configuration. Backups
 and partial failures are reported. Shell installation and control enablement are
 independent.
 
-**This is not the complete feature or packaged acceptance.** Transactional
-file/folder open and close, applied filters, marks, global highlighters,
-source-addressed navigation/selection, and relocatable package integration are
-still being implemented. Existing launcher and headless-search command-line roles are unchanged.
+**This is not the complete feature or packaged acceptance.** Composing lifecycle
+or filter changes with annotations in explicit transactions, folder filters,
+continuous-append cutover, source-addressed navigation/selection,
+and full cross-platform package acceptance are still in progress.
+A relocated macOS Qt/CLI payload has passed native Cocoa startup checks; this is not
+full release-artifact acceptance. Existing launcher and headless-search command-line
+roles are unchanged.
 See the [accepted design](docs/AGENT_CONTROL_PROPOSAL.md) and the
 [implementation record](docs/AGENT_CONTROL_IMPLEMENTATION.md) for supported scope,
 verification evidence, and remaining gates.

@@ -1,6 +1,9 @@
 set(UI_TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/qtests_main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/reviewcontroladapter_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/windowpublication_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reviewdocuments_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reviewfilters_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/logdata_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/logfiltereddata_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/crawlerwidget_test.cpp

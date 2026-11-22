@@ -135,7 +135,12 @@ runs:
           echo "::error::macdeployqt is missing from configured Qt: $KLOGG_QT_DIR"
           exit 1
         }
-        "$KLOGG_QT_DIR/bin/macdeployqt" "$KLOGG_MAC_APP" -always-overwrite -verbose=2
+        test -x "$KLOGG_MAC_APP/Contents/MacOS/kloggctl" || {
+          echo "::error::bundled control CLI is missing from the package stage"
+          exit 1
+        }
+        "$KLOGG_QT_DIR/bin/macdeployqt" "$KLOGG_MAC_APP" -always-overwrite -verbose=2 \
+          "-executable=$KLOGG_MAC_APP/Contents/MacOS/kloggctl"
 
     - name: Mac deploy Qt fixing
       if: "env.KLOGG_QT == 'Qt5'"

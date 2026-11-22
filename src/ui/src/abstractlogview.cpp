@@ -86,6 +86,7 @@
 #include "highlightedmatch.h"
 #include "highlightcompose.h"
 #include "matchprojection.h"
+#include "highlighterstatepublisher.h"
 #include "linetypes.h"
 
 #include "active_screen.h"
@@ -408,6 +409,8 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
     setMouseTracking( true );
 
     createMenu();
+    connect( &HighlighterStatePublisher::instance(), &HighlighterStatePublisher::changed,
+             this, [this] { forceRefresh(); } );
 
     connect( quickFindPattern_, SIGNAL( patternUpdated() ), this, SLOT( handlePatternUpdated() ) );
     connectQuickFindSource();
@@ -447,6 +450,22 @@ void AbstractLogView::connectQuickFindSource()
                 setQuickFindResult( result );
             }
         }, Qt::QueuedConnection );
+}
+
+std::vector<QFuture<void>> AbstractLogView::retireSearches()
+{
+    std::vector<QFuture<void>> completions;
+    completions.reserve( matchSelectionWorkers_.size() + 1 );
+    searchesRetiring_ = true;
+    acceptQuickFindResults_ = false;
+    if ( quickFind_ ) completions.push_back( quickFind_->retire() );
+    for ( const auto& worker : matchSelectionWorkers_ ) {
+        completions.push_back( worker.completion() );
+    }
+    // Cancellation can notify observers. Do not access this view afterward;
+    // the returned values already retain every dispatched task's completion.
+    cancelMatchSelection();
+    return completions;
 }
 
 void AbstractLogView::stopSearchAndWait()
@@ -648,7 +667,6 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 
         highlightersMenu_->createHighlightersMenu();
         highlightersMenu_->populateHighlightersMenu();
-        highlightersMenu_->setApplyChange( [ this ]() { Q_EMIT highlightersChange(); } );
 
         QActionGroup* colorLablesActionGroup = nullptr;
         colorLabelsMenu_->clear();
@@ -1449,6 +1467,7 @@ LineNumber AbstractLogView::getViewPosition() const
 
 void AbstractLogView::searchUsingFunction( QuickFindSearchFn searchFunction )
 {
+    if ( searchesRetiring_ ) return;
     cancelMatchSelection();
     acceptQuickFindResults_ = true;
     disableFollow();
@@ -1457,7 +1476,7 @@ void AbstractLogView::searchUsingFunction( QuickFindSearchFn searchFunction )
 
 void AbstractLogView::setQuickFindResult( const QuickFindResult& result ) try
 {
-    if ( !acceptQuickFindResults_ ) {
+    if ( searchesRetiring_ || !acceptQuickFindResults_ ) {
         return;
     }
     auto selected = result.selection;
@@ -1505,6 +1524,7 @@ void AbstractLogView::incrementallySearchBackward()
 
 void AbstractLogView::incrementalSearchAbort()
 {
+    if ( searchesRetiring_ ) return;
     // Reset routing clears the preview; restore only after those synchronous updates.
     const QPointer<AbstractLogView> guard{ this };
     Q_EMIT changeQuickFind( "", QuickFindMux::Forward );
@@ -1519,6 +1539,7 @@ void AbstractLogView::incrementalSearchAbort()
 
 void AbstractLogView::incrementalSearchStop()
 {
+    if ( searchesRetiring_ ) return;
     auto oldSelection = quickFind_->incrementalSearchStop();
     if ( selection_.isEmpty() && !selection_.hasStableNavigationAnchor() ) {
         selection_ = std::move( oldSelection );
@@ -2222,6 +2243,7 @@ LineKind AbstractLogView::lineKind( LineNumber /*lineNumber*/ ) const
 
 void AbstractLogView::setDataSource( const AbstractLogData* newLogData )
 {
+    if ( searchesRetiring_ ) return;
     auto nextSearch = std::make_unique<QuickFind>( *newLogData );
     stopSearchAndWait();
     invalidateMatchSelection();

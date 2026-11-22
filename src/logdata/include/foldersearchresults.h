@@ -36,6 +36,8 @@
 
 #include "abstractlogdata.h"
 #include "foldersearchtypes.h"
+#include "foldersearchengine.h"
+#include "reviewmarks.h"
 #include "synchronization.h"
 
 class QFile;
@@ -70,6 +72,7 @@ class FolderSearchResults : public AbstractLogData {
     Q_OBJECT
 
   public:
+    using MarksStore = QHash<QString, std::set<uint64_t>>;
     FolderSearchResults();
     ~FolderSearchResults() override;
 
@@ -83,6 +86,9 @@ class FolderSearchResults : public AbstractLogData {
     klogg::LogSnapshot::Ptr createReadSnapshot( klogg::SnapshotScope scope ) const override;
     OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override;
     bool containsRowIdentity( const klogg::LogRowId& identity ) const override;
+    // Retained membership lookup, independent of collapse/filter visibility.
+    // This is metadata only: never reopen a path to validate an old identity.
+    std::optional<klogg::folder::SourceRef> sourceForIdentity( const klogg::LogRowId& identity ) const;
 
     // --- Streaming API (stable incremental display) ---
     // beginSearch resets for a streaming search, retains `expectedFileOrder` as
@@ -162,6 +168,56 @@ class FolderSearchResults : public AbstractLogData {
     // Rebuild + emit layoutChanged. Called by the widget when marks change while
     // the Marks filter is active (the visible set depends on marks).
     void refreshForMarksChange();
+
+    // Capture on the owner thread, prepare using immutable values on a worker,
+    // then acquire every participating model before installing any projection.
+    // Installation neither modifies the widget-owned marks store nor notifies
+    // observers. The owner publishes marks and releases all guards before signals.
+    // An optional candidate visibility publishes the native filter-reset layout
+    // in the same boundary; omitted visibility preserves the captured choice.
+    static constexpr size_t MaxPreparedLayoutRows = 256 * 1024;
+    struct MarksLayoutCapture;
+    struct PreparedMarksLayout;
+    class MarksLayoutPublication {
+      public:
+        ~MarksLayoutPublication();
+        bool install() noexcept;
+      private:
+        friend class FolderSearchResults;
+        struct State;
+        explicit MarksLayoutPublication( std::unique_ptr<State> state );
+        std::unique_ptr<State> state_;
+    };
+    std::shared_ptr<const MarksLayoutCapture> captureMarksLayout(
+        const MarksStore& candidate, klogg::ReviewMarksBudget* budget = nullptr,
+        std::optional<Visibility> candidateVisibility = std::nullopt ) const;
+    static std::shared_ptr<PreparedMarksLayout> prepareMarksLayout(
+        const std::shared_ptr<const MarksLayoutCapture>& captured );
+    std::unique_ptr<MarksLayoutPublication> lockMarksLayout(
+        const std::shared_ptr<PreparedMarksLayout>& prepared );
+
+    // Complete, membership-aware re-search: prepare from owned scan values,
+    // preserve collapse by path, install silently, then notify after all guards
+    // are released. The coordinating owner validates engine/request freshness.
+    struct SearchReplacementCapture;
+    struct PreparedSearchReplacement;
+    class SearchReplacementPublication {
+      public:
+        ~SearchReplacementPublication();
+        bool install() noexcept;
+      private:
+        friend class FolderSearchResults;
+        struct State;
+        explicit SearchReplacementPublication( std::unique_ptr<State> state );
+        std::unique_ptr<State> state_;
+    };
+    std::shared_ptr<const SearchReplacementCapture> captureSearchReplacement(
+        std::optional<Visibility> candidateVisibility = std::nullopt ) const;
+    static std::shared_ptr<PreparedSearchReplacement> prepareSearchReplacement(
+        const std::shared_ptr<const SearchReplacementCapture>& captured,
+        FolderSearchEngine::CompletedSearch completed );
+    std::unique_ptr<SearchReplacementPublication> lockSearchReplacement(
+        const std::shared_ptr<PreparedSearchReplacement>& prepared );
 
     // Per-file size cap for the whole-file decoded mark-line cache. Exposed so
     // tests build fixtures relative to the SAME constant (a cap change keeps
@@ -261,15 +317,38 @@ class FolderSearchResults : public AbstractLogData {
         uint64_t localLine( const VisibleRow& item ) const;
     };
     class ReadSnapshot;
-
+    struct LayoutInput {
+        const std::vector<GroupPtr>& groups;
+        const QHash<QString, klogg::folder::ScannedFileContent::Ptr>& sources;
+        const QSet<klogg::folder::FileId>& collapsed;
+        const QSet<QString>& expectedFiles;
+        bool restrictMarks;
+        Visibility visibility;
+        const MarksStore* marks;
+    };
+    struct LayoutProjection {
+        std::shared_ptr<std::vector<VisibleRow>> visible = std::make_shared<std::vector<VisibleRow>>();
+        std::vector<MarksGroup> markGroups;
+        std::shared_ptr<const SnapshotLayout> snapshot;
+        LineLength maxLength = 0_length;
+        LineNumber maxLocalLine = 0_lnum;
+    };
+    static LayoutProjection buildLayout( const LayoutInput& input );
+    static std::shared_ptr<const SnapshotLayout> buildSnapshotLayout(
+        const LayoutInput& input, const LayoutProjection& projection );
+    static bool marksContain( const MarksStore* marks, const QString& path, LineNumber line );
+    static QString formatGroupHeader( const klogg::folder::FileGroup& group, bool collapsed );
+    static QString formatMarksHeader( const MarksGroup& group, bool collapsed );
+    void installLayout( LayoutProjection&& projection ) noexcept;
     void rebuildVisibleRows();
-    void rebuildSnapshotLayout();
     // Retain every scanned member; return whether presented text or failure
     // status changed and therefore needs a new layout publication.
     bool retainSource( const klogg::folder::FileGroup& group );
     // Full result-set replacement invalidates every file-backed cache. Caller
     // holds dataMutex_ uniquely; this helper takes fileIoMutex_ second.
     void resetFileCaches();
+    // Both dataMutex_ and fileIoMutex_ must already be held.
+    void clearFileCaches() noexcept;
     // Snapshot the filePaths of currently-collapsed groups (called at the top of
     // beginSearch, before groups_ is rebuilt) and re-apply collapse to a group as
     // it streams back in (called after each push_back). Keyed by filePath because
@@ -312,6 +391,7 @@ class FolderSearchResults : public AbstractLogData {
     // incl. the QuickFind worker's reads. The file-content caches named below are
     // instead guarded by fileIoMutex_.
     mutable SharedMutex dataMutex_;
+    const std::shared_ptr<const uint8_t> layoutIdentity_ = std::make_shared<const uint8_t>( 0 );
     // Guards openFiles_, markLineCache_, markTextCache_, markTextCacheBytes_, and
     // every seek/read on the shared per-group QFile handles (two concurrent
     // readMatchLine callers would otherwise tear the file cursor). Always taken
@@ -326,7 +406,14 @@ class FolderSearchResults : public AbstractLogData {
     QHash<QString, klogg::folder::ScannedFileContent::Ptr> retainedSources_;
     // Source existence, independent of layout membership. Includes zero-match
     // members and stores their accepted scan cutoff for bounded identity checks.
-    std::map<std::pair<uint64_t, uint64_t>, LinesCount> retainedMembers_;
+    struct RetainedMember {
+        LinesCount lineCount;
+        QString filePath;
+    };
+    using RetainedMembers = std::map<std::pair<uint64_t, uint64_t>, RetainedMember>;
+    static void retainSourceMetadata( const klogg::folder::FileGroup& group,
+        QHash<QString, klogg::folder::ScannedFileContent::Ptr>& sources, RetainedMembers& members );
+    RetainedMembers retainedMembers_;
     QString retentionError_;
     std::shared_ptr<const SnapshotLayout> snapshotLayout_ = std::make_shared<SnapshotLayout>();
     QSet<klogg::folder::FileId> collapsed_;

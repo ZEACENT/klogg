@@ -22,15 +22,11 @@
 
 #include "highlighterset.h"
 
-#include <functional>
-
 #include <QAction>
 #include <QActionGroup>
 #include <QMenu>
 
 #include "menu.h"
-
-class CrawlerWidget;
 
 class HighlightersMenu : public HoverMenu {
     Q_OBJECT
@@ -48,11 +44,6 @@ class HighlightersMenu : public HoverMenu {
 
     void populateHighlightersMenu();
 
-    inline void setApplyChange( std::function<void()> apply )
-    {
-        applyChange_ = apply;
-    }
-
   private:
     using HoverMenu::clear;
 
@@ -66,7 +57,7 @@ class HighlightersMenu : public HoverMenu {
 
   private:
     QActionGroup* highLighters_;
-    std::function<void()> applyChange_;
+    bool contentDirty_ = true;
 };
 
 #endif

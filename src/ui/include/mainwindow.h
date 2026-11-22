@@ -126,6 +126,35 @@ class MainWindow : public QMainWindow {
     // than once; this does not claim workspace atomicity. Reads have no effects.
     InventorySnapshot inventorySnapshot() const;
 
+    // Native membership publication, not rollback or a complete transaction.
+    // Without yielding: install/extract all owners, finalize every inventory,
+    // release all barriers, then notify. Callers own policy, global groups,
+    // history, source activation and retirement. Destruction only releases the
+    // facade barrier; it does not finalize, notify or undo installed membership.
+    class Publication {
+      public:
+        ~Publication();
+        Publication( const Publication& ) = delete;
+        Publication& operator=( const Publication& ) = delete;
+        bool install( std::unique_ptr<Session::PreparedDocument>& document );
+        std::unique_ptr<Session::PreparedDocument> extract( AbstractCrawlerWidget* document );
+        void finalize();
+        void release();
+        void notify();
+      private:
+        friend class MainWindow;
+        Publication( MainWindow& owner, std::unique_ptr<TabbedCrawlerWidget::Publication> tabs );
+        struct State;
+        std::unique_ptr<State> state_;
+    };
+    std::unique_ptr<Publication> beginPublication();
+    std::shared_ptr<Session> sessionOwner() const { return session_.owner(); }
+    std::unique_ptr<Session::PreparedDocument> prepareFile(
+        std::unique_ptr<PreparedFileSource>& source, bool followFile = false );
+    std::unique_ptr<Session::PreparedDocument> prepareFolder(
+        const QString& path, const std::vector<QString>& files );
+    void recordPublishedDocument( const QString& path, DocumentKind kind, bool opened );
+
     // Re-install the geometry stored in config file
     // (should be done before 'Widget::show()')
     void reloadGeometry();
@@ -162,6 +191,7 @@ class MainWindow : public QMainWindow {
 
   private:
     friend struct MainWindowLiveSaveTestAccess;
+    static QString previousFileContext( const QString& fileName );
 
     enum class ActionInitiator : std::uint8_t { User, WindowDiscard, App };
     enum class CloseRequestScope : std::uint8_t { Single, Batch };

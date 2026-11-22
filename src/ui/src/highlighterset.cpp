@@ -40,6 +40,10 @@
 
 #include <algorithm>
 #include <iterator>
+#include <limits>
+#include <QSet>
+
+#include "configuration.h"
 #include <qcolor.h>
 #include <qnamespace.h>
 #include <random>
@@ -250,12 +254,17 @@ bool HighlighterSet::isEmpty() const
 
 void HighlighterSet::compile() const
 {
+    compile( Configuration::get().regexpEngine() );
+}
+
+void HighlighterSet::compile( RegexpEngine engine ) const
+{
     klogg::vector<RegularExpressionPattern> patterns(
         static_cast<size_t>( highlighterList_.size() ) );
     std::transform( highlighterList_.begin(), highlighterList_.end(), patterns.begin(),
                     []( const Highlighter& hl ) { return hl.expressionPattern(); } );
 
-    compiledExpression_ = std::make_shared<MultiRegularExpression>( patterns );
+    compiledExpression_ = std::make_shared<MultiRegularExpression>( patterns, engine );
 }
 
 HighlighterMatchType HighlighterSet::matchLine( const QString& line,
@@ -452,7 +461,152 @@ HighlighterSetCollection& HighlighterSetCollection::operator=( const Highlighter
 
 HighlighterSetCollection::Snapshot HighlighterSetCollection::snapshot() const
 {
-    return { revision_, highlighters_, activeSets_, quickHighlighters_, quickHighlighterDefaults_ };
+    Snapshot result{ revision_, highlighters_, activeSets_, quickHighlighters_, quickHighlighterDefaults_ };
+    // Detach cache-owning elements on the GUI owner thread. Detaching later in
+    // a worker could copy mutable caches while paint initializes those caches.
+    result.sets.detach();
+    for ( auto& set : result.sets ) set.highlighterList_.detach();
+    return result;
+}
+
+std::optional<HighlighterSetCollection::Snapshot> HighlighterSetCollection::boundedSnapshot() const
+{
+    // Shallow, owner-thread admission first; malformed stored IDs/colors remain
+    // observable, but oversized imports never incur deep cache-owner copies.
+    const Snapshot candidate{ revision_, highlighters_, activeSets_, quickHighlighters_, quickHighlighterDefaults_ };
+    if ( !withinSnapshotLimits( candidate ) ) return {};
+    return snapshot();
+}
+
+HighlighterSet HighlighterSet::fromDescription( QString id, QString name, QList<Highlighter> rules )
+{
+    HighlighterSet result;
+    result.id_ = std::move( id );
+    result.name_ = std::move( name );
+    result.highlighterList_ = std::move( rules );
+    return result;
+}
+
+HighlighterSetCollection::PreparedUpdate::PreparedUpdate( PreparedUpdate&& other ) noexcept
+    : state_( std::move( other.state_ ) ), combined_( std::move( other.combined_ ) ),
+      error_( std::exchange( other.error_, UpdateResult::InvalidArgument ) )
+{
+}
+
+HighlighterSetCollection::PreparedUpdate&
+HighlighterSetCollection::PreparedUpdate::operator=( PreparedUpdate&& other ) noexcept
+{
+    if ( this != &other ) {
+        state_ = std::move( other.state_ );
+        combined_ = std::move( other.combined_ );
+        error_ = std::exchange( other.error_, UpdateResult::InvalidArgument );
+    }
+    return *this;
+}
+
+bool HighlighterSetCollection::withinSnapshotLimits( const Snapshot& candidate )
+{
+    if ( static_cast<size_t>( candidate.sets.size() ) > MaxPreparedSets
+         || static_cast<size_t>( candidate.activeSetIds.size() ) > MaxPreparedSets
+         || static_cast<size_t>( candidate.quickHighlighters.size() ) > MaxSnapshotPalette ) return false;
+    size_t rules = 0;
+    size_t textUnits = 0;
+    const auto admitText = [&]( const QString& text ) {
+        const auto size = static_cast<size_t>( text.size() );
+        if ( size > MaxPreparedTextUnits - textUnits ) return false;
+        textUnits += size;
+        return true;
+    };
+    for ( const auto& set : candidate.sets ) {
+        if ( !admitText( set.id_ ) || !admitText( set.name_ )
+             || static_cast<size_t>( set.highlighterList_.size() ) > MaxPreparedRules - rules ) return false;
+        rules += static_cast<size_t>( set.highlighterList_.size() );
+        for ( const auto& highlighter : set.highlighterList_ )
+            if ( !admitText( highlighter.pattern() ) ) return false;
+    }
+    for ( const auto& id : candidate.activeSetIds ) if ( !admitText( id ) ) return false;
+    for ( const auto& label : candidate.quickHighlighters ) if ( !admitText( label.name ) ) return false;
+    return true;
+}
+
+std::optional<HighlighterSetCollection::UpdateResult>
+HighlighterSetCollection::validateUpdate( const Snapshot& candidate )
+{
+    if ( !withinSnapshotLimits( candidate ) ) return UpdateResult::ResourceLimit;
+    QSet<QString> ids;
+    for ( const auto& set : candidate.sets ) {
+        if ( set.id_.isEmpty() || ids.contains( set.id_ ) ) return UpdateResult::InvalidArgument;
+        ids.insert( set.id_ );
+        for ( const auto& highlighter : set.highlighterList_ ) {
+            if ( !highlighter.foreColor().isValid() || !highlighter.backColor().isValid() )
+                return UpdateResult::InvalidArgument;
+        }
+    }
+    QSet<QString> active;
+    for ( const auto& id : candidate.activeSetIds ) {
+        if ( !ids.contains( id ) || active.contains( id ) ) return UpdateResult::InvalidArgument;
+        active.insert( id );
+    }
+    return {};
+}
+
+HighlighterSetCollection::PreparedUpdate HighlighterSetCollection::prepareUpdate(
+    Snapshot state, RegexpEngine engine )
+{
+    PreparedUpdate result;
+    result.state_ = std::move( state );
+    auto& candidate = result.state_;
+    result.error_ = validateUpdate( candidate );
+    if ( result.error_ ) return result;
+    QSet<QString> active;
+    for ( const auto& id : klogg::as_const( candidate.activeSetIds ) ) active.insert( id );
+
+    // Qt container copies share element storage. Detach both levels before
+    // touching mutable matcher caches on a worker; a const copy alone is not
+    // an independent cache owner.
+    candidate.sets.detach();
+    for ( auto& set : candidate.sets ) {
+        set.highlighterList_.detach();
+        for ( const auto& highlighter : klogg::as_const( set.highlighterList_ ) ) {
+            if ( !highlighter.foreColor().isValid() || !highlighter.backColor().isValid()
+                 || !highlighter.compile().isValid() ) {
+                result.error_ = UpdateResult::InvalidArgument;
+                return result;
+            }
+        }
+        set.compile( engine );
+        if ( !set.compiledExpression_->isValid() ) {
+            result.error_ = UpdateResult::InvalidArgument;
+            return result;
+        }
+        if ( active.contains( set.id_ ) ) result.combined_.highlighterList_.append( set.highlighterList_ );
+    }
+    result.combined_.compile( engine );
+    if ( !result.combined_.compiledExpression_->isValid() ) result.error_ = UpdateResult::InvalidArgument;
+    return result;
+}
+
+HighlighterSetCollection::UpdateResult HighlighterSetCollection::applyPrepared(
+    PreparedUpdate&& prepared, uint64_t expectedRevision )
+{
+    if ( prepared.error_ ) return *prepared.error_;
+    if ( revision_ != expectedRevision ) return UpdateResult::Conflict;
+    auto& candidate = prepared.state_;
+    if ( highlighters_ == candidate.sets && activeSets_ == candidate.activeSetIds
+         && quickHighlighters_ == candidate.quickHighlighters
+         && quickHighlighterDefaults_ == candidate.quickHighlighterDefaults ) {
+        prepared.error_ = UpdateResult::InvalidArgument; // A prepared update is single-use.
+        return UpdateResult::Unchanged;
+    }
+    if ( revision_ == std::numeric_limits<uint64_t>::max() ) return UpdateResult::ResourceLimit;
+    highlighters_.swap( candidate.sets );
+    activeSets_.swap( candidate.activeSetIds );
+    quickHighlighters_.swap( candidate.quickHighlighters );
+    std::swap( quickHighlighterDefaults_, candidate.quickHighlighterDefaults );
+    std::swap( combinedActiveSet_, prepared.combined_ );
+    ++revision_;
+    prepared.error_ = UpdateResult::InvalidArgument;
+    return UpdateResult::Applied;
 }
 
 QList<HighlighterSet> HighlighterSetCollection::highlighterSets() const

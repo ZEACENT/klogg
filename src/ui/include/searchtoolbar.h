@@ -74,6 +74,7 @@ class SearchToolbar : public QWidget {
         bool autoRefresh = false;
         bool keepResults = false;
 
+        RegularExpressionPattern regularExpressionPattern() const;
         bool operator==( const FilterSpec& other ) const;
         bool operator!=( const FilterSpec& other ) const { return !( *this == other ); }
     };
@@ -89,6 +90,12 @@ class SearchToolbar : public QWidget {
     // lifetime and advances on semantic edits, including edits back to an old
     // value; history repopulation and search busy/idle presentation are neutral.
     FilterDraftSnapshot filterDraftSnapshot() const;
+
+    // Owner-thread compare-and-install for coordinated publication. One semantic
+    // revision, no focus, input/option signals or automatic search. The host must
+    // install its applied query/model state in the same non-yielding publication.
+    bool canInstallFilterDraft( const FilterDraftSnapshot& expected, const FilterSpec& candidate ) const;
+    bool installFilterDraft( const FilterDraftSnapshot& expected, const FilterSpec& candidate );
 
     // --- Pattern contract (verbatim move of crawlerwidget.cpp:1976-1978) ---
     // isPlainText = !useRegexp is preserved exactly.
@@ -148,6 +155,8 @@ class SearchToolbar : public QWidget {
     // the dropdown. Shared by CrawlerWidget and FolderCrawlerWidget so folder
     // searches persist across restarts exactly like single-file ones.
     void recordSearch();
+    // Retain the committed query if a later observer has already edited the draft.
+    void recordSearch( const QString& pattern );
 
     // Loads icons for the owned buttons via its own IconLoader.
     void loadIcons();

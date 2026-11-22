@@ -37,6 +37,8 @@
 #include <QMenu>
 #include <QPushButton>
 #include <QScopedValueRollback>
+#include <QSignalBlocker>
+#include <QThread>
 #include <QStringListModel>
 #include <QToolButton>
 #include <algorithm>
@@ -264,6 +266,52 @@ void SearchToolbar::setupConnections()
     connect( searchRefreshButton_, &QPushButton::toggled, this, &SearchToolbar::autoRefreshChanged );
 }
 
+RegularExpressionPattern SearchToolbar::FilterSpec::regularExpressionPattern() const
+{
+    return RegularExpressionPattern( text, matchCase, inverse, boolean, !useRegexp );
+}
+
+bool SearchToolbar::canInstallFilterDraft( const FilterDraftSnapshot& expected,
+                                           const FilterSpec& candidate ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    return !updatingHistoryItems_ && expected.revision == filterDraft_.revision
+        && candidate.text.size() <= searchLineEdit_->lineEdit()->maxLength()
+        && expected.filter == filterDraft_.filter
+        && ( candidate == filterDraft_.filter
+             || filterDraft_.revision != std::numeric_limits<uint64_t>::max() );
+}
+
+bool SearchToolbar::installFilterDraft( const FilterDraftSnapshot& expected, const FilterSpec& candidate )
+{
+    if ( !canInstallFilterDraft( expected, candidate ) ) return false;
+    if ( candidate == filterDraft_.filter ) return true;
+
+    // Block both editor and combo: observing the editor deliberately keeps normal
+    // session/history setters revisioned even when they block only the combo.
+    const QSignalBlocker toolbarSignals{ this };
+    const QSignalBlocker comboSignals{ searchLineEdit_ };
+    const QSignalBlocker editorSignals{ searchLineEdit_->lineEdit() };
+    const QSignalBlocker caseSignals{ matchCaseButton_ };
+    const QSignalBlocker regexpSignals{ useRegexpButton_ };
+    const QSignalBlocker inverseSignals{ inverseButton_ };
+    const QSignalBlocker booleanSignals{ booleanButton_ };
+    const QSignalBlocker refreshSignals{ searchRefreshButton_ };
+    const QSignalBlocker keepSignals{ keepSearchResultsButton_ };
+    searchLineEdit_->setEditText( candidate.text );
+    setMatchCase( candidate.matchCase );
+    setUseRegexp( candidate.useRegexp );
+    setInverse( candidate.inverse );
+    setBoolean( candidate.boolean );
+    setAutoRefresh( candidate.autoRefresh );
+    setKeepResultsChecked( candidate.keepResults );
+    // Internal presentation coupling normally runs in the blocked toggle slot.
+    searchLineCompleter_->setCaseSensitivity( candidate.matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive );
+    predefinedFilters_->clearCurrentSelection();
+    updateFilterDraft();
+    return true;
+}
+
 bool SearchToolbar::FilterSpec::operator==( const FilterSpec& other ) const
 {
     return text == other.text && matchCase == other.matchCase && useRegexp == other.useRegexp
@@ -291,9 +339,10 @@ void SearchToolbar::updateFilterDraft()
 
 RegularExpressionPattern SearchToolbar::currentRegularExpressionPattern() const
 {
-    // Verbatim move of crawlerwidget.cpp:1976-1978.
-    return RegularExpressionPattern( currentSearchText(), isMatchCase(), isInverse(),
-                                     isBoolean(), !isUseRegexp() );
+    // Keep reading the widgets for the native blocked-setter contract; detached
+    // preparation uses the same recipe without accessing a live toolbar.
+    return FilterSpec{ currentSearchText(), isMatchCase(), isUseRegexp(), isInverse(),
+                       isBoolean() }.regularExpressionPattern();
 }
 
 QString SearchToolbar::currentSearchText() const
@@ -459,10 +508,14 @@ void SearchToolbar::setSearchHistory( SavedSearches* savedSearches )
 
 void SearchToolbar::recordSearch()
 {
+    recordSearch( currentSearchText() );
+}
+
+void SearchToolbar::recordSearch( const QString& pattern )
+{
     if ( savedSearches_ == nullptr ) {
         return;
     }
-    const auto pattern = currentSearchText();
     if ( pattern.isEmpty() ) {
         return;
     }

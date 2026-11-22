@@ -6,6 +6,10 @@
 #include <utility>
 
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QFutureWatcher>
+#include "highlighterstatepublisher.h"
+#include "reviewhighlightercodec.h"
 #include <QThread>
 
 #include "abstractcrawlerwidget.h"
@@ -14,6 +18,12 @@
 #include "searchtoolbar.h"
 #include "reviewtransaction.h"
 #include "reviewcontentadapter.h"
+#include "reviewdocumentadapter.h"
+#include "reviewfilteradapter.h"
+#include "reviewfiltercodec.h"
+#include "crawlerwidget.h"
+#include "controlframing.h"
+#include "controlruntime.h"
 
 namespace {
 using klogg::control::RpcError;
@@ -23,6 +33,49 @@ RpcError failure( const RpcRequest& request, int code, const QString& symbol,
                   const QString& message )
 {
     return { request.id, code, message, QJsonObject{ { "code", symbol } }, true, false };
+}
+
+QJsonObject capabilitiesJson()
+{
+    return {
+        { "protocol_version", klogg::control::ControlProtocolVersion },
+        { "methods", QJsonArray{
+            "capabilities.get", "state.get", "tab.get", "pane.list", "pane.get",
+            "source.capture", "source.read", "source.release", "operation.get", "operation.cancel",
+            "transaction.begin", "transaction.get", "transaction.commit", "transaction.abort",
+            "label.list", "label.set", "label.remove", "label.clear",
+            "mark.list", "mark.add", "mark.remove", "mark.replace", "mark.clear",
+            "highlighter.list", "highlighter.replace", "documents.open", "documents.close", "filter.apply" } },
+        { "features", QJsonObject{
+            { "explicit_transaction_writes", QJsonArray{ "labels", "marks", "global_highlighters" } },
+            { "explicit_transaction_filter_draft_reads", true },
+            { "implicit_document_kinds", QJsonArray{ "file", "folder" } },
+            { "explicit_lifecycle_transactions", false }, { "applied_filters", true },
+            { "implicit_filter_kinds", QJsonArray{ "file", "live" } },
+            { "filter_source_policy", "unchanged-snapshot" },
+            { "filter_kept_pane_creation", true }, { "explicit_filter_transactions", false },
+            { "applied_filter_observation", true },
+            { "source_navigation", false }, { "live_lifecycle", false },
+            { "event_subscription", false }, { "durable_transactions", false },
+            { "content_requires_explicit_request", true } } },
+        { "limits", QJsonObject{
+            { "frame_bytes", static_cast<int>( klogg::control::MaxFrameBytes ) },
+            { "transactions", static_cast<int>( ReviewControlAdapter::MaxTransactions ) },
+            { "transaction_lifetime_ms", static_cast<int>( ReviewControlAdapter::TransactionLifetimeMs ) },
+            { "transaction_owners", static_cast<int>( ReviewTransaction::MaxOwners ) },
+            { "snapshots", static_cast<int>( ReviewContentAdapter::MaxSnapshots ) },
+            { "operations", static_cast<int>( ReviewContentAdapter::MaxOperations ) },
+            { "read_rows", static_cast<int>( ReviewContentAdapter::MaxRows ) },
+            { "read_source_bytes", static_cast<int>( ReviewContentAdapter::MaxSourceBytes ) },
+            { "read_text_units", static_cast<int>( ReviewContentAdapter::MaxTextUnits ) },
+            { "read_output_bytes", static_cast<int>( ReviewContentAdapter::MaxOutputBytes ) },
+            { "snapshot_lifetime_ms", static_cast<int>( ReviewContentAdapter::LifetimeMs ) },
+            { "concurrent_document_preparations", ReviewDocumentAdapter::MaxConcurrentPreparations },
+            { "document_preparation_lifetime_ms", static_cast<int>( ReviewDocumentAdapter::PreparationLifetimeMs ) },
+            { "filter_pattern_units", klogg::review::MaxFilterPatternUnits },
+            { "concurrent_filter_preparations", ReviewFilterAdapter::MaxConcurrentPreparations },
+            { "filter_preparation_lifetime_ms", static_cast<int>( ReviewFilterAdapter::PreparationLifetimeMs ) } } }
+    };
 }
 
 QString kindName( DocumentKind kind )
@@ -59,14 +112,44 @@ QJsonObject labelsJson( const ColorLabelsController::Snapshot& snapshot )
     return { { "revision", QString::number( snapshot.revision ) }, { "slots", slots } };
 }
 
-QJsonObject draftJson( const SearchToolbar::FilterDraftSnapshot& snapshot )
+QJsonObject paneJson( const AbstractCrawlerWidget::PaneInventoryEntry& entry )
 {
-    const auto& filter = snapshot.filter;
-    return { { "revision", QString::number( snapshot.revision ) },
-             { "text", filter.text }, { "match_case", filter.matchCase },
-             { "use_regexp", filter.useRegexp }, { "inverse", filter.inverse },
-             { "boolean", filter.boolean }, { "auto_refresh", filter.autoRefresh },
-             { "keep_results", filter.keepResults } };
+    const auto& pane = entry.metadata;
+    QJsonObject result{ { "pane_id", entry.paneId.isEmpty() ? QJsonValue( QJsonValue::Null ) : QJsonValue( entry.paneId ) },
+        { "pane", entry.kind == AbstractCrawlerWidget::Pane::Main ? "main" : "results" },
+        { "title", entry.title }, { "current", entry.current },
+        { "marks_owner_id", entry.marksOwnerId.isEmpty() ? QJsonValue( QJsonValue::Null ) : QJsonValue( entry.marksOwnerId ) },
+        { "coordinates", "presented-model-zero-based" }, { "available", pane.available },
+        { "row_count", QString::number( pane.sourceRowCount.get() ) },
+        { "top_row", pane.topPresentedRow
+            ? QJsonValue( QString::number( pane.topPresentedRow->get() ) ) : QJsonValue( QJsonValue::Null ) },
+        { "follow", pane.follow }, { "wrap", pane.wrap },
+        { "visible", pane.visible }, { "focused", pane.focused } };
+    if ( entry.appliedFilter ) {
+        result.insert( "applied_filter", klogg::review::encodeAppliedFilter( *entry.appliedFilter ) );
+    }
+    return result;
+}
+
+QJsonObject marksJson( const klogg::ReviewMarksSnapshot& state, const QString& ownerId )
+{
+    QJsonArray groups;
+    for ( const auto& group : state.groups ) {
+        QJsonArray rows;
+        for ( const auto row : group.rows ) rows.append( QString::number( row.get() ) );
+        groups.append( QJsonObject{ { "member_path", group.memberPath.isEmpty()
+            ? QJsonValue( QJsonValue::Null ) : QJsonValue( group.memberPath ) }, { "rows", rows } } );
+    }
+    return { { "owner_id", ownerId }, { "revision", QString::number( state.revision ) },
+        { "scope", state.scope == klogg::ReviewMarksSnapshot::Scope::SourceModel ? "source-model" : "folder-tab" },
+        { "coordinates", "stored-source-model-zero-based" }, { "groups", groups } };
+}
+
+bool fitsObservationResponse( const QJsonObject& result )
+{
+    // Leave transport-envelope headroom after JSON escaping.
+    constexpr int MaxObservationResponseBytes = 512 * 1024;
+    return QJsonDocument( result ).toJson( QJsonDocument::Compact ).size() <= MaxObservationResponseBytes;
 }
 
 using Status = ReviewTransaction::Status;
@@ -81,6 +164,12 @@ struct Target {
     bool filterRead = false;
 };
 
+struct MarkTarget {
+    QString tabId;
+    QString ownerId;
+    QPointer<QObject> owner;
+};
+
 struct Transaction {
     QString id;
     QString error;
@@ -88,7 +177,28 @@ struct Transaction {
     std::optional<qint64> retiredAt;
     ReviewTransaction edits;
     std::vector<Target> targets;
+    std::vector<MarkTarget> markTargets;
+    bool observingPreparation = false;
 };
+
+bool pending( Status status )
+{
+    return status == Status::Open || status == Status::Preparing;
+}
+
+QString transactionError( const Transaction& transaction )
+{
+    if ( !transaction.error.isEmpty() ) return transaction.error;
+    switch ( transaction.edits.status() ) {
+    case Status::Conflict: return "REVISION_CONFLICT";
+    case Status::TargetClosed: return "TARGET_CLOSED";
+    case Status::InvalidArgument: return "INVALID_PARAMS";
+    case Status::ResourceLimit: return "RESOURCE_LIMIT";
+    case Status::PreparationFailed: return "PREPARATION_FAILED";
+    case Status::Aborted: return "TRANSACTION_ABORTED";
+    default: return {};
+    }
+}
 
 QString statusName( const Transaction& transaction )
 {
@@ -99,6 +209,8 @@ QString statusName( const Transaction& transaction )
     if ( transaction.error == QLatin1String( "RESOURCE_LIMIT" ) ) return "resource_limit";
     switch ( transaction.edits.status() ) {
     case Status::Open: return "open";
+    case Status::Preparing: return "preparing";
+    case Status::PreparationFailed: return "preparation_failed";
     case Status::Committed: return "committed";
     case Status::Aborted: return "aborted";
     case Status::Conflict: return "conflict";
@@ -113,26 +225,15 @@ QJsonObject transactionJson( const Transaction& transaction )
 {
     QJsonObject result{ { "status", statusName( transaction ) } };
     if ( !transaction.id.isEmpty() ) result.insert( "transaction_id", transaction.id );
+    const auto error = transactionError( transaction );
+    if ( !error.isEmpty() ) result.insert( "error", QJsonObject{ { "code", error } } );
     return result;
 }
 
 DecodedResponse transactionResult( const RpcRequest& request, const Transaction& transaction )
 {
-    if ( transaction.error.isEmpty()
-         && ( transaction.edits.status() == Status::Open
-              || transaction.edits.status() == Status::Committed ) ) {
-        return transactionJson( transaction );
-    }
-    auto code = transaction.error;
-    if ( code.isEmpty() ) {
-        switch ( transaction.edits.status() ) {
-        case Status::Conflict: code = "REVISION_CONFLICT"; break;
-        case Status::TargetClosed: code = "TARGET_CLOSED"; break;
-        case Status::InvalidArgument: code = "INVALID_PARAMS"; break;
-        case Status::ResourceLimit: code = "RESOURCE_LIMIT"; break;
-        default: code = "TRANSACTION_ABORTED"; break;
-        }
-    }
+    const auto code = transactionError( transaction );
+    if ( code.isEmpty() ) return transactionJson( transaction );
     return failure( request, code == QLatin1String( "INVALID_PARAMS" ) ? -32602 : -32000,
                     code, QStringLiteral( "Review transaction did not commit" ) );
 }
@@ -145,6 +246,14 @@ bool onlyKeys( const QJsonObject& params, std::initializer_list<const char*> all
              } ) ) return false;
     }
     return true;
+}
+
+std::optional<uint64_t> canonicalUnsigned( const QJsonValue& value )
+{
+    bool valid = false;
+    const auto number = value.toString().toULongLong( &valid );
+    if ( !value.isString() || !valid || QString::number( number ) != value.toString() ) return {};
+    return number;
 }
 
 struct ResolvedTab {
@@ -168,6 +277,16 @@ std::optional<ResolvedTab> resolveTab( const ReviewControlAdapter::WindowProvide
     return {};
 }
 
+klogg::ReviewMarksOwner* resolveMarkOwner( const ResolvedTab& tab, const QString& ownerId )
+{
+    auto* document = dynamic_cast<AbstractCrawlerWidget*>( tab.tab.widget.data() );
+    if ( !document ) return nullptr;
+    for ( auto* owner : document->reviewMarksOwners() ) {
+        if ( owner && owner->reviewMarksId() == ownerId ) return owner;
+    }
+    return nullptr;
+}
+
 void captureTarget( Transaction& transaction, const ResolvedTab& tab, bool filter )
 {
     auto found = std::find_if( transaction.targets.begin(), transaction.targets.end(),
@@ -189,7 +308,7 @@ void captureTarget( Transaction& transaction, const ResolvedTab& tab, bool filte
 DecodedResponse commit( const RpcRequest& request, Transaction& transaction,
                         const ReviewControlAdapter::WindowProvider& windows )
 {
-    if ( transaction.edits.status() == Status::Open ) {
+    if ( pending( transaction.edits.status() ) ) {
         for ( const auto& target : transaction.targets ) {
             const auto current = resolveTab( windows, target.tabId );
             if ( !current || current->tab.widget != target.widget
@@ -200,7 +319,18 @@ DecodedResponse commit( const RpcRequest& request, Transaction& transaction,
                 return transactionResult( request, transaction );
             }
         }
-        transaction.edits.commit();
+        for ( const auto& target : transaction.markTargets ) {
+            const auto tab = resolveTab( windows, target.tabId );
+            auto* owner = tab ? resolveMarkOwner( *tab, target.ownerId ) : nullptr;
+            if ( !owner || owner->reviewMarksObject() != target.owner ) {
+                transaction.edits.abort();
+                transaction.error = "TARGET_CLOSED";
+                return transactionResult( request, transaction );
+            }
+        }
+        transaction.edits.commit( [&] {
+            if ( transaction.edits.committedHighlighters() ) HighlighterStatePublisher::instance().publish();
+        } );
     }
     return transactionResult( request, transaction );
 }
@@ -209,23 +339,43 @@ DecodedResponse commit( const RpcRequest& request, Transaction& transaction,
 struct ReviewControlAdapter::State {
     // Terminal records allow a lost commit response to be queried/repeated
     // without replay. Only terminal records may be evicted to admit new work.
-    explicit State( Clock clock ) : now( std::move( clock ) ), content( now ) {}
+    State( Clock clock, WindowProvider windows )
+        : now( std::move( clock ) ), content( now ), documents( std::move( windows ), content ),
+          filters( content ) {}
     Clock now;
     ReviewContentAdapter content;
+    ReviewDocumentAdapter documents;
+    ReviewFilterAdapter filters;
     std::map<QString, std::shared_ptr<Transaction>> transactions;
+
+    std::shared_ptr<Transaction> begin()
+    {
+        if ( transactions.size() >= MaxTransactions ) {
+            const auto retired = std::find_if( transactions.begin(), transactions.end(),
+                []( const auto& item ) { return !pending( item.second->edits.status() ); } );
+            if ( retired == transactions.end() ) return {};
+            transactions.erase( retired );
+        }
+        auto transaction = std::make_shared<Transaction>();
+        transaction->id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+        transaction->createdAt = now();
+        transactions.emplace( transaction->id, transaction );
+        return transaction;
+    }
 
     void expire()
     {
         const auto tick = now();
         for ( auto it = transactions.begin(); it != transactions.end(); ) {
             auto& transaction = *it->second;
-            if ( transaction.edits.status() == Status::Open
+            if ( pending( transaction.edits.status() )
                  && tick - transaction.createdAt >= TransactionLifetimeMs ) {
                 transaction.edits.abort();
                 transaction.error = "TRANSACTION_EXPIRED";
                 transaction.targets.clear();
+                transaction.markTargets.clear();
             }
-            if ( transaction.edits.status() != Status::Open ) {
+            if ( !pending( transaction.edits.status() ) ) {
                 if ( !transaction.retiredAt ) transaction.retiredAt = tick;
                 if ( tick - *transaction.retiredAt >= TransactionLifetimeMs ) {
                     it = transactions.erase( it );
@@ -246,7 +396,7 @@ ReviewControlAdapter::ReviewControlAdapter( WindowProvider windows, QObject* par
 }
 
 ReviewControlAdapter::ReviewControlAdapter( WindowProvider windows, Clock now, QObject* parent )
-    : QObject( parent ), state_( std::make_unique<State>( std::move( now ) ) ),
+    : QObject( parent ), state_( std::make_unique<State>( std::move( now ), windows ) ),
       windows_( std::move( windows ) )
 {
 }
@@ -257,9 +407,11 @@ void ReviewControlAdapter::reset()
     for ( auto& item : state_->transactions ) item.second->edits.abort();
     state_->transactions.clear();
     state_->content.reset();
+    state_->documents.reset();
+    state_->filters.reset();
 }
 
-ReviewControlAdapter::~ReviewControlAdapter() = default;
+ReviewControlAdapter::~ReviewControlAdapter() { reset(); }
 
 DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
 {
@@ -273,9 +425,25 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             transaction->error = code;
             transaction->edits.abort();
         }
-        return failure( request, code == QLatin1String( "INVALID_PARAMS" ) ? -32602 : -32000,
-                        code, QStringLiteral( "Control request rejected" ) );
+        const auto number = code == QLatin1String( "INVALID_PARAMS" ) ? -32602
+            : code == QLatin1String( "METHOD_NOT_FOUND" ) ? -32601 : -32000;
+        return failure( request, number, code, QStringLiteral( "Control request rejected" ) );
     };
+    // Bind explicit transaction context before every route, including malformed
+    // observations and unknown methods. A rejected suffix cannot leave staged
+    // writes silently committable just because dispatch returned early.
+    const auto transactionId = params.value( "transaction_id" );
+    if ( !transactionId.isUndefined() ) {
+        if ( !transactionId.isString() || transactionId.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
+        const auto found = state_->transactions.find( transactionId.toString() );
+        if ( found == state_->transactions.end() ) return reject( "TRANSACTION_NOT_FOUND" );
+        transaction = found->second;
+    }
+
+    if ( method == QLatin1String( "capabilities.get" ) ) {
+        if ( !params.isEmpty() ) return reject( "INVALID_PARAMS" );
+        return capabilitiesJson();
+    }
 
     if ( method == QLatin1String( "state.get" ) ) {
         if ( !params.isEmpty() ) return reject( "INVALID_PARAMS" );
@@ -295,67 +463,146 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
         return QJsonObject{ { "scope", "window-tab-inventory" }, { "windows", windows } };
     }
 
-    if ( method == QLatin1String( "source.read" ) || method == QLatin1String( "source.release" )
-         || method == QLatin1String( "operation.get" ) || method == QLatin1String( "operation.cancel" ) )
-        return state_->content.dispatch( request );
+    if ( method == QLatin1String( "documents.open" ) || method == QLatin1String( "documents.close" ) ) {
+        if ( transaction ) return reject( "INVALID_PARAMS" );
+        return state_->documents.dispatch( request );
+    }
 
-    const bool captureSource = method == QLatin1String( "source.capture" );
-    if ( method == QLatin1String( "pane.get" ) || captureSource ) {
-        // Presentation observation is live, not a transactional source address.
-        // Only an explicit capture acquires a source lease; ordinary metadata
-        // never reads payload or rebuilds layout.
-        if ( captureSource ? !onlyKeys( params, { "tab_id", "pane", "scope" } )
-                           : !onlyKeys( params, { "tab_id", "pane" } ) )
+    if ( method == QLatin1String( "filter.apply" ) ) {
+        if ( transaction || !onlyKeys( params, { "tab_id", "filter", "expected_revision" } ) )
             return reject( "INVALID_PARAMS" );
         const auto tabId = params.value( "tab_id" );
-        const auto paneName = params.value( "pane" ).toString();
-        if ( !tabId.isString() || tabId.toString().isEmpty()
-             || ( paneName != QLatin1String( "main" ) && paneName != QLatin1String( "results" ) ) )
-            return reject( "INVALID_PARAMS" );
+        if ( !tabId.isString() || tabId.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
+        const auto tab = resolveTab( windows_, tabId.toString() );
+        if ( !tab ) return reject( "TARGET_NOT_FOUND" );
+        const QPointer<CrawlerWidget> widget{ qobject_cast<CrawlerWidget*>( tab->tab.widget.data() ) };
+        if ( !widget || !tab->controls.filter
+             || ( tab->tab.kind != DocumentKind::File && tab->tab.kind != DocumentKind::AdbLogcat ) )
+            return reject( "UNSUPPORTED_SOURCE" );
+        const auto draft = tab->controls.filter->filterDraftSnapshot();
+        auto decoded = klogg::review::decodeFilterPatch( params.value( "filter" ), draft.filter );
+        if ( const auto* error = std::get_if<klogg::review::FilterDecodeError>( &decoded ) )
+            return reject( *error == klogg::review::FilterDecodeError::ResourceLimit ? "RESOURCE_LIMIT" : "INVALID_PARAMS" );
+        if ( params.contains( "expected_revision" ) ) {
+            const auto expected = canonicalUnsigned( params.value( "expected_revision" ) );
+            if ( !expected ) return reject( "INVALID_PARAMS" );
+            if ( *expected != draft.revision ) return reject( "REVISION_CONFLICT" );
+        }
+        ReviewFilterAdapter::Target target{ tab->windowId, tab->tab.tabId, widget,
+            [windows = windows_, id = tab->tab.tabId, windowId = tab->windowId, widget] {
+                const auto current = resolveTab( windows, id );
+                return widget && current && current->windowId == windowId
+                    && current->tab.widget.data() == widget.data();
+            } };
+        return state_->filters.apply( request, std::move( target ), std::get<SearchToolbar::FilterSpec>( decoded ) );
+    }
+
+    if ( method == QLatin1String( "source.read" ) || method == QLatin1String( "source.release" )
+         || method == QLatin1String( "operation.get" ) || method == QLatin1String( "operation.cancel" ) ) {
+        if ( transaction ) return reject( "INVALID_PARAMS" );
+        return state_->content.dispatch( request );
+    }
+
+    const bool captureSource = method == QLatin1String( "source.capture" );
+    const bool listPanes = method == QLatin1String( "pane.list" );
+    if ( method == QLatin1String( "pane.get" ) || captureSource || listPanes ) {
+        // The aliases remain convenient live observations. An explicit pane ID
+        // resolves actual membership and never follows a human page switch.
+        const bool keysValid = listPanes ? onlyKeys( params, { "tab_id" } )
+            : captureSource ? onlyKeys( params, { "tab_id", "pane", "pane_id", "scope" } )
+                            : onlyKeys( params, { "tab_id", "pane", "pane_id" } );
+        if ( !keysValid ) return reject( "INVALID_PARAMS" );
+        const auto tabId = params.value( "tab_id" );
+        if ( !tabId.isString() || tabId.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
         const auto tab = resolveTab( windows_, tabId.toString() );
         if ( !tab ) return reject( "TARGET_NOT_FOUND" );
         const auto* document = dynamic_cast<const AbstractCrawlerWidget*>( tab->tab.widget.data() );
-        const auto paneId = paneName == QLatin1String( "main" )
-            ? AbstractCrawlerWidget::Pane::Main : AbstractCrawlerWidget::Pane::Results;
+        const auto panes = document->paneInventory();
+        if ( listPanes ) {
+            constexpr size_t MaxObservedPanes = 128;
+            if ( panes.size() > MaxObservedPanes ) return reject( "RESOURCE_LIMIT" );
+            QJsonArray items;
+            for ( const auto& pane : panes ) items.append( paneJson( pane ) );
+            const QJsonObject result{ { "tab_id", tabId }, { "panes", items } };
+            if ( !fitsObservationResponse( result ) ) return reject( "RESOURCE_LIMIT" );
+            return result;
+        }
+        if ( params.contains( "pane" ) == params.contains( "pane_id" ) ) return reject( "INVALID_PARAMS" );
+        AbstractCrawlerWidget::PaneInventoryEntry selected;
+        if ( params.contains( "pane_id" ) ) {
+            const auto id = params.value( "pane_id" );
+            if ( !id.isString() || id.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
+            const auto found = std::find_if( panes.begin(), panes.end(), [&]( const auto& pane ) {
+                return pane.paneId == id.toString();
+            } );
+            if ( found == panes.end() ) return reject( "PANE_NOT_FOUND" );
+            selected = *found;
+        }
+        else {
+            const auto name = params.value( "pane" ).toString();
+            if ( name != QLatin1String( "main" ) && name != QLatin1String( "results" ) ) return reject( "INVALID_PARAMS" );
+            selected.kind = name == QLatin1String( "main" )
+                ? AbstractCrawlerWidget::Pane::Main : AbstractCrawlerWidget::Pane::Results;
+            const auto found = std::find_if( panes.begin(), panes.end(), [&]( const auto& pane ) {
+                return pane.kind == selected.kind && pane.current;
+            } );
+            if ( found != panes.end() ) selected = *found;
+        }
         if ( captureSource ) {
             const auto scope = params.value( "scope" ).toString();
-            // Raw main-pane providers have no match membership and intentionally
-            // ignore SnapshotScope internally. Do not advertise all source rows
-            // as match-only evidence through the public control protocol.
+            // Raw sources have no match membership; do not label all rows as matches.
             if ( ( scope != QLatin1String( "presented" ) && scope != QLatin1String( "matches" ) )
-                 || ( scope == QLatin1String( "matches" ) && paneId == AbstractCrawlerWidget::Pane::Main ) )
+                 || ( scope == QLatin1String( "matches" ) && selected.kind == AbstractCrawlerWidget::Pane::Main ) )
                 return reject( "INVALID_PARAMS" );
             try {
-                return state_->content.capture( request, document->createPaneSnapshot( paneId,
+                return state_->content.capture( request, document->createPaneSnapshot( selected.paneId,
                     scope == QLatin1String( "presented" ) ? klogg::SnapshotScope::PresentedRows
                                                           : klogg::SnapshotScope::Matches ) );
             }
             catch ( ... ) { return reject( "SOURCE_CAPTURE_FAILED" ); }
         }
-        const auto pane = document->paneMetadata( paneId );
-        return QJsonObject{ { "tab_id", tabId }, { "pane", paneName },
-            { "coordinates", "presented-model-zero-based" }, { "available", pane.available },
-            { "row_count", QString::number( pane.sourceRowCount.get() ) },
-            { "top_row", pane.topPresentedRow
-                ? QJsonValue( QString::number( pane.topPresentedRow->get() ) ) : QJsonValue( QJsonValue::Null ) },
-            { "follow", pane.follow }, { "wrap", pane.wrap },
-            { "visible", pane.visible }, { "focused", pane.focused } };
+        auto result = paneJson( selected );
+        result.insert( "tab_id", tabId );
+        if ( !fitsObservationResponse( result ) ) return reject( "RESOURCE_LIMIT" );
+        return result;
     }
 
     if ( method == QLatin1String( "transaction.begin" ) ) {
         if ( !params.isEmpty() ) return reject( "INVALID_PARAMS" );
-        if ( state_->transactions.size() >= MaxTransactions ) {
-            const auto retired = std::find_if( state_->transactions.begin(), state_->transactions.end(),
-                []( const auto& item ) { return item.second->edits.status() != Status::Open; } );
-            if ( retired == state_->transactions.end() ) return reject( "RESOURCE_LIMIT" );
-            state_->transactions.erase( retired );
-        }
-        transaction = std::make_shared<Transaction>();
-        transaction->id = QUuid::createUuid().toString( QUuid::WithoutBraces );
-        transaction->createdAt = state_->now();
-        state_->transactions.emplace( transaction->id, transaction );
+        transaction = state_->begin();
+        if ( !transaction ) return reject( "RESOURCE_LIMIT" );
         return transactionJson( *transaction );
     }
+
+    const auto finishCommit = [&]( const std::shared_ptr<Transaction>& candidate ) {
+        // Publication observers may destroy this adapter. Do not dereference it
+        // after commit unless the weak lifetime guard still permits doing so.
+        QPointer<ReviewControlAdapter> self( this );
+        const auto windows = windows_;
+        auto response = commit( request, *candidate, windows );
+        if ( self && candidate->edits.status() == Status::Preparing && !candidate->observingPreparation ) {
+            const auto future = candidate->edits.preparationFuture();
+            Q_ASSERT( future );
+            auto* watcher = new QFutureWatcher<ReviewTransaction::Preparation>( self );
+            QPointer<QObject> watcherGuard( watcher );
+            candidate->observingPreparation = true;
+            // Retain no request payload while compiling. The candidate owns its
+            // admitted semantic state, independently of transport/socket lifetime.
+            const RpcRequest completionRequest{ request.id, "transaction.commit", {} };
+            connect( watcher, &QFutureWatcherBase::finished, self,
+                [self, candidate, watcherGuard, completionRequest] {
+                    if ( !self ) return;
+                    self->state_->expire();
+                    const auto currentWindows = self->windows_;
+                    if ( candidate->edits.status() == Status::Preparing )
+                        commit( completionRequest, *candidate, currentWindows );
+                    if ( self ) Q_EMIT self->preparationFinished( candidate->id );
+                    if ( watcherGuard ) watcherGuard->deleteLater();
+                } );
+            watcher->setFuture( *future );
+        }
+        return response;
+    };
 
     const bool get = method == QLatin1String( "transaction.get" );
     const bool commitRequest = method == QLatin1String( "transaction.commit" );
@@ -363,21 +610,21 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
     const bool lifecycle = get || commitRequest || abort;
     const bool tabGet = method == QLatin1String( "tab.get" );
     const bool labelList = method == QLatin1String( "label.list" );
+    const bool markList = method == QLatin1String( "mark.list" );
+    const bool markAdd = method == QLatin1String( "mark.add" );
+    const bool markRemove = method == QLatin1String( "mark.remove" );
+    const bool markReplace = method == QLatin1String( "mark.replace" );
+    const bool markClear = method == QLatin1String( "mark.clear" );
+    const bool markWrite = markAdd || markRemove || markReplace || markClear;
     const bool labelSet = method == QLatin1String( "label.set" );
     const bool labelRemove = method == QLatin1String( "label.remove" );
     const bool labelClear = method == QLatin1String( "label.clear" );
     const bool write = labelSet || labelRemove || labelClear;
-    if ( !lifecycle && !tabGet && !labelList && !write ) {
-        return failure( request, -32601, "METHOD_NOT_FOUND", "Unknown control method" );
-    }
-    const auto transactionId = params.value( "transaction_id" );
-    if ( lifecycle || !transactionId.isUndefined() ) {
-        if ( !transactionId.isString() || transactionId.toString().isEmpty() )
-            return reject( "INVALID_PARAMS" );
-        const auto found = state_->transactions.find( transactionId.toString() );
-        if ( found == state_->transactions.end() ) return reject( "TRANSACTION_NOT_FOUND" );
-        transaction = found->second;
-    }
+    const bool highlighterList = method == QLatin1String( "highlighter.list" );
+    const bool highlighterReplace = method == QLatin1String( "highlighter.replace" );
+    if ( !lifecycle && !tabGet && !labelList && !markList && !markWrite && !write && !highlighterList && !highlighterReplace )
+        return reject( "METHOD_NOT_FOUND" );
+    if ( lifecycle && !transaction ) return reject( "INVALID_PARAMS" );
     if ( lifecycle ) {
         if ( !onlyKeys( params, { "transaction_id" } ) ) return reject( "INVALID_PARAMS" );
         if ( get ) return transactionJson( *transaction );
@@ -387,11 +634,43 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             transaction->edits.abort();
             return transactionJson( *transaction );
         }
-        return commit( request, *transaction, windows_ );
+        return finishCommit( transaction );
     }
     if ( transaction && transaction->edits.status() != Status::Open ) {
+        if ( transaction->edits.status() == Status::Preparing ) return reject( "TRANSACTION_PREPARING" );
         if ( transaction->edits.status() == Status::Committed )
             return reject( "TRANSACTION_COMMITTED" );
+        return transactionResult( request, *transaction );
+    }
+    if ( highlighterList || highlighterReplace ) {
+        if ( highlighterList ? !onlyKeys( params, { "transaction_id" } )
+            : !onlyKeys( params, { "transaction_id", "expected_revision", "sets", "active_set_ids" } ) )
+            return reject( "INVALID_PARAMS" );
+        if ( highlighterList ) {
+            const auto state = transaction ? transaction->edits.highlighters()
+                : HighlighterSetCollection::get().boundedSnapshot();
+            if ( !state ) return reject( "RESOURCE_LIMIT" );
+            const auto result = klogg::review::encodeHighlighters( *state );
+            if ( !fitsObservationResponse( result ) ) return reject( "RESOURCE_LIMIT" );
+            return result;
+        }
+        auto decoded = klogg::review::decodeHighlighters( params.value( "sets" ), params.value( "active_set_ids" ) );
+        if ( const auto* error = std::get_if<klogg::review::HighlighterDecodeError>( &decoded ) )
+            return reject( *error == klogg::review::HighlighterDecodeError::ResourceLimit ? "RESOURCE_LIMIT" : "INVALID_PARAMS" );
+        std::optional<uint64_t> expected;
+        if ( params.contains( "expected_revision" ) ) {
+            expected = canonicalUnsigned( params.value( "expected_revision" ) );
+            if ( !expected ) return reject( "INVALID_PARAMS" );
+        }
+        const bool autocommit = !transaction;
+        if ( autocommit ) transaction = state_->begin();
+        if ( !transaction ) return reject( "RESOURCE_LIMIT" );
+        const auto base = transaction->edits.highlighters();
+        if ( !base ) return transactionResult( request, *transaction );
+        if ( expected && *expected != base->revision ) return reject( "REVISION_CONFLICT" );
+        auto& change = std::get<klogg::review::HighlighterReplacement>( decoded );
+        transaction->edits.stageHighlighters( std::move( change.sets ), std::move( change.activeSetIds ) );
+        if ( autocommit ) return finishCommit( transaction );
         return transactionResult( request, *transaction );
     }
     const auto tabId = params.value( "tab_id" );
@@ -399,6 +678,77 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
     const auto tab = resolveTab( windows_, tabId.toString() );
     if ( !tab ) return reject( "TARGET_NOT_FOUND" );
     const auto controls = tab->controls;
+
+    if ( markList || markWrite ) {
+        const bool validKeys = markList ? onlyKeys( params, { "tab_id", "owner_id", "transaction_id" } )
+            : markClear ? onlyKeys( params, { "tab_id", "owner_id", "transaction_id", "expected_revision" } )
+            : onlyKeys( params, { "tab_id", "owner_id", "transaction_id", "expected_revision", "snapshot_id", "rows" } );
+        if ( !validKeys ) return reject( "INVALID_PARAMS" );
+        const auto ownerId = params.value( "owner_id" );
+        if ( !ownerId.isString() || ownerId.toString().isEmpty() ) return reject( "INVALID_PARAMS" );
+        auto* owner = resolveMarkOwner( *tab, ownerId.toString() );
+        if ( !owner ) return reject( "MARK_OWNER_NOT_FOUND" );
+        std::optional<uint64_t> expected;
+        if ( params.contains( "expected_revision" ) ) {
+            expected = canonicalUnsigned( params.value( "expected_revision" ) );
+            if ( !expected ) return reject( "INVALID_PARAMS" );
+        }
+        ReviewTransaction::MarkEdit edit;
+        if ( markWrite ) {
+            using Kind = ReviewTransaction::MarkEdit::Kind;
+            edit.kind = markAdd ? Kind::Add : markRemove ? Kind::Remove : markReplace ? Kind::Replace : Kind::Clear;
+            if ( !markClear ) {
+                const auto snapshotId = params.value( "snapshot_id" );
+                const auto rows = params.value( "rows" );
+                if ( !snapshotId.isString() || snapshotId.toString().isEmpty() || !rows.isArray() )
+                    return reject( "INVALID_PARAMS" );
+                const auto values = rows.toArray();
+                if ( static_cast<uint64_t>( values.size() ) > ReviewContentAdapter::MaxRows ) return reject( "RESOURCE_LIMIT" );
+                if ( values.isEmpty() ) return reject( "INVALID_PARAMS" );
+                std::vector<LineNumber> ordinals;
+                ordinals.reserve( static_cast<size_t>( values.size() ) );
+                for ( const auto& value : values ) {
+                    const auto row = canonicalUnsigned( value );
+                    if ( !row ) return reject( "INVALID_PARAMS" );
+                    ordinals.push_back( LineNumber{ *row } );
+                }
+                const auto resolved = state_->content.resolveRows( snapshotId.toString(), ordinals );
+                if ( const auto* error = std::get_if<ReviewContentAdapter::RowResolutionError>( &resolved ) ) {
+                    using Error = ReviewContentAdapter::RowResolutionError;
+                    switch ( *error ) {
+                    case Error::SnapshotNotFound: return reject( "SNAPSHOT_NOT_FOUND" );
+                    case Error::InvalidArgument: return reject( "INVALID_PARAMS" );
+                    case Error::ResourceLimit: return reject( "RESOURCE_LIMIT" );
+                    case Error::SourceUnavailable: return reject( "SOURCE_UNAVAILABLE" );
+                    }
+                }
+                for ( const auto& row : std::get<ReviewContentAdapter::RowMetadata>( resolved ) ) edit.rows.push_back( row.identity );
+            }
+        }
+        const bool autocommit = markWrite && !transaction;
+        if ( autocommit ) transaction = state_->begin();
+        if ( autocommit && !transaction ) return reject( "RESOURCE_LIMIT" );
+        const auto state = transaction ? transaction->edits.marks( *owner ) : owner->reviewMarksSnapshot();
+        if ( !state ) return transaction ? transactionResult( request, *transaction ) : reject( "RESOURCE_LIMIT" );
+        if ( transaction ) {
+            const auto& targets = transaction->markTargets;
+            const auto found = std::find_if( targets.begin(), targets.end(), [&]( const auto& target ) {
+                return target.tabId == tabId.toString() && target.ownerId == ownerId.toString();
+            } );
+            if ( found == targets.end() ) transaction->markTargets.push_back(
+                { tabId.toString(), ownerId.toString(), owner->reviewMarksObject() } );
+        }
+        if ( markWrite ) {
+            if ( expected && *expected != state->revision ) return reject( "REVISION_CONFLICT" );
+            transaction->edits.stageMarks( *owner, edit );
+            if ( autocommit ) return finishCommit( transaction );
+            return transactionResult( request, *transaction );
+        }
+        auto result = marksJson( *state, ownerId.toString() );
+        result.insert( "tab_id", tabId );
+        if ( !fitsObservationResponse( result ) ) return reject( "RESOURCE_LIMIT" );
+        return result;
+    }
 
     if ( !write ) {
         if ( !onlyKeys( params, { "tab_id", "transaction_id" } ) ) return reject( "INVALID_PARAMS" );
@@ -419,7 +769,7 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             const auto snapshot = transaction ? transaction->edits.filterDraft( *controls.filter )
                 : std::optional<SearchToolbar::FilterDraftSnapshot>( controls.filter->filterDraftSnapshot() );
             if ( !snapshot ) return transactionResult( request, *transaction );
-            filter = draftJson( *snapshot );
+            filter = klogg::review::encodeFilterDraft( *snapshot );
         }
         if ( transaction ) captureTarget( *transaction, *tab, true );
         auto value = tabMetadata( tab->tab, tab->windowId );
@@ -463,12 +813,8 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
     }
     std::optional<uint64_t> expectedRevision;
     if ( params.contains( "expected_revision" ) ) {
-        const auto value = params.value( "expected_revision" );
-        bool valid = false;
-        const auto number = value.toString().toULongLong( &valid );
-        if ( !value.isString() || !valid || QString::number( number ) != value.toString() )
-            return reject( "INVALID_PARAMS" );
-        expectedRevision = number;
+        expectedRevision = canonicalUnsigned( params.value( "expected_revision" ) );
+        if ( !expectedRevision ) return reject( "INVALID_PARAMS" );
     }
     const bool autocommit = !transaction;
     if ( autocommit ) transaction = std::make_shared<Transaction>();

@@ -65,6 +65,8 @@
 #include "folderfilteredview.h"
 #include "foldersearchengine.h"
 #include "foldersearchresults.h"
+#include "highlighterset.h"
+#include "highlighterstatepublisher.h"
 #include "linetypes.h"
 #include "logmainview.h"
 #include "overview.h"
@@ -79,6 +81,8 @@
 #include "searchablelogdata.h"
 #include "shortcuts.h"
 #include "test_utils.h"
+#include "ownedtaskpoolgate.h"
+#include "logdata.h"
 #include "viewinterface.h"
 
 namespace {
@@ -309,6 +313,16 @@ struct FolderCrawlerWidget::access_by<FolderViewTestAccess> {
         return widget->engine_;
     }
 
+    static std::vector<std::shared_ptr<LogData>> mainSources( const FolderCrawlerWidget* widget )
+    {
+        std::vector<std::shared_ptr<LogData>> sources{
+            widget->placeholderData_, widget->currentMainData_, widget->pendingMainData_ };
+        for ( auto it = widget->mainViewCache_.cbegin(); it != widget->mainViewCache_.cend(); ++it ) {
+            sources.push_back( it.value().first );
+        }
+        return sources;
+    }
+
     static quint64 searchGeneration( const FolderCrawlerWidget* widget )
     {
         return widget->currentSearchGeneration_;
@@ -412,6 +426,67 @@ class NoProviderFolderMarkProbeView final : public FolderFilteredView {
   private:
     mutable std::vector<LineNumber> probedLines_;
 };
+
+TEST_CASE( "Folder document retirement covers kept views and pending current cached sources",
+           "[folder][document-retirement]" )
+{
+    using Access = FolderCrawlerWidget::access_by<FolderViewTestAccess>;
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto a = writeFile( root, "a.log", "ERROR one\n" );
+    const auto b = writeFile( root, "b.log", "ERROR two\n" );
+    const auto c = writeFile( root, "c.log", "ERROR three\n" );
+    FolderCrawlerWidget widget;
+    widget.setFolder( root.path(), { a, b, c } );
+    widget.searchFor( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitUiState( [&] { return !widget.isSearchActive(); } ) );
+    auto* firstPane = widget.filteredView();
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitUiState( [&] { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.resultsTabs()->count() == 2 );
+    REQUIRE( widget.folderResults()->sourceForLine( 1_lnum ).filePath == a );
+    REQUIRE( widget.folderResults()->sourceForLine( 3_lnum ).filePath == b );
+    REQUIRE( widget.folderResults()->sourceForLine( 5_lnum ).filePath == c );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
+    selectResultRowAndWaitForFile( widget, 3_lnum, b );
+    REQUIRE( widget.currentMainFilePath() == b );
+    auto pattern = std::make_shared<QuickFindPattern>();
+    pattern->changeSearchPattern( QStringLiteral( "ERROR" ) );
+    widget.setQuickFindPattern( pattern );
+    widget.selectResultRow( 5_lnum ); // No event turn: this third source is pending.
+    REQUIRE_FALSE( FolderViewTestAccess::pendingMainData( &widget ).expired() );
+    const auto sources = Access::mainSources( &widget );
+    ScopedOwnedTaskPoolGate gate;
+    REQUIRE( gate.entered.tryAcquire( 1, 5000 ) );
+    widget.mainView()->searchForward();
+    firstPane->searchForward();
+    widget.filteredView()->searchForward();
+    const auto pending = widget.retireResources();
+    REQUIRE( pending.size() >= 8 ); // Engine, three views and four distinct indexed sources.
+    CHECK_FALSE( widget.isSearchActive() );
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( QStringLiteral( "late request" ) );
+    widget.selectResultRow( 1_lnum );
+    CHECK( widget.resultsTabs()->count() == 2 );
+    CHECK( widget.currentMainFilePath() == b );
+    Access::publishProgress( &widget, 17, 50 );
+    CHECK_FALSE( Access::statusPending( &widget ) );
+    gate.release.release();
+    REQUIRE( waitUiState( [&] {
+        return std::all_of( pending.begin(), pending.end(),
+                            []( const auto& future ) { return future.isFinished(); } );
+    } ) );
+    CHECK( widget.currentMainFilePath() == b );
+    for ( const auto& source : sources ) {
+        if ( !source ) continue;
+        source->reload();
+        CHECK( source->retire().isFinished() );
+    }
+    const auto repeated = widget.retireResources();
+    CHECK( std::all_of( repeated.begin(), repeated.end(),
+                       []( const auto& future ) { return future.isFinished(); } ) );
+}
 
 TEST_CASE( "FolderCrawlerWidget plain click on a result row repaints the selection highlight",
            "[folder][selection]" )
@@ -2685,6 +2760,40 @@ TEST_CASE( "FolderCrawlerWidget keep results freezes the current pane on a new s
     REQUIRE( widget.paneCount() == 2 ); // still 2, not 3
 }
 
+TEST_CASE( "Folder search resets Marks-only visibility before deciding whether to keep results",
+           "[folder][keep][folder-filter-visibility]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", QByteArray( "foo\nbar\nfoo\n" ) );
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ path } );
+    widget.searchFor( "foo" );
+    REQUIRE( waitFor( [&] { return !widget.isSearchActive(); } ) );
+    auto* const original = widget.folderResults();
+    widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    REQUIRE( original->getNbLine() == 0_lcount );
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    SECTION( "nonempty Keep counts rows after visibility reset" ) {
+        widget.searchFor( "bar" );
+        REQUIRE( waitFor( [&] { return !widget.isSearchActive(); } ) );
+        CHECK( widget.paneCount() == 2 );
+        CHECK_FALSE( widget.searchToolbar()->isKeepResultsChecked() );
+        CHECK( original->visibility() == FolderSearchResults::Visibility::MarksAndMatches );
+        CHECK( original->getNbLine() == 3_lcount );
+        CHECK( widget.folderResults()->visibility() == FolderSearchResults::Visibility::MarksAndMatches );
+        CHECK( widget.folderResults()->getNbLine() == 2_lcount );
+    }
+    SECTION( "empty reset bypasses Keep but still resets visibility" ) {
+        widget.searchFor( "" );
+        CHECK_FALSE( widget.isSearchActive() );
+        CHECK( widget.paneCount() == 1 );
+        CHECK( widget.searchToolbar()->isKeepResultsChecked() );
+        CHECK( original->visibility() == FolderSearchResults::Visibility::MarksAndMatches );
+        CHECK( original->getNbLine() == 0_lcount );
+    }
+}
+
 TEST_CASE( "FolderCrawlerWidget closing the active search pane finalizes its search state",
            "[folder][keep][stop]" )
 {
@@ -2906,7 +3015,7 @@ TEST_CASE( "FolderCrawlerWidget shared view-signal wiring", "[folder][wiring]" )
 {
     // Single-file parity (cluster A of the 2026-07-18 audit): CrawlerWidget
     // wires every view's scratchpad / search-composition / splitter / font /
-    // exitView / highlightersChange signals (crawlerwidget.cpp:1390-1600), but
+    // exitView signals (crawlerwidget.cpp:1390-1600), but
     // FolderCrawlerWidget wired none of them, so those context-menu actions and
     // shortcuts were dead in folder mode. The fix routes both hosts through a
     // shared ViewSignalWiring component.
@@ -2998,16 +3107,15 @@ TEST_CASE( "FolderCrawlerWidget shared view-signal wiring", "[folder][wiring]" )
         REQUIRE( filteredView->hasFocus() );
     }
 
-    SECTION( "highlightersChange re-applies the configuration" )
+    SECTION( "global highlighter publication refreshes both folder panes" )
     {
-        const WiringConfigGuard guard;
-        const bool before = Configuration::get().mainLineNumbersVisible();
-        Configuration::get().setMainLineNumbersVisible( !before );
-
+        HighlighterSetCollection::getSynced();
         using Access = AbstractLogView::access_by<FolderViewTestAccess>;
-        Q_EMIT mainView->highlightersChange();
-        QTest::qWait( 20 );
-        REQUIRE( Access::lineNumbersVisible( mainView ) == !before );
+        const auto mainRefreshes = Access::forceRefreshCount( mainView );
+        const auto resultRefreshes = Access::forceRefreshCount( filteredView );
+        REQUIRE( HighlighterStatePublisher::instance().publish() );
+        REQUIRE( Access::forceRefreshCount( mainView ) == mainRefreshes + 1 );
+        REQUIRE( Access::forceRefreshCount( filteredView ) == resultRefreshes + 1 );
     }
 
     SECTION( "save splitter sizes persists the folder splitter" )

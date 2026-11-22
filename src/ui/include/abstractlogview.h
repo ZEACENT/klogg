@@ -56,6 +56,7 @@
 #include <QEvent>
 #include <QFontMetrics>
 #include <QPointer>
+#include <QUuid>
 
 #include "abstractlogdata.h"
 #include "linekind.h"
@@ -191,6 +192,8 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // source addresses. No visible-line map or selection text is materialized.
     using PaneMetadata = klogg::ReviewPaneMetadata;
     PaneMetadata paneMetadata() const;
+    // Runtime widget identity, independent of source generation and tab order.
+    QString runtimePaneId() const { return runtimePaneId_; }
     // Explicit owner-thread capture, separate from metadata. The provider owns
     // scope semantics, frozen mapping and lifetime; null/exception means capture
     // is unsupported/failed. Never falls back to mutable reads or reopening paths.
@@ -217,6 +220,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void cancelMatchSelection();
     void invalidateMatchSelection();
     bool hasMatchSelection() const;
+    // Owner-thread metadata for non-interrupting query publication admission.
+    bool matchSelectionPending() const { return bool( matchSelection_ ); }
+    quint64 matchSelectionRevision() const { return matchSelectionGeneration_; }
     void refreshMatchSelection();
     // Ordinary Copy can arrive before the batched selection is published.
     bool deferCopyUntilMatchSelection();
@@ -376,7 +382,6 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void removeColorLabel();
     void clearColorLabels();
     void quickColorLabelDefaultsChanged( bool ignoreCase, bool wholeWord );
-    void highlightersChange();
 
   public Q_SLOTS:
     // Makes the widget select and display the passed line.
@@ -414,6 +419,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // reads freed memory (the FolderCrawlerWidget teardown use-after-free that
     // surfaced as the flaky Windows-x86 CI crash).
     void stopSearchAndWait();
+    // Terminal, nonblocking retirement of view-owned work only. Keep the view
+    // and its data alive until every returned completion has finished.
+    std::vector<QFuture<void>> retireSearches();
 
     // Signals the follow mode has been enabled.
     void followSet( bool checked );
@@ -520,6 +528,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     bool controlsSearchLimits_ = true;
 
     // Pointer to the CrawlerWidget's data set
+    const QString runtimePaneId_ = QUuid::createUuid().toString( QUuid::WithoutBraces );
     const AbstractLogData* logData_;
 
     // Pointer to the Overview object
@@ -565,6 +574,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     std::vector<klogg::OwnedTaskFuture<klogg::MatchSelectionStep>> matchSelectionWorkers_;
     quint64 matchSelectionGeneration_ = 0;
     bool acceptQuickFindResults_ = true;
+    bool searchesRetiring_ = false;
 
     QRegularExpression matchSelectionExpression( bool quickFind ) const;
     void connectQuickFindSource();

@@ -10,6 +10,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingdetector.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingutils.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logsnapshot.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewmarks.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logsnapshot.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/folderscanarena.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderscanarena.cpp
@@ -17,6 +18,11 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchresults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchtypes.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/indexedcontent.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/indexedlinelength.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/indexingsettings.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/preparedfilesource.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/preparedfilesource.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/indexingsettings.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/indexedcontent.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linekind.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linepositionarray.h
@@ -26,6 +32,10 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logdataworker.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logfiltereddata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logfiltereddataworker.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/searchsettings.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/searchsettings.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/searchpreparation.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/searchpreparation.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linetypes.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/searchablelogdata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/streaminglogdata.h
@@ -47,6 +57,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logdataoperation.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logdataworker.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logfiltereddata.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/logfilteredsearchpublication.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logfiltereddataworker.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/searchablelogdata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/streaminglogdata.cpp

@@ -20,6 +20,9 @@
 #include "foldercrawlerwidget.h"
 
 #include <QApplication>
+#include <QCoreApplication>
+#include <QEvent>
+#include <QSet>
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
@@ -217,7 +220,7 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     searchToolbar_ = new SearchToolbar( this, nullptr );
 
     // Shared view-signal wiring (scratchpad / search composition / splitter
-    // save / font zoom / exitView / highlightersChange / hover-highlight) --
+    // save / font zoom / exitView / hover-highlight) --
     // the same component CrawlerWidget uses, so folder views cannot drift from
     // single-file behavior again. Hooks adapt the host-specific parts.
     {
@@ -246,7 +249,6 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
                 mainView_->setFocus();
             }
         };
-        hooks.applyConfiguration = [ this ]() { applyConfiguration(); };
         hooks.hoveredOverLine
             = [ this ]( AbstractLogView* view, LineNumber row ) { highlightOverviewForRow( view, row ); };
         hooks.leftHoveringZone = [ this ]() { overviewWidget_->removeHighlight(); };
@@ -331,7 +333,7 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     colorLabelsController_.watchView( mainView_ );
 
     // Shared view-signal wiring (scratchpad / search composition / splitter /
-    // font zoom / exitView / highlightersChange). Folder search cannot honor
+    // font zoom / exitView). Folder search cannot honor
     // line-range limits, so those menu entries are hidden instead of
     // misleadingly graying the view.
     viewSignalWiring_->wireView( mainView_ );
@@ -550,6 +552,70 @@ FolderCrawlerWidget::~FolderCrawlerWidget()
     }
 }
 
+std::vector<QFuture<void>> FolderCrawlerWidget::retireResources()
+{
+    std::vector<std::shared_ptr<LogData>> sources;
+    QSet<LogData*> seen;
+    const auto addSource = [&]( const std::shared_ptr<LogData>& source ) {
+        if ( source && !seen.contains( source.get() ) ) {
+            seen.insert( source.get() );
+            sources.push_back( source );
+        }
+    };
+    addSource( placeholderData_ );
+    addSource( currentMainData_ );
+    addSource( pendingMainData_ );
+    for ( auto it = mainViewCache_.cbegin(); it != mainViewCache_.cend(); ++it ) {
+        addSource( it.value().first );
+    }
+    std::vector<QPointer<AbstractLogView>> views;
+    views.reserve( panes_.size() + 1 );
+    views.emplace_back( mainView_ );
+    for ( const auto& pane : panes_ ) {
+        if ( pane ) views.emplace_back( pane->view );
+    }
+    std::vector<QFuture<void>> completions;
+    completions.reserve( views.size() + sources.size() + 1 );
+
+    resourcesRetiring_ = true;
+    searchActive_ = false;
+    presentationActive_ = false;
+    presentationDirty_ = false;
+    presentationCatchUpQueued_ = false;
+    mainViewPresentationRefreshPending_ = false;
+    overviewPresentationRefreshPending_ = false;
+    overviewLineCountPresentationPending_ = false;
+    searchPatternPresentationPending_ = false;
+    pendingProgressStatusText_.clear();
+    presentationRefreshTimer_.cancel();
+    statusRefreshTimer_.cancel();
+    searchTargetResults_ = nullptr;
+    for ( const auto& pane : panes_ ) {
+        if ( pane ) pane->presentationRefreshPending = false;
+    }
+    disconnect( pendingMainDataConn_ );
+    disconnect( mainDataLoadingFinishedConn_ );
+    disconnect( mainDataLoadingProgressedConn_ );
+    disconnect( mainDataFileChangedConn_ );
+    if ( engine_ ) {
+        completions.push_back( engine_->retire() );
+        currentSearchGeneration_ = engine_->currentGeneration();
+    }
+    for ( const auto& view : views ) {
+        if ( view ) QCoreApplication::removePostedEvents( view.data(), QEvent::DeferredDelete );
+    }
+    setEnabled( false );
+
+    // No widget members below this boundary: cancellation can notify observers.
+    for ( const auto& view : views ) {
+        if ( !view ) continue;
+        const auto pending = view->retireSearches();
+        completions.insert( completions.end(), pending.begin(), pending.end() );
+    }
+    for ( const auto& source : sources ) completions.push_back( source->retire() );
+    return completions;
+}
+
 bool FolderCrawlerWidget::eventFilter( QObject* obj, QEvent* event )
 {
     // Splitter proportions, mirroring CrawlerWidget::setup: a session-restored
@@ -582,6 +648,7 @@ void FolderCrawlerWidget::changeEvent( QEvent* event )
 
 void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringList& filePaths )
 {
+    if ( resourcesRetiring_ ) return;
     folderPath_ = folderPath;
     filePaths_ = filePaths;
     // Seed every pane's membership before session marks are restored. setFolder
@@ -590,6 +657,7 @@ void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringLis
     for ( auto& pane : panes_ ) {
         if ( pane != nullptr && pane->results != nullptr ) {
             pane->searchComplete = false;
+            pane->appliedPattern = {};
             pane->view->invalidateMatchSelection();
             pane->results->beginSearch( filePaths_ );
         }
@@ -608,6 +676,31 @@ void FolderCrawlerWidget::updateReadyStatus()
 QString FolderCrawlerWidget::statusText() const
 {
     return statusLabel_ != nullptr ? statusLabel_->text() : QString();
+}
+
+std::vector<AbstractCrawlerWidget::PaneReference> FolderCrawlerWidget::reviewPanes() const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    std::vector<PaneReference> result;
+    if ( mainView_ ) result.push_back( { mainView_, Pane::Main, tr( "Main view" ),
+        currentMainData_ != nullptr && currentMainData_ != placeholderData_, reviewMarksId() } );
+    for ( int index = 0; resultsTabs_ && index < resultsTabs_->count(); ++index ) {
+        const auto* view = qobject_cast<FolderFilteredView*>( resultsTabs_->widget( index ) );
+        if ( !view ) continue;
+        // removeTab emits synchronously before panes_ erases its old entry.
+        // Resolve ownership by view identity even during that transient order.
+        const auto owner = std::find_if( panes_.begin(), panes_.end(), [view]( const auto& pane ) {
+            return pane && pane->view == view;
+        } );
+        std::optional<klogg::ReviewAppliedFilter> appliedFilter;
+        if ( owner != panes_.end() ) {
+            appliedFilter = klogg::ReviewAppliedFilter{ ( *owner )->appliedPattern,
+                                                       ( *owner )->searchComplete };
+        }
+        result.push_back( { view, Pane::Results, resultsTabs_->tabText( index ), true, reviewMarksId(),
+                            std::move( appliedFilter ) } );
+    }
+    return result;
 }
 
 const AbstractLogView* FolderCrawlerWidget::reviewPane( Pane pane ) const
@@ -640,6 +733,59 @@ FolderCrawlerWidget::currentMainViewInfo() const
         info.encodingText = QString::fromLatin1( codec->name() );
     }
     return info;
+}
+
+std::optional<klogg::ReviewMarkLocation>
+FolderCrawlerWidget::resolveReviewMark( const klogg::LogRowId& identity ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( currentMainData_ && currentMainData_ != placeholderData_ ) {
+        if ( const auto row = currentMainData_->rowForIdentity( identity ) )
+            return klogg::ReviewMarkLocation{ currentMainFilePath_, *row };
+    }
+    // A page switch is not a source replacement. Consult the actual retained
+    // indexed members without refreshing LRU order or reopening their paths.
+    for ( auto it = mainViewCache_.cbegin(); it != mainViewCache_.cend(); ++it ) {
+        const auto& sourceData = it.value().first;
+        if ( sourceData && sourceData != currentMainData_ ) {
+            if ( const auto row = sourceData->rowForIdentity( identity ) )
+                return klogg::ReviewMarkLocation{ it.key(), *row };
+        }
+    }
+    for ( const auto& pane : panes_ ) {
+        if ( !pane || !pane->results || !resultsTabs_ || resultsTabs_->indexOf( pane->view ) < 0 ) continue;
+        if ( const auto source = pane->results->sourceForIdentity( identity ) )
+            return klogg::ReviewMarkLocation{ source->filePath, source->localLine };
+    }
+    return {};
+}
+
+std::optional<klogg::ReviewMarksSnapshot> FolderCrawlerWidget::reviewMarksSnapshot() const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( static_cast<size_t>( folderMarks_.size() ) > MaxMembers ) return {};
+    size_t count = 0;
+    size_t textUnits = 0;
+    for ( auto it = folderMarks_.cbegin(); it != folderMarks_.cend(); ++it ) {
+        const auto units = static_cast<size_t>( it.key().size() );
+        if ( it.value().size() > MaxMarks - count || units > MaxTextUnits - textUnits ) return {};
+        count += it.value().size();
+        textUnits += units;
+    }
+    klogg::ReviewMarksSnapshot result;
+    result.scope = klogg::ReviewMarksSnapshot::Scope::FolderTab;
+    result.revision = marksRevision_;
+    for ( auto it = folderMarks_.cbegin(); it != folderMarks_.cend(); ++it ) {
+        if ( it.value().empty() ) continue;
+        klogg::ReviewMarksSnapshot::Group group;
+        group.memberPath = it.key();
+        for ( const auto row : it.value() ) group.rows.append( LineNumber( row ) );
+        result.groups.push_back( std::move( group ) );
+    }
+    std::sort( result.groups.begin(), result.groups.end(), []( const auto& left, const auto& right ) {
+        return left.memberPath < right.memberPath;
+    } );
+    return result;
 }
 
 FolderCrawlerWidget::MarksSnapshot FolderCrawlerWidget::marksSnapshot() const
@@ -789,6 +935,166 @@ void FolderCrawlerWidget::setResultsVisibility( FolderSearchResults::Visibility 
     visibilityBox_->setCurrentIndex( index );
     if ( activeResults()->visibility() != visibility ) {
         activeResults()->setVisibility( visibility );
+    }
+}
+
+class FolderCrawlerWidget::ReviewMarksUpdate final : public klogg::PreparedReviewMarks {
+  public:
+    struct Pane {
+        QPointer<FolderSearchResults> owner;
+        std::shared_ptr<const FolderSearchResults::MarksLayoutCapture> captured;
+        std::shared_ptr<FolderSearchResults::PreparedMarksLayout> prepared;
+    };
+    ReviewMarksUpdate( QPointer<FolderCrawlerWidget> owner, uint64_t revision,
+                      FolderSearchResults::MarksStore candidate, std::vector<Pane> panes, bool changed )
+        : state_( std::make_shared<State>( State{ std::move( owner ), revision,
+              std::move( candidate ), std::move( panes ), changed, false, false } ) ) {}
+    std::unique_ptr<klogg::ReviewMarksPublication> acquire() override
+    {
+        const auto owner = state_->owner;
+        if ( !owner || state_->claimed || state_->consumed ) return {};
+        Q_ASSERT( QThread::currentThread() == owner->thread() );
+        if ( owner->marksRevision_ != state_->revision ) return {};
+        Guards guards;
+        if ( state_->changed ) {
+            if ( owner->panes_.size() != state_->panes.size() ) return {};
+            for ( size_t index = 0; index < state_->panes.size(); ++index ) {
+                const auto& pane = owner->panes_[ index ];
+                if ( !pane || pane->results.get() != state_->panes[ index ].owner.data()
+                     || owner->resultsTabs_->indexOf( pane->view ) < 0 ) return {};
+            }
+            guards.reserve( state_->panes.size() );
+            for ( const auto& pane : state_->panes ) {
+                auto guard = pane.owner->lockMarksLayout( pane.prepared );
+                if ( !guard ) return {};
+                guards.push_back( std::move( guard ) );
+            }
+        }
+        auto publication = std::make_unique<Publication>( state_, std::move( guards ) );
+        state_->claimed = true;
+        return publication;
+    }
+  private:
+    struct State {
+        QPointer<FolderCrawlerWidget> owner;
+        uint64_t revision;
+        FolderSearchResults::MarksStore candidate;
+        std::vector<Pane> panes;
+        bool changed;
+        bool claimed;
+        bool consumed;
+    };
+    using Guards = std::vector<std::unique_ptr<FolderSearchResults::MarksLayoutPublication>>;
+    class Publication final : public klogg::ReviewMarksPublication {
+      public:
+        Publication( std::shared_ptr<State> state, Guards guards )
+            : state_( std::move( state ) ), guards_( std::move( guards ) ) {}
+        ~Publication() override { release(); }
+        void install() noexcept override
+        {
+            if ( released_ || state_->consumed || !state_->owner ) return;
+            if ( state_->changed ) {
+                state_->owner->folderMarks_.swap( state_->candidate );
+                ++state_->owner->marksRevision_;
+                for ( const auto& guard : guards_ ) {
+                    const bool applied = guard->install();
+                    Q_ASSERT( applied );
+                    Q_UNUSED( applied );
+                }
+            }
+            state_->consumed = true;
+            installed_ = true;
+        }
+        void release() noexcept override
+        {
+            if ( released_ ) return;
+            guards_.clear();
+            state_->claimed = false;
+            released_ = true;
+        }
+        void notify() override
+        {
+            if ( !released_ || !installed_ || notified_ || !state_->changed || !state_->owner ) return;
+            notified_ = true;
+            state_->owner->publishPreparedMarks();
+        }
+      private:
+        std::shared_ptr<State> state_;
+        Guards guards_;
+        bool installed_ = false;
+        bool released_ = false;
+        bool notified_ = false;
+    };
+    std::shared_ptr<State> state_;
+};
+
+klogg::ReviewMarksPreparer FolderCrawlerWidget::prepareReviewMarks(
+    const klogg::ReviewMarksSnapshot& candidate, klogg::ReviewMarksBudget& budget )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( candidate.scope != klogg::ReviewMarksSnapshot::Scope::FolderTab
+         || candidate.revision != marksRevision_ || candidate.groups.size() > MaxMembers ) return {};
+    FolderSearchResults::MarksStore marks;
+    QSet<QString> members;
+    size_t rows = 0;
+    size_t text = 0;
+    for ( const auto& group : candidate.groups ) {
+        if ( group.memberPath.isEmpty() || members.contains( group.memberPath )
+             || static_cast<size_t>( group.rows.size() ) > MaxMarks - rows
+             || static_cast<size_t>( group.memberPath.size() ) > MaxTextUnits - text ) return {};
+        members.insert( group.memberPath );
+        rows += static_cast<size_t>( group.rows.size() );
+        text += static_cast<size_t>( group.memberPath.size() );
+        if ( !group.rows.isEmpty() ) {
+            auto& target = marks[ group.memberPath ];
+            for ( const auto row : group.rows ) target.insert( row.get() );
+        }
+    }
+    const bool changed = marks != folderMarks_;
+    if ( changed && marksRevision_ == std::numeric_limits<uint64_t>::max() ) return {};
+    auto available = budget;
+    std::vector<ReviewMarksUpdate::Pane> panes;
+    if ( changed ) {
+        if ( !available.charge( rows * 128 + text * sizeof( QChar ) ) ) return {};
+        panes.reserve( panes_.size() );
+        for ( const auto& pane : panes_ ) {
+            if ( !pane || !pane->results || resultsTabs_->indexOf( pane->view ) < 0 ) return {};
+            auto captured = pane->results->captureMarksLayout( marks, &available );
+            if ( !captured ) return {};
+            panes.push_back( { pane->results.get(), std::move( captured ), {} } );
+        }
+    }
+    budget = available;
+    const QPointer<FolderCrawlerWidget> owner{ this };
+    const auto revision = marksRevision_;
+    return [owner, revision, marks = std::move( marks ), panes = std::move( panes ), changed]
+        ( const std::atomic<bool>& cancelled ) -> std::shared_ptr<klogg::PreparedReviewMarks> {
+        if ( cancelled ) return {};
+        auto ready = panes;
+        for ( auto& pane : ready ) {
+            if ( cancelled ) return {};
+            pane.prepared = FolderSearchResults::prepareMarksLayout( pane.captured );
+            if ( !pane.prepared ) return {};
+        }
+        if ( cancelled ) return {};
+        return std::make_shared<ReviewMarksUpdate>( owner, revision, marks, std::move( ready ), changed );
+    };
+}
+
+void FolderCrawlerWidget::publishPreparedMarks()
+{
+    std::vector<QPointer<FolderSearchResults>> changed;
+    changed.reserve( panes_.size() );
+    for ( const auto& pane : panes_ ) {
+        if ( !pane ) continue;
+        if ( pane->results ) changed.emplace_back( pane->results.get() );
+        schedulePanePresentationRefresh( pane.get() );
+    }
+    scheduleMainViewPresentationRefresh( true );
+    const QPointer<FolderCrawlerWidget> lifetime{ this };
+    for ( const auto& results : changed ) {
+        if ( !lifetime ) return;
+        if ( results ) Q_EMIT results->layoutChanged();
     }
 }
 
@@ -993,6 +1299,7 @@ void FolderCrawlerWidget::refreshPaneImmediately( ResultPane* pane )
 
 void FolderCrawlerWidget::deliverFolderPresentationRefresh()
 {
+    if ( resourcesRetiring_ ) return;
     if ( !presentationActive_ ) {
         presentationDirty_ = true;
         return;
@@ -1044,6 +1351,7 @@ void FolderCrawlerWidget::flushFolderPresentation()
 
 void FolderCrawlerWidget::deliverFolderStatusRefresh()
 {
+    if ( resourcesRetiring_ ) return;
     if ( !presentationActive_ || pendingProgressStatusText_.isEmpty() ) {
         return;
     }
@@ -1055,6 +1363,7 @@ void FolderCrawlerWidget::deliverFolderStatusRefresh()
 
 void FolderCrawlerWidget::queuePresentationCatchUp()
 {
+    if ( resourcesRetiring_ ) return;
     if ( presentationCatchUpQueued_ || !presentationActive_ || !presentationDirty_ ) {
         return;
     }
@@ -1069,6 +1378,7 @@ void FolderCrawlerWidget::queuePresentationCatchUp()
 
 void FolderCrawlerWidget::setPresentationActive( bool active )
 {
+    if ( resourcesRetiring_ ) return;
     if ( presentationActive_ == active ) {
         return;
     }
@@ -1086,6 +1396,7 @@ void FolderCrawlerWidget::setPresentationActive( bool active )
 
 void FolderCrawlerWidget::onActivePaneChanged( int tabIndex )
 {
+    if ( resourcesRetiring_ ) return;
     // tab index == pane index (append-only + same-index erase). Re-apply the
     // global visibility combo to the now-active pane (all panes share the one
     // toolbar combo).
@@ -1106,6 +1417,7 @@ void FolderCrawlerWidget::onActivePaneChanged( int tabIndex )
 
 void FolderCrawlerWidget::onClosePane( int tabIndex )
 {
+    if ( resourcesRetiring_ ) return;
     if ( panes_.empty() || tabIndex < 0 || tabIndex >= static_cast<int>( panes_.size() ) ) {
         return;
     }
@@ -1604,6 +1916,7 @@ void FolderCrawlerWidget::editSearchHistory()
 
 void FolderCrawlerWidget::searchFor( const QString& pattern )
 {
+    if ( resourcesRetiring_ ) return;
     // Set the pattern text WITHOUT triggering setSearchPattern's auto-run /
     // reset side effects (which would double-fire startSearch when
     // autoRunSearchOnPatternChange is on), then start exactly one search.
@@ -1616,6 +1929,7 @@ void FolderCrawlerWidget::searchFor( const QString& pattern )
 
 void FolderCrawlerWidget::selectResultRow( LineNumber line )
 {
+    if ( resourcesRetiring_ ) return;
     onResultSelected( line, 1_lcount, 0_lcol, 0_length );
 }
 
@@ -1771,6 +2085,7 @@ std::shared_ptr<const ViewContextInterface> FolderCrawlerWidget::doGetViewContex
 
 void FolderCrawlerWidget::startSearch()
 {
+    if ( resourcesRetiring_ ) return;
     // Progress text belongs to the superseded generation, but pane refreshes do
     // not: a Keep-results pane may still owe one presentation of model data that
     // was committed before this search started.
@@ -1809,7 +2124,9 @@ void FolderCrawlerWidget::startSearch()
         setCurrentSearchPattern( {} );
         lastResultStatusText_.clear();
         if ( auto* const results = activeResults() ) {
-            panes_[ static_cast<size_t>( activePaneIndex_ ) ]->searchComplete = false;
+            auto& pane = *panes_[ static_cast<size_t>( activePaneIndex_ ) ];
+            pane.searchComplete = false;
+            pane.appliedPattern = {};
             activeFilteredView()->invalidateMatchSelection();
             results->beginSearch( filePaths_ );
         }
@@ -1846,7 +2163,9 @@ void FolderCrawlerWidget::startSearch()
     // The pane the new search streams into. Set BEFORE engine_->startSearch so
     // the first queued signal cannot arrive before the target is pinned.
     searchTargetResults_ = activeResults();
-    panes_[ static_cast<size_t>( activePaneIndex_ ) ]->searchComplete = false;
+    auto& targetPane = *panes_[ static_cast<size_t>( activePaneIndex_ ) ];
+    targetPane.searchComplete = false;
+    targetPane.appliedPattern = {};
     activeFilteredView()->invalidateMatchSelection();
     // Reset the view for streaming: beginSearch sizes the pending buffer and
     // clears any prior result set so file groups stream into a clean view. This
@@ -1878,6 +2197,7 @@ void FolderCrawlerWidget::startSearch()
     // the toolbar so programmatic startSearch (searchFor, session restore) also
     // honors it, not just direct control edits.
     updateContextFromControls();
+    targetPane.appliedPattern = regexpPattern;
     currentSearchGeneration_ = engine_->startFolderSearch(
         folderPath_, regexpPattern,
         klogg::folder::ContextOptions{ contextBefore_, contextAfter_ } );
@@ -1895,6 +2215,7 @@ void FolderCrawlerWidget::startSearch()
 
 void FolderCrawlerWidget::stopSearch()
 {
+    if ( resourcesRetiring_ ) return;
     engine_->interrupt();
     flushFolderPresentation();
     statusRefreshTimer_.cancel();
@@ -1907,7 +2228,7 @@ void FolderCrawlerWidget::stopSearch()
 
 void FolderCrawlerWidget::onFolderSnapshotReady( QStringList filePaths, quint64 generation )
 {
-    if ( generation != currentSearchGeneration_ ) {
+    if ( resourcesRetiring_ || generation != currentSearchGeneration_ ) {
         return;
     }
     filePaths_ = std::move( filePaths );
@@ -1918,7 +2239,7 @@ void FolderCrawlerWidget::onFolderSnapshotReady( QStringList filePaths, quint64 
 
 void FolderCrawlerWidget::onSearchStarted( quint64 generation )
 {
-    if ( generation != currentSearchGeneration_ ) {
+    if ( resourcesRetiring_ || generation != currentSearchGeneration_ ) {
         return; // stale: a superseded scan (empty/invalid pattern replaced it)
     }
     statusLabel_->setText( tr( "Searching..." ) );
@@ -1926,7 +2247,7 @@ void FolderCrawlerWidget::onSearchStarted( quint64 generation )
 
 void FolderCrawlerWidget::onSearchProgressed( quint64 nbMatches, int percent, quint64 generation )
 {
-    if ( generation != currentSearchGeneration_ ) {
+    if ( resourcesRetiring_ || generation != currentSearchGeneration_ ) {
         return; // stale: a superseded scan (empty/invalid pattern replaced it)
     }
     pendingProgressStatusText_
@@ -1939,7 +2260,7 @@ void FolderCrawlerWidget::onSearchProgressed( quint64 nbMatches, int percent, qu
 
 void FolderCrawlerWidget::onSearchFinished( quint64 generation )
 {
-    if ( generation != currentSearchGeneration_ ) {
+    if ( resourcesRetiring_ || generation != currentSearchGeneration_ ) {
         return; // stale: superseded by a newer search
     }
 
@@ -1979,7 +2300,7 @@ void FolderCrawlerWidget::onSearchFinished( quint64 generation )
 
 void FolderCrawlerWidget::onFileGroupReady( int fileIndex, quint64 generation )
 {
-    if ( generation != currentSearchGeneration_ ) {
+    if ( resourcesRetiring_ || generation != currentSearchGeneration_ ) {
         return; // stale: superseded by a newer search
     }
     auto group = engine_->takeCompletedGroup( fileIndex );
@@ -2083,7 +2404,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                                               LinesCount nLines, LineColumn startCol,
                                               LineLength nSymbols )
 {
-    if ( filePath.isEmpty() ) {
+    if ( resourcesRetiring_ || filePath.isEmpty() ) {
         return;
     }
 
@@ -2186,7 +2507,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     pendingMainDataConn_
         = connect( pendingMainData_.get(), &SearchableLogData::loadingFinished, this,
                    [ this ]( LoadingStatus status ) {
-                       if ( pendingMainData_ == nullptr ) {
+                       if ( resourcesRetiring_ || pendingMainData_ == nullptr ) {
                            return;
                        }
                        // Self-disconnect: the open this connection served is
@@ -2215,6 +2536,11 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                            // load for its latest jump. Any still-newer request
                            // advances the revision and suppresses this retry.
                            auto abandonedData = std::move( pendingMainData_ );
+                           // The indexing worker has completed, but another
+                           // owner's watcher could still queue follow-up work.
+                           // Close that admission before hiding ownership inside
+                           // the deferred-release closure.
+                           abandonedData->retire();
                            pendingMainFilePath_.clear();
                            QTimer::singleShot(
                                0, this,
@@ -2312,6 +2638,7 @@ void FolderCrawlerWidget::refreshFileOverview( const QString& filePath )
 
 void FolderCrawlerWidget::cacheMainViewData( const QString& filePath, std::shared_ptr<LogData> logData )
 {
+    if ( resourcesRetiring_ ) return;
     if ( filePath.isEmpty() ) {
         return;
     }

@@ -41,6 +41,7 @@
 
 #include <cstdint>
 
+#include <cstddef>
 #include <QColor>
 #include <QList>
 #include <QMetaType>
@@ -134,6 +135,7 @@ class HighlighterSet {
     }
 
     static HighlighterSet createNewSet( const QString& name );
+    static HighlighterSet fromDescription( QString id, QString name, QList<Highlighter> rules );
 
     HighlighterSet() = default;
 
@@ -156,6 +158,7 @@ class HighlighterSet {
     void retrieveFromStorage( QSettings& settings );
 
     void compile() const;
+    void compile( RegexpEngine engine ) const;
 
   private:
     explicit HighlighterSet( const QString& name );
@@ -227,6 +230,34 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
     // not synchronize storage, compile matchers, or publish/persist changes.
     // The revision belongs to this collection instance, not its saved config.
     Snapshot snapshot() const;
+    // Admit control-plane reads before detaching potentially large GUI imports.
+    std::optional<Snapshot> boundedSnapshot() const;
+    uint64_t revision() const { return revision_; }
+
+    enum class UpdateResult { Applied, Unchanged, Conflict, InvalidArgument, ResourceLimit };
+    static constexpr std::size_t MaxPreparedSets = 128;
+    static constexpr std::size_t MaxPreparedRules = 1024;
+    static constexpr std::size_t MaxSnapshotPalette = 128;
+    static constexpr std::size_t MaxPreparedTextUnits = 1024 * 1024;
+    class PreparedUpdate {
+      public:
+        PreparedUpdate( PreparedUpdate&& other ) noexcept;
+        PreparedUpdate& operator=( PreparedUpdate&& other ) noexcept;
+        PreparedUpdate( const PreparedUpdate& ) = delete;
+        PreparedUpdate& operator=( const PreparedUpdate& ) = delete;
+        std::optional<UpdateResult> error() const { return error_; }
+      private:
+        friend class HighlighterSetCollection;
+        PreparedUpdate() = default;
+        Snapshot state_;
+        HighlighterSet combined_;
+        std::optional<UpdateResult> error_;
+    };
+    // Pure private preparation: callers capture the backend on the owner thread
+    // and may build this sealed value on a worker. Installation never compiles.
+    static std::optional<UpdateResult> validateUpdate( const Snapshot& state );
+    static PreparedUpdate prepareUpdate( Snapshot state, RegexpEngine engine );
+    UpdateResult applyPrepared( PreparedUpdate&& prepared, uint64_t expectedRevision );
 
     QList<HighlighterSet> highlighterSets() const;
     void setHighlighterSets( const QList<HighlighterSet>& highlighters );
@@ -253,6 +284,7 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
 
   private:
     static constexpr int HighlighterSetCollection_VERSION = 3;
+    static bool withinSnapshotLimits( const Snapshot& state );
 
     void updateCombinedSet();
     void loadFromStorage( QSettings& settings );

@@ -33,7 +33,7 @@ fi
 cp "$LINUXDEPLOYQT_SRC" ./linuxdeployqt-continuous-x86_64.AppImage
 chmod a+x linuxdeployqt-continuous-x86_64.AppImage
 
-VERSION=$KLOGG_VERSION ./linuxdeployqt-continuous-x86_64.AppImage appdir/usr/share/applications/*.desktop -bundle-non-qt-libs
+VERSION=$KLOGG_VERSION ./linuxdeployqt-continuous-x86_64.AppImage appdir/usr/share/applications/*.desktop -bundle-non-qt-libs -executable=appdir/usr/bin/kloggctl
 
 # linuxdeployqt only deploys the linked xcb platform plugin. Bundle offscreen
 # next to it so the shipped AppImage can start headless (version/smoke checks).
@@ -49,7 +49,7 @@ cp "$offscreen_src" "$platform_dir/libqoffscreen.so"
 mkdir -p appdir/usr/lib
 cp /lib/x86_64-linux-gnu/libssl* appdir/usr/lib
 
-VERSION=$KLOGG_VERSION ./linuxdeployqt-continuous-x86_64.AppImage appdir/usr/share/applications/*.desktop -appimage
+VERSION=$KLOGG_VERSION ./linuxdeployqt-continuous-x86_64.AppImage appdir/usr/share/applications/*.desktop -appimage -executable=appdir/usr/bin/kloggctl
 
 mkdir ./packages
 package="./packages/klogg-${KLOGG_VERSION}-appimage-${KLOGG_PACKAGE_TAG}.AppImage"
@@ -61,6 +61,10 @@ rm -rf squashfs-root
 "$package" --appimage-extract >/dev/null
 test -d squashfs-root
 QT_QPA_PLATFORM=offscreen ./squashfs-root/AppRun --version
+# The installation UI resolves the sibling CLI, not AppRun. It must load the
+# deployed runtime directly, without the AppImage launcher's environment setup.
+./squashfs-root/usr/bin/kloggctl --version
+./squashfs-root/usr/bin/kloggctl --help >/dev/null
 
 python3 ../scripts/smoke_adb_helper.py \
   --adb squashfs-root/usr/bin/helpers/adb \

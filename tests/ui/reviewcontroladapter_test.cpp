@@ -11,13 +11,21 @@
 #include <QJsonArray>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QSignalSpy>
+#include "highlighterset.h"
+#include "highlighterstatepublisher.h"
 
 #include "abstractcrawlerwidget.h"
 #include "colorlabelscontroller.h"
 #include "mainwindow.h"
+#include "foldercrawlerwidget.h"
+#include "crawlerwidget.h"
+#include "foldersearchengine.h"
 #include "optionsdialog.h"
+#include "logger.h"
 #include "styles.h"
 #include "reviewcontroladapter.h"
+#include "reviewcontentadapter.h"
 #include "reviewcontrolservice.h"
 #include "test_utils.h"
 #include "searchtoolbar.h"
@@ -111,7 +119,219 @@ struct ReviewFixture {
         return id;
     }
 };
+struct RestoreHighlighters {
+    HighlighterSetCollection saved = HighlighterSetCollection::get();
+    ~RestoreHighlighters() { HighlighterSetCollection::get() = saved; HighlighterSetCollection::get().save(); }
+};
+
+QJsonObject markRequest( ReviewFixture& fixture, const QString& tabId, const QString& pane )
+{
+    const auto panes = resultObject( fixture.call( "pane.list", { { "tab_id", tabId } } ) ).value( "panes" ).toArray();
+    REQUIRE_FALSE( panes.isEmpty() );
+    const auto owner = panes.last().toObject().value( "marks_owner_id" ).toString();
+    REQUIRE_FALSE( owner.isEmpty() );
+    const auto snapshot = resultObject( fixture.call( "source.capture", {
+        { "tab_id", tabId }, { "pane", pane }, { "scope", "presented" } } ) ).value( "snapshot_id" ).toString();
+    REQUIRE_FALSE( snapshot.isEmpty() );
+    return { { "tab_id", tabId }, { "owner_id", owner }, { "snapshot_id", snapshot }, { "rows", QJsonArray{ "0" } } };
+}
+
+QJsonObject replacement( const QString& pattern = QStringLiteral( "Evidence" ) )
+{
+    return { { "sets", QJsonArray{ QJsonObject{ { "id", "rpc-evidence" }, { "name", "Evidence rules" },
+        { "rules", QJsonArray{ QJsonObject{ { "pattern", pattern }, { "foreground", "#ff000000" },
+                                          { "background", "#ffffff00" } } } } } } },
+        { "active_set_ids", QJsonArray{ "rpc-evidence" } } };
+}
 } // namespace
+
+TEST_CASE( "Control global highlighters and labels publish together after private preparation",
+           "[ui][control-adapter][control-highlighter-rpc]" )
+{
+    ReviewFixture fixture;
+    RestoreHighlighters restore;
+    auto& global = HighlighterSetCollection::get();
+    const auto revision = global.revision();
+    const auto before = resultObject( fixture.call( "highlighter.list" ) );
+    CHECK( before.value( "revision" ) == QString::number( revision ) );
+    const auto id = resultObject( fixture.call( "transaction.begin" ) ).value( "transaction_id" ).toString();
+    const QJsonObject tx{ { "transaction_id", id } };
+    auto change = replacement();
+    change.insert( "transaction_id", id );
+    change.insert( "expected_revision", QString::number( revision ) );
+    resultObject( fixture.call( "highlighter.replace", change ) );
+    resultObject( fixture.call( "label.set", { { "transaction_id", id }, { "tab_id", fixture.tabId() },
+        { "label", 1 }, { "texts", QJsonArray{ "Evidence" } } } ) );
+    const auto staged = resultObject( fixture.call( "highlighter.list", tx ) );
+    CHECK( staged.value( "active_set_ids" ) == change.value( "active_set_ids" ) );
+    CHECK( staged.value( "sets" ).toArray().first().toObject().value( "id" ) == QLatin1String( "rpc-evidence" ) );
+    CHECK( resultObject( fixture.call( "highlighter.list" ) ) == before );
+    QSignalSpy finished( &fixture.adapter, &ReviewControlAdapter::preparationFinished );
+    QSignalSpy published( &HighlighterStatePublisher::instance(), &HighlighterStatePublisher::changed );
+    auto* labels = fixture.controls().labels;
+    QObject::connect( labels, &ColorLabelsController::labelsChanged, labels, [&] {
+        CHECK( global.activeSetIds() == QStringList{ QStringLiteral( "rpc-evidence" ) } );
+        CHECK( published.count() == 1 );
+    } );
+    const auto* focus = QApplication::focusWidget();
+    const auto* active = QApplication::activeWindow();
+    REQUIRE( resultObject( fixture.call( "transaction.commit", tx ) ).value( "status" ) == QLatin1String( "preparing" ) );
+    CHECK( global.revision() == revision );
+    CHECK( labels->snapshot().labels.front().isEmpty() );
+    REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+    CHECK( resultObject( fixture.call( "transaction.get", tx ) ).value( "status" ) == QLatin1String( "committed" ) );
+    CHECK( published.count() == 1 );
+    CHECK( global.revision() == revision + 1 );
+    CHECK_FALSE( labels->snapshot().labels.front().isEmpty() );
+    CHECK( QApplication::focusWidget() == focus );
+    CHECK( QApplication::activeWindow() == active );
+    CHECK( resultObject( fixture.call( "transaction.commit", tx ) ).value( "status" ) == QLatin1String( "committed" ) );
+    CHECK( published.count() == 1 );
+}
+
+TEST_CASE( "Preparing control transactions reject human edits and detached owners without a prefix",
+           "[ui][control-adapter][control-highlighter-rpc]" )
+{
+    const bool detach = GENERATE( false, true );
+    ReviewFixture fixture;
+    RestoreHighlighters restore;
+    const auto before = HighlighterSetCollection::get().revision();
+    const auto id = resultObject( fixture.call( "transaction.begin" ) ).value( "transaction_id" ).toString();
+    const QJsonObject tx{ { "transaction_id", id } };
+    auto change = replacement();
+    change.insert( "transaction_id", id );
+    resultObject( fixture.call( "highlighter.replace", change ) );
+    resultObject( fixture.call( "label.set", { { "transaction_id", id }, { "tab_id", fixture.tabId() },
+        { "label", 1 }, { "texts", QJsonArray{ "Agent" } } } ) );
+    auto* labels = fixture.controls().labels;
+    QSignalSpy finished( &fixture.adapter, &ReviewControlAdapter::preparationFinished );
+    QSignalSpy published( &HighlighterStatePublisher::instance(), &HighlighterStatePublisher::changed );
+    REQUIRE( resultObject( fixture.call( "transaction.commit", tx ) ).value( "status" ) == QLatin1String( "preparing" ) );
+    // No event-loop turn: completion cannot overtake this human action.
+    if ( detach ) fixture.window.findChild<TabbedCrawlerWidget*>()->removeCrawler( 0 );
+    else {
+        ColorLabelsController::Edit human;
+        human.texts = QStringList{ QStringLiteral( "Human" ) };
+        labels->apply( { human } );
+    }
+    REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+    const auto result = resultObject( fixture.call( "transaction.get", tx ) );
+    CHECK( result.value( "status" ) == QLatin1String( detach ? "target_closed" : "conflict" ) );
+    CHECK( result.value( "error" ).toObject().value( "code" )
+           == QLatin1String( detach ? "TARGET_CLOSED" : "REVISION_CONFLICT" ) );
+    CHECK( HighlighterSetCollection::get().revision() == before );
+    CHECK( published.isEmpty() );
+    if ( detach ) CHECK( labels->snapshot().labels.front().isEmpty() );
+    else CHECK( labels->snapshot().labels.front().front().text == QLatin1String( "Human" ) );
+}
+
+TEST_CASE( "Highlighter autocommit returns an inspectable transaction and reports compiler rejection",
+           "[ui][control-adapter][control-highlighter-rpc]" )
+{
+    const bool invalid = GENERATE( false, true );
+    ReviewFixture fixture;
+    RestoreHighlighters restore;
+    QSignalSpy finished( &fixture.adapter, &ReviewControlAdapter::preparationFinished );
+    const auto started = resultObject( fixture.call( "highlighter.replace", replacement( invalid ? "(" : "Evidence" ) ) );
+    REQUIRE( started.value( "status" ) == QLatin1String( "preparing" ) );
+    const auto id = started.value( "transaction_id" ).toString();
+    REQUIRE_FALSE( id.isEmpty() );
+    REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+    const auto result = resultObject( fixture.call( "transaction.get", { { "transaction_id", id } } ) );
+    CHECK( result.value( "status" ) == QLatin1String( invalid ? "invalid_argument" : "committed" ) );
+    if ( invalid ) CHECK( result.value( "error" ).toObject().value( "code" ) == QLatin1String( "INVALID_PARAMS" ) );
+}
+
+TEST_CASE( "Reset and expiry prevent late private highlighter publication without client polling",
+           "[ui][control-adapter][control-highlighter-rpc]" )
+{
+    const bool reset = GENERATE( false, true );
+    ReviewFixture fixture;
+    RestoreHighlighters restore;
+    qint64 now = 0;
+    ReviewControlAdapter adapter{ [&] { return std::vector<QPointer<MainWindow>>{ &fixture.window }; },
+                                  [&] { return now; } };
+    const auto before = HighlighterSetCollection::get().revision();
+    QSignalSpy finished( &adapter, &ReviewControlAdapter::preparationFinished );
+    QSignalSpy published( &HighlighterStatePublisher::instance(), &HighlighterStatePublisher::changed );
+    const auto started = resultObject( adapter.dispatch( { "id", "highlighter.replace", replacement() } ) );
+    REQUIRE( started.value( "status" ) == QLatin1String( "preparing" ) );
+    if ( reset ) adapter.reset();
+    else now += ReviewControlAdapter::TransactionLifetimeMs;
+    REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+    CHECK( HighlighterSetCollection::get().revision() == before );
+    CHECK( published.isEmpty() );
+    const auto result = adapter.dispatch( { "id", "transaction.get",
+        { { "transaction_id", started.value( "transaction_id" ) } } } );
+    if ( reset ) CHECK( errorCode( result ) == QLatin1String( "TRANSACTION_NOT_FOUND" ) );
+    else CHECK( resultObject( result ).value( "status" ) == QLatin1String( "expired" ) );
+}
+
+TEST_CASE( "Control highlighter reads reject oversized state and escaped wire responses",
+           "[ui][control-adapter][control-highlighter-bounds]" )
+{
+    ReviewFixture fixture;
+    RestoreHighlighters restore;
+    SECTION( "collection cardinality is bounded before detachment" ) {
+        QList<HighlighterSet> sets;
+        for ( int i = 0; i < 129; ++i ) sets.append( HighlighterSet::createNewSet( "Imported" ) );
+        HighlighterSetCollection::get().setHighlighterSets( sets );
+    }
+    SECTION( "JSON escaping cannot overflow the transport frame" ) {
+        HighlighterSetCollection::get().setHighlighterSets( {
+            HighlighterSet::fromDescription( "imported", QString( 100000, QChar( 1 ) ), {} ) } );
+    }
+    CHECK( errorCode( fixture.call( "highlighter.list" ) ) == QLatin1String( "RESOURCE_LIMIT" ) );
+}
+
+TEST_CASE( "Preparing transactions retain their admission slot and reject further staging",
+           "[ui][control-adapter][control-highlighter-bounds]" )
+{
+    ReviewFixture fixture;
+    RestoreHighlighters restore;
+    QSignalSpy finished( &fixture.adapter, &ReviewControlAdapter::preparationFinished );
+    const auto started = resultObject( fixture.call( "highlighter.replace", replacement() ) );
+    REQUIRE( started.value( "status" ) == QLatin1String( "preparing" ) );
+    const QJsonObject tx{ { "transaction_id", started.value( "transaction_id" ) } };
+    CHECK( errorCode( fixture.call( "highlighter.list", tx ) ) == QLatin1String( "TRANSACTION_PREPARING" ) );
+    for ( size_t i = 1; i < ReviewControlAdapter::MaxTransactions; ++i )
+        resultObject( fixture.call( "transaction.begin" ) );
+    CHECK( errorCode( fixture.call( "transaction.begin" ) ) == QLatin1String( "RESOURCE_LIMIT" ) );
+    CHECK( resultObject( fixture.call( "transaction.get", tx ) ).value( "status" ) == QLatin1String( "preparing" ) );
+    REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+    CHECK( resultObject( fixture.call( "transaction.get", tx ) ).value( "status" ) == QLatin1String( "committed" ) );
+}
+
+TEST_CASE( "Highlighter publication tolerates an observer destroying the control adapter",
+           "[ui][control-adapter][control-highlighter-rpc]" )
+{
+    ReviewFixture fixture;
+    RestoreHighlighters restore;
+    auto adapter = std::make_unique<ReviewControlAdapter>( [&] {
+        return std::vector<QPointer<MainWindow>>{ &fixture.window };
+    } );
+    const auto id = resultObject( adapter->dispatch( { "id", "transaction.begin", {} } ) )
+                        .value( "transaction_id" ).toString();
+    auto change = replacement();
+    change.insert( "transaction_id", id );
+    resultObject( adapter->dispatch( { "id", "highlighter.replace", change } ) );
+    auto* labels = fixture.controls().labels;
+    resultObject( adapter->dispatch( { "id", "label.set", { { "transaction_id", id },
+        { "tab_id", fixture.tabId() }, { "label", 1 }, { "texts", QJsonArray{ "Evidence" } } } } ) );
+    QSignalSpy destroyed( adapter.get(), &QObject::destroyed );
+    QSignalSpy labelNotifications( labels, &ColorLabelsController::labelsChanged );
+    const auto connection = QObject::connect( &HighlighterStatePublisher::instance(),
+        &HighlighterStatePublisher::changed, &fixture.window, [&] {
+            CHECK_FALSE( labels->snapshot().labels.front().isEmpty() );
+            adapter.reset();
+        } );
+    REQUIRE( resultObject( adapter->dispatch( { "id", "transaction.commit", { { "transaction_id", id } } } ) )
+                 .value( "status" ) == QLatin1String( "preparing" ) );
+    REQUIRE( waitUiState( [&] { return !destroyed.isEmpty(); } ) );
+    QObject::disconnect( connection );
+    CHECK( labelNotifications.count() == 1 );
+    CHECK( HighlighterSetCollection::get().activeSetIds() == QStringList{ QStringLiteral( "rpc-evidence" ) } );
+}
 
 TEST_CASE( "Control adapter projects actual window and tab identities without GUI effects",
            "[ui][control-adapter]" )
@@ -146,7 +366,7 @@ TEST_CASE( "Control tab observation reads shared draft and labels without submit
     REQUIRE( controls.filter != nullptr );
     REQUIRE( controls.labels != nullptr );
     ColorLabelsController::Edit edit;
-    edit.texts = { QStringLiteral( "Evidence" ) };
+    edit.texts = QStringList{ QStringLiteral( "Evidence" ) };
     REQUIRE( controls.labels->apply( { edit } ) == ColorLabelsController::EditResult::Applied );
     const auto draft = controls.filter->filterDraftSnapshot();
     const auto tab = resultObject( fixture.call( "tab.get", { { "tab_id", fixture.tabId() } } ) );
@@ -161,6 +381,344 @@ TEST_CASE( "Control tab observation reads shared draft and labels without submit
     REQUIRE( entries.size() == 1 );
     CHECK( entries.first().toObject().value( "text" ).toString() == QStringLiteral( "Evidence" ) );
     CHECK( controls.filter->filterDraftSnapshot().revision == draft.revision );
+}
+
+TEST_CASE( "Control pane inventory provides explicit handles without capturing source content",
+           "[ui][control-adapter][control-pane-inventory]" )
+{
+    ReviewFixture fixture;
+    const auto tabId = fixture.tabId();
+    const auto listed = resultObject( fixture.call( "pane.list", { { "tab_id", tabId } } ) );
+    const auto panes = listed.value( "panes" ).toArray();
+    REQUIRE( panes.size() == 2 );
+    for ( const auto& item : panes ) {
+        const auto pane = item.toObject();
+        const auto id = pane.value( "pane_id" ).toString();
+        REQUIRE_FALSE( id.isEmpty() );
+        const auto observed = resultObject( fixture.call( "pane.get", { { "tab_id", tabId }, { "pane_id", id } } ) );
+        CHECK( observed.value( "pane_id" ) == id );
+        CHECK( observed.value( "available" ) == pane.value( "available" ) );
+        CHECK_FALSE( pane.contains( "text" ) );
+        CHECK_FALSE( pane.contains( "snapshot_id" ) );
+        CHECK( errorCode( fixture.call( "pane.get", { { "tab_id", tabId }, { "pane_id", id }, { "pane", "main" } } ) )
+               == QLatin1String( "INVALID_PARAMS" ) );
+    }
+    CHECK( errorCode( fixture.call( "pane.get", { { "tab_id", tabId }, { "pane_id", "retired" } } ) )
+           == QLatin1String( "PANE_NOT_FOUND" ) );
+    CHECK( errorCode( fixture.call( "pane.list", { { "tab_id", tabId }, { "include_text", true } } ) )
+           == QLatin1String( "INVALID_PARAMS" ) );
+}
+
+TEST_CASE( "Control captures a kept pane by identity without changing the active results page",
+           "[ui][control-adapter][control-pane-inventory]" )
+{
+    ReviewFixture fixture;
+    const auto tabId = fixture.tabId();
+    auto* widget = qobject_cast<FolderCrawlerWidget*>( fixture.window.inventorySnapshot().tabs.front().widget.data() );
+    REQUIRE( widget );
+    auto* engine = widget->findChild<FolderSearchEngine*>();
+    REQUIRE( engine );
+    const auto search = [&]( const QString& pattern ) {
+        QObject completion;
+        bool finished = false;
+        QObject::connect( engine, &FolderSearchEngine::searchFinished, &completion,
+                          [&] { finished = true; }, Qt::QueuedConnection );
+        widget->searchFor( pattern );
+        REQUIRE( waitUiState( [&] { return finished && !widget->isSearchActive(); } ) );
+    };
+    search( "Evidence" );
+    const auto panes = resultObject( fixture.call( "pane.list", { { "tab_id", tabId } } ) ).value( "panes" ).toArray();
+    REQUIRE( panes.size() == 2 );
+    const auto id = panes.last().toObject().value( "pane_id" ).toString();
+    widget->searchToolbar()->setKeepResultsChecked( true );
+    search( "absent" );
+    const auto* focus = QApplication::focusWidget();
+    const auto current = widget->resultsTabs()->currentIndex();
+    const QJsonObject target{ { "tab_id", tabId }, { "pane_id", id } };
+    CHECK( resultObject( fixture.call( "pane.get", target ) ).value( "row_count" ) == QLatin1String( "2" ) );
+    auto capture = target;
+    capture.insert( "scope", "matches" );
+    const auto snapshot = resultObject( fixture.call( "source.capture", capture ) );
+    CHECK( snapshot.value( "row_count" ) == QLatin1String( "1" ) );
+    CHECK( widget->resultsTabs()->currentIndex() == current );
+    CHECK( QApplication::focusWidget() == focus );
+    REQUIRE( QMetaObject::invokeMethod( widget->resultsTabs(), "tabCloseRequested", Qt::DirectConnection, Q_ARG( int, 0 ) ) );
+    CHECK( errorCode( fixture.call( "pane.get", target ) ) == QLatin1String( "PANE_NOT_FOUND" ) );
+    CHECK( errorCode( fixture.call( "source.capture", capture ) ) == QLatin1String( "PANE_NOT_FOUND" ) );
+    resultObject( fixture.call( "source.release", { { "snapshot_id", snapshot.value( "snapshot_id" ) } } ) );
+}
+
+TEST_CASE( "Control source-backed marks join label transactions and finalize without client polling",
+           "[ui][control-adapter][control-mark-writes]" )
+{
+    const bool folderMode = GENERATE( false, true );
+    ReviewFixture fixture;
+    const auto tabId = folderMode ? fixture.tabId() : fixture.openEvidenceFileTab();
+    if ( folderMode ) {
+        auto* folder = qobject_cast<FolderCrawlerWidget*>( fixture.window.inventorySnapshot().tabs.front().widget.data() );
+        REQUIRE( folder );
+        auto* engine = folder->findChild<FolderSearchEngine*>();
+        REQUIRE( engine );
+        QObject completion;
+        bool searched = false;
+        QObject::connect( engine, &FolderSearchEngine::searchFinished, &completion,
+                          [&] { searched = true; }, Qt::QueuedConnection );
+        folder->searchFor( "Evidence" );
+        REQUIRE( waitUiState( [&] { return searched && !folder->isSearchActive(); } ) );
+    }
+    auto change = markRequest( fixture, tabId, folderMode ? "results" : "main" );
+    const QJsonObject read{ { "tab_id", tabId }, { "owner_id", change.value( "owner_id" ) } };
+    const auto before = resultObject( fixture.call( "mark.list", read ) );
+    const auto id = resultObject( fixture.call( "transaction.begin" ) ).value( "transaction_id" ).toString();
+    const QJsonObject tx{ { "transaction_id", id } };
+    change.insert( "transaction_id", id );
+    change.insert( "expected_revision", before.value( "revision" ) );
+    REQUIRE( resultObject( fixture.call( "mark.add", change ) ).value( "status" ) == QLatin1String( "open" ) );
+    resultObject( fixture.call( "label.set", { { "transaction_id", id }, { "tab_id", fixture.tabId() },
+        { "label", 1 }, { "texts", QJsonArray{ "Evidence" } } } ) );
+    auto stagedRead = read;
+    stagedRead.insert( "transaction_id", id );
+    const auto groups = resultObject( fixture.call( "mark.list", stagedRead ) ).value( "groups" ).toArray();
+    REQUIRE( groups.size() == 1 );
+    CHECK( groups.first().toObject().value( "rows" ) == QJsonArray{ "0" } );
+    CHECK( resultObject( fixture.call( "mark.list", read ) ) == before );
+    // Staging keeps value proofs, not an extra pin on the client's evidence lease.
+    resultObject( fixture.call( "source.release", { { "snapshot_id", change.value( "snapshot_id" ) } } ) );
+    bool allInstalled = false;
+    auto* labels = fixture.controls().labels;
+    QObject::connect( labels, &ColorLabelsController::labelsChanged, labels, [&] {
+        allInstalled = resultObject( fixture.call( "mark.list", read ) ).value( "groups" ).toArray().size() == 1;
+    } );
+    QSignalSpy finished( &fixture.adapter, &ReviewControlAdapter::preparationFinished );
+    const auto* focus = QApplication::focusWidget();
+    const auto* active = QApplication::activeWindow();
+    REQUIRE( resultObject( fixture.call( "transaction.commit", tx ) ).value( "status" ) == QLatin1String( "preparing" ) );
+    REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+    CHECK( resultObject( fixture.call( "transaction.get", tx ) ).value( "status" ) == QLatin1String( "committed" ) );
+    CHECK( allInstalled );
+    CHECK( QApplication::focusWidget() == focus );
+    CHECK( QApplication::activeWindow() == active );
+}
+
+TEST_CASE( "Control mark add remove replace and clear preserve native no-op revisions",
+           "[ui][control-adapter][control-mark-writes]" )
+{
+    ReviewFixture fixture;
+    const auto tabId = fixture.openEvidenceFileTab();
+    const auto change = markRequest( fixture, tabId, "main" );
+    const QJsonObject read{ { "tab_id", tabId }, { "owner_id", change.value( "owner_id" ) } };
+    const auto complete = [&]( const QString& method, const QJsonObject& params ) {
+        QSignalSpy finished( &fixture.adapter, &ReviewControlAdapter::preparationFinished );
+        auto result = resultObject( fixture.call( method, params ) );
+        if ( result.value( "status" ) == QLatin1String( "preparing" ) ) {
+            REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+            result = resultObject( fixture.call( "transaction.get", { { "transaction_id", result.value( "transaction_id" ) } } ) );
+        }
+        REQUIRE( result.value( "status" ) == QLatin1String( "committed" ) );
+    };
+    complete( "mark.add", change );
+    const auto marked = resultObject( fixture.call( "mark.list", read ) );
+    complete( "mark.replace", change );
+    CHECK( resultObject( fixture.call( "mark.list", read ) ) == marked );
+    SECTION( "source-backed removal" ) { complete( "mark.remove", change ); }
+    SECTION( "clear needs no source lease" ) { complete( "mark.clear", read ); }
+    CHECK( resultObject( fixture.call( "mark.list", read ) ).value( "groups" ).toArray().isEmpty() );
+    auto stale = change;
+    stale.insert( "expected_revision", marked.value( "revision" ) );
+    CHECK( errorCode( fixture.call( "mark.add", stale ) ) == QLatin1String( "REVISION_CONFLICT" ) );
+}
+
+TEST_CASE( "Invalid mark wire arguments reject the whole staged prefix before publication",
+           "[ui][control-adapter][control-mark-writes]" )
+{
+    ReviewFixture fixture;
+    const auto tabId = fixture.openEvidenceFileTab();
+    auto change = markRequest( fixture, tabId, "main" );
+    const auto id = resultObject( fixture.call( "transaction.begin" ) ).value( "transaction_id" ).toString();
+    change.insert( "transaction_id", id );
+    resultObject( fixture.call( "label.set", { { "transaction_id", id }, { "tab_id", fixture.tabId() },
+        { "label", 1 }, { "texts", QJsonArray{ "Unpublished" } } } ) );
+    QString expected = QStringLiteral( "INVALID_PARAMS" );
+    SECTION( "numeric rather than canonical string row" ) { change.insert( "rows", QJsonArray{ 0 } ); }
+    SECTION( "noncanonical row" ) { change.insert( "rows", QJsonArray{ "00" } ); }
+    SECTION( "empty rows" ) { change.insert( "rows", QJsonArray{} ); }
+    SECTION( "no evidence lease" ) { change.remove( "snapshot_id" ); }
+    SECTION( "raw path is not an evidence address" ) { change.insert( "member_path", "/arbitrary/path" ); }
+    SECTION( "released evidence" ) {
+        resultObject( fixture.call( "source.release", { { "snapshot_id", change.value( "snapshot_id" ) } } ) );
+        expected = QStringLiteral( "SNAPSHOT_NOT_FOUND" );
+    }
+    SECTION( "bounded row admission" ) {
+        QJsonArray rows;
+        for ( uint64_t index = 0; index <= ReviewContentAdapter::MaxRows; ++index ) rows.append( "0" );
+        change.insert( "rows", rows );
+        expected = QStringLiteral( "RESOURCE_LIMIT" );
+    }
+    CHECK( errorCode( fixture.call( "mark.add", change ) ) == expected );
+    CHECK( errorCode( fixture.call( "transaction.commit", { { "transaction_id", id } } ) ) == expected );
+    CHECK( fixture.controls().labels->snapshot().labels.front().isEmpty() );
+}
+
+TEST_CASE( "Control mark completion revalidates closed tabs and global reset",
+           "[ui][control-adapter][control-mark-writes]" )
+{
+    ReviewFixture fixture;
+    const auto tabId = fixture.openEvidenceFileTab();
+    const auto change = markRequest( fixture, tabId, "main" );
+    QSignalSpy finished( &fixture.adapter, &ReviewControlAdapter::preparationFinished );
+    const auto started = resultObject( fixture.call( "mark.add", change ) );
+    REQUIRE( started.value( "status" ) == QLatin1String( "preparing" ) );
+    const QJsonObject tx{ { "transaction_id", started.value( "transaction_id" ) } };
+    bool reset = false;
+    SECTION( "tab removed during preparation" ) {
+        auto* tabs = fixture.window.findChild<TabbedCrawlerWidget*>();
+        REQUIRE( tabs );
+        tabs->removeCrawler( 2 );
+    }
+    SECTION( "global controller reset" ) { fixture.adapter.reset(); reset = true; }
+    REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+    if ( reset ) {
+        CHECK( errorCode( fixture.call( "transaction.get", tx ) ) == QLatin1String( "TRANSACTION_NOT_FOUND" ) );
+        CHECK( resultObject( fixture.call( "mark.list", { { "tab_id", tabId }, { "owner_id", change.value( "owner_id" ) } } ) )
+                   .value( "groups" ).toArray().isEmpty() );
+    }
+    else CHECK( resultObject( fixture.call( "transaction.get", tx ) ).value( "status" ) == QLatin1String( "target_closed" ) );
+}
+
+TEST_CASE( "Rejected transaction commands cannot leave a valid staged prefix committable",
+           "[ui][control-adapter][control-transactions][control-rejected-prefix]" )
+{
+    const QString method = GENERATE( "mark.unknown-command", "state.get", "pane.list", "source.read" );
+    const auto expected = method == QLatin1String( "mark.unknown-command" )
+        ? QStringLiteral( "METHOD_NOT_FOUND" ) : QStringLiteral( "INVALID_PARAMS" );
+    ReviewFixture fixture;
+    const auto id = resultObject( fixture.call( "transaction.begin" ) ).value( "transaction_id" ).toString();
+    const QJsonObject tx{ { "transaction_id", id } };
+    resultObject( fixture.call( "label.set", { { "transaction_id", id }, { "tab_id", fixture.tabId() },
+        { "label", 1 }, { "texts", QJsonArray{ "Unpublished" } } } ) );
+    CHECK( errorCode( fixture.call( method, tx ) ) == expected );
+    CHECK( errorCode( fixture.call( "transaction.commit", tx ) ) == expected );
+    CHECK( fixture.controls().labels->snapshot().labels.front().isEmpty() );
+}
+
+TEST_CASE( "Control mark reads bind the shared owner and conflict with human changes",
+           "[ui][control-adapter][control-marks-rpc]" )
+{
+    const bool asynchronous = GENERATE( false, true );
+    ReviewFixture fixture;
+    RestoreHighlighters restore;
+    const auto globalRevision = HighlighterSetCollection::get().revision();
+    const auto tabId = fixture.tabId();
+    auto* widget = qobject_cast<FolderCrawlerWidget*>( fixture.window.inventorySnapshot().tabs.front().widget.data() );
+    REQUIRE( widget );
+    widget->setViewContext( QStringLiteral( "{\"M\":{\"evidence.log\":[0]}}" ) );
+    const auto panes = resultObject( fixture.call( "pane.list", { { "tab_id", tabId } } ) ).value( "panes" ).toArray();
+    REQUIRE( panes.size() == 2 );
+    const auto ownerId = panes.last().toObject().value( "marks_owner_id" ).toString();
+    REQUIRE_FALSE( ownerId.isEmpty() );
+    CHECK( panes.first().toObject().value( "marks_owner_id" ) == ownerId );
+    const auto id = resultObject( fixture.call( "transaction.begin" ) ).value( "transaction_id" ).toString();
+    const QJsonObject tx{ { "transaction_id", id } };
+    const QJsonObject read{ { "tab_id", tabId }, { "owner_id", ownerId }, { "transaction_id", id } };
+    const auto before = resultObject( fixture.call( "mark.list", read ) );
+    CHECK( before.value( "scope" ) == QLatin1String( "folder-tab" ) );
+    CHECK( before.value( "coordinates" ) == QLatin1String( "stored-source-model-zero-based" ) );
+    const auto groups = before.value( "groups" ).toArray();
+    REQUIRE( groups.size() == 1 );
+    CHECK( groups.first().toObject().value( "rows" ) == QJsonArray{ "0" } );
+    CHECK( groups.first().toObject().value( "member_path" ) == fixture.directory.filePath( "evidence.log" ) );
+    resultObject( fixture.call( "label.set", { { "transaction_id", id }, { "tab_id", tabId },
+        { "label", 1 }, { "texts", QJsonArray{ "Unpublished" } } } ) );
+    QSignalSpy finished( &fixture.adapter, &ReviewControlAdapter::preparationFinished );
+    if ( asynchronous ) {
+        auto change = replacement();
+        change.insert( "transaction_id", id );
+        resultObject( fixture.call( "highlighter.replace", change ) );
+        REQUIRE( resultObject( fixture.call( "transaction.commit", tx ) ).value( "status" ) == QLatin1String( "preparing" ) );
+    }
+    widget->setViewContext( QStringLiteral( "{}" ) );
+    if ( asynchronous ) {
+        REQUIRE( waitUiState( [&] { return !finished.isEmpty(); } ) );
+        CHECK( resultObject( fixture.call( "transaction.get", tx ) ).value( "status" ) == QLatin1String( "conflict" ) );
+    }
+    else {
+        CHECK( resultObject( fixture.call( "mark.list", read ) ) == before );
+        CHECK( errorCode( fixture.call( "transaction.commit", tx ) ) == QLatin1String( "REVISION_CONFLICT" ) );
+    }
+    CHECK( fixture.controls().labels->snapshot().labels.front().isEmpty() );
+    CHECK( HighlighterSetCollection::get().revision() == globalRevision );
+}
+
+TEST_CASE( "Mark owner IDs are scoped to document membership and never rebound by revision alone",
+           "[ui][control-adapter][control-marks-rpc]" )
+{
+    ReviewFixture fixture;
+    const auto fileTab = fixture.openEvidenceFileTab();
+    const auto panes = resultObject( fixture.call( "pane.list", { { "tab_id", fileTab } } ) ).value( "panes" ).toArray();
+    REQUIRE( panes.size() == 2 );
+    const auto ownerId = panes.last().toObject().value( "marks_owner_id" ).toString();
+    REQUIRE_FALSE( ownerId.isEmpty() );
+    CHECK( panes.first().toObject().value( "marks_owner_id" ) == ownerId );
+    CHECK( errorCode( fixture.call( "mark.list", { { "tab_id", fixture.tabId() }, { "owner_id", ownerId } } ) )
+           == QLatin1String( "MARK_OWNER_NOT_FOUND" ) );
+    const auto id = resultObject( fixture.call( "transaction.begin" ) ).value( "transaction_id" ).toString();
+    const auto state = resultObject( fixture.call( "mark.list", { { "tab_id", fileTab },
+        { "owner_id", ownerId }, { "transaction_id", id } } ) );
+    CHECK( state.value( "scope" ) == QLatin1String( "source-model" ) );
+    CHECK( state.value( "groups" ).toArray().isEmpty() );
+    resultObject( fixture.call( "label.set", { { "transaction_id", id }, { "tab_id", fixture.tabId() },
+        { "label", 1 }, { "texts", QJsonArray{ "Unpublished" } } } ) );
+    auto* tabs = fixture.window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs );
+    tabs->removeCrawler( 2 );
+    CHECK( errorCode( fixture.call( "transaction.commit", { { "transaction_id", id } } ) )
+           == QLatin1String( "TARGET_CLOSED" ) );
+    CHECK( fixture.controls().labels->snapshot().labels.front().isEmpty() );
+}
+
+TEST_CASE( "Kept file result models retain distinct mark scopes across current-page changes",
+           "[ui][control-adapter][control-marks-rpc]" )
+{
+    ReviewFixture fixture;
+    const auto fileTab = fixture.openEvidenceFileTab();
+    auto* widget = qobject_cast<CrawlerWidget*>( fixture.window.inventorySnapshot().tabs.back().widget.data() );
+    REQUIRE( widget );
+    const auto owners = widget->reviewMarksOwners();
+    REQUIRE( owners.size() == 1 );
+    auto* first = dynamic_cast<LogFilteredData*>( owners.front() );
+    REQUIRE( first );
+    first->addMark( 0_lnum );
+    const auto firstId = first->reviewMarksId();
+    const auto begin = [&] {
+        const auto id = resultObject( fixture.call( "transaction.begin" ) ).value( "transaction_id" ).toString();
+        resultObject( fixture.call( "mark.list", { { "tab_id", fileTab }, { "owner_id", firstId }, { "transaction_id", id } } ) );
+        resultObject( fixture.call( "label.set", { { "tab_id", fixture.tabId() }, { "transaction_id", id },
+            { "label", 1 }, { "texts", QJsonArray{ id } } } ) );
+        return id;
+    };
+    const auto id = begin();
+    widget->reviewControls().filter->setKeepResultsChecked( true );
+    widget->reviewControls().filter->searchLineEdit()->setEditText( "absent" );
+    REQUIRE( QMetaObject::invokeMethod( widget, "startNewSearch", Qt::DirectConnection ) );
+    const auto panes = resultObject( fixture.call( "pane.list", { { "tab_id", fileTab } } ) ).value( "panes" ).toArray();
+    REQUIRE( panes.size() == 3 );
+    CHECK( panes.at( 1 ).toObject().value( "marks_owner_id" ) == firstId );
+    const auto secondId = panes.at( 2 ).toObject().value( "marks_owner_id" ).toString();
+    REQUIRE_FALSE( secondId.isEmpty() );
+    CHECK( secondId != firstId );
+    CHECK( panes.first().toObject().value( "marks_owner_id" ) == secondId );
+    CHECK( resultObject( fixture.call( "mark.list", { { "tab_id", fileTab }, { "owner_id", secondId } } ) )
+               .value( "groups" ).toArray().isEmpty() );
+    CHECK( resultObject( fixture.call( "transaction.commit", { { "transaction_id", id } } ) )
+               .value( "status" ) == QLatin1String( "committed" ) );
+    const auto closing = begin();
+    const auto labelRevision = fixture.controls().labels->snapshot().revision;
+    REQUIRE( QMetaObject::invokeMethod( widget, "closeFilteredView", Qt::DirectConnection, Q_ARG( int, 0 ) ) );
+    CHECK( errorCode( fixture.call( "mark.list", { { "tab_id", fileTab }, { "owner_id", firstId } } ) )
+           == QLatin1String( "MARK_OWNER_NOT_FOUND" ) );
+    CHECK( errorCode( fixture.call( "transaction.commit", { { "transaction_id", closing } } ) )
+           == QLatin1String( "TARGET_CLOSED" ) );
+    CHECK( fixture.controls().labels->snapshot().revision == labelRevision );
 }
 
 TEST_CASE( "Control pane observation reports presentation coordinates without content or activation",
@@ -514,6 +1072,9 @@ TEST_CASE( "Settings Apply reaches the application policy observer before the di
             Configuration::get().setStyle( style );
             Configuration::get().setLocalControlEnabled( enabled );
             Configuration::get().save();
+            // Options Apply also changes the process logger. Restore the
+            // qtests_main policy before unrelated live-presentation tests run.
+            logging::enableLogging( true, logging::LogLevel::Warning );
         }
     } restore{ config.style(), config.localControlEnabled() };
     config.setStyle( StyleManager::DarkStyleKey );
@@ -554,6 +1115,7 @@ TEST_CASE( "The real console executable stages GUI evidence and observes human c
            "[ui][control-service][control-cli-gui]" )
 {
     ReviewFixture fixture;
+    RestoreHighlighters restore;
     RuntimeOptions runtime;
     runtime.descriptorRoot = QFileInfo( fixture.directory.path() ).canonicalFilePath() + "/control";
     ReviewControlService service{ [ & ] {
@@ -623,10 +1185,35 @@ TEST_CASE( "The real console executable stages GUI evidence and observes human c
     const auto pane = run( target + QStringList{ "pane", "get", "--tab", fileTab, "--pane", "main" } )
                           .value( "result" ).toObject();
     CHECK( pane.value( "row_count" ) == QLatin1String( "1" ) );
-    const auto captured = call( "source.capture", { { "tab_id", fileTab }, { "pane", "main" },
+    const auto listedPanes = call( "pane.list", { { "tab_id", fileTab } } )
+                                 .value( "result" ).toObject().value( "panes" ).toArray();
+    REQUIRE( listedPanes.size() == 2 );
+    const auto mainPaneId = pane.value( "pane_id" ).toString();
+    REQUIRE_FALSE( mainPaneId.isEmpty() );
+    CHECK( listedPanes.first().toObject().value( "pane_id" ) == mainPaneId );
+    const auto captured = call( "source.capture", { { "tab_id", fileTab }, { "pane_id", mainPaneId },
                                                    { "scope", "presented" } } ).value( "result" ).toObject();
     const auto snapshot = captured.value( "snapshot_id" ).toString();
     REQUIRE_FALSE( snapshot.isEmpty() );
+    const auto markOwner = listedPanes.first().toObject().value( "marks_owner_id" );
+    const QJsonObject markRead{ { "tab_id", fileTab }, { "owner_id", markOwner } };
+    const auto marksBefore = call( "mark.list", markRead ).value( "result" ).toObject();
+    QJsonObject markChange{ { "tab_id", fileTab }, { "owner_id", markOwner }, { "snapshot_id", snapshot },
+        { "rows", QJsonArray{ "0" } }, { "expected_revision", marksBefore.value( "revision" ) } };
+    const auto markStart = call( "mark.add", markChange ).value( "result" ).toObject();
+    REQUIRE( markStart.value( "status" ) == QLatin1String( "preparing" ) );
+    QJsonObject markDone;
+    REQUIRE( waitUiState( [&] {
+        markDone = call( "transaction.get", { { "transaction_id", markStart.value( "transaction_id" ) } } )
+            .value( "result" ).toObject();
+        return markDone.value( "status" ) != QLatin1String( "preparing" );
+    } ) );
+    CHECK( markDone.value( "status" ) == QLatin1String( "committed" ) );
+    const auto marked = call( "mark.list", markRead ).value( "result" ).toObject().value( "groups" ).toArray();
+    REQUIRE( marked.size() == 1 );
+    CHECK( marked.first().toObject().value( "rows" ) == QJsonArray{ "0" } );
+    CHECK( call( "mark.add", markChange, 4 ).value( "error" ).toObject().value( "data" ).toObject()
+               .value( "code" ) == QLatin1String( "REVISION_CONFLICT" ) );
     const auto reading = call( "source.read", { { "snapshot_id", snapshot }, { "start", "0" }, { "count", 1 } } )
                              .value( "result" ).toObject().value( "operation_id" ).toString();
     REQUIRE_FALSE( reading.isEmpty() );
@@ -640,6 +1227,88 @@ TEST_CASE( "The real console executable stages GUI evidence and observes human c
     const auto rows = content.value( "result" ).toObject().value( "rows" ).toArray();
     REQUIRE( rows.size() == 1 );
     CHECK( rows.first().toObject().value( "text" ) == QLatin1String( "Evidence" ) );
+    const auto globalBefore = call( "highlighter.list", {} ).value( "result" ).toObject();
+    auto globalChange = replacement();
+    globalChange.insert( "expected_revision", globalBefore.value( "revision" ) );
+    const auto globalStart = call( "highlighter.replace", globalChange ).value( "result" ).toObject();
+    REQUIRE( globalStart.value( "status" ) == QLatin1String( "preparing" ) );
+    const auto globalId = globalStart.value( "transaction_id" ).toString();
+    REQUIRE_FALSE( globalId.isEmpty() );
+    QJsonObject globalDone;
+    REQUIRE( waitUiState( [&] {
+        globalDone = call( "transaction.get", { { "transaction_id", globalId } } ).value( "result" ).toObject();
+        return globalDone.value( "status" ) != QLatin1String( "preparing" );
+    } ) );
+    CHECK( globalDone.value( "status" ) == QLatin1String( "committed" ) );
+    const auto globalAfter = call( "highlighter.list", {} ).value( "result" ).toObject();
+    CHECK( globalAfter.value( "active_set_ids" ) == QJsonArray{ "rpc-evidence" } );
+    CHECK( globalAfter.value( "label_palette" ) == globalBefore.value( "label_palette" ) );
+    CHECK( call( "highlighter.replace", globalChange, 4 ).value( "error" ).toObject()
+               .value( "data" ).toObject().value( "code" ) == QLatin1String( "REVISION_CONFLICT" ) );
+    const auto currentBeforeOpen = fixture.window.inventorySnapshot().currentTabId;
+    const auto lifecyclePath = fixture.directory.filePath( "cli-lifecycle.log" );
+    QFile lifecycleFile{ lifecyclePath };
+    REQUIRE( lifecycleFile.open( QIODevice::WriteOnly ) );
+    REQUIRE( lifecycleFile.write( "CLI lifecycle\n" ) == 14 );
+    lifecycleFile.close();
+    const auto opening = call( "documents.open", {
+        { "window_id", fixture.window.runtimeWindowId() },
+        { "path", lifecyclePath }, { "kind", "file" } } )
+        .value( "result" ).toObject();
+    const auto openingId = opening.value( "operation_id" ).toString();
+    REQUIRE_FALSE( openingId.isEmpty() );
+    QJsonObject opened;
+    REQUIRE( waitUiState( [&] {
+        opened = call( "operation.get", { { "operation_id", openingId } } ).value( "result" ).toObject();
+        return opened.value( "status" ) != QLatin1String( "pending" );
+    } ) );
+    REQUIRE( opened.value( "status" ) == QLatin1String( "completed" ) );
+    CHECK( fixture.window.inventorySnapshot().currentTabId == currentBeforeOpen );
+    const auto openedTab = opened.value( "result" ).toObject().value( "tab_id" );
+    const auto filterDraft = call( "tab.get", { { "tab_id", openedTab } } )
+        .value( "result" ).toObject().value( "filter_draft" ).toObject();
+    const auto filtering = call( "filter.apply", { { "tab_id", openedTab },
+        { "expected_revision", filterDraft.value( "revision" ) },
+        { "filter", QJsonObject{ { "text", "CLI" }, { "use_regexp", false },
+            { "inverse", false }, { "boolean", false }, { "auto_refresh", false },
+            { "keep_results", false } } } } ).value( "result" ).toObject();
+    QJsonObject filtered;
+    REQUIRE( waitUiState( [&] {
+        filtered = call( "operation.get", { { "operation_id", filtering.value( "operation_id" ) } } )
+            .value( "result" ).toObject();
+        return filtered.value( "status" ) != QLatin1String( "pending" );
+    } ) );
+    REQUIRE( filtered.value( "status" ) == QLatin1String( "completed" ) );
+    CHECK( call( "tab.get", { { "tab_id", openedTab } } ).value( "result" ).toObject()
+        .value( "filter_draft" ).toObject().value( "text" ) == QLatin1String( "CLI" ) );
+    const auto filteredSnapshot = call( "source.capture", { { "tab_id", openedTab },
+        { "pane_id", filtered.value( "result" ).toObject().value( "pane_id" ) },
+        { "scope", "matches" } } ).value( "result" ).toObject();
+    CHECK( filteredSnapshot.value( "row_count" ) == QLatin1String( "1" ) );
+    call( "source.release", { { "snapshot_id", filteredSnapshot.value( "snapshot_id" ) } } );
+    const auto keeping = call( "filter.apply", { { "tab_id", openedTab },
+        { "filter", QJsonObject{ { "text", "lifecycle" }, { "keep_results", true } } } } )
+        .value( "result" ).toObject();
+    QJsonObject kept;
+    REQUIRE( waitUiState( [&] {
+        kept = call( "operation.get", { { "operation_id", keeping.value( "operation_id" ) } } )
+            .value( "result" ).toObject();
+        return kept.value( "status" ) != QLatin1String( "pending" );
+    } ) );
+    REQUIRE( kept.value( "status" ) == QLatin1String( "completed" ) );
+    const auto oldResultPane = filtered.value( "result" ).toObject().value( "pane_id" );
+    CHECK( kept.value( "result" ).toObject().value( "pane_id" ) != oldResultPane );
+    CHECK( call( "pane.get", { { "tab_id", openedTab }, { "pane_id", oldResultPane } } )
+        .value( "result" ).toObject().value( "applied_filter" ).toObject().value( "text" )
+        == QLatin1String( "CLI" ) );
+    CHECK( call( "pane.list", { { "tab_id", openedTab } } ).value( "result" ).toObject()
+        .value( "panes" ).toArray().size() == 3 );
+    CHECK( fixture.window.inventorySnapshot().currentTabId == currentBeforeOpen );
+    const auto closed = call( "documents.close", {
+        { "window_id", fixture.window.runtimeWindowId() }, { "tab_id", openedTab } } )
+        .value( "result" ).toObject();
+    CHECK( closed.value( "status" ) == QLatin1String( "completed" ) );
+    CHECK( fixture.window.inventorySnapshot().currentTabId == currentBeforeOpen );
     REQUIRE( service.setEnabled( false ) );
     const auto unavailable = run( target + QStringList{ "state", "get" }, 3 );
     CHECK( unavailable.contains( "error" ) );

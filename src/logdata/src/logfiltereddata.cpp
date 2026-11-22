@@ -43,6 +43,7 @@
 #include "log.h"
 
 #include <QCoreApplication>
+#include <QPointer>
 #include <QString>
 #include <QtGlobal>
 
@@ -50,12 +51,15 @@
 #include <cassert>
 #include <exception>
 #include <functional>
+#include <limits>
+#include <type_traits>
 #include <numeric>
 #include <set>
 #include <tuple>
 #include <vector>
 
 #include "logfiltereddata.h"
+#include <QThread>
 #include "searchablelogdata.h"
 
 #include "configuration.h"
@@ -174,7 +178,10 @@ LogFilteredData::LogFilteredData( const SearchableLogData* logData )
     // Forward the update signal
     connect( &workerThread_, &LogFilteredDataWorker::searchProgressed, this,
              &LogFilteredData::handleSearchProgressed, Qt::DirectConnection );
+    connect( &retirementWatcher_, &QFutureWatcher<void>::finished, this,
+             &LogFilteredData::finishRetirement );
     connect( sourceLogData_, &AbstractLogData::interpretationChanged, this, [ this ] {
+        if ( shuttingDown_ ) return;
         // Retained leases remain readable, but their membership no longer
         // describes the source's current interpretation. Retire queued work
         // before notifying selection/presentation consumers.
@@ -186,7 +193,9 @@ LogFilteredData::LogFilteredData( const SearchableLogData* logData )
         notifyInterpretationChanged();
     } );
     connect( sourceLogData_, &SearchableLogData::loadingFinished, this,
-             [ this ]( LoadingStatus ) { refreshPresentedSourceForDisplay(); } );
+             [ this ]( LoadingStatus ) {
+                 if ( !shuttingDown_ ) refreshPresentedSourceForDisplay();
+             } );
 }
 
 LogFilteredData::~LogFilteredData()
@@ -205,7 +214,7 @@ LogFilteredData::~LogFilteredData()
     disconnect( &workerThread_, nullptr, this, nullptr );
     disconnect( this, nullptr, &workerThread_, nullptr );
 
-    detachReaderIfNeeded();
+    finishRetirement();
 
     // Queued MetaCall events can still be pending after disconnect(); remove them
     // before subobject destruction.
@@ -308,8 +317,28 @@ bool LogFilteredData::containsRowIdentity( const klogg::LogRowId& identity ) con
     return sourceLogData_ && sourceLogData_->containsRowIdentity( identity );
 }
 
+QFuture<void> LogFilteredData::retire()
+{
+    if ( !retirementCompletion_.isStarted() ) {
+        shuttingDown_ = true;
+        retirementCompletion_.reportStarted();
+        cancelPendingPublications();
+        retirementWatcher_.setFuture( workerThread_.retire() );
+    }
+    return retirementCompletion_.future();
+}
+
+void LogFilteredData::finishRetirement()
+{
+    detachReaderIfNeeded();
+    if ( retirementCompletion_.isStarted() && !retirementCompletion_.isFinished() ) {
+        retirementCompletion_.reportFinished();
+    }
+}
+
 void LogFilteredData::runSearch( const RegularExpressionPattern& regExp )
 {
+    if ( shuttingDown_ ) return;
     runSearch( regExp, 0_lnum, LineNumber( getNbTotalLines().get() ) );
 }
 
@@ -318,6 +347,7 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
                                  LineNumber endLine )
 {
     LOG_DEBUG << "Entering runSearch";
+    if ( shuttingDown_ ) return;
 
     const auto& config = Configuration::get();
 
@@ -383,6 +413,7 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
 void LogFilteredData::updateSearch( LineNumber startLine, LineNumber endLine )
 {
     LOG_DEBUG << "Entering updateSearch";
+    if ( shuttingDown_ ) return;
 
     cancelPendingPublications();
     completedResult_.reset();
@@ -411,6 +442,7 @@ void LogFilteredData::bumpSearchGeneration()
 
 void LogFilteredData::clearSearch( bool dropCache )
 {
+    if ( shuttingDown_ ) return;
     // Clearing abandons both the model and every queued payload from the old
     // search, so retire its generation before interrupting the worker.
     bumpSearchGeneration();
@@ -580,9 +612,252 @@ void LogFilteredData::iterateOverLines( const std::function<void( LineNumber )>&
 
 // Delegation to our Marks object
 
+std::optional<klogg::ReviewMarkLocation>
+LogFilteredData::resolveReviewMark( const klogg::LogRowId& identity ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    const auto row = sourceLogData_ ? sourceLogData_->rowForIdentity( identity ) : OptionalLineNumber{};
+    if ( !row ) return {};
+    return klogg::ReviewMarkLocation{ {}, *row };
+}
+
+std::optional<klogg::ReviewMarksSnapshot> LogFilteredData::reviewMarksSnapshot() const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( marks_.cardinality() > MaxMarks ) return {};
+    klogg::ReviewMarksSnapshot result;
+    result.revision = marksRevision_;
+    if ( !marks_.isEmpty() ) result.groups.push_back( { {}, getMarks() } );
+    return result;
+}
+
 LogFilteredData::MarksSnapshot LogFilteredData::marksSnapshot() const
 {
     return { marksRevision_, getMarks() };
+}
+
+struct LogFilteredData::MarksUpdateCapture {
+    QString ownerId;
+    uint64_t revision = 0;
+    bool changed = false;
+    SearchResultArray candidate;
+    SearchResultArray matches;
+    SearchableLogData::ReadSnapshot::Ptr source;
+    Visibility visibility;
+    bool allVisible = false;
+    int before = 0;
+    int after = 0;
+    bool needsContext = false;
+    size_t contextWorkUnits = 0;
+    OptionalLineNumber lastContextSeed;
+};
+struct LogFilteredData::PreparedMarksUpdate {
+    std::shared_ptr<const MarksUpdateCapture> captured;
+    SearchResultArray marks;
+    SearchResultArray combined;
+    klogg::vector<LineNumber> context;
+    bool consumed = false;
+};
+struct LogFilteredData::MarksUpdatePublication::State {
+    LogFilteredData* owner;
+    std::shared_ptr<PreparedMarksUpdate> prepared;
+    SearchableLogData::ReadSnapshot::Ptr source;
+    bool completedSourceInvalid = false;
+};
+LogFilteredData::MarksUpdatePublication::MarksUpdatePublication( std::unique_ptr<State> state )
+    : state_( std::move( state ) ) {}
+LogFilteredData::MarksUpdatePublication::~MarksUpdatePublication()
+{
+    state_->owner->marksPublicationLocked_ = false;
+}
+bool LogFilteredData::MarksUpdatePublication::install() noexcept
+{
+    static_assert( std::is_nothrow_move_assignable<SearchResultArray>::value,
+                   "Mark publication requires allocation-free bitmap moves" );
+    static_assert( std::is_nothrow_move_assignable<klogg::vector<LineNumber>>::value,
+                   "Mark publication requires allocation-free context moves" );
+    auto& owner = *state_->owner;
+    auto& prepared = *state_->prepared;
+    Q_ASSERT( QThread::currentThread() == owner.thread() );
+    if ( prepared.consumed ) return false;
+    if ( prepared.captured->changed ) {
+        owner.marks_ = std::move( prepared.marks );
+        owner.marks_and_matches_ = std::move( prepared.combined );
+        owner.contextLinesList_ = std::move( prepared.context );
+        owner.contextLinesListValid_ = prepared.captured->needsContext;
+        owner.presentedSource_ = std::move( state_->source );
+        owner.completedSourceInvalid_ = state_->completedSourceInvalid;
+        owner.maxLengthContext_.reset();
+        owner.maxLengthMarks_ = owner.marks_.isEmpty() ? std::optional<LineLength>{ 0_length } : std::nullopt;
+        owner.longestMark_.reset();
+        owner.unmeasuredMarks_ = SearchResultArray{};
+        ++owner.marksRevision_;
+    }
+    prepared.consumed = true;
+    return true;
+}
+std::shared_ptr<const LogFilteredData::MarksUpdateCapture>
+LogFilteredData::captureMarksUpdate( const QList<LineNumber>& candidate ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( !sourceLogData_ || static_cast<size_t>( candidate.size() ) > MaxMarks ) return {};
+    auto captured = std::make_shared<MarksUpdateCapture>();
+    captured->ownerId = reviewMarksId();
+    captured->revision = marksRevision_;
+    for ( const auto row : candidate ) captured->candidate.add( row.get() );
+    captured->changed = !( captured->candidate == marks_ );
+    if ( !captured->changed ) return captured;
+    if ( marksRevision_ == std::numeric_limits<uint64_t>::max() ) return {};
+    const auto candidateBytes = captured->candidate.getSizeInBytes();
+    if ( candidateBytes > MaxPreparedBitmapBytes
+         || matching_lines_.getSizeInBytes() > MaxPreparedBitmapBytes - candidateBytes ) return {};
+    captured->visibility = visibility_;
+    captured->allVisible = allLinesVisible_;
+    captured->before = contextLinesBefore_;
+    captured->after = contextLinesAfter_;
+    captured->needsContext = ( contextLinesBefore_ != 0 || contextLinesAfter_ != 0 )
+        && !( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) );
+    if ( captured->needsContext ) {
+        const auto expansion = uint64_t{ 1 } + static_cast<uint64_t>( contextLinesBefore_ )
+            + static_cast<uint64_t>( contextLinesAfter_ );
+        auto availableSeeds = MaxPreparedContextRows / expansion;
+        for ( const auto flag : { VisibilityFlags::Matches, VisibilityFlags::Marks } ) {
+            if ( !visibility_.testFlag( flag ) ) continue;
+            const auto& seeds = flag == VisibilityFlags::Matches ? matching_lines_ : captured->candidate;
+            if ( seeds.cardinality() > availableSeeds ) return {};
+            availableSeeds -= seeds.cardinality();
+            captured->contextWorkUnits += static_cast<size_t>( seeds.cardinality() * expansion );
+            if ( !seeds.isEmpty() ) {
+                const LineNumber last{ seeds.maximum() };
+                if ( !captured->lastContextSeed || last > *captured->lastContextSeed ) captured->lastContextSeed = last;
+            }
+        }
+    }
+    captured->source = sourceLogData_->searchableSnapshot();
+    if ( !captured->source ) return {};
+    const auto count = captured->source->lineCount();
+    // Existing stored marks may outlive a source cutoff; preserve them, but
+    // never introduce a new bookmark beyond the captured source's admitted rows.
+    for ( const auto row : candidate )
+        if ( row >= count && !marks_.contains( row.get() ) ) return {};
+    captured->matches = matching_lines_;
+    return captured;
+}
+std::shared_ptr<LogFilteredData::PreparedMarksUpdate>
+LogFilteredData::prepareMarksUpdate( const std::shared_ptr<const MarksUpdateCapture>& captured )
+{
+    if ( !captured ) return {};
+    auto prepared = std::make_shared<PreparedMarksUpdate>();
+    prepared->captured = captured;
+    if ( captured->changed ) {
+        prepared->marks = captured->candidate;
+        prepared->combined = captured->matches | captured->candidate;
+        if ( captured->needsContext ) {
+            prepared->context = buildContextLines( captured->matches, captured->candidate,
+                captured->visibility, captured->before, captured->after, captured->source->lineCount() );
+        }
+    }
+    return prepared;
+}
+std::unique_ptr<LogFilteredData::MarksUpdatePublication>
+LogFilteredData::lockMarksUpdate( const std::shared_ptr<PreparedMarksUpdate>& prepared )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( !prepared || prepared->consumed || marksPublicationLocked_ || !sourceLogData_ ) return {};
+    const auto& captured = *prepared->captured;
+    if ( captured.ownerId != reviewMarksId() || captured.revision != marksRevision_ ) return {};
+    SearchableLogData::ReadSnapshot::Ptr source;
+    auto invalid = completedSourceInvalid_;
+    if ( captured.changed ) {
+        if ( !( captured.matches == matching_lines_ ) || captured.visibility != visibility_
+             || captured.allVisible != allLinesVisible_ || captured.before != contextLinesBefore_
+             || captured.after != contextLinesAfter_ ) return {};
+        source = sourceLogData_->searchableSnapshot();
+        if ( !source ) return {};
+        const auto key = source->cacheKey();
+        const bool unchanged = source == captured.source || ( key && key == captured.source->cacheKey() );
+        if ( !unchanged && !source->preservesPresentationOf( *captured.source ) ) return {};
+        if ( captured.needsContext && captured.lastContextSeed
+             && source->lineCount() != captured.source->lineCount() ) {
+            const auto count = captured.source->lineCount().get();
+            const auto last = captured.lastContextSeed->get();
+            // Sealed append is safe only when no prepared context range was
+            // clipped by the old source boundary. Otherwise rebuild privately.
+            if ( last >= count || static_cast<uint64_t>( captured.after ) > count - last - 1 ) return {};
+        }
+        if ( completedResult_ && completedResult_->source
+             && !source->preservesPresentationOf( *completedResult_->source ) ) invalid = true;
+    }
+    auto state = std::make_unique<MarksUpdatePublication::State>(
+        MarksUpdatePublication::State{ this, prepared, std::move( source ), invalid } );
+    auto publication = std::unique_ptr<MarksUpdatePublication>( new MarksUpdatePublication( std::move( state ) ) );
+    marksPublicationLocked_ = true;
+    return publication;
+}
+
+class LogFilteredData::ReviewMarksUpdate final : public klogg::PreparedReviewMarks {
+  public:
+    ReviewMarksUpdate( QPointer<LogFilteredData> owner, std::shared_ptr<PreparedMarksUpdate> update )
+        : owner_( std::move( owner ) ), update_( std::move( update ) ) {}
+    std::unique_ptr<klogg::ReviewMarksPublication> acquire() override
+    {
+        if ( !owner_ ) return {};
+        auto guard = owner_->lockMarksUpdate( update_ );
+        if ( !guard ) return {};
+        return std::make_unique<Publication>( owner_, std::move( guard ), update_->captured->changed );
+    }
+  private:
+    class Publication final : public klogg::ReviewMarksPublication {
+      public:
+        Publication( QPointer<LogFilteredData> owner, std::unique_ptr<MarksUpdatePublication> guard,
+                     bool changed )
+            : owner_( std::move( owner ) ), guard_( std::move( guard ) ), changed_( changed ) {}
+        void install() noexcept override
+        {
+            if ( guard_ && !installed_ ) installed_ = guard_->install();
+        }
+        void release() noexcept override { guard_.reset(); }
+        void notify() override
+        {
+            if ( guard_ || !installed_ || notified_ || !changed_ || !owner_ ) return;
+            notified_ = true;
+            Q_EMIT owner_->marksChanged();
+        }
+      private:
+        QPointer<LogFilteredData> owner_;
+        std::unique_ptr<MarksUpdatePublication> guard_;
+        bool changed_;
+        bool installed_ = false;
+        bool notified_ = false;
+    };
+    QPointer<LogFilteredData> owner_;
+    std::shared_ptr<PreparedMarksUpdate> update_;
+};
+
+klogg::ReviewMarksPreparer LogFilteredData::prepareReviewMarks(
+    const klogg::ReviewMarksSnapshot& candidate, klogg::ReviewMarksBudget& budget )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( candidate.scope != klogg::ReviewMarksSnapshot::Scope::SourceModel
+         || candidate.revision != marksRevision_ || candidate.groups.size() > 1
+         || ( !candidate.groups.empty() && !candidate.groups.front().memberPath.isEmpty() ) ) return {};
+    const auto captured = captureMarksUpdate( candidate.groups.empty()
+        ? QList<LineNumber>{} : candidate.groups.front().rows );
+    if ( !captured ) return {};
+    size_t cost = 0;
+    if ( captured->changed ) {
+        // Charge container overhead and private copies, not just encoded bits.
+        cost = 16 * ( captured->matches.getSizeInBytes() + captured->candidate.getSizeInBytes() );
+        cost += 64 * captured->contextWorkUnits;
+    }
+    if ( !budget.charge( cost ) ) return {};
+    const QPointer<LogFilteredData> owner{ this };
+    return [owner, captured]( const std::atomic<bool>& cancelled ) -> std::shared_ptr<klogg::PreparedReviewMarks> {
+        if ( cancelled ) return {};
+        auto prepared = prepareMarksUpdate( captured );
+        if ( cancelled || !prepared ) return {};
+        return std::make_shared<ReviewMarksUpdate>( owner, std::move( prepared ) );
+    };
 }
 
 void LogFilteredData::toggleMark( LineNumber line )
@@ -596,13 +871,11 @@ void LogFilteredData::toggleMark( LineNumber line )
         ++marksRevision_;
         if ( !marks_.addChecked( line.get() ) ) {
             marks_.remove( line.get() );
-            updateMaxLengthMarks( {}, line );
+            updateMarksProjection( {}, line );
         }
         else {
-            updateMaxLengthMarks( line, {} );
+            updateMarksProjection( line, {} );
         }
-        // marks_and_matches_ is already updated by updateMaxLengthMarks()
-        contextLinesListValid_ = false; // Invalidate context lines cache when marks change
     }
     else {
         LOG_ERROR << "LogFilteredData::toggleMark trying to toggle a mark outside of the file.";
@@ -619,10 +892,8 @@ void LogFilteredData::addMark( LineNumber line )
     if ( ( line >= 0_lnum ) && line < sourceLogData_->getNbLine() ) {
         if ( marks_.addChecked( line.get() ) ) {
             ++marksRevision_;
+            updateMarksProjection( line, {} );
         }
-        updateMaxLengthMarks( line, {} );
-        // marks_and_matches_ is already updated by updateMaxLengthMarks()
-        contextLinesListValid_ = false; // Invalidate context lines cache when marks change
     }
     else {
         LOG_ERROR << "LogFilteredData::addMark trying to create a mark outside of the file.";
@@ -674,45 +945,46 @@ void LogFilteredData::deleteMark( LineNumber line )
 {
     if ( marks_.removeChecked( line.get() ) ) {
         ++marksRevision_;
+        updateMarksProjection( {}, line );
     }
-    updateMaxLengthMarks( {}, line );
-    // marks_and_matches_ is already updated by updateMaxLengthMarks()
-    contextLinesListValid_ = false; // Invalidate context lines cache when marks change
 }
 
-void LogFilteredData::updateMaxLengthMarks( OptionalLineNumber added_line,
-                                            OptionalLineNumber removed_line )
+void LogFilteredData::updateMarksProjection( OptionalLineNumber addedLine,
+                                             OptionalLineNumber removedLine )
 {
     marks_and_matches_ = matching_lines_ | marks_;
-
-    // Safety check: if sourceLogData_ is null (object being destroyed), return early
-    if ( !sourceLogData_ ) {
-        return;
+    contextLinesListValid_ = false;
+    if ( removedLine ) {
+        unmeasuredMarks_.remove( removedLine->get() );
+        if ( longestMark_ == removedLine ) {
+            maxLengthMarks_.reset();
+            longestMark_.reset();
+            unmeasuredMarks_ = {};
+        }
     }
+    if ( addedLine && maxLengthMarks_ ) unmeasuredMarks_.add( addedLine->get() );
+}
 
-    if ( added_line.has_value() ) {
-        maxLengthMarks_ = qMax( maxLengthMarks_, sourceLogData_->getLineLength( *added_line ) );
+LineLength LogFilteredData::marksMaxLength() const
+{
+    if ( !sourceLogData_ ) return 0_length;
+    auto maximum = maxLengthMarks_.value_or( 0_length );
+    auto longest = longestMark_;
+    const auto& pending = maxLengthMarks_ ? unmeasuredMarks_ : marks_;
+    const auto sourceCount = sourceLogData_->getNbLine().get();
+    for ( const auto line : pending ) {
+        if ( line >= sourceCount ) continue;
+        const auto width = sourceLogData_->getLineLength( LineNumber( line ) );
+        if ( width > maximum ) {
+            maximum = width;
+            longest = LineNumber( line );
+        }
     }
-
-    // Now update the max length if needed
-    if ( removed_line.has_value()
-         && sourceLogData_->getLineLength( *removed_line ) >= maxLengthMarks_ ) {
-        LOG_DEBUG << "deleteMark recalculating longest mark";
-        maxLengthMarks_ = 0_length;
-        marks_.iterate(
-            []( uint64_t line, void* context ) -> bool {
-                auto* self = static_cast<LogFilteredData*>( context );
-                // Safety check: if sourceLogData_ is null, skip this iteration
-                if ( !self->sourceLogData_ ) {
-                    return false;
-                }
-                self->maxLengthMarks_
-                    = qMax( self->maxLengthMarks_,
-                            self->sourceLogData_->getLineLength( LineNumber( line ) ) );
-                return true;
-            },
-            static_cast<void*>( this ) );
-    }
+    // Publish the cache only after every requested measurement succeeds.
+    maxLengthMarks_ = maximum;
+    longestMark_ = longest;
+    unmeasuredMarks_ = {};
+    return maximum;
 }
 
 void LogFilteredData::clearMarks()
@@ -723,6 +995,8 @@ void LogFilteredData::clearMarks()
     marks_ = {};
     marks_and_matches_ = matching_lines_;
     maxLengthMarks_ = 0_length;
+    longestMark_.reset();
+    unmeasuredMarks_ = {};
     contextLinesListValid_ = false; // Invalidate context lines cache when marks change
 }
 
@@ -752,108 +1026,76 @@ LogFilteredData::Visibility LogFilteredData::visibility() const
 
 void LogFilteredData::setContextLines( int before, int after )
 {
-    contextLinesBefore_ = std::max( 0, before );
-    contextLinesAfter_ = std::max( 0, after );
-    contextLinesListValid_ = false; // Invalidate cache
+    before = std::max( 0, before );
+    after = std::max( 0, after );
+    if ( before == contextLinesBefore_ && after == contextLinesAfter_ ) return;
+    contextLinesBefore_ = before;
+    contextLinesAfter_ = after;
+    contextLinesListValid_ = false; // Invalidate only a changed projection
 }
 
 void LogFilteredData::rebuildContextLinesList() const
 {
     maxLengthContext_.reset();
-    // Context lines should always be calculated relative to search matches (matching_lines_),
-    // regardless of visibility settings. This is because the feature is designed to provide
-    // context around search results similar to grep's -B, -A, -C options.
-    // Using currentResultArray() would respect visibility settings, which could cause context
-    // lines to be calculated around marks instead of matches when visibility is set to show
-    // only marks.
+    const bool hasContext = contextLinesBefore_ != 0 || contextLinesAfter_ != 0;
+    if ( hasContext && !sourceLogData_ ) return;
+    const auto totalLines = !hasContext ? 0_lcount
+        : presentedSource_ ? presentedSource_->lineCount() : sourceLogData_->getNbLine();
+    contextLinesList_ = buildContextLines( matching_lines_, marks_, visibility_,
+                                           contextLinesBefore_, contextLinesAfter_, totalLines );
+    contextLinesListValid_ = true;
+}
 
-    // If no context lines needed, use simple list of matching lines plus marks
-    if ( contextLinesBefore_ == 0 && contextLinesAfter_ == 0 ) {
-        contextLinesList_.clear();
-        // Build union of matching_lines_ and marks_ (respecting visibility)
+klogg::vector<LineNumber> LogFilteredData::buildContextLines(
+    const SearchResultArray& matches, const SearchResultArray& marks, Visibility visibility,
+    int before, int after, LinesCount totalLines )
+{
+    klogg::vector<LineNumber> lines;
+    // Both visible matches and visible marks seed context, matching the native
+    // display contract. Membership never decodes payload or accesses an owner.
+    if ( before == 0 && after == 0 ) {
         SearchResultArray combinedLines;
-        if ( visibility_.testFlag( VisibilityFlags::Matches ) ) {
-            combinedLines |= matching_lines_;
-        }
-        if ( visibility_.testFlag( VisibilityFlags::Marks ) ) {
-            combinedLines |= marks_;
-        }
-        contextLinesList_.reserve( combinedLines.cardinality() );
+        if ( visibility.testFlag( VisibilityFlags::Matches ) ) combinedLines |= matches;
+        if ( visibility.testFlag( VisibilityFlags::Marks ) ) combinedLines |= marks;
+        lines.reserve( combinedLines.cardinality() );
         combinedLines.iterate(
             []( uint64_t line, void* context ) -> bool {
                 static_cast<klogg::vector<LineNumber>*>( context )->emplace_back( LineNumber( line ) );
                 return true;
             },
-            static_cast<void*>( &contextLinesList_ ) );
-        contextLinesListValid_ = true;
-        return;
+            static_cast<void*>( &lines ) );
+        return lines;
     }
 
-    // Build set of all lines to include (matching lines + context lines)
     std::set<LineNumber::UnderlyingType> linesSet;
-    
-    // Safety check for sourceLogData_ before accessing it
-    if ( !sourceLogData_ ) {
-        return;
-    }
-    const LinesCount totalLines = presentedSource_ ? presentedSource_->lineCount()
-                                                  : sourceLogData_->getNbLine();
-
-    // Structure to pass data to lambda via context pointer
     struct ContextData {
         std::set<LineNumber::UnderlyingType>* linesSet;
         LineNumber::UnderlyingType totalLines;
         uint64_t contextLinesBefore;
         uint64_t contextLinesAfter;
     };
-    ContextData contextData = { &linesSet, totalLines.get(), 
-                                static_cast<uint64_t>( contextLinesBefore_ ),
-                                static_cast<uint64_t>( contextLinesAfter_ ) };
-
-    // Lambda to add a line and its context to the set
+    ContextData contextData = { &linesSet, totalLines.get(),
+                                static_cast<uint64_t>( before ), static_cast<uint64_t>( after ) };
     auto addLineWithContext = []( uint64_t matchLine, void* context ) -> bool {
         auto* data = static_cast<ContextData*>( context );
-
-        // Add the line itself
         data->linesSet->insert( matchLine );
-
-        // Add context lines before
         for ( uint64_t i = 1; i <= data->contextLinesBefore; ++i ) {
             const LineNumber::UnderlyingType contextLine = matchLine >= i ? matchLine - i : 0;
-            if ( contextLine < data->totalLines ) {
-                data->linesSet->insert( contextLine );
-            }
+            if ( contextLine < data->totalLines ) data->linesSet->insert( contextLine );
         }
-
-        // Add context lines after
         for ( uint64_t i = 1; i <= data->contextLinesAfter; ++i ) {
             const LineNumber::UnderlyingType contextLine = matchLine + i;
-            if ( contextLine < data->totalLines ) {
-                data->linesSet->insert( contextLine );
-            }
+            if ( contextLine < data->totalLines ) data->linesSet->insert( contextLine );
         }
-
         return true;
     };
-
-    // Iterate through matching lines and add context (respecting visibility)
-    if ( visibility_.testFlag( VisibilityFlags::Matches ) ) {
-        matching_lines_.iterate( addLineWithContext, static_cast<void*>( &contextData ) );
-    }
-
-    // Also iterate through marks and add context (respecting visibility)
-    if ( visibility_.testFlag( VisibilityFlags::Marks ) ) {
-        marks_.iterate( addLineWithContext, static_cast<void*>( &contextData ) );
-    }
-
-    // Membership is payload-free; only an explicit width query decodes lines.
-    contextLinesList_.clear();
-    contextLinesList_.reserve( linesSet.size() );
-    for ( const auto& line : linesSet ) {
-        contextLinesList_.emplace_back( LineNumber( line ) );
-    }
-
-    contextLinesListValid_ = true;
+    if ( visibility.testFlag( VisibilityFlags::Matches ) )
+        matches.iterate( addLineWithContext, static_cast<void*>( &contextData ) );
+    if ( visibility.testFlag( VisibilityFlags::Marks ) )
+        marks.iterate( addLineWithContext, static_cast<void*>( &contextData ) );
+    lines.reserve( linesSet.size() );
+    for ( const auto line : linesSet ) lines.emplace_back( LineNumber( line ) );
+    return lines;
 }
 
 void LogFilteredData::updateSearchResultsCache()
@@ -1033,8 +1275,12 @@ void LogFilteredData::publishTerminal( LinesCount nbMatches, LineNumber initialL
         return;
     }
 
+    const QPointer<LogFilteredData> owner{ this };
+    const auto ticket = workerThread_.currentRequestTicket();
     Q_EMIT searchResultsChanged( nbMatches, initialLine, true, generation );
-    Q_EMIT searchProgressed( nbMatches, 100, initialLine, generation );
+    if ( !owner || owner->shuttingDown_ || generation != owner->currentSearchGeneration()
+         || ticket != owner->workerThread_.currentRequestTicket() ) return;
+    Q_EMIT owner->searchProgressed( nbMatches, 100, initialLine, generation );
     if ( traceSearchTerminals() ) {
         LOG_WARNING << "Search terminal published generation " << generation;
     }
@@ -1293,7 +1539,7 @@ LineLength LogFilteredData::doGetMaxLength() const
         return sourceLogData_ ? sourceLogData_->getMaxLength() : 0_length;
     }
 
-    LineLength result = qMax( maxLength_, maxLengthMarks_ );
+    LineLength result = qMax( maxLength_, marksMaxLength() );
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
             rebuildContextLinesList();

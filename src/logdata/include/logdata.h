@@ -43,6 +43,8 @@
 
 #include <QDateTime>
 #include <QFile>
+#include <QFuture>
+#include <QFutureInterface>
 #include <QMetaObject>
 #include <QObject>
 #include <QString>
@@ -60,6 +62,7 @@
 #include "searchablelogdata.h"
 
 class LogFilteredData;
+class PreparedFileSource;
 
 // Thrown when trying to attach an already attached LogData
 class CantReattachErr {
@@ -86,9 +89,20 @@ class LogData : public SearchableLogData {
     // to be empty.
     // Reattaching is forbidden and will throw.
     void attachFile( const QString& fileName );
+    // Owner-thread construction from a fully quiescent private source. No path
+    // acquisition, watcher registration or loading notification occurs here.
+    // Success consumes source. Complete loading after binding the private view;
+    // activate only at publication to register watching and release its reader.
+    static std::unique_ptr<LogData> fromPrepared( std::unique_ptr<PreparedFileSource>& source );
+    bool completePreparedLoading();
+    bool activatePrepared();
     // Interrupt the loading and report a null file.
     // Does nothing if no loading in progress.
     void interruptLoading() override;
+    // Owner-thread, irreversible quiescence request. Keep the source alive and
+    // process owner-thread events until the future finishes; never wait on it
+    // synchronously from that thread. Does not retire filtered/search readers.
+    QFuture<void> retire();
     // Creates a new filtered data.
     // ownership is passed to the caller
     std::unique_ptr<LogFilteredData> getNewFilteredData() const override;
@@ -123,6 +137,9 @@ class LogData : public SearchableLogData {
     void checkFileChangesFinished( MonitoredFileStatus status );
 
   private:
+    LogData( std::shared_ptr<IndexingData> index, const QString& preparedPath );
+    void connectFileWatcher();
+
     // Implementation of virtual functions
     QString doGetLineString( LineNumber line ) const override;
     QString doGetExpandedLineString( LineNumber line ) const override;
@@ -139,6 +156,7 @@ class LogData : public SearchableLogData {
     void doDetachReader() const override;
 
     void reOpenFile() const;
+    void finishOperation();
 
     klogg::vector<QString> getLinesFromFile( LineNumber first, LinesCount number,
                                            QString ( *processLine )( QString&& ) ) const;
@@ -156,6 +174,8 @@ class LogData : public SearchableLogData {
     // mutable FileId attached_file_id_;
 
     bool keepFileClosed_;
+    enum class PreparedPhase : uint8_t { Native, Ready, Announced };
+    PreparedPhase preparedPhase_ = PreparedPhase::Native;
 
     QDateTime lastModifiedDate_;
 
@@ -171,6 +191,8 @@ class LogData : public SearchableLogData {
     QMetaObject::Connection workerIndexingFinishedConnection_;
     QMetaObject::Connection workerCheckFileChangesFinishedConnection_;
     bool shuttingDown_{ false };
+    bool retiring_{ false };
+    QFutureInterface<void> retirementCompletion_;
 
     // Set when this instance has actually handed its file to the FileWatcher
     // singleton (only on successful indexing). The destructor consults it to

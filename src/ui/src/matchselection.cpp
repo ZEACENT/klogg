@@ -95,6 +95,7 @@ void AbstractLogView::showMatchSelectionProgress()
 
 bool AbstractLogView::selectAllMatches( bool quickFind, bool copy )
 {
+    if ( searchesRetiring_ ) return false;
     if ( !canSelectAllMatches( quickFind ) ) {
         return false;
     }
@@ -275,6 +276,7 @@ void AbstractLogView::finishMatchSelection( bool completed )
 
 bool AbstractLogView::serializeMatchSelection( bool withLineNumbers )
 {
+    if ( searchesRetiring_ ) return false;
     if ( matchSelection_ ) {
         matchSelection_->copyWhenFinished = true;
         matchSelection_->withLineNumbers = withLineNumbers;

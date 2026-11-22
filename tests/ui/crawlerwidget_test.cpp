@@ -33,6 +33,7 @@
 #include <QTemporaryFile>
 #include <QTest>
 #include <QTimer>
+#include <QVBoxLayout>
 #include <qglobal.h>
 #include <qnamespace.h>
 #include <qtestmouse.h>
@@ -50,6 +51,7 @@
 
 #include "savedsearches.h"
 #include "session.h"
+#include "ownedtaskpoolgate.h"
 #include "test_utils.h"
 
 #include "adblogcatsource.h"
@@ -1234,9 +1236,14 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->updateEncoding();
     }
 
-    void closeFilteredView( int index )
+    void queueFilteredViewClose( int index )
     {
         crawler->closeFilteredView( index );
+    }
+
+    void closeFilteredView( int index )
+    {
+        queueFilteredViewClose( index );
         QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
         QCoreApplication::processEvents();
     }
@@ -1390,6 +1397,95 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
 };
 
 using CrawlerWidgetVisitor = CrawlerWidget::access_by<CrawlerWidgetPrivate>;
+
+TEST_CASE( "Private file loading preserves editor focus through deferred presentation",
+           "[ui][initial-focus][session-preparation]" )
+{
+    const bool deferred = GENERATE( false, true );
+    const auto policy = GENERATE( CrawlerWidget::InitialFocusPolicy::Preserve,
+                                 CrawlerWidget::InitialFocusPolicy::FocusMainView );
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    REQUIRE( file.write( "one\ntwo\n" ) == 8 );
+    REQUIRE( file.flush() );
+    Session session;
+    QWidget host;
+    QVBoxLayout layout{ &host };
+    QLineEdit editor;
+    layout.addWidget( &editor );
+    CrawlerWidgetVisitor visitor;
+    auto prepared = session.prepareFile( file.fileName(), [&] {
+        return new CrawlerWidget( nullptr, policy );
+    } );
+    REQUIRE( prepared );
+    auto* widget = dynamic_cast<CrawlerWidget*>( prepared->view() );
+    REQUIRE( widget );
+    layout.addWidget( widget );
+    host.show();
+    editor.setFocus();
+    REQUIRE( waitUiState( [&] { return editor.hasFocus(); } ) );
+    widget->setPresentationActive( !deferred );
+    SafeQSignalSpy loaded{ prepared->source(), &SearchableLogData::loadingFinished };
+    REQUIRE( prepared->startLoading() );
+    visitor.crawler.reset( static_cast<CrawlerWidget*>( session.adoptPrepared( prepared ) ) );
+    REQUIRE( visitor.crawler );
+    REQUIRE( loaded.safeWait( 10000 ) );
+    if ( deferred ) CHECK( editor.hasFocus() );
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+    if ( policy == CrawlerWidget::InitialFocusPolicy::Preserve ) CHECK( editor.hasFocus() );
+    else CHECK( visitor.mainView()->hasFocus() );
+    session.close( widget );
+}
+
+TEST_CASE( "File document retirement retains all panes until their owned work completes",
+           "[ui][document-retirement]" )
+{
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    REQUIRE( file.write( "one\ntwo\n" ) == 8 );
+    REQUIRE( file.flush() );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>( session.open( file.fileName(), [] {
+        return new CrawlerWidget( nullptr, CrawlerWidget::InitialFocusPolicy::Preserve );
+    } ) ) );
+    REQUIRE( waitUiState( [&] { return visitor.isLoadingFinished(); } ) );
+    QPointer<FilteredView> closedPane{ visitor.activeFilteredView() };
+    visitor.createAdditionalFilteredView();
+    REQUIRE( visitor.filteredViewCount() == 2 );
+    session.quickFindPattern()->changeSearchPattern( QStringLiteral( "one" ) );
+    ScopedOwnedTaskPoolGate gate;
+    REQUIRE( gate.entered.tryAcquire( 1, 5000 ) );
+    visitor.mainView()->searchForward();
+    closedPane->searchForward();
+    visitor.activeFilteredView()->searchForward();
+    visitor.queueFilteredViewClose( 0 );
+    const auto pending = visitor.crawler->retireResources();
+    REQUIRE( pending.size() >= 6 ); // Source, both models, main and both result views.
+    CHECK( std::any_of( pending.begin(), pending.end(),
+                       []( const auto& future ) { return !future.isFinished(); } ) );
+    // A close queued before document retirement must not force a blocking view
+    // destructor while the pool is still held. The document now owns teardown.
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+    CHECK( closedPane );
+    visitor.createAdditionalFilteredView();
+    CHECK( visitor.filteredViewCount() == 1 );
+    CHECK( visitor.filteredViewDataCount() == 2 );
+    visitor.reload();
+    CHECK( visitor.isLoadingFinished() );
+    gate.release.release();
+    REQUIRE( waitUiState( [&] {
+        return std::all_of( pending.begin(), pending.end(),
+                            []( const auto& future ) { return future.isFinished(); } );
+    } ) );
+    const auto repeated = visitor.crawler->retireResources();
+    CHECK( std::all_of( repeated.begin(), repeated.end(),
+                       []( const auto& future ) { return future.isFinished(); } ) );
+    session.close( visitor.crawler.get() );
+    visitor.crawler.reset();
+    CHECK_FALSE( closedPane );
+}
 
 TEST_CASE( "Crawler widget preserves its final filtered results view", "[ui]" )
 {
@@ -4985,6 +5081,59 @@ TEST_CASE( "Inactive CrawlerWidget clears context in the model and defers presen
     visitor.setPresentationActive( true );
     visitor.flushPresentationCatchUp();
     CHECK( visitor.filteredUpdateCount() == 1 );
+}
+
+TEST_CASE( "Prepared marks refresh their actual file pane without activation",
+           "[ui][review-mark-publication]" )
+{
+    QTemporaryFile file{ "crawler_prepared_marks_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [&] { return visitor.isLoadingFinished(); } ) );
+    visitor.flushPresentationCatchUp();
+    auto* target = visitor.rawFilteredData();
+    auto* view = visitor.activeFilteredView();
+    bool activeDocument = true;
+    bool keptPane = false;
+    SECTION( "current visible pane" ) {}
+    SECTION( "current pane in inactive document" ) { activeDocument = false; }
+    SECTION( "inactive kept pane" ) { visitor.createAdditionalFilteredView(); keptPane = true; }
+    visitor.resetPresentationCounts();
+    using ViewAccess = AbstractLogView::access_by<AbstractLogViewPrivate>;
+    ViewAccess::resetRefreshCounts( view );
+    visitor.setPresentationActive( activeDocument );
+    const auto index = visitor.currentFilteredViewIndex();
+    const auto* focus = QApplication::focusWidget();
+    auto candidate = *target->reviewMarksSnapshot();
+    candidate.groups = { { {}, { 1_lnum } } };
+    klogg::ReviewMarksBudget budget;
+    const auto prepare = target->prepareReviewMarks( candidate, budget );
+    REQUIRE( prepare );
+    const std::atomic<bool> cancelled{ false };
+    const auto prepared = prepare( cancelled );
+    REQUIRE( prepared );
+    auto publication = prepared->acquire();
+    REQUIRE( publication );
+    publication->install();
+    CHECK( ViewAccess::updateDataCount( view ) == 0 );
+    publication->release();
+    publication->notify();
+    CHECK( target->getNbMarks() == 1_lcount );
+    CHECK( ViewAccess::updateDataCount( view ) == ( activeDocument ? 1 : 0 ) );
+    CHECK( visitor.currentFilteredViewIndex() == index );
+    CHECK( QApplication::focusWidget() == focus );
+    if ( keptPane ) {
+        CHECK( visitor.rawFilteredData()->getNbMarks() == 0_lcount );
+        CHECK( visitor.filteredUpdateCount() == 0 );
+    }
+    if ( !activeDocument ) {
+        visitor.setPresentationActive( true );
+        visitor.flushPresentationCatchUp();
+        CHECK( ViewAccess::updateDataCount( view ) == 1 );
+    }
 }
 
 TEST_CASE( "Inactive CrawlerWidget keeps marks authoritative and defers their presentation",

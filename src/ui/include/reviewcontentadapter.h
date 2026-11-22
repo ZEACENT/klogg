@@ -3,6 +3,9 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
+#include <variant>
+#include <vector>
 #include <QObject>
 
 #include "controlrpc.h"
@@ -29,6 +32,22 @@ class ReviewContentAdapter : public QObject {
                                             klogg::LogSnapshot::Ptr snapshot );
     klogg::control::DecodedResponse dispatch( const klogg::control::RpcRequest& request );
     void reset();
+    // Shared bounded operation records for GUI-published work as well as reads.
+    // Call current() immediately before installation and complete() before any
+    // publication observer. Neither callback retains the adapter or a widget.
+    struct PendingOperation {
+        QString id;
+        std::function<bool()> current;
+        std::function<void( QJsonObject, QString )> complete;
+    };
+    std::optional<PendingOperation> beginOperation( std::function<void()> cancel,
+                                                   qint64 lifetimeMs = LifetimeMs );
+    enum class RowResolutionError : std::uint8_t { SnapshotNotFound, InvalidArgument, ResourceLimit, SourceUnavailable };
+    using RowMetadata = std::vector<klogg::SnapshotRow>;
+    using ResolvedRows = std::variant<RowMetadata, RowResolutionError>;
+    // Resolve admitted lease ordinals without decoding. Returned values do not
+    // pin content after release; mutation owners must revalidate each identity.
+    ResolvedRows resolveRows( const QString& snapshotId, const std::vector<LineNumber>& ordinals );
 
   private:
     struct State;

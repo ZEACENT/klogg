@@ -60,6 +60,7 @@
 #include "logfiltereddata.h"
 
 #include "logdata.h"
+#include "preparedfilesource.h"
 
 namespace {
 class IndexedReadSnapshot final : public SearchableLogData::ReadSnapshot {
@@ -186,22 +187,30 @@ IndexedContentSnapshot::Ptr LogData::indexedContentSnapshot() const
 }
 
 LogData::LogData()
+    : LogData( std::make_shared<IndexingData>(), {} )
+{
+}
+
+LogData::LogData( std::shared_ptr<IndexingData> index, const QString& preparedPath )
     : SearchableLogData()
-    , indexing_data_( std::make_shared<IndexingData>() )
+    , indexing_data_( std::move( index ) )
     , operationQueue_( [ this ] { attached_file_->attachReader(); } )
     , codec_( QTextCodec::codecForName( "UTF-8" ) )
 {
-    // Initialise the file watcher
-    fileWatcherConnection_
-        = connect( &FileWatcher::getFileWatcher(), &FileWatcher::fileChanged, this,
-                   &LogData::fileChangedOnDisk, Qt::QueuedConnection );
+    // A private source must not subscribe to global events from another owner
+    // of the same path before its prepared snapshot is published.
+    if ( preparedPath.isEmpty() ) connectFileWatcher();
+    else preparedPhase_ = PreparedPhase::Ready;
 
     auto worker = std::make_unique<LogDataWorker>( indexing_data_ );
+    if ( !preparedPath.isEmpty() ) worker->attachFile( preparedPath );
 
     // Forward the update signal
     workerIndexingProgressConnection_
         = connect( worker.get(), &LogDataWorker::indexingProgressed, this,
-                   &LogData::loadingProgressed, Qt::QueuedConnection );
+                   [ this ]( int percent ) {
+                       if ( !retiring_ && !shuttingDown_ ) Q_EMIT loadingProgressed( percent );
+                   }, Qt::QueuedConnection );
     workerIndexingFinishedConnection_
         = connect( worker.get(), &LogDataWorker::indexingFinished, this, &LogData::indexingFinished,
                    Qt::QueuedConnection );
@@ -233,6 +242,9 @@ LogData::~LogData()
     // Stop worker activity so no more queued worker callbacks are produced while
     // this QObject is tearing down.
     operationQueue_.shutdown();
+    if ( retiring_ && !retirementCompletion_.isFinished() ) {
+        retirementCompletion_.reportFinished();
+    }
 
     // A queued file-changed or worker callback may already be posted for this
     // object. Purge them before this instance is destroyed.
@@ -250,15 +262,13 @@ LogData::~LogData()
     // only posts a task to the watcher's SerialExecutor, which is alive for
     // the whole process and serializes this behind the matching addFile.
     //
-    // Known limitation (pre-existing): if two LogData instances watch the same
-    // file, addFile dedups to a single watch entry, so the first destructor
-    // removes the watch for both. Opening the same file in two tabs therefore
-    // loses change notifications on the surviving tab. That trade-off predates
-    // this guard and is preferable to leaking an entry per closed tab.
+    // Claims belong to individual LogData instances. Reindexing the same owner
+    // is idempotent; retiring a duplicate/private source cannot remove another
+    // source's watch. Removal is queued before this address can be reused.
     if ( fileWatcherRegistered_ ) {
         fileWatcherRegistered_ = false;
         try {
-            FileWatcher::getFileWatcher().removeFile( indexingFileName_ );
+            FileWatcher::getFileWatcher().removeFile( indexingFileName_, this );
         } catch ( const std::exception& error ) {
             LOG_ERROR << "Failed to deregister file from watcher: " << error.what();
         }
@@ -293,6 +303,7 @@ void LogData::attachFile( const QString& fileName )
 {
     LOG_DEBUG << "LogData::attachFile " << fileName.toStdString();
 
+    if ( retiring_ || shuttingDown_ ) return;
     if ( attached_file_ ) {
         // We cannot reattach
         throw CantReattachErr();
@@ -305,9 +316,73 @@ void LogData::attachFile( const QString& fileName )
     operationQueue_.enqueueOperation<AttachOperation>( fileName );
 }
 
+std::unique_ptr<LogData> LogData::fromPrepared( std::unique_ptr<PreparedFileSource>& source )
+{
+    if ( !source ) return {};
+    auto model = std::unique_ptr<LogData>( new LogData( source->index_, source->path_ ) );
+    model->indexingFileName_ = source->path_;
+    model->lastModifiedDate_ = source->metadata_.modified;
+    model->fileChangedOnDisk_ = MonitoredFileStatus::Unchanged;
+    {
+        IndexingData::ConstAccessor index{ source->index_.get() };
+        model->codec_.setCodec( index.getForcedEncoding() ? index.getForcedEncoding()
+                                                         : index.getEncodingGuess() );
+    }
+    model->attached_file_ = std::make_unique<FileHolder>( model->keepFileClosed_ );
+    const auto& identity = source->metadata_.identity;
+    if ( !model->attached_file_->adoptForReader(
+             source->path_, source->file_, FileId{ identity.file, identity.device } ) ) {
+        return {};
+    }
+    source.reset();
+    return model;
+}
+
+void LogData::connectFileWatcher()
+{
+    if ( fileWatcherConnection_ ) return;
+    fileWatcherConnection_ = connect( &FileWatcher::getFileWatcher(), &FileWatcher::fileChanged,
+                                     this, &LogData::fileChangedOnDisk, Qt::QueuedConnection );
+}
+
+bool LogData::completePreparedLoading()
+{
+    if ( preparedPhase_ != PreparedPhase::Ready || retiring_ || shuttingDown_ ) return false;
+    preparedPhase_ = PreparedPhase::Announced;
+    Q_EMIT loadingFinished( LoadingStatus::Successful );
+    // Observers can retire or destroy the private graph; do not access it again.
+    return true;
+}
+
+bool LogData::activatePrepared()
+{
+    if ( preparedPhase_ != PreparedPhase::Announced || retiring_ || shuttingDown_ ) return false;
+    connectFileWatcher();
+    FileWatcher::getFileWatcher().addFile( indexingFileName_, this );
+    fileWatcherRegistered_ = true;
+    preparedPhase_ = PreparedPhase::Native;
+    // Watch registration cannot replay changes made during private preparation.
+    // Reconcile through the native queue while the preparation reader still
+    // pins the handle, so admitting this check never reopens it on the GUI thread.
+    operationQueue_.enqueueOperation<CheckDataChangesOperation>();
+    attached_file_->detachReader();
+    return true;
+}
+
 void LogData::interruptLoading()
 {
     operationQueue_.interrupt();
+}
+
+QFuture<void> LogData::retire()
+{
+    if ( !retiring_ ) {
+        retiring_ = true;
+        retirementCompletion_.reportStarted();
+        QObject::disconnect( fileWatcherConnection_ );
+        if ( operationQueue_.beginRetirement() ) retirementCompletion_.reportFinished();
+    }
+    return retirementCompletion_.future();
 }
 
 qint64 LogData::getFileSize() const
@@ -328,6 +403,8 @@ std::unique_ptr<LogFilteredData> LogData::getNewFilteredData() const
 
 void LogData::reload( QTextCodec* forcedEncoding )
 {
+    if ( retiring_ || shuttingDown_ || !attached_file_
+         || preparedPhase_ != PreparedPhase::Native ) return;
     operationQueue_.interrupt();
 
     // Re-open the file, useful in case the file has been moved
@@ -338,7 +415,8 @@ void LogData::reload( QTextCodec* forcedEncoding )
 
 void LogData::fileChangedOnDisk( const QString& filename )
 {
-    if ( shuttingDown_ || !attached_file_ ) {
+    if ( retiring_ || shuttingDown_ || !attached_file_
+         || preparedPhase_ != PreparedPhase::Native ) {
         return;
     }
 
@@ -384,6 +462,16 @@ void LogData::fileChangedOnDisk( const QString& filename )
     operationQueue_.enqueueOperation<CheckDataChangesOperation>();
 }
 
+void LogData::finishOperation()
+{
+    operationQueue_.finishOperationAndStartNext();
+    // Retirement may also have been requested reentrantly by a normal completion
+    // observer. Publish quiescence only after its pending queue was cleared.
+    if ( retiring_ && !retirementCompletion_.isFinished() ) {
+        retirementCompletion_.reportFinished();
+    }
+}
+
 void LogData::indexingFinished( LoadingStatus status )
 {
     if ( shuttingDown_ || !attached_file_ ) {
@@ -396,13 +484,17 @@ void LogData::indexingFinished( LoadingStatus status )
     operationQueue_.waitForWorkerDone();
 
     attached_file_->detachReader();
+    if ( retiring_ ) {
+        finishOperation();
+        return;
+    }
 
     LOG_INFO << "indexingFinished for: " << indexingFileName_
              << ( status == LoadingStatus::Successful ) << ", found "
              << IndexingData::ConstAccessor{ indexing_data_.get() }.getNbLines() << " lines.";
 
     if ( status == LoadingStatus::Successful ) {
-        FileWatcher::getFileWatcher().addFile( indexingFileName_ );
+        FileWatcher::getFileWatcher().addFile( indexingFileName_, this );
         // Paired with the guarded removeFile in ~LogData; the flag, not the
         // FileHolder state, is the source of truth for watcher registration.
         fileWatcherRegistered_ = true;
@@ -419,7 +511,7 @@ void LogData::indexingFinished( LoadingStatus status )
     LOG_DEBUG << "Sending indexingFinished.";
     Q_EMIT loadingFinished( status );
 
-    operationQueue_.finishOperationAndStartNext();
+    finishOperation();
 }
 
 void LogData::checkFileChangesFinished( MonitoredFileStatus status )
@@ -433,6 +525,10 @@ void LogData::checkFileChangesFinished( MonitoredFileStatus status )
     operationQueue_.waitForWorkerDone();
 
     attached_file_->detachReader();
+    if ( retiring_ ) {
+        finishOperation();
+        return;
+    }
 
     LOG_INFO << "File " << indexingFileName_ << " status " << static_cast<uint8_t>( status );
 
@@ -460,7 +556,7 @@ void LogData::checkFileChangesFinished( MonitoredFileStatus status )
         Q_EMIT fileChanged( fileChangedOnDisk_ );
     }
 
-    operationQueue_.finishOperationAndStartNext();
+    finishOperation();
 }
 
 //

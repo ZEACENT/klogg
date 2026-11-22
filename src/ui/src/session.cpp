@@ -32,18 +32,23 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QJsonDocument>
 #include <QMetaObject>
 #include <QPointer>
 
+#include "abstractcrawlerwidget.h"
+#include "containers.h"
 #include "foldercrawlerwidget.h"
 #include "folderenumeration.h"
 #include "logdata.h"
+#include "preparedfilesource.h"
 #include "logfiltereddata.h"
 #include "pathutils.h"
 #include "savedsearches.h"
@@ -52,6 +57,12 @@
 #include "viewinterface.h"
 
 namespace {
+
+bool hasQtOwner( const ViewInterface* view )
+{
+    const auto* object = dynamic_cast<const QObject*>( view );
+    return object && object->parent();
+}
 
 // Fatal diagnostics only: info diagnostics never refuse a restore.
 QStringList fatalMessagesOf( const std::vector<klogg::livelog::Diagnostic>& diagnostics )
@@ -541,7 +552,7 @@ const LiveSourceTransportFactory& Session::transportFactory() const
 
 Session::~Session()
 {
-    // FIXME Clean up all the data objects...
+    drainRetiredDocuments();
 }
 
 ViewInterface* Session::getViewIfOpen( const QString& file_name ) const
@@ -557,10 +568,245 @@ ViewInterface* Session::getViewIfOpen( const QString& file_name ) const
         return nullptr;
 }
 
+struct Session::PreparedDocument::State {
+    OpenFile file{};
+    std::shared_ptr<const uint8_t> ownerIdentity;
+    bool started = false;
+    bool sourceReady = false;
+    bool failed = false;
+    bool retiring = false;
+    // Tear the view down before releasing the graph's last model references.
+    std::unique_ptr<ViewInterface> view;
+};
+Session::PreparedDocument::PreparedDocument( std::unique_ptr<State> state ) : state_( std::move( state ) ) {}
+Session::PreparedDocument::~PreparedDocument() = default;
+ViewInterface* Session::PreparedDocument::view() const { return state_->view.get(); }
+SearchableLogData* Session::PreparedDocument::source() const { return state_->file.logData.get(); }
+OpenedDocumentInfo Session::PreparedDocument::info() const
+{
+    const auto& file = state_->file;
+    return { file.documentId, file.displayName,
+             file.associatedPath.isEmpty() ? file.displayName : file.associatedPath, file.kind };
+}
+bool Session::PreparedDocument::startLoading()
+{
+    if ( state_->started || state_->failed || state_->retiring ) return false;
+    state_->started = true;
+    if ( state_->sourceReady ) {
+        const auto source = state_->file.logData;
+        // The initial notification uses native view setup, but never acquires
+        // the path again. Observers may destroy this private document.
+        return static_cast<LogData*>( source.get() )->completePreparedLoading();
+    }
+    try {
+        static_cast<LogData*>( state_->file.logData.get() )->attachFile( state_->file.fileName );
+    }
+    catch ( ... ) { state_->failed = true; throw; }
+    return true;
+}
+QFuture<void> Session::PreparedDocument::retire()
+{
+    state_->retiring = true;
+    if ( state_->file.logData ) {
+        return static_cast<LogData*>( state_->file.logData.get() )->retire();
+    }
+    // An unpublished folder has only enumerated membership, not running scans.
+    QFutureInterface<void> completion;
+    completion.reportStarted();
+    completion.reportFinished();
+    return completion.future();
+}
+std::unique_ptr<Session::PreparedDocument> Session::prepareFile(
+    const QString& fileName, const std::function<ViewInterface*()>& viewFactory )
+{
+    return prepareFileGraph( fileName, std::make_shared<LogData>(), viewFactory, false );
+}
+
+std::unique_ptr<Session::PreparedDocument> Session::prepareFileGraph(
+    const QString& fileName, std::shared_ptr<LogData> data,
+    const std::function<ViewInterface*()>& viewFactory, bool sourceReady )
+{
+    auto filtered = std::shared_ptr<LogFilteredData>( data->getNewFilteredData() );
+    std::unique_ptr<ViewInterface> view{ viewFactory() };
+    if ( !view ) return {};
+    view->setData( data, filtered );
+    view->setQuickFindPattern( quickFindPattern_ );
+    view->setSavedSearches( savedSearches_ );
+    auto state = std::make_unique<PreparedDocument::State>();
+    state->file = { fileName, fileName, klogg::displayNameForPath( fileName ), fileName,
+                    DocumentKind::File, std::move( data ), std::move( filtered ), {}, view.get(), {}, {}, {} };
+    state->ownerIdentity = preparationIdentity_;
+    state->sourceReady = sourceReady;
+    state->view = std::move( view );
+    return std::unique_ptr<PreparedDocument>( new PreparedDocument( std::move( state ) ) );
+}
+std::unique_ptr<Session::PreparedDocument> Session::prepareFile(
+    std::unique_ptr<PreparedFileSource>& source, const std::function<ViewInterface*()>& viewFactory )
+{
+    if ( !source ) return {};
+    const auto path = source->path();
+    auto data = LogData::fromPrepared( source );
+    if ( !data ) return {};
+    return prepareFileGraph( path, std::shared_ptr<LogData>{ std::move( data ) }, viewFactory, true );
+}
+
+std::unique_ptr<Session::PreparedDocument> Session::prepareFolder(
+    const QString& folderPath, const std::vector<QString>& filePaths )
+{
+    if ( folderPath.isEmpty() || filePaths.empty()
+         || filePaths.size() > static_cast<size_t>( std::numeric_limits<klogg::ContainerIndex>::max() ) ) return {};
+    auto view = std::make_unique<FolderCrawlerWidget>();
+    view->setQuickFindPattern( quickFindPattern_ );
+    view->setSavedSearches( savedSearches_ );
+    QStringList paths;
+    paths.reserve( static_cast<klogg::ContainerIndex>( filePaths.size() ) );
+    for ( const auto& path : filePaths ) paths.append( path );
+    view->setFolder( folderPath, paths );
+    auto state = std::make_unique<PreparedDocument::State>();
+    state->file = { folderPath, folderPath, klogg::displayNameForPath( folderPath ), folderPath,
+                    DocumentKind::Folder, {}, {}, {}, view.get(), {}, {}, {} };
+    state->ownerIdentity = preparationIdentity_;
+    state->started = true; // Folder membership is already enumerated by the caller.
+    state->view = std::move( view );
+    return std::unique_ptr<PreparedDocument>( new PreparedDocument( std::move( state ) ) );
+}
+ViewInterface* Session::adoptPrepared( std::unique_ptr<PreparedDocument>& prepared )
+{
+    if ( !prepared || prepared->state_->ownerIdentity != preparationIdentity_
+         || !prepared->state_->started || prepared->state_->failed
+         || prepared->state_->retiring ) return nullptr;
+    auto& state = *prepared->state_;
+    const auto inserted = openFiles_.emplace( state.view.get(), state.file );
+    if ( !inserted.second ) return nullptr;
+    auto* view = state.view.release();
+    prepared.reset();
+    return view;
+}
+ViewInterface* WindowSession::adoptPrepared( std::unique_ptr<Session::PreparedDocument>& prepared )
+{
+    if ( !prepared ) return nullptr;
+    // Allocate before shared-session publication, retaining geometric growth
+    // rather than copying the whole window list for every ordinary GUI open.
+    if ( openedViews_.size() == openedViews_.capacity() ) {
+        const auto size = openedViews_.size();
+        const auto maximum = openedViews_.max_size();
+        if ( size == maximum ) throw std::length_error( "Window document capacity exhausted" );
+        const auto growth = std::max( size_t{ 1 }, std::min( size, maximum - size ) );
+        openedViews_.reserve( size + growth );
+    }
+    auto* view = appSession_->adoptPrepared( prepared );
+    if ( view ) openedViews_.push_back( view );
+    return view;
+}
+
+std::unique_ptr<Session::PreparedDocument> Session::extractDocument( ViewInterface* view )
+{
+    const auto position = openFiles_.find( view );
+    if ( position == openFiles_.end() || position->second.kind == DocumentKind::AdbLogcat ) return {};
+    if ( hasQtOwner( view ) ) return {};
+    auto state = std::make_unique<PreparedDocument::State>();
+    state->file = position->second;
+    state->ownerIdentity = preparationIdentity_;
+    state->started = true;
+    state->retiring = true; // Extraction is terminal, never another adoption path.
+    auto extracted = std::unique_ptr<PreparedDocument>( new PreparedDocument( std::move( state ) ) );
+    // All allocation precedes membership removal and ownership transfer. No UI
+    // callbacks, model destructors or worker waits occur in this transition.
+    extracted->state_->view.reset( view );
+    openFiles_.erase( position );
+    return extracted;
+}
+
+std::unique_ptr<Session::PreparedDocument> WindowSession::extractDocument( ViewInterface* view )
+{
+    const auto position = std::find( openedViews_.begin(), openedViews_.end(), view );
+    if ( position == openedViews_.end() ) return {};
+    auto extracted = appSession_->extractDocument( view );
+    if ( extracted ) openedViews_.erase( position );
+    return extracted;
+}
+
 ViewInterface* Session::open( const QString& file_name,
                               const std::function<ViewInterface*()>& view_factory )
 {
     return openAlways( file_name, view_factory, {} );
+}
+
+namespace {
+// A GUI-thread owner, not a pool task waiting for GUI-thread completion. Watchers
+// release the graph only after native tasks have dropped their captured state.
+class RetiringDocument final : public QObject {
+  public:
+    explicit RetiringDocument( std::unique_ptr<Session::PreparedDocument> document )
+        : document_( std::move( document ) )
+    {
+    }
+    ~RetiringDocument() override
+    {
+        // Destruction observers may drain the Session again. Remove this entry
+        // before destroying its view/model graph, not in QObject's base destructor.
+        setParent( nullptr );
+    }
+    Session::PreparedDocument& document() const { return *document_; }
+    void watch( std::vector<QFuture<void>> pending )
+    {
+        pending_ = std::move( pending );
+        watchers_.reserve( pending_.size() );
+        for ( const auto& future : pending_ ) {
+            auto watcher = std::make_unique<QFutureWatcher<void>>();
+            connect( watcher.get(), &QFutureWatcher<void>::finished, this,
+                     [ this ] { releaseIfFinished(); } );
+            watcher->setFuture( future );
+            watchers_.push_back( std::move( watcher ) );
+        }
+        releaseIfFinished();
+    }
+  private:
+    void releaseIfFinished()
+    {
+        if ( std::all_of( pending_.begin(), pending_.end(),
+                          []( const auto& future ) { return future.isFinished(); } ) ) {
+            deleteLater();
+        }
+    }
+    std::unique_ptr<Session::PreparedDocument> document_;
+    std::vector<QFuture<void>> pending_;
+    std::vector<std::unique_ptr<QFutureWatcher<void>>> watchers_;
+};
+} // namespace
+
+bool Session::retirePrepared( std::unique_ptr<PreparedDocument>& prepared )
+{
+    if ( !prepared || prepared->state_->ownerIdentity != preparationIdentity_
+         || hasQtOwner( prepared->view() ) ) return false;
+    if ( !retiredDocuments_ ) retiredDocuments_ = std::make_unique<QObject>();
+    const QPointer<QObject> owner{ retiredDocuments_.get() };
+    auto entry = std::make_unique<RetiringDocument>( std::move( prepared ) );
+    auto& state = *entry->document().state_;
+    state.retiring = true;
+    // Capture all non-widget dependencies before cancellation can notify view
+    // observers. Keep the entry locally owned across that callback boundary.
+    const auto source = state.file.logData;
+    const auto filtered = state.file.logFilteredData;
+    std::vector<QFuture<void>> pending;
+    if ( auto* crawler = dynamic_cast<AbstractCrawlerWidget*>( state.view.get() ) ) {
+        pending = crawler->retireResources();
+    }
+    // Also cover non-widget ViewInterface implementations and unbound sources.
+    if ( filtered ) pending.push_back( filtered->retire() );
+    if ( source ) pending.push_back( static_cast<LogData*>( source.get() )->retire() );
+    entry->watch( std::move( pending ) );
+    if ( owner ) entry.release()->setParent( owner );
+    // If shutdown destroyed the owner reentrantly, local destruction is the
+    // blocking shutdown fallback. No Session member is accessed after callbacks.
+    return true;
+}
+
+void Session::drainRetiredDocuments()
+{
+    // Move first so destruction callbacks cannot recursively delete this owner.
+    auto retired = std::move( retiredDocuments_ );
+    retired.reset();
 }
 
 void Session::close( const ViewInterface* view )
@@ -624,43 +870,8 @@ ViewInterface* Session::openMerged( const std::vector<QString>& fileNames,
 ViewInterface* Session::openFolder( const QString& folderPath,
                                     const std::vector<QString>& filePaths )
 {
-    if ( folderPath.isEmpty() || filePaths.empty() ) {
-        // Empty filePaths means the folder is gone/empty: return nullptr so the
-        // restore loop skips it gracefully rather than showing an empty tab.
-        return nullptr;
-    }
-
-    auto* view = new FolderCrawlerWidget();
-    view->setQuickFindPattern( quickFindPattern_ );
-    view->setSavedSearches( savedSearches_ );
-
-    QStringList paths;
-    paths.reserve( static_cast<int>( filePaths.size() ) );
-    for ( const auto& p : filePaths ) {
-        paths << p;
-    }
-    view->setFolder( folderPath, paths );
-
-    // Robust to trailing slashes (drag-dropped folders carry one): Qt's
-    // QFileInfo(path).fileName() returns "" for "/.../Logs/", which would
-    // produce a blank tab title. See klogg::displayNameForPath.
-    const QString displayName = klogg::displayNameForPath( folderPath );
-
-    openFiles_.insert( { view,
-                         OpenFile{ folderPath, // fileName
-                                   folderPath, // documentId
-                                   displayName,
-                                   folderPath, // associatedPath
-                                   DocumentKind::Folder,
-                                   nullptr, // logData (folder mode streams, no index)
-                                   nullptr, // logFilteredData
-                                   nullptr, // adbLogcatSource
-                                   view,
-                                   nullptr, // liveLogEffects
-                                   nullptr, // liveLogController
-                                   nullptr } } ); // liveLogExportService
-
-    return view;
+    auto prepared = prepareFolder( folderPath, filePaths );
+    return adoptPrepared( prepared );
 }
 
 ViewInterface* Session::openAdbLogcat( const AdbLogcatSessionData& sessionData,
@@ -813,37 +1024,11 @@ ViewInterface* Session::openAlways( const QString& file_name,
                                     const std::function<ViewInterface*()>& view_factory,
                                     const QString& view_context )
 {
-    // Create the data objects
-    auto log_data = std::make_shared<LogData>();
-    auto log_filtered_data = std::shared_ptr<LogFilteredData>( log_data->getNewFilteredData() );
-
-    ViewInterface* view = view_factory();
-    view->setData( log_data, log_filtered_data );
-    view->setQuickFindPattern( quickFindPattern_ );
-    view->setSavedSearches( savedSearches_ );
-
-    if ( !view_context.isEmpty() )
-        view->setViewContext( view_context );
-
-    // Insert in the hash
-    openFiles_.insert( { view,
-                         { file_name,
-                           file_name,
-                           klogg::displayNameForPath( file_name ),
-                           file_name,
-                           DocumentKind::File,
-                           log_data,
-                           log_filtered_data,
-                           {},
-                           view,
-                           {},
-                           {},
-                           {} } } );
-
-    // Start loading the file
-    log_data->attachFile( file_name );
-
-    return view;
+    auto prepared = prepareFile( file_name, view_factory );
+    if ( !prepared ) return nullptr;
+    if ( !view_context.isEmpty() ) prepared->view()->setViewContext( view_context );
+    prepared->startLoading();
+    return adoptPrepared( prepared );
 }
 
 bool Session::isLiveCaptureIdOpen( const QString& captureId ) const
@@ -1173,7 +1358,7 @@ OpenedDocumentsList WindowSession::restore( const std::function<ViewInterface*()
             mappedCurrentIndex = klogg::isize( result );
         }
         result.emplace_back( info, view );
-        openedDocuments_.emplace_back( info.documentId );
+        openedViews_.push_back( view );
     }
 
     *current_file_index = mappedCurrentIndex >= 0 ? mappedCurrentIndex : klogg::isize( result ) - 1;

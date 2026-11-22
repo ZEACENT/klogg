@@ -73,6 +73,7 @@ Section "klogg" klogg
 
     SetOutPath $INSTDIR
     File release\klogg.exe
+    File release\kloggctl.exe
 
     SetOutPath $INSTDIR\helpers
     File release\helpers\adb.exe
@@ -207,6 +208,7 @@ Section "Uninstall"
     Delete "$INSTDIR\Uninstall.exe"
 
     Delete "$INSTDIR\klogg.exe"
+    Delete "$INSTDIR\kloggctl.exe"
     Delete "$INSTDIR\helpers\adb.exe"
     Delete "$INSTDIR\helpers\AdbWinApi.dll"
     Delete "$INSTDIR\helpers\AdbWinUsbApi.dll"

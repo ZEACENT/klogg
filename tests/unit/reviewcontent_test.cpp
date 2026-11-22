@@ -26,6 +26,7 @@ QString code( const DecodedResponse& response )
 }
 struct Observations {
     std::atomic<int> payloadReads{ 0 };
+    std::atomic<int> metadataReads{ 0 };
     std::atomic<bool> readOnGui{ false };
     QSemaphore release;
 };
@@ -36,11 +37,15 @@ class Snapshot final : public klogg::LogSnapshot {
     QString text = QStringLiteral( "retained" );
     bool block = false;
     bool failRead = false;
+    bool failMetadata = false;
+    bool copyable = true;
     LinesCount lineCount() const override { return 2_lcount; }
     klogg::SnapshotRow row( LineNumber index ) const override
     {
+        ++observations->metadataReads;
+        if ( failMetadata && index == 1_lnum ) throw klogg::SnapshotError( "sensitive-metadata-detail" );
         return { { klogg::LogRowId::Origin::Capture, 17, 3, index.get() },
-                 LineNumber{ index.get() + 11 }, true, true };
+                 LineNumber{ index.get() + 11 }, copyable, true };
     }
     std::optional<uint64_t> sourceBytesForLine( LineNumber ) const override { return extent; }
     QString lineString( LineNumber index ) const override
@@ -83,6 +88,69 @@ struct Fixture {
         return result;
     }
 };
+}
+
+TEST_CASE( "Lease row resolution returns ordered metadata without payload or extra content pins",
+           "[review-content][review-evidence-rows]" )
+{
+    Fixture fixture;
+    auto source = std::make_shared<Snapshot>();
+    source->extent.reset(); // Metadata needs no physical-read budget or decoder.
+    source->failRead = true;
+    const auto observed = source->observations;
+    std::weak_ptr<const klogg::LogSnapshot> weak = source;
+    const auto id = fixture.capture( source );
+    const auto result = fixture.adapter.resolveRows( id, { 1_lnum, 0_lnum } );
+    REQUIRE( std::holds_alternative<ReviewContentAdapter::RowMetadata>( result ) );
+    const auto& rows = std::get<ReviewContentAdapter::RowMetadata>( result );
+    REQUIRE( rows.size() == 2 );
+    CHECK( rows.at( 0 ).identity.row == 1 );
+    CHECK( rows.at( 0 ).sourceLineNumber == 12_lnum );
+    CHECK( rows.at( 1 ).identity.row == 0 );
+    CHECK( observed->payloadReads.load() == 0 );
+    object( fixture.call( "source.release", { { "snapshot_id", id } } ) );
+    source.reset();
+    CHECK( weak.expired() );
+    const auto expired = fixture.adapter.resolveRows( id, { 0_lnum } );
+    REQUIRE( std::holds_alternative<ReviewContentAdapter::RowResolutionError>( expired ) );
+    CHECK( std::get<ReviewContentAdapter::RowResolutionError>( expired )
+           == ReviewContentAdapter::RowResolutionError::SnapshotNotFound );
+}
+
+TEST_CASE( "Evidence row admission validates the whole bounded range before metadata access",
+           "[review-content][review-evidence-rows]" )
+{
+    Fixture fixture;
+    auto source = std::make_shared<Snapshot>();
+    const auto id = fixture.capture( source );
+    using Error = ReviewContentAdapter::RowResolutionError;
+    std::vector<LineNumber> rows{ 0_lnum, 2_lnum };
+    auto expected = Error::InvalidArgument;
+    SECTION( "out of range" ) {}
+    SECTION( "empty request" ) { rows.clear(); }
+    SECTION( "too many rows" ) { rows.assign( ReviewContentAdapter::MaxRows + 1, 0_lnum ); expected = Error::ResourceLimit; }
+    SECTION( "expired lease" ) { rows = { 0_lnum }; fixture.now += ReviewContentAdapter::LifetimeMs; expected = Error::SnapshotNotFound; }
+    const auto result = fixture.adapter.resolveRows( id, rows );
+    REQUIRE( std::holds_alternative<Error>( result ) );
+    CHECK( std::get<Error>( result ) == expected );
+    CHECK( source->observations->metadataReads.load() == 0 );
+    CHECK( source->observations->payloadReads.load() == 0 );
+}
+
+TEST_CASE( "Evidence metadata failures and synthetic rows do not return a valid prefix",
+           "[review-content][review-evidence-rows]" )
+{
+    Fixture fixture;
+    auto source = std::make_shared<Snapshot>();
+    const auto id = fixture.capture( source );
+    using Error = ReviewContentAdapter::RowResolutionError;
+    auto expected = Error::SourceUnavailable;
+    SECTION( "provider exception" ) { source->failMetadata = true; }
+    SECTION( "synthetic row" ) { source->copyable = false; expected = Error::InvalidArgument; }
+    const auto result = fixture.adapter.resolveRows( id, { 0_lnum, 1_lnum } );
+    REQUIRE( std::holds_alternative<Error>( result ) );
+    CHECK( std::get<Error>( result ) == expected );
+    CHECK( source->observations->payloadReads.load() == 0 );
 }
 
 TEST_CASE( "Explicit content reads use immutable leases off the GUI thread", "[review-content]" )

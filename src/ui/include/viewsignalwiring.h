@@ -36,15 +36,14 @@ class SearchToolbar;
 // must honor, so CrawlerWidget and FolderCrawlerWidget cannot drift (the
 // folder mode shipped with these signals connected to nothing -- dead menu
 // entries for scratchpad, search composition, splitter save, font zoom,
-// exitView, highlightersChange, hover-highlight).
+// exitView, hover-highlight). Global highlighters publish directly to all views.
 //
 // Behavior splits into two kinds:
 //  - Fully shared, implemented here: add/exclude/replace-search composition
 //    (via the host's SearchToolbar) and Ctrl+wheel font zoom (Configuration
 //    font stepping fanned out to every registered view).
 //  - Host-specific, injected as Hooks: scratchpad forwarding, splitter-size
-//    persistence, exitView focus swap, configuration re-apply, and hover
-//    highlight. A null hook means the signal is left unconnected (capability
+//    persistence, exitView focus swap, and hover highlight. A null hook means the signal is left unconnected (capability
 //    opt-out).
 //
 // Usage: the host constructs one ViewSignalWiring and calls wireView() for
@@ -66,8 +65,6 @@ class ViewSignalWiring : public QObject {
         std::function<void()> saveSplitterSizes;
         // Move focus to the host's other view (Space).
         std::function<void( AbstractLogView* fromView )> exitView;
-        // Re-apply Configuration (view-menu Highlighters edits take effect).
-        std::function<void()> applyConfiguration;
         // Highlight the hovered line in the minimap / clear the highlight.
         std::function<void( AbstractLogView*, LineNumber )> hoveredOverLine;
         std::function<void()> leftHoveringZone;

@@ -16,6 +16,17 @@ Edit label( const QString& text, size_t color = 0 )
     return { Edit::Kind::Set, color, { text }, { false, true } };
 }
 
+struct MarkOwner : QObject, klogg::ReviewMarksOwner {
+    klogg::ReviewMarksSnapshot state;
+    bool exceedsBudget = false;
+    QObject* reviewMarksObject() override { return this; }
+    uint64_t reviewMarksRevision() const override { return state.revision; }
+    std::optional<klogg::ReviewMarksSnapshot> reviewMarksSnapshot() const override
+    {
+        return exceedsBudget ? std::optional<klogg::ReviewMarksSnapshot>{} : state;
+    }
+};
+
 struct Owners {
     QWidget parent;
     ColorLabelsController first{ &parent, {} };
@@ -24,6 +35,64 @@ struct Owners {
     SearchToolbar filter{ &parent };
 };
 } // namespace
+
+TEST_CASE( "Mark read dependencies are repeatable and reject ABA edits before label publication",
+           "[review-transaction][review-marks-transaction]" )
+{
+    Owners owners;
+    MarkOwner marks;
+    ReviewTransaction transaction;
+    transaction.stageLabels( owners.first, { label( "staged" ) } );
+    const auto captured = transaction.marks( marks );
+    REQUIRE( captured );
+    CHECK( captured->groups.empty() );
+    marks.state.revision += 2; // Human add/remove returns to the same collection.
+    const auto repeated = transaction.marks( marks );
+    REQUIRE( repeated );
+    CHECK( repeated->revision == captured->revision );
+    CHECK( transaction.commit() == Status::Conflict );
+    CHECK( owners.first.snapshot().labels.front().isEmpty() );
+}
+
+TEST_CASE( "Closed or oversized mark owners fail the entire candidate without dereferencing retired models",
+           "[review-transaction][review-marks-transaction]" )
+{
+    Owners owners;
+    auto marks = std::make_unique<MarkOwner>();
+    ReviewTransaction transaction;
+    transaction.stageLabels( owners.first, { label( "staged" ) } );
+    SECTION( "owner lifetime" ) {
+        REQUIRE( transaction.marks( *marks ) );
+        marks.reset();
+        CHECK( transaction.commit() == Status::TargetClosed );
+    }
+    SECTION( "bounded snapshot failure" ) {
+        marks->exceedsBudget = true;
+        CHECK_FALSE( transaction.marks( *marks ) );
+        CHECK( transaction.commit() == Status::ResourceLimit );
+    }
+    CHECK( owners.first.snapshot().labels.front().isEmpty() );
+}
+
+TEST_CASE( "Mark read owners share transaction admission and unrelated owners do not conflict",
+           "[review-transaction][review-marks-transaction]" )
+{
+    Owners owners;
+    MarkOwner unrelated;
+    ReviewTransaction transaction;
+    transaction.stageLabels( owners.first, { label( "staged" ) } );
+    unrelated.state.revision += 1;
+    CHECK( transaction.commit() == Status::Committed );
+    ReviewTransaction bounded;
+    std::vector<std::unique_ptr<MarkOwner>> marks;
+    for ( size_t i = 0; i < ReviewTransaction::MaxOwners; ++i ) {
+        marks.push_back( std::make_unique<MarkOwner>() );
+        REQUIRE( bounded.marks( *marks.back() ) );
+    }
+    CHECK( bounded.marks( *marks.front() ) ); // Repeat reads do not consume another slot.
+    CHECK_FALSE( bounded.marks( unrelated ) );
+    CHECK( bounded.status() == Status::ResourceLimit );
+}
 
 TEST_CASE( "Review transactions read their own label writes without publishing",
            "[review-transaction]" )

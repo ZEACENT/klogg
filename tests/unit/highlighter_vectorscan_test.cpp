@@ -560,6 +560,21 @@ TEST_CASE( "Configured regex backend matches the built product", "[vectorscan][b
 #endif
 }
 
+TEST_CASE( "Prepared highlighter matchers keep their captured backend across preference changes",
+           "[highlighter][review-highlighters][matcher-backend]" )
+{
+    ScopedRegexpEngine engine( RegexpEngine::QRegularExpression );
+    const auto patterns = makeRegressionPatterns();
+    MultiRegularExpression prepared( patterns );
+    REQUIRE( prepared.isValid() );
+    Configuration::get().setRegexpEnging( RegexpEngine::Vectorscan );
+    auto matcher = prepared.createMatcher();
+    const auto result = matcher->match( "ERROR https://example.invalid/evidence" );
+    REQUIRE( result.size() == patterns.size() );
+    CHECK( result[ 0 ].second );
+    CHECK( result[ 1 ].second );
+}
+
 TEST_CASE( "MultiRegularExpression matches representative highlighter patterns",
            "[vectorscan][backend]" )
 {

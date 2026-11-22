@@ -20,25 +20,31 @@
 #ifndef SESSION_H
 #define SESSION_H
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include <QByteArray>
 #include <QDateTime>
+#include <QFuture>
 #include <QSet>
 #include <QStringList>
 
 #include "log.h"
 #include "quickfindpattern.h"
 
+class QObject;
 class ViewInterface;
 class ViewContextInterface;
 class SearchableLogData;
+class LogData;
+class PreparedFileSource;
 class LogFilteredData;
 class SavedSearches;
 class AdbLogcatSource;
@@ -105,6 +111,44 @@ public:
     // Throw exceptions if the file is already open or if it cannot be open.
     ViewInterface* open( const QString& file_name,
                          const std::function<ViewInterface*()>& view_factory );
+
+    // An unpublished native document graph. No session/window membership or
+    // history is changed until adoption. Construct, start and adopt on the GUI
+    // thread; callers can arm loading observers before starting asynchronous work.
+    class PreparedDocument {
+      public:
+        ~PreparedDocument();
+        PreparedDocument( const PreparedDocument& ) = delete;
+        PreparedDocument& operator=( const PreparedDocument& ) = delete;
+        ViewInterface* view() const;
+        SearchableLogData* source() const;
+        OpenedDocumentInfo info() const;
+        bool startLoading();
+        // Permanently reject adoption and retire private source loading. Retain
+        // this graph until completion on the GUI event loop. Unpublished views
+        // must not run searches; this future covers the source worker only.
+        QFuture<void> retire();
+      private:
+        friend class Session;
+        struct State;
+        explicit PreparedDocument( std::unique_ptr<State> state );
+        std::unique_ptr<State> state_;
+    };
+    std::unique_ptr<PreparedDocument> prepareFile( const QString& fileName,
+        const std::function<ViewInterface*()>& viewFactory );
+    std::unique_ptr<PreparedDocument> prepareFile( std::unique_ptr<PreparedFileSource>& source,
+        const std::function<ViewInterface*()>& viewFactory );
+    std::unique_ptr<PreparedDocument> prepareFolder( const QString& folderPath,
+        const std::vector<QString>& filePaths );
+    // Consumes the candidate only on success; the caller then owns its view.
+    ViewInterface* adoptPrepared( std::unique_ptr<PreparedDocument>& prepared );
+
+    // Transfer a detached graph to owner-thread retirement. Consumes only
+    // candidates belonging to this Session and without a competing Qt parent;
+    // no membership/history is changed. Rejection leaves ownership with caller.
+    bool retirePrepared( std::unique_ptr<PreparedDocument>& prepared );
+    // Blocking fallback for application shutdown only, never transaction commit.
+    void drainRetiredDocuments();
 
     // Close the file identified by the view passed
     // Throw an exception if it does not exist.
@@ -202,6 +246,11 @@ private:
                                   bool startConnected, const QString& viewContext );
     bool isLiveCaptureIdOpen( const QString& captureId ) const;
 
+    std::unique_ptr<PreparedDocument> extractDocument( ViewInterface* view );
+    std::unique_ptr<PreparedDocument> prepareFileGraph( const QString& fileName,
+        std::shared_ptr<LogData> data, const std::function<ViewInterface*()>& viewFactory,
+        bool sourceReady );
+
     // Find an open file from its associated view
     OpenFile* findOpenFileFromView( const ViewInterface* view );
     const OpenFile* findOpenFileFromView( const ViewInterface* view ) const;
@@ -214,6 +263,9 @@ private:
     // List of open files
     typedef std::unordered_map<const ViewInterface*, OpenFile> OpenFileMap;
     OpenFileMap openFiles_;
+    const std::shared_ptr<const uint8_t> preparationIdentity_ = std::make_shared<const uint8_t>( 0 );
+    // QObject children own retired graphs; completion observers never retain Session.
+    std::unique_ptr<QObject> retiredDocuments_;
 
     // Global search history
     SavedSearches* savedSearches_;
@@ -250,27 +302,49 @@ using SaveFileInfo
 class WindowSession {
 public:
     WindowSession( std::shared_ptr<Session> appSession, const QString& id, size_t index );
+    std::shared_ptr<Session> owner() const { return appSession_; }
 
     ViewInterface* getViewIfOpen( const QString& file_name ) const
     {
         return appSession_->getViewIfOpen( file_name );
     }
 
+    std::unique_ptr<Session::PreparedDocument> prepareFile( const QString& fileName,
+        const std::function<ViewInterface*()>& viewFactory )
+    {
+        return appSession_->prepareFile( fileName, viewFactory );
+    }
+    std::unique_ptr<Session::PreparedDocument> prepareFile( std::unique_ptr<PreparedFileSource>& source,
+        const std::function<ViewInterface*()>& viewFactory )
+    {
+        return appSession_->prepareFile( source, viewFactory );
+    }
+    std::unique_ptr<Session::PreparedDocument> prepareFolder( const QString& folderPath,
+        const std::vector<QString>& filePaths )
+    {
+        return appSession_->prepareFolder( folderPath, filePaths );
+    }
+    ViewInterface* adoptPrepared( std::unique_ptr<Session::PreparedDocument>& prepared );
+    // Remove exact native membership without deleting models or invoking UI.
+    // The caller must first detach the view from its presentation/Qt parent.
+    // On success the terminal graph owns the view; retire it through Session.
+    // Live documents require their separate transport-close policy and are refused.
+    std::unique_ptr<Session::PreparedDocument> extractDocument( ViewInterface* view );
+
     ViewInterface* open( const QString& file_name,
                          const std::function<ViewInterface*()>& view_factory )
     {
-        openedDocuments_.push_back( file_name );
-        return appSession_->open( file_name, view_factory );
+        auto prepared = prepareFile( file_name, view_factory );
+        if ( !prepared ) return nullptr;
+        prepared->startLoading();
+        return adoptPrepared( prepared );
     }
 
     void close( const ViewInterface* view )
     {
-        const auto position
-            = std::find( openedDocuments_.begin(), openedDocuments_.end(), getDocumentId( view ) );
-        if ( position != openedDocuments_.end() ) {
-            openedDocuments_.erase( position );
-        }
-
+        const auto position = std::find( openedViews_.begin(), openedViews_.end(), view );
+        if ( position == openedViews_.end() ) return;
+        openedViews_.erase( position );
         appSession_->close( view );
     }
 
@@ -280,7 +354,7 @@ public:
     {
         auto* view = appSession_->openMerged( fileNames, view_factory, tempDir );
         if ( view ) {
-            openedDocuments_.push_back( appSession_->getDocumentId( view ) );
+            openedViews_.push_back( view );
         }
         return view;
     }
@@ -291,18 +365,15 @@ public:
     {
         auto* view = appSession_->openAdbLogcat( sessionData, view_factory, startConnected );
         if ( view ) {
-            openedDocuments_.push_back( appSession_->getDocumentId( view ) );
+            openedViews_.push_back( view );
         }
         return view;
     }
 
     ViewInterface* openFolder( const QString& folderPath, const std::vector<QString>& filePaths )
     {
-        auto* view = appSession_->openFolder( folderPath, filePaths );
-        if ( view ) {
-            openedDocuments_.push_back( appSession_->getDocumentId( view ) );
-        }
-        return view;
+        auto prepared = prepareFolder( folderPath, filePaths );
+        return adoptPrepared( prepared );
     }
 
     QString getFilename( const ViewInterface* view ) const
@@ -365,16 +436,10 @@ public:
     std::vector<OpenedDocumentInfo> openedDocuments() const
     {
         std::vector<OpenedDocumentInfo> documents;
-        documents.reserve( openedDocuments_.size() );
-        for ( const auto& documentId : openedDocuments_ ) {
-            const auto openFilePosition
-                = std::find_if( appSession_->openFiles_.cbegin(), appSession_->openFiles_.cend(),
-                                [ &documentId ]( const auto& openFile ) {
-                                    return openFile.second.documentId == documentId;
-                                } );
-            if ( openFilePosition != appSession_->openFiles_.cend() ) {
-                documents.push_back(
-                    appSession_->openedDocumentInfo( openFilePosition->first ) );
+        documents.reserve( openedViews_.size() );
+        for ( const auto* view : openedViews_ ) {
+            if ( appSession_->openFiles_.find( view ) != appSession_->openFiles_.cend() ) {
+                documents.push_back( appSession_->openedDocumentInfo( view ) );
             }
         }
         return documents;
@@ -435,7 +500,8 @@ private:
     QString windowId_;
     size_t windowIndex_;
 
-    std::vector<QString> openedDocuments_;
+    // Runtime membership is object identity, not a path shared by duplicate tabs.
+    std::vector<ViewInterface*> openedViews_;
 };
 
 #endif

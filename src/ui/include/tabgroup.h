@@ -20,6 +20,9 @@
 #ifndef TABGROUP_H
 #define TABGROUP_H
 
+#include <cstdint>
+#include <memory>
+
 #include <QColor>
 #include <QList>
 #include <QObject>
@@ -62,10 +65,9 @@ class TabGroupManager : public QObject, public Persistable<TabGroupManager> {
     TabGroupManager() = default;
 
     QList<TabGroup> groups() const;
-    TabGroup* groupById( const QString& groupId );
     const TabGroup* groupById( const QString& groupId ) const;
     QString groupIdForTab( const QString& tabPath ) const;
-    TabGroup* groupForTab( const QString& tabPath );
+    const TabGroup* groupForTab( const QString& tabPath ) const;
 
     void createGroup( const QString& name, const QColor& color );
     void deleteGroup( const QString& groupId );
@@ -79,6 +81,25 @@ class TabGroupManager : public QObject, public Persistable<TabGroupManager> {
 
     void ungroupAll( const QString& groupId );
 
+    // Private value preparation, silent one-shot install, then explicit notify.
+    // A workspace coordinator reconciles every tab facade/inventory between
+    // install and notify. Discarding an installed update does not roll it back.
+    class PreparedRemoval {
+      public:
+        ~PreparedRemoval();
+        PreparedRemoval( const PreparedRemoval& ) = delete;
+        PreparedRemoval& operator=( const PreparedRemoval& ) = delete;
+        bool isCurrent() const noexcept;
+        bool install() noexcept;
+        void notify();
+      private:
+        friend class TabGroupManager;
+        struct State;
+        explicit PreparedRemoval( std::unique_ptr<State> state );
+        std::unique_ptr<State> state_;
+    };
+    std::unique_ptr<PreparedRemoval> prepareTabRemovals( const QStringList& paths );
+
     void retrieveFromStorage( QSettings& settings );
     void saveToStorage( QSettings& settings ) const;
 
@@ -87,7 +108,12 @@ class TabGroupManager : public QObject, public Persistable<TabGroupManager> {
     void groupCollapsedChanged( const QString& groupId, bool collapsed );
 
   private:
+    TabGroup* mutableGroupById( const QString& groupId );
+    void advanceMutationIdentity();
     QList<TabGroup> groups_;
+    // Retained identity catches ABA without a wrapping public counter. Only
+    // revision-owning commands may mutate groups; lookup results are read-only.
+    std::shared_ptr<const uint8_t> mutationIdentity_ = std::make_shared<const uint8_t>( 0 );
 };
 
 Q_DECLARE_METATYPE( TabGroup )

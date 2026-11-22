@@ -126,6 +126,9 @@ class QuickFind : public QObject {
     // Make the object forget the 'no more match' flag.
     void resetLimits();
 
+    // Permanently stop admission without waiting. Retain this owner until the
+    // returned task completion finishes; queued results/notifications are retired.
+    QFuture<void> retire();
     bool isSearchRunning() const { return !operationFuture_.isFinished(); }
     // Owner-thread publication guard: queued completions retain their accepted ID.
     quint64 currentRequestId() const { return requestId_; }
@@ -269,6 +272,7 @@ class QuickFind : public QObject {
                                      const QuickFindMatcher& matcher );
 
     quint64 requestId_ = 0;
+    bool retiring_ = false; // Owner-thread admission and publication state.
     AtomicFlag interruptRequested_;
 #if defined( KLOGG_ASAN_BUILD )
     void runBeforeLineReadCallbackForTesting();

@@ -1371,12 +1371,6 @@ void MainWindow::createMenus()
     highlightersMenu = new HighlightersMenu( tr( menu::highlightersTitle ), menuBar() );
     highlightersMenu->setObjectName( QStringLiteral( "highlightersMenu" ) );
     menuBar()->addMenu( highlightersMenu );
-    highlightersMenu->setApplyChange( [ this ]() {
-        auto crawler = currentCrawlerWidget();
-        if ( crawler != nullptr ) {
-            crawler->applyConfiguration();
-        }
-    } );
 
     toolsMenu->addAction( predefinedFiltersDialogAction );
     toolsMenu->addAction( importFilterFavoritesAction );
@@ -2247,13 +2241,9 @@ void MainWindow::openUrl()
 void MainWindow::editHighlighters()
 {
     HighlightersDialog dialog( this );
-    signalMux_.connect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
-
-    connect( &dialog, &HighlightersDialog::optionsChanged,
-             [ this ]() { updateHighlightersMenu(); } );
-
+    // HighlighterStatePublisher refreshes every view and invalidates every menu,
+    // including other windows and kept panes, through the same publication path.
     dialog.exec();
-    signalMux_.disconnect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
 }
 
 // Opens dialog to configure predefined filters
@@ -3578,6 +3568,17 @@ bool MainWindow::extractAndLoadFile( const QString& fileName )
 // Create a CrawlerWidget for the passed file, start its loading
 // and update the title bar.
 // The loading is done asynchronously.
+QString MainWindow::previousFileContext( const QString& fileName )
+{
+    const auto& session = SessionInfo::getSynced();
+    for ( const auto& windowId : session.windows() ) {
+        for ( const auto& context : session.openFiles( windowId ) ) {
+            if ( context.fileName == fileName ) return context.viewContext;
+        }
+    }
+    return {};
+}
+
 bool MainWindow::loadFile( const QString& fileName, bool followFile )
 {
     LOG_DEBUG << "loadFile ( " << fileName.toStdString() << " )";
@@ -3615,22 +3616,7 @@ bool MainWindow::loadFile( const QString& fileName, bool followFile )
         loadingFileName = fileName;
 
         try {
-            const auto previousViewContext = [ &fileName ]() {
-                const auto& session = SessionInfo::getSynced();
-                const auto& windows = session.windows();
-                for ( const auto& windowId : windows ) {
-                    const auto openedFiles = session.openFiles( windowId );
-                    const auto existingContext
-                        = std::find_if( openedFiles.begin(), openedFiles.end(),
-                                        [ &fileName ]( const auto& context ) {
-                                            return context.fileName == fileName;
-                                        } );
-                    if ( existingContext != openedFiles.end() ) {
-                        return existingContext->viewContext;
-                    }
-                }
-                return QString{};
-            }();
+            const auto previousViewContext = previousFileContext( fileName );
 
             CrawlerWidget* crawler_widget = static_cast<CrawlerWidget*>(
                 session_.open( fileName, []() { return new CrawlerWidget(); } ) );

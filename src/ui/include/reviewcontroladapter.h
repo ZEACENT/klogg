@@ -16,6 +16,7 @@ class MainWindow;
 // existing domain owners, then serialize. The provider is the application's
 // existing window collection, not a second authoritative window/tab registry.
 class ReviewControlAdapter : public QObject {
+    Q_OBJECT
   public:
     using WindowProvider = std::function<std::vector<QPointer<MainWindow>>() >;
     using Clock = std::function<qint64()>; // Monotonic milliseconds; injectable for lease tests.
@@ -26,6 +27,11 @@ class ReviewControlAdapter : public QObject {
     void reset(); // Discard unpublished candidates when globally disabling control.
     ~ReviewControlAdapter() override;
     klogg::control::DecodedResponse dispatch( const klogg::control::RpcRequest& request );
+
+  Q_SIGNALS:
+    // Private work has retired, including canceled/expired work. Publication,
+    // when still permitted, precedes this owner-thread completion notification.
+    void preparationFinished( const QString& transactionId );
 
   private:
     struct State;

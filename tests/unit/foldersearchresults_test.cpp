@@ -23,6 +23,7 @@
 #include "foldersearchengine.h"
 #include "regularexpression.h"
 #include "foldersearchtypes.h"
+#include "reviewmarks.h"
 
 #include <QByteArray>
 #include <QDir>
@@ -60,6 +61,452 @@ QString writeFile( const QTemporaryDir& dir, const QString& name, const QStringL
     return path;
 }
 } // namespace
+
+TEST_CASE( "Complete folder replacement prepares privately and publishes retained membership once",
+           "[folder][folder-search-publication]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto oldPath = writeFile( dir, "old.log", { "MATCH old" } );
+    const auto newPath = writeFile( dir, "new.log", { "MATCH new" } );
+    const auto markedPath = writeFile( dir, "marked.log", { "old bookmark" } );
+    FolderSearchEngine engine;
+    engine.scanSynchronously( { oldPath, markedPath }, RegularExpressionPattern{ "MATCH" } );
+    FolderSearchResults::MarksStore marks{ { markedPath, { 0 } } };
+    FolderSearchResults results;
+    results.setResults( engine.takeResults() );
+    const auto oldSnapshot = results.createReadSnapshot( klogg::SnapshotScope::Matches );
+    REQUIRE( oldSnapshot );
+    const auto oldIdentity = oldSnapshot->row( 0_lnum ).identity;
+    results.setMarksStore( &marks );
+    // Legacy unrestricted marks would display this excluded path; the completed
+    // search must restrict presentation without deleting the shared bookmark.
+    marks[ oldPath ].insert( 0 );
+    results.refreshForMarksChange();
+    const auto originalMarks = marks;
+    REQUIRE( results.getLineString( 3_lnum ) == "old bookmark" );
+    writeFile( dir, "marked.log", { "retained bookmark", "later bookmark" } );
+    QSignalSpy changed( &results, &FolderSearchResults::layoutChanged );
+    const auto captured = results.captureSearchReplacement();
+    REQUIRE( captured );
+    const auto generation = engine.scanSynchronously( { newPath, markedPath }, RegularExpressionPattern{ "MATCH" } );
+    auto completed = engine.takeCompletedSearch( generation );
+    REQUIRE( completed );
+    REQUIRE( completed->status == FolderSearchEngine::CompletionStatus::Ready );
+    const auto source = completed->groups.back().content;
+    REQUIRE( source );
+    const auto bytesRead = source->bytesReadForTesting();
+    std::shared_ptr<FolderSearchResults::PreparedSearchReplacement> prepared;
+    std::thread worker( [&] {
+        prepared = FolderSearchResults::prepareSearchReplacement( captured, std::move( *completed ) );
+    } );
+    worker.join();
+    REQUIRE( prepared );
+    CHECK( results.containsRowIdentity( oldIdentity ) );
+    CHECK( changed.count() == 0 );
+    auto publication = results.lockSearchReplacement( prepared );
+    REQUIRE( publication );
+    CHECK( publication->install() );
+    CHECK_FALSE( publication->install() );
+    publication.reset();
+    CHECK( changed.count() == 0 );
+    CHECK( marks == originalMarks );
+    CHECK_FALSE( results.containsRowIdentity( oldIdentity ) );
+    CHECK( source->bytesReadForTesting() == bytesRead );
+    CHECK_FALSE( results.lockSearchReplacement( prepared ) );
+    bool observed = false;
+    QObject::connect( &results, &FolderSearchResults::layoutChanged, &results, [&] {
+        observed = results.groupCount() == 1 && results.getNbLine() == 4_lcount;
+    } );
+    results.layoutChanged();
+    CHECK( observed );
+    CHECK( changed.count() == 1 );
+    REQUIRE( QFile::remove( oldPath ) );
+    REQUIRE( QFile::remove( newPath ) );
+    REQUIRE( QFile::remove( markedPath ) );
+    CHECK( oldSnapshot->lineString( 0_lnum ) == "MATCH old" );
+    CHECK( results.getLineString( 1_lnum ) == "MATCH new" );
+    CHECK( results.getLineString( 3_lnum ) == "retained bookmark" );
+    CHECK( results.containsRowIdentity( source->identity( 1_lnum ) ) );
+    marks[ markedPath ].insert( 1 );
+    results.refreshForMarksChange();
+    CHECK( results.getLineString( 4_lnum ) == "later bookmark" );
+}
+
+TEST_CASE( "Complete folder publication rejects changed owners and discarded candidates stay private",
+           "[folder][folder-search-publication]" )
+{
+    FolderSearchResults::MarksStore marks;
+    FolderSearchResults::MarksStore otherMarks;
+    auto results = std::make_unique<FolderSearchResults>();
+    results->setMarksStore( &marks );
+    const auto captured = results->captureSearchReplacement();
+    REQUIRE( captured );
+    FolderSearchEngine::CompletedSearch empty;
+    empty.status = FolderSearchEngine::CompletionStatus::Ready;
+    const auto prepared = FolderSearchResults::prepareSearchReplacement( captured, std::move( empty ) );
+    REQUIRE( prepared );
+    SECTION( "marks changed without refresh" ) { marks[ "absent.log" ].insert( 0 ); }
+    SECTION( "marks rebound" ) { results->setMarksStore( &otherMarks ); }
+    SECTION( "visibility changed" ) { results->setVisibility( FolderSearchResults::Visibility::Matches ); }
+    SECTION( "new empty search supersedes capture" ) { results->beginSearch( {} ); }
+    SECTION( "other owner" ) {
+        FolderSearchResults other;
+        CHECK_FALSE( other.lockSearchReplacement( prepared ) );
+        return;
+    }
+    SECTION( "discarded guard and owner-independent preparation" ) {
+        QSignalSpy changed( results.get(), &FolderSearchResults::layoutChanged );
+        auto publication = results->lockSearchReplacement( prepared );
+        REQUIRE( publication );
+        publication.reset();
+        CHECK( changed.count() == 0 );
+        REQUIRE( results->lockSearchReplacement( prepared ) );
+        results.reset();
+        FolderSearchEngine::CompletedSearch afterClose;
+        afterClose.status = FolderSearchEngine::CompletionStatus::Ready;
+        std::shared_ptr<FolderSearchResults::PreparedSearchReplacement> detached;
+        std::thread worker( [&] {
+            detached = FolderSearchResults::prepareSearchReplacement( captured, std::move( afterClose ) );
+        } );
+        worker.join();
+        CHECK( detached );
+        return;
+    }
+    QSignalSpy changed( results.get(), &FolderSearchResults::layoutChanged );
+    CHECK_FALSE( results->lockSearchReplacement( prepared ) );
+    CHECK( changed.count() == 0 );
+}
+
+TEST_CASE( "Complete folder replacement preserves collapse by path and discards old streaming buffers",
+           "[folder][folder-search-publication]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, "a.log", { "MATCH a" } );
+    const auto b = writeFile( dir, "b.log", { "MATCH b" } );
+    FolderSearchEngine engine;
+    engine.scanSynchronously( { a, b }, RegularExpressionPattern{ "MATCH" } );
+    auto oldGroups = engine.takeResults();
+    REQUIRE( oldGroups.size() == 2 );
+    FolderSearchResults results;
+    results.setResults( oldGroups );
+    results.setCollapsed( 0, true );
+    SECTION( "existing groups" ) {}
+    SECTION( "pending re-search with a missing predecessor" ) {
+        results.beginSearch( { a, b } );
+        results.addFileGroup( 1, oldGroups.back() );
+    }
+    const auto captured = results.captureSearchReplacement();
+    REQUIRE( captured );
+    const auto generation = engine.scanSynchronously( { b, a }, RegularExpressionPattern{ "MATCH" } );
+    auto complete = engine.takeCompletedSearch( generation );
+    REQUIRE( complete );
+    const auto prepared = FolderSearchResults::prepareSearchReplacement( captured, std::move( *complete ) );
+    REQUIRE( prepared );
+    SECTION( "human collapse edit rejects the captured replacement" ) {
+        results.expandAll();
+        CHECK_FALSE( results.lockSearchReplacement( prepared ) );
+        CHECK( results.getNbLine() == 4_lcount );
+        return;
+    }
+    auto publication = results.lockSearchReplacement( prepared );
+    REQUIRE( publication );
+    REQUIRE( publication->install() );
+    publication.reset();
+    CHECK_FALSE( results.isCollapsed( 0 ) );
+    CHECK( results.isCollapsed( 1 ) );
+    CHECK( results.getNbLine() == 3_lcount );
+    CHECK( results.sourceForLine( 0_lnum ).filePath == b );
+    QSignalSpy changed( &results, &FolderSearchResults::layoutChanged );
+    results.flushPending();
+    results.addFileGroup( 0, oldGroups.front() );
+    CHECK( changed.count() == 0 );
+    CHECK( results.groupCount() == 2 );
+    CHECK( results.getNbLine() == 3_lcount );
+}
+
+TEST_CASE( "Finishing an empty folder search invalidates its pending collapse capture",
+           "[folder][folder-search-publication][folder-collapse-capture]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", { "MATCH" } );
+    FolderSearchEngine engine;
+    engine.scanSynchronously( { path }, RegularExpressionPattern{ "MATCH" } );
+    FolderSearchResults results;
+    results.setResults( engine.takeResults() );
+    results.collapseAll();
+    results.beginSearch( { path } );
+    const auto captured = results.captureSearchReplacement();
+    REQUIRE( captured );
+    const auto generation = engine.scanSynchronously( { path }, RegularExpressionPattern{ "MATCH" } );
+    auto completed = engine.takeCompletedSearch( generation );
+    REQUIRE( completed );
+    const auto prepared = FolderSearchResults::prepareSearchReplacement( captured, std::move( *completed ) );
+    REQUIRE( prepared );
+    QSignalSpy changed( &results, &FolderSearchResults::layoutChanged );
+    results.flushPending(); // Native completion discards pending collapse, without a layout change.
+    REQUIRE( changed.count() == 0 );
+    CHECK_FALSE( results.lockSearchReplacement( prepared ) );
+    CHECK( results.getNbLine() == 0_lcount );
+}
+
+TEST_CASE( "Folder replacement distinguishes empty success from rejected or incomplete scans",
+           "[folder][folder-search-publication]" )
+{
+    FolderSearchResults::MarksStore marks{ { "excluded.log", { 0 } } };
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    const auto before = results.getNbLine();
+    REQUIRE( before != 0_lcount );
+    const auto captured = results.captureSearchReplacement();
+    REQUIRE( captured );
+    FolderSearchEngine::CompletedSearch completed;
+    bool accepted = false;
+    SECTION( "empty success" ) { completed.status = FolderSearchEngine::CompletionStatus::Ready; accepted = true; }
+    SECTION( "cancelled" ) { completed.status = FolderSearchEngine::CompletionStatus::Cancelled; }
+    SECTION( "compile failure" ) { completed.status = FolderSearchEngine::CompletionStatus::CompileFailure; }
+    SECTION( "enumeration failure" ) { completed.status = FolderSearchEngine::CompletionStatus::EnumerationFailure; }
+    SECTION( "retention failure" ) { completed.status = FolderSearchEngine::CompletionStatus::RetentionFailure; }
+    SECTION( "already streamed" ) { completed.status = FolderSearchEngine::CompletionStatus::ResultsConsumed; }
+    SECTION( "missing member" ) {
+        completed.status = FolderSearchEngine::CompletionStatus::Ready;
+        completed.filePaths.push_back( "missing.log" );
+    }
+    QSignalSpy changed( &results, &FolderSearchResults::layoutChanged );
+    const auto prepared = FolderSearchResults::prepareSearchReplacement( captured, std::move( completed ) );
+    CHECK( static_cast<bool>( prepared ) == accepted );
+    CHECK( results.getNbLine() == before );
+    if ( accepted ) {
+        auto publication = results.lockSearchReplacement( prepared );
+        REQUIRE( publication );
+        REQUIRE( publication->install() );
+        publication.reset();
+        CHECK( results.getNbLine() == 0_lcount );
+    }
+    CHECK( marks.size() == 1 );
+    CHECK( changed.count() == 0 );
+}
+
+TEST_CASE( "Folder prepared layouts install requested visibility without an intermediate rebuild",
+           "[folder][folder-prepared-visibility]" )
+{
+    using Visibility = FolderSearchResults::Visibility;
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "a.log", { "MATCH", "bookmark" } );
+    FolderSearchEngine engine;
+    engine.scanSynchronously( { path }, RegularExpressionPattern{ "MATCH" } );
+    FolderSearchResults::MarksStore marks{ { path, { 1 } } };
+    FolderSearchResults results;
+    results.setMarksStore( &marks );
+    results.setResults( engine.takeResults() );
+    results.setVisibility( Visibility::Marks );
+    REQUIRE( results.getNbLine() == 2_lcount );
+    const auto originalMarks = marks;
+    QSignalSpy changed( &results, &FolderSearchResults::layoutChanged );
+    SECTION( "existing results projection for a kept pane" ) {
+        const auto captured = results.captureMarksLayout( marks, nullptr, Visibility::MarksAndMatches );
+        REQUIRE( captured );
+        const auto prepared = FolderSearchResults::prepareMarksLayout( captured );
+        REQUIRE( prepared );
+        CHECK( results.visibility() == Visibility::Marks );
+        CHECK( results.getNbLine() == 2_lcount );
+        auto publication = results.lockMarksLayout( prepared );
+        REQUIRE( publication );
+        REQUIRE( publication->install() );
+        publication.reset();
+    }
+    SECTION( "complete search replacement" ) {
+        const auto captured = results.captureSearchReplacement( Visibility::MarksAndMatches );
+        REQUIRE( captured );
+        const auto generation = engine.scanSynchronously( { path }, RegularExpressionPattern{ "MATCH" } );
+        auto completed = engine.takeCompletedSearch( generation );
+        REQUIRE( completed );
+        const auto prepared = FolderSearchResults::prepareSearchReplacement( captured, std::move( *completed ) );
+        REQUIRE( prepared );
+        CHECK( results.visibility() == Visibility::Marks );
+        CHECK( results.getNbLine() == 2_lcount );
+        auto publication = results.lockSearchReplacement( prepared );
+        REQUIRE( publication );
+        REQUIRE( publication->install() );
+        publication.reset();
+    }
+    CHECK( results.visibility() == Visibility::MarksAndMatches );
+    CHECK( results.getNbLine() == 3_lcount );
+    CHECK( marks == originalMarks );
+    CHECK( changed.count() == 0 );
+    CHECK( results.getLineString( 1_lnum ) == "MATCH" );
+    CHECK( results.getLineString( 2_lnum ) == "bookmark" );
+}
+
+TEST_CASE( "Folder marks prepare privately and install once without intermediate notifications",
+           "[folder][folder-mark-preparation]" )
+{
+    FolderSearchResults results;
+    FolderSearchResults::MarksStore marks;
+    results.setMarksStore( &marks );
+    klogg::folder::FileGroup group;
+    group.filePath = QStringLiteral( "/retained/a.log" );
+    group.matches.push_back( match( 4, 0, 10, 10, 5 ) );
+    results.setResults( { group } );
+    const FolderSearchResults::MarksStore candidate{ { group.filePath, { 2, 4 } } };
+    QSignalSpy changed( &results, &FolderSearchResults::layoutChanged );
+    const auto captured = results.captureMarksLayout( candidate );
+    REQUIRE( captured );
+    std::shared_ptr<FolderSearchResults::PreparedMarksLayout> prepared;
+    std::thread worker( [&] { prepared = FolderSearchResults::prepareMarksLayout( captured ); } );
+    worker.join();
+    REQUIRE( prepared );
+    CHECK( results.getNbLine() == 2_lcount );
+    CHECK( marks.isEmpty() );
+    CHECK( changed.count() == 0 );
+    auto publication = results.lockMarksLayout( prepared );
+    REQUIRE( publication );
+    marks = candidate; // The owning transaction installs every owner before notifications.
+    CHECK( publication->install() );
+    CHECK_FALSE( publication->install() );
+    publication.reset(); // Readers can re-enter only after every publication guard is released.
+    CHECK( changed.count() == 0 );
+    CHECK( results.getNbLine() == 3_lcount );
+    CHECK( results.sourceForLine( 1_lnum ).localLine == 2_lnum );
+    CHECK( results.sourceForLine( 2_lnum ).localLine == 4_lnum );
+    CHECK_FALSE( results.lockMarksLayout( prepared ) );
+}
+
+TEST_CASE( "Prepared folder marks reject changed context without overwriting human state",
+           "[folder][folder-mark-preparation]" )
+{
+    FolderSearchResults results;
+    FolderSearchResults::MarksStore marks;
+    FolderSearchResults::MarksStore otherMarks;
+    results.setMarksStore( &marks );
+    klogg::folder::FileGroup group;
+    group.filePath = QStringLiteral( "/retained/a.log" );
+    group.matches.push_back( match( 4, 0, 10, 10, 5 ) );
+    results.setResults( { group } );
+    const auto captured = results.captureMarksLayout( { { group.filePath, { 2 } } } );
+    REQUIRE( captured );
+    const auto prepared = FolderSearchResults::prepareMarksLayout( captured );
+    REQUIRE( prepared );
+    SECTION( "collapse" ) { results.collapseAll(); }
+    SECTION( "visibility" ) { results.setVisibility( FolderSearchResults::Visibility::Matches ); }
+    SECTION( "new search" ) { results.beginSearch( { group.filePath } ); }
+    SECTION( "changed marks without layout refresh" ) { marks[ group.filePath ].insert( 7 ); }
+    SECTION( "store rebound" ) { results.setMarksStore( &otherMarks ); }
+    SECTION( "another owner" ) {
+        FolderSearchResults other;
+        other.setResults( { group } );
+        other.setMarksStore( &marks );
+        CHECK_FALSE( other.lockMarksLayout( prepared ) );
+        return;
+    }
+    const auto count = results.getNbLine();
+    QSignalSpy changed( &results, &FolderSearchResults::layoutChanged );
+    CHECK_FALSE( results.lockMarksLayout( prepared ) );
+    CHECK( results.getNbLine() == count );
+    CHECK( changed.count() == 0 );
+}
+
+TEST_CASE( "Folder mark preparation admits semantic no-ops and outlives the capture owner",
+           "[folder][folder-mark-preparation]" )
+{
+    auto results = std::make_unique<FolderSearchResults>();
+    FolderSearchResults::MarksStore marks;
+    results->setMarksStore( &marks );
+    const auto captured = results->captureMarksLayout( { { QStringLiteral( "/retained/a.log" ), { 2 } } } );
+    REQUIRE( captured );
+    SECTION( "no-op refresh is not a conflict" ) {
+        results->refreshForMarksChange();
+        results->setVisibility( results->visibility() );
+        const auto prepared = FolderSearchResults::prepareMarksLayout( captured );
+        REQUIRE( prepared );
+        REQUIRE( results->lockMarksLayout( prepared ) );
+    }
+    SECTION( "worker needs no QObject lifetime" ) {
+        results.reset();
+        std::shared_ptr<FolderSearchResults::PreparedMarksLayout> prepared;
+        std::thread worker( [&] { prepared = FolderSearchResults::prepareMarksLayout( captured ); } );
+        worker.join();
+        CHECK( prepared );
+    }
+}
+
+TEST_CASE( "Folder mark preparation bounds candidate and projected metadata before admission",
+           "[folder][folder-mark-preparation]" )
+{
+    FolderSearchResults results;
+    FolderSearchResults::MarksStore marks;
+    results.setMarksStore( &marks );
+    FolderSearchResults::MarksStore candidate;
+    SECTION( "mark count" ) {
+        auto& rows = candidate[ QStringLiteral( "/retained/a.log" ) ];
+        for ( size_t row = 0; row < klogg::ReviewMarksOwner::MaxMarks; ++row ) rows.insert( row );
+        REQUIRE( results.captureMarksLayout( candidate ) );
+        rows.insert( klogg::ReviewMarksOwner::MaxMarks );
+    }
+    SECTION( "member count" ) {
+        for ( size_t index = 0; index < klogg::ReviewMarksOwner::MaxMembers; ++index )
+            candidate.insert( QString::number( index ), { 0 } );
+        REQUIRE( results.captureMarksLayout( candidate ) );
+        candidate.insert( QStringLiteral( "overflow" ), { 0 } );
+    }
+    SECTION( "member text" ) {
+        const QString path( static_cast<int>( klogg::ReviewMarksOwner::MaxTextUnits ), QLatin1Char( 'x' ) );
+        candidate.insert( path, { 0 } );
+        REQUIRE( results.captureMarksLayout( candidate ) );
+        candidate.insert( QStringLiteral( "overflow" ), { 0 } );
+    }
+    SECTION( "projection upper bound includes headers" ) {
+        klogg::folder::FileGroup group;
+        group.filePath = QStringLiteral( "/retained/a.log" );
+        group.matches.resize( FolderSearchResults::MaxPreparedLayoutRows - 1 );
+        results.setResults( { group } );
+        REQUIRE( results.captureMarksLayout( candidate ) );
+        candidate.insert( group.filePath, { 1 } );
+    }
+    CHECK_FALSE( results.captureMarksLayout( candidate ) );
+    CHECK_FALSE( FolderSearchResults::prepareMarksLayout( {} ) );
+    CHECK_FALSE( results.lockMarksLayout( {} ) );
+}
+
+TEST_CASE( "Prepared folder marks keep immutable source leases without decoding during preparation",
+           "[folder][folder-mark-preparation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = writeFile( dir, "source.log", { "before", "hit", "after" } );
+    RegularExpression expression{ RegularExpressionPattern{ QStringLiteral( "hit" ) } };
+    auto matcher = expression.createMatcher();
+    auto group = FolderSearchEngine::scanFile( path, *matcher );
+    const auto source = group.content;
+    REQUIRE( source );
+    FolderSearchResults results;
+    FolderSearchResults::MarksStore marks;
+    results.setMarksStore( &marks );
+    results.setResults( { group } );
+    FolderSearchResults::MarksStore candidate{ { path, { 0, 2 } } };
+    const auto oldSnapshot = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    const auto captured = results.captureMarksLayout( candidate );
+    REQUIRE( captured );
+    candidate[ path ].clear(); // Detached candidate edits must not alter captured input.
+    REQUIRE( QFile::remove( path ) );
+    const auto bytesBefore = source->bytesReadForTesting();
+    const auto prepared = FolderSearchResults::prepareMarksLayout( captured );
+    REQUIRE( prepared );
+    auto publication = results.lockMarksLayout( prepared );
+    REQUIRE( publication );
+    marks = FolderSearchResults::MarksStore{ { path, { 0, 2 } } };
+    REQUIRE( publication->install() );
+    publication.reset();
+    CHECK( source->bytesReadForTesting() == bytesBefore );
+    CHECK( oldSnapshot->lineCount() == 1_lcount );
+    const auto snapshot = results.createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+    REQUIRE( snapshot->lineCount() == 3_lcount );
+    CHECK( snapshot->lineString( 0_lnum ) == QStringLiteral( "before" ) );
+    CHECK( snapshot->lineString( 2_lnum ) == QStringLiteral( "after" ) );
+}
 
 TEST_CASE( "FolderSearchResults empty has 0 lines", "[folder]" )
 {

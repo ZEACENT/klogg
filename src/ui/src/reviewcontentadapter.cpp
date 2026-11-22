@@ -1,10 +1,14 @@
 #include "reviewcontentadapter.h"
+#include <new>
+#include "asyncworkbudget.h"
 
 #include <algorithm>
 #include <atomic>
 #include <map>
 #include <utility>
 #include <QFuture>
+#include <QFutureInterface>
+#include <QPointer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QThread>
@@ -51,26 +55,11 @@ QString originName( klogg::LogRowId::Origin origin )
     return QStringLiteral( "unknown" );
 }
 
-// A process-wide permit survives adapter reset/destruction until the worker
-// actually retires. Repeated disable/re-enable cannot enqueue unbounded reads.
-struct ReadPermit {
-    std::shared_ptr<std::atomic<int>> active;
-    bool held = false;
-    ~ReadPermit() { if ( held ) --*active; }
-};
-std::shared_ptr<ReadPermit> acquireReadPermit()
+// Process-wide admission survives controller reset until workers retire.
+klogg::AsyncWorkBudget::Lease acquireReadPermit()
 {
-    static const auto active = std::make_shared<std::atomic<int>>( 0 );
-    auto permit = std::make_shared<ReadPermit>();
-    permit->active = active;
-    auto count = active->load();
-    while ( count < Limits::MaxConcurrentReads ) {
-        if ( active->compare_exchange_weak( count, count + 1 ) ) {
-            permit->held = true;
-            return permit;
-        }
-    }
-    return {};
+    static const klogg::AsyncWorkBudget budget{ Limits::MaxConcurrentReads };
+    return budget.tryAcquire();
 }
 struct ReadOutcome {
     QString error;
@@ -135,6 +124,14 @@ struct Operation {
     QFuture<ReadOutcome> future;
     std::shared_ptr<std::atomic<bool>> cancelled;
     qint64 created;
+    qint64 lifetime = Limits::LifetimeMs;
+    std::function<void()> onCancel{};
+    void cancel()
+    {
+        if ( future.isFinished() ) return;
+        *cancelled = true;
+        if ( onCancel ) onCancel();
+    }
 };
 QJsonObject operationJson( const QString& id, const Operation& operation )
 {
@@ -167,6 +164,15 @@ struct ReviewContentAdapter::State {
     std::map<QString, Lease> snapshots;
     std::map<QString, Operation> operations;
     QTimer timer;
+    bool makeRoom()
+    {
+        if ( operations.size() < MaxOperations ) return true;
+        const auto retired = std::find_if( operations.begin(), operations.end(),
+            []( const auto& item ) { return item.second.future.isFinished(); } );
+        if ( retired == operations.end() ) return false;
+        operations.erase( retired );
+        return true;
+    }
     void expire()
     {
         const auto tick = now();
@@ -175,8 +181,8 @@ struct ReviewContentAdapter::State {
             else ++it;
         }
         for ( auto it = operations.begin(); it != operations.end(); ) {
-            if ( tick - it->second.created >= LifetimeMs ) {
-                *it->second.cancelled = true;
+            if ( tick - it->second.created >= it->second.lifetime ) {
+                it->second.cancel();
                 it = operations.erase( it );
             }
             else ++it;
@@ -196,9 +202,66 @@ void ReviewContentAdapter::reset()
 {
     Q_ASSERT( QThread::currentThread() == thread() );
     state_->timer.stop();
-    for ( auto& item : state_->operations ) *item.second.cancelled = true;
+    for ( auto& item : state_->operations ) item.second.cancel();
     state_->operations.clear();
     state_->snapshots.clear();
+}
+
+std::optional<ReviewContentAdapter::PendingOperation> ReviewContentAdapter::beginOperation(
+    std::function<void()> cancel, qint64 lifetimeMs )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    state_->expire();
+    if ( !state_->makeRoom() ) return {};
+    const auto id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    auto cancelled = std::make_shared<std::atomic<bool>>( false );
+    auto completed = std::make_shared<std::atomic<bool>>( false );
+    auto promise = std::make_shared<QFutureInterface<ReadOutcome>>();
+    promise->reportStarted();
+    state_->operations.emplace( id, Operation{ promise->future(), cancelled, state_->now(),
+                                              lifetimeMs, std::move( cancel ) } );
+    state_->timer.start();
+    const QPointer<ReviewContentAdapter> owner{ this };
+    return PendingOperation{ id,
+        [owner, id, cancelled] {
+            if ( !owner ) return false;
+            owner->state_->expire();
+            const auto found = owner->state_->operations.find( id );
+            return found != owner->state_->operations.end() && found->second.cancelled == cancelled
+                && !cancelled->load() && !found->second.future.isFinished();
+        },
+        [promise, cancelled, completed]( QJsonObject result, QString error ) {
+            if ( completed->exchange( true ) ) return;
+            promise->reportResult( ReadOutcome{ std::move( error ), std::move( result ), cancelled->load() } );
+            promise->reportFinished();
+        } };
+}
+
+ReviewContentAdapter::ResolvedRows ReviewContentAdapter::resolveRows(
+    const QString& snapshotId, const std::vector<LineNumber>& ordinals )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    state_->expire();
+    if ( ordinals.size() > MaxRows ) return RowResolutionError::ResourceLimit;
+    if ( ordinals.empty() ) return RowResolutionError::InvalidArgument;
+    const auto found = state_->snapshots.find( snapshotId );
+    if ( found == state_->snapshots.end() ) return RowResolutionError::SnapshotNotFound;
+    const auto source = found->second.source;
+    try {
+        const auto count = source->lineCount();
+        for ( const auto index : ordinals )
+            if ( index >= count ) return RowResolutionError::InvalidArgument;
+        RowMetadata rows;
+        rows.reserve( ordinals.size() );
+        for ( const auto index : ordinals ) {
+            const auto row = source->row( index );
+            if ( !row.copyable ) return RowResolutionError::InvalidArgument;
+            rows.push_back( row );
+        }
+        return rows;
+    }
+    catch ( const std::bad_alloc& ) { return RowResolutionError::ResourceLimit; }
+    catch ( ... ) { return RowResolutionError::SourceUnavailable; }
 }
 
 DecodedResponse ReviewContentAdapter::capture( const RpcRequest& request, klogg::LogSnapshot::Ptr snapshot )
@@ -225,8 +288,7 @@ DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request )
         if ( !onlyKeys( params, { "operation_id" } ) || id.isEmpty() ) return failure( request, "INVALID_PARAMS" );
         const auto found = state_->operations.find( id );
         if ( found == state_->operations.end() ) return failure( request, "OPERATION_NOT_FOUND" );
-        if ( request.method == QLatin1String( "operation.cancel" ) && !found->second.future.isFinished() )
-            *found->second.cancelled = true;
+        if ( request.method == QLatin1String( "operation.cancel" ) ) found->second.cancel();
         return operationJson( id, found->second );
     }
     const bool release = request.method == QLatin1String( "source.release" );
@@ -248,12 +310,7 @@ DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request )
          || countValue.toDouble() != static_cast<double>( count ) ) return failure( request, "INVALID_PARAMS" );
     const auto total = lease->second.source->lineCount().get();
     if ( *start > total || static_cast<uint64_t>( count ) > total - *start ) return failure( request, "INVALID_PARAMS" );
-    if ( state_->operations.size() >= MaxOperations ) {
-        const auto retired = std::find_if( state_->operations.begin(), state_->operations.end(),
-            []( const auto& item ) { return item.second.future.isFinished(); } );
-        if ( retired == state_->operations.end() ) return failure( request, "RESOURCE_LIMIT" );
-        state_->operations.erase( retired );
-    }
+    if ( !state_->makeRoom() ) return failure( request, "RESOURCE_LIMIT" );
     auto permit = acquireReadPermit();
     if ( !permit ) return failure( request, "RESOURCE_LIMIT" );
     const auto operationId = QUuid::createUuid().toString( QUuid::WithoutBraces );

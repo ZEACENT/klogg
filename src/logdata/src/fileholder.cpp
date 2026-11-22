@@ -3,6 +3,7 @@
 #include "log.h"
 #include "platform/platform_files.h"
 #include <QtCore/QFileInfo>
+#include <QThread>
 
 namespace {
 void openFileByHandle( QFile* file )
@@ -67,6 +68,27 @@ void FileHolder::open( const QString& fileName )
         counter_ = 1;
         reOpenFile();
     }
+}
+
+bool FileHolder::adoptForReader( const QString& path, std::unique_ptr<QFile>& file,
+                                 const FileId& identity )
+{
+    ScopedRecursiveLock locker( file_mutex_ );
+    if ( attached_file_ || !file_name_.isEmpty() || counter_ != 0
+         || !file || !file->isOpen() || !file->isReadable() || file->parent()
+         || ( file->thread() && file->thread() != QThread::currentThread() ) ) {
+        return false;
+    }
+    if ( !file->thread() ) {
+        file->moveToThread( QThread::currentThread() );
+        if ( file->thread() != QThread::currentThread() ) return false;
+    }
+    file_name_ = path;
+    attached_file_id_ = identity;
+    attached_file_ = std::move( file );
+    // One preparation reader in addition to the native always-open baseline.
+    counter_ = keep_closed_ ? 1U : 2U;
+    return true;
 }
 
 void FileHolder::lock()

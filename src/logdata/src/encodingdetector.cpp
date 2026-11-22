@@ -91,7 +91,8 @@ EncodingParameters::EncodingParameters( const QTextCodec* sourceCodec )
         = encodedLineFeed[ 0 ] == '\n' ? 0 : ( static_cast<int>( encodedLineFeed.size() ) - 1 );
 }
 
-QTextCodec* EncodingDetector::detectEncoding( const klogg::vector<char>& block ) const
+QTextCodec* EncodingDetector::detectEncoding( const klogg::vector<char>& block,
+                                             std::optional<int> capturedDefaultMib ) const
 {
     // Fast path: BOM-less, NUL-free, well-formed UTF-8 (pure ASCII included) is
     // by far the common case for log files. Recognizing it here skips the
@@ -137,7 +138,8 @@ QTextCodec* EncodingDetector::detectEncoding( const klogg::vector<char>& block )
     QByteArray blockArray = QByteArray::fromRawData( block.data(), klogg::isize( block ) );
 
     QTextCodec* fallbackCodec = nullptr;
-    const auto defaultEncodingMib = Configuration::get().defaultEncodingMib();
+    const auto defaultEncodingMib = capturedDefaultMib
+        ? *capturedDefaultMib : Configuration::get().defaultEncodingMib();
     if ( defaultEncodingMib >= 0 ) {
         fallbackCodec = QTextCodec::codecForMib( defaultEncodingMib );
     }

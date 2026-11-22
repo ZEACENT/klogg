@@ -26,6 +26,7 @@
 #include <QByteArray>
 #include <atomic>
 #include <memory>
+#include <optional>
 
 class QTextCodec;
 class QTextDecoder;
@@ -77,7 +78,10 @@ class EncodingDetector {
     EncodingDetector( const EncodingDetector&& ) = delete;
     EncodingDetector& operator=( const EncodingDetector&& ) = delete;
 
-    QTextCodec* detectEncoding( const klogg::vector<char>& block ) const;
+    // An explicit fallback is a captured input. Legacy callers consult current
+    // preferences only if detection actually needs a fallback, not on UTF-8's fast path.
+    QTextCodec* detectEncoding( const klogg::vector<char>& block,
+                               std::optional<int> defaultEncodingMib = std::nullopt ) const;
 
     // Test instrumentation: how many times the expensive uchardet fallback ran.
     // The clear-UTF-8 fast path must not increment this; legacy/BOM/NUL samples

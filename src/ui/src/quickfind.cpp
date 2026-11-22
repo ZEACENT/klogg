@@ -263,6 +263,16 @@ void QuickFind::runBeforeLineReadCallbackForTesting()
 }
 #endif
 
+QFuture<void> QuickFind::retire()
+{
+    if ( !retiring_ ) {
+        retiring_ = true;
+        ++requestId_;
+        interruptRequested_.set();
+    }
+    return operationFuture_.completion();
+}
+
 void QuickFind::stopSearch()
 {
     LOG_INFO << "Stop search for quickfind " << this;
@@ -272,6 +282,7 @@ void QuickFind::stopSearch()
 
 void QuickFind::onSearchFutureReady()
 {
+    if ( retiring_ ) return;
     auto result = operationFuture_.result();
     if ( result.requestId != requestId_ ) {
         return;
@@ -285,6 +296,7 @@ void QuickFind::onSearchFutureReady()
 
 void QuickFind::incrementallySearchForward( Selection selection, QuickFindMatcher matcher )
 {
+    if ( retiring_ ) return;
     LOG_DEBUG << "QuickFind::incrementallySearchForward";
 
     interruptAndWait();
@@ -308,6 +320,7 @@ void QuickFind::incrementallySearchForward( Selection selection, QuickFindMatche
 
 void QuickFind::incrementallySearchBackward( Selection selection, QuickFindMatcher matcher )
 {
+    if ( retiring_ ) return;
     LOG_DEBUG << "QuickFind::incrementallySearchBackward";
 
     interruptAndWait();
@@ -331,6 +344,7 @@ void QuickFind::incrementallySearchBackward( Selection selection, QuickFindMatch
 
 void QuickFind::searchForward( Selection selection, QuickFindMatcher matcher )
 {
+    if ( retiring_ ) return;
     incrementalSearchStatus_ = IncrementalSearchStatus();
     interruptAndWait();
 
@@ -339,6 +353,7 @@ void QuickFind::searchForward( Selection selection, QuickFindMatcher matcher )
 
 void QuickFind::searchBackward( Selection selection, QuickFindMatcher matcher )
 {
+    if ( retiring_ ) return;
     incrementalSearchStatus_ = IncrementalSearchStatus();
     interruptAndWait();
 
@@ -490,6 +505,7 @@ QuickFindResult QuickFind::doSearchBackward( const klogg::LogSnapshot& snapshot,
 
 void QuickFind::resetLimits()
 {
+    if ( retiring_ ) return;
     lastMatch_.reset();
     firstMatch_.reset();
 }
@@ -504,5 +520,6 @@ void QuickFind::sendNotification( QFNotification notification )
 
 void QuickFind::deliverNotification( const QString& message )
 {
+    if ( retiring_ ) return;
     Q_EMIT notify( QFNotification{ message } );
 }

@@ -576,6 +576,97 @@ LogFilteredData → LogFilteredDataWorker → SearchOperation → PatternMatcher
    - Publishes changed filtered results at 33 ms cadence and progress/status at 100 ms cadence
    - Publishes terminal results before terminal status immediately
 
+### Private Snapshot Search Preparation
+
+`prepareFullSearch` (`src/logdata/include/searchpreparation.h`) runs synchronously
+on a worker using a retained immutable read snapshot, a value-owned pattern and
+`SearchSettings` captured before dispatch. Those settings fix buffer size,
+matching concurrency, block-scan policy and regex backend for the request. It
+reuses `FullSearchOperation` and drains native tasks before returning. Only a
+`Ready` result carries the complete snapshot-backed `CompletedSearchResult`;
+cancellation, invalid input, compilation failure and execution failure do not
+return a successful partial prefix. Cancellation is cooperative at native chunk
+boundaries, so the flag must outlive the call.
+
+Preparation leaves publication identities zero and does not publish into a GUI
+owner. The implicit filter RPC described below composes this internal foundation
+with owner-thread publication; preparation alone is not a GUI mutation or support
+for mixed explicit lifecycle/filter/annotation transactions. Production worker
+shutdown and retirement remain terminal; private coalescing/trace fixtures alone
+reopen admission after joining the consumer to inspect queue behavior.
+
+### Implicit Filter Publication
+
+`ReviewControlAdapter` routes `filter.apply` through the strict
+`reviewfiltercodec` patch decoder and `ReviewFilterAdapter`. Requests take
+`tab_id`, a `filter` object, and optionally `expected_revision`, a canonical
+unsigned decimal string checked against the toolbar draft revision. The only
+patch fields are string `text` and boolean `match_case`, `use_regexp`, `inverse`,
+`boolean`, `auto_refresh`, and `keep_results`; omitted fields retain the captured
+draft values. Unknown fields, wrong types and embedded NUL are rejected. The
+wire text limit is 32,767 UTF-16 units, and native admission also checks the actual
+toolbar editor capacity rather than allowing silent truncation.
+
+For file/live tabs, the adapter captures value dependencies, prepares privately
+on a worker, and uses `CrawlerWidget`'s non-yielding publication to install the
+model, draft and native query presentation into the existing current results
+pane, or a new kept-results pane when requested. The source policy is
+`unchanged-snapshot`: source changes during preparation,
+including continuous appends, can reject publication with `CONFLICT`. This is not
+a guaranteed continuous-append cutover. Empty text uses the native `NoSearch`
+reset with the configured empty-filter presentation, not a completed match-all
+regex search. Marks and pane identities are preserved.
+
+The RPC returns a pending operation in the same registry as content reads and
+document lifecycle work; `operation.get` observes completion and
+`operation.cancel` requests cancellation. Successful publication returns only
+`window_id`, `tab_id`, `pane_id` and `updated:true`. It neither returns log text
+nor creates a content lease: reading requires explicit `source.capture` and
+`source.read`. No polling is required to drive publication.
+
+`capabilities.get` advertises `applied_filters:true`, file/live
+`implicit_filter_kinds`, `filter_kept_pane_creation:true`, and
+`filter_source_policy:"unchanged-snapshot"`. Folder filter writes and explicit
+filter transactions remain unsupported. `tab.get.filter_draft` describes only
+editor state.
+
+`FilterUpdateStaging` owns unpublished resources on the GUI thread; workers
+receive only immutable capture values. For Keep, staging creates a fresh
+`LogFilteredData` before capture and uses the existing owner-bound preparation
+pipeline, with empty marks and the final context/visibility settings. It does
+not relax model identity validation or rescan a prepared query at publication.
+GUI acquisition creates the unpublished view and preallocates model registration.
+Installation validates the original active pane and source, installs the new
+model, interrupts the old search, and binds/selects the new pane with ordinary
+tab-switch notifications suppressed. Facade notifications follow guard release.
+The old pane retains its model, query and marks; the new pane does not copy marks.
+The keep checkbox is consumed on successful publication. Private cleanup stops
+and destroys the view before releasing its model/source; the captured worker
+request does not retain GUI objects.
+
+Targeted view configuration is shared with native configuration without running
+the broad source-interpretation, history and watcher reconfiguration path during
+private staging. As with other GUI publication primitives, this is not a claim of
+global rollback under arbitrary allocation failure.
+
+### Applied Query Observation
+
+`pane.get` and `pane.list` report an optional `applied_filter` object for result
+panes, including kept file/live/folder panes. The fields are `text`, `match_case`,
+`use_regexp`, `inverse`, `boolean` and `complete`. Main panes omit the object: they
+do not own result membership, even when a search pattern highlights their text.
+`capabilities.get` advertises `applied_filter_observation:true`; no separate
+`filter.get` method is needed.
+
+`ReviewAppliedFilter` is a detached owner-thread value. File/live attribution
+reads the query owned by each `LogFilteredData`; folder attribution is retained
+per `ResultPane` at native search admission and cleared on reset. It is not
+inferred from toolbar text, pane titles, or `AbstractLogView` paint state, which
+may lag while presentation is inactive. Observation does not compile a matcher,
+acquire a source snapshot or read log lines. `complete` is the existing native
+completion/readiness flag, not a richer running/stopped/error classification or
+a guarantee that a subsequent content lease can be acquired.
+
 ### Search Caching
 
 **Location**: `src/logdata/src/logfiltereddata.cpp:96-129`
@@ -982,8 +1073,16 @@ provider-neutral control design with shared human/programmatic state, optimistic
 transactions, explicit runtime pipeline ownership, and settings-based shell
 integration. The [implementation record](AGENT_CONTROL_IMPLEMENTATION.md) tracks
 the experimental `kloggctl`, local transport, payload-free pane observation,
-bounded asynchronous snapshot reads, label transactions and explicit shell
-installation. Remaining mutation domains and packaged acceptance are not complete. Launcher,
+bounded asynchronous snapshot reads, implicit file/folder open and close,
+file/live filter application and kept-pane creation, per-pane applied-query
+observation, mixed source-backed
+mark/label/global-highlighter transactions, explicit shell installation and
+package-payload contracts. `capabilities.get` supplies protocol version, method
+names, feature flags and selected limits without log content; it is not full
+parameter/result schema discovery. Folder filter writes, source-addressed
+navigation/selection and mixed explicit lifecycle/filter transactions remain
+undelivered. Remaining mutation domains and native packaged acceptance are not
+complete. Launcher,
 headless search and test-runner entrypoints remain separate. The single-instance
 file-forwarding channel is not reused as a general control API.
 The Chart Panel and persistent Filters Panel are proposed features, not

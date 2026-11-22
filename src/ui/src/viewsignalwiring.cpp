@@ -79,11 +79,6 @@ void ViewSignalWiring::wireView( AbstractLogView* view )
                  [ this, view ]() { hooks_.exitView( view ); } );
     }
 
-    if ( hooks_.applyConfiguration ) {
-        connect( view, &AbstractLogView::highlightersChange, this,
-                 [ this ]() { hooks_.applyConfiguration(); } );
-    }
-
     views_.push_back( view );
 }
 

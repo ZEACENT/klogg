@@ -1,14 +1,23 @@
 #include <catch2/catch.hpp>
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QHash>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTabWidget>
+#include "searchtoolbar.h"
+#include "test_utils.h"
 #include <QUuid>
 
 #include <memory>
+#include <thread>
 
 #include "abstractcrawlerwidget.h"
 #include "abstractlogview.h"
@@ -74,6 +83,8 @@ class PaneData final : public SearchableLogData {
     std::shared_ptr<Observations> observations = std::make_shared<Observations>();
     klogg::LogSnapshot::Ptr snapshot = std::make_shared<PaneSnapshot>();
     bool failCapture = false;
+    QHash<uint64_t, QString> lineTexts;
+    OptionalLineNumber failLine;
 
     klogg::LogSnapshot::Ptr createReadSnapshot( Scope scope ) const override
     {
@@ -85,10 +96,11 @@ class PaneData final : public SearchableLogData {
     }
 
   protected:
-    QString doGetLineString( LineNumber ) const override
+    QString doGetLineString( LineNumber line ) const override
     {
         ++observations->payloadReads;
-        return QStringLiteral( "mutable" );
+        if ( failLine && *failLine == line ) throw klogg::SnapshotError{ "fixture read failure" };
+        return lineTexts.value( line.get(), QStringLiteral( "mutable" ) );
     }
     QString doGetExpandedLineString( LineNumber line ) const override
     {
@@ -130,6 +142,766 @@ class PaneView final : public AbstractLogView {
     }
 };
 } // namespace
+
+TEST_CASE( "Runtime pane identity belongs to the view and needs no source capture",
+           "[review-panes][review-pane-inventory]" )
+{
+    PaneData data;
+    QuickFindPattern pattern;
+    PaneView first{ &data, &pattern };
+    PaneView second{ &data, &pattern };
+    const auto id = first.runtimePaneId();
+    REQUIRE_FALSE( id.isEmpty() );
+    CHECK( id != second.runtimePaneId() );
+    data.count = 9_lcount;
+    first.textWrapSet( true );
+    CHECK( first.runtimePaneId() == id );
+    CHECK( data.observations->acquisitions == 0 );
+    CHECK( data.observations->payloadReads == 0 );
+}
+
+TEST_CASE( "Pane inventory includes unavailable main views and stable live source panes",
+           "[review-panes][review-pane-inventory]" )
+{
+    FolderCrawlerWidget folder;
+    const auto folderPanes = folder.paneInventory();
+    REQUIRE( folderPanes.size() == 2 );
+    CHECK( folderPanes.front().kind == Pane::Main );
+    CHECK_FALSE( folderPanes.front().metadata.available );
+    CHECK( folderPanes.back().kind == Pane::Results );
+    CHECK( folderPanes.back().metadata.available );
+    CHECK_FALSE( folder.createPaneSnapshot( folderPanes.front().paneId, Scope::PresentedRows ) );
+    CrawlerWidget empty;
+    CHECK( empty.paneInventory().empty() );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( QUuid::createUuid().toString(), root.path() );
+    data->appendUtf8( "before\n" );
+    std::shared_ptr<LogFilteredData> filtered = data->getNewFilteredData();
+    SavedSearches searches;
+    CrawlerWidget live;
+    live.setData( data, filtered );
+    live.setQuickFindPattern( std::make_shared<QuickFindPattern>() );
+    live.setSavedSearches( &searches );
+    const auto panes = live.paneInventory();
+    REQUIRE( panes.size() == 2 );
+    REQUIRE( panes.front().metadata.available );
+    const auto mainId = panes.front().paneId;
+    const auto retained = live.createPaneSnapshot( mainId, Scope::PresentedRows );
+    REQUIRE( retained );
+    data->appendUtf8( "after\n" );
+    CHECK( live.paneInventory().front().paneId == mainId );
+    CHECK( live.paneMetadata( mainId ).sourceRowCount == 2_lcount );
+    CHECK( retained->lineCount() == 1_lcount );
+    CHECK_FALSE( live.paneMetadata( "retired-pane" ).available );
+    CHECK_FALSE( live.createPaneSnapshot( "retired-pane", Scope::PresentedRows ) );
+}
+
+TEST_CASE( "Kept folder panes retain explicit identity across switching and retire on close",
+           "[review-panes][review-pane-inventory]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto path = root.filePath( "kept.log" );
+    QFile file{ path };
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    const QByteArray text{ "foo first\nbar middle\nfoo last\n" };
+    REQUIRE( file.write( text ) == text.size() );
+    file.close();
+    FolderCrawlerWidget widget;
+    widget.setFolder( root.path(), QStringList{ path } );
+    auto* engine = widget.findChild<FolderSearchEngine*>();
+    REQUIRE( engine );
+    const auto search = [&]( const QString& pattern ) {
+        QObject completion;
+        bool finished = false;
+        QObject::connect( engine, &FolderSearchEngine::searchFinished, &completion,
+                          [&] { finished = true; }, Qt::QueuedConnection );
+        widget.searchFor( pattern );
+        REQUIRE( waitUiState( [&] { return finished && !widget.isSearchActive(); } ) );
+    };
+    search( "foo" );
+    const auto initial = widget.paneInventory();
+    REQUIRE( initial.size() == 2 );
+    const auto firstId = initial.back().paneId;
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    search( "bar" );
+    const auto kept = widget.paneInventory();
+    REQUIRE( kept.size() == 3 );
+    CHECK( kept.at( 1 ).paneId == firstId );
+    CHECK_FALSE( kept.at( 1 ).current );
+    CHECK( kept.at( 2 ).current );
+    CHECK( kept.at( 2 ).paneId != firstId );
+    const auto* focus = QApplication::focusWidget();
+    const auto retained = widget.createPaneSnapshot( firstId, Scope::Matches );
+    REQUIRE( retained );
+    CHECK( retained->lineCount() == 2_lcount );
+    CHECK( widget.resultsTabs()->currentIndex() == 1 );
+    CHECK( QApplication::focusWidget() == focus );
+    widget.resultsTabs()->setCurrentIndex( 0 );
+    CHECK( widget.paneInventory().at( 1 ).paneId == firstId );
+    CHECK( widget.paneInventory().at( 1 ).current );
+    REQUIRE( QMetaObject::invokeMethod( widget.resultsTabs(), "tabCloseRequested", Qt::DirectConnection,
+                                       Q_ARG( int, 0 ) ) );
+    CHECK_FALSE( widget.paneMetadata( firstId ).available );
+    CHECK_FALSE( widget.createPaneSnapshot( firstId, Scope::Matches ) );
+    CHECK( widget.paneInventory().back().paneId == kept.at( 2 ).paneId );
+    CHECK( retained->lineString( 0_lnum ) == QLatin1String( "foo first" ) );
+}
+
+TEST_CASE( "Applied-query inventory does not acquire or decode source content",
+           "[review-applied-filter]" )
+{
+    auto source = std::make_shared<PaneData>();
+    std::shared_ptr<LogFilteredData> model = source->getNewFilteredData();
+    SavedSearches searches;
+    CrawlerWidget widget;
+    widget.setData( source, model );
+    widget.setQuickFindPattern( std::make_shared<QuickFindPattern>() );
+    widget.setSavedSearches( &searches );
+    const auto reads = source->observations->payloadReads;
+    const auto acquisitions = source->observations->acquisitions;
+    const auto panes = widget.paneInventory();
+    REQUIRE( panes.size() == 2 );
+    REQUIRE( panes.back().appliedFilter );
+    CHECK( panes.back().appliedFilter->pattern.pattern.isEmpty() );
+    CHECK_FALSE( panes.back().appliedFilter->complete );
+    CHECK( source->observations->payloadReads == reads );
+    CHECK( source->observations->acquisitions == acquisitions );
+}
+
+TEST_CASE( "Folder kept panes retain query attribution while drafts and selection change",
+           "[review-applied-filter]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto path = root.filePath( "queries.log" );
+    QFile file{ path };
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    const QByteArray text{ "foo first\nbar second\n" };
+    REQUIRE( file.write( text ) == text.size() );
+    file.close();
+    FolderCrawlerWidget folder;
+    folder.setFolder( root.path(), { path } );
+    folder.setPresentationActive( false );
+    auto* engine = folder.findChild<FolderSearchEngine*>();
+    REQUIRE( engine );
+    const auto search = [&]( const QString& pattern ) {
+        QObject completion;
+        bool finished = false;
+        QObject::connect( engine, &FolderSearchEngine::searchFinished, &completion,
+                          [&] { finished = true; }, Qt::QueuedConnection );
+        folder.searchFor( pattern );
+        REQUIRE( waitUiState( [&] { return finished && !folder.isSearchActive(); } ) );
+    };
+    search( "foo" );
+    folder.searchToolbar()->setKeepResultsChecked( true );
+    search( "bar" );
+    folder.searchToolbar()->searchLineEdit()->setEditText( QStringLiteral( "unsubmitted" ) );
+    const auto panes = folder.paneInventory();
+    REQUIRE( panes.size() == 3 );
+    CHECK_FALSE( panes.front().appliedFilter );
+    REQUIRE( panes.at( 1 ).appliedFilter );
+    REQUIRE( panes.at( 2 ).appliedFilter );
+    CHECK( panes.at( 1 ).appliedFilter->pattern.pattern == QStringLiteral( "foo" ) );
+    CHECK( panes.at( 2 ).appliedFilter->pattern.pattern == QStringLiteral( "bar" ) );
+    CHECK( panes.at( 1 ).appliedFilter->complete );
+    CHECK( panes.at( 2 ).appliedFilter->complete );
+    folder.resultsTabs()->setCurrentIndex( 0 );
+    const auto* focus = QApplication::focusWidget();
+    const auto switched = folder.paneInventory();
+    CHECK( switched.at( 1 ).appliedFilter->pattern.pattern == QStringLiteral( "foo" ) );
+    CHECK( switched.at( 2 ).appliedFilter->pattern.pattern == QStringLiteral( "bar" ) );
+    CHECK( folder.resultsTabs()->currentIndex() == 0 );
+    CHECK( QApplication::focusWidget() == focus );
+    SECTION( "reset affects only its owner" ) {
+        folder.searchFor( QString{} );
+        const auto cleared = folder.paneInventory();
+        CHECK( cleared.at( 1 ).appliedFilter->pattern.pattern.isEmpty() );
+        CHECK_FALSE( cleared.at( 1 ).appliedFilter->complete );
+        CHECK( cleared.at( 2 ).appliedFilter->pattern.pattern == QStringLiteral( "bar" ) );
+    }
+    SECTION( "synchronous close observers retain surviving view attribution" ) {
+        QObject observer;
+        int observations = 0;
+        bool coherent = true;
+        const auto survivorId = panes.at( 2 ).paneId;
+        QObject::connect( &folder, &FolderCrawlerWidget::searchablesChanged, &observer, [&] {
+            for ( const auto& pane : folder.paneInventory() ) {
+                if ( pane.paneId != survivorId ) continue;
+                ++observations;
+                coherent = coherent && pane.appliedFilter
+                    && pane.appliedFilter->pattern.pattern == QStringLiteral( "bar" );
+            }
+        } );
+        REQUIRE( QMetaObject::invokeMethod( folder.resultsTabs(), "tabCloseRequested",
+                                           Qt::DirectConnection, Q_ARG( int, 0 ) ) );
+        CHECK( observations > 0 );
+        CHECK( coherent );
+        CHECK( folder.paneInventory().back().paneId == survivorId );
+    }
+}
+
+TEST_CASE( "Mark membership edits defer decoding until explicit width projection",
+           "[review-mark-projection]" )
+{
+    PaneData data;
+    LogFilteredData filtered{ &data };
+    const auto reads = data.observations->payloadReads;
+    filtered.addMark( 0_lnum );
+    CHECK( data.observations->payloadReads == reads );
+    CHECK( filtered.getNbMarks() == 1_lcount );
+    CHECK( filtered.getNbLine() == 1_lcount );
+    CHECK( data.observations->payloadReads == reads );
+    CHECK( filtered.getMaxLength() == 20_length );
+    const auto measured = data.observations->payloadReads;
+    CHECK( measured == reads + 1 );
+    CHECK( filtered.getMaxLength() == 20_length );
+    CHECK( data.observations->payloadReads == measured );
+    filtered.addMark( 1_lnum );
+    CHECK( data.observations->payloadReads == measured );
+    CHECK( filtered.getMaxLength() == 20_length );
+    CHECK( data.observations->payloadReads == measured + 1 );
+    const auto bothMeasured = data.observations->payloadReads;
+    filtered.addMark( 1_lnum );
+    filtered.deleteMark( 2_lnum );
+    CHECK( filtered.getMaxLength() == 20_length );
+    CHECK( data.observations->payloadReads == bothMeasured );
+    filtered.deleteMark( 0_lnum );
+    CHECK( data.observations->payloadReads == bothMeasured );
+    CHECK( filtered.getMaxLength() == 20_length );
+    CHECK( data.observations->payloadReads == bothMeasured + 1 );
+    filtered.clearMarks();
+    CHECK( filtered.getMaxLength() == 20_length );
+    CHECK( data.observations->payloadReads == bothMeasured + 1 );
+}
+
+TEST_CASE( "Mark width projection measures only surviving additions in a batch",
+           "[review-mark-projection]" )
+{
+    PaneData data;
+    LogFilteredData filtered{ &data };
+    filtered.addMark( 0_lnum );
+    filtered.addMark( 1_lnum );
+    filtered.toggleMark( 2_lnum );
+    filtered.toggleMark( 1_lnum );
+    filtered.deleteMark( 0_lnum );
+    CHECK( filtered.getMarks() == QList<LineNumber>{ 2_lnum } );
+    CHECK( data.observations->payloadReads == 0 );
+    CHECK( filtered.getMaxLength() == 20_length );
+    CHECK( data.observations->payloadReads == 1 );
+}
+
+TEST_CASE( "Lazy mark widths preserve long rows and recover after measurement failure",
+           "[review-mark-projection]" )
+{
+    PaneData data;
+    data.lineTexts.insert( 0, QString( 100, 'x' ) );
+    LogFilteredData filtered{ &data };
+    filtered.addMark( 0_lnum );
+    filtered.addMark( 1_lnum );
+    SECTION( "failed measurements never publish a partial cache" ) {
+        data.failLine = 1_lnum;
+        CHECK_THROWS_AS( filtered.getMaxLength(), klogg::SnapshotError );
+        const auto reads = data.observations->payloadReads;
+        data.failLine.reset();
+        CHECK( filtered.getMaxLength() == 100_length );
+        CHECK( data.observations->payloadReads == reads + 2 );
+    }
+    SECTION( "removing a nonmaximum row keeps the measured maximum" ) {
+        CHECK( filtered.getMaxLength() == 100_length );
+        const auto reads = data.observations->payloadReads;
+        filtered.deleteMark( 1_lnum );
+        CHECK( filtered.getMaxLength() == 100_length );
+        CHECK( data.observations->payloadReads == reads );
+        filtered.deleteMark( 0_lnum );
+        CHECK( filtered.getMaxLength() == 20_length );
+        CHECK( data.observations->payloadReads == reads );
+    }
+}
+
+TEST_CASE( "Source-model marks expose a bounded detached snapshot without reading rows",
+           "[review-marks-owner]" )
+{
+    PaneData data;
+    LogFilteredData filtered{ &data };
+    filtered.addMark( 2_lnum );
+    filtered.addMark( 0_lnum );
+    const klogg::ReviewMarksOwner& owner = filtered;
+    const auto state = owner.reviewMarksSnapshot();
+    REQUIRE( state );
+    CHECK( state->scope == klogg::ReviewMarksSnapshot::Scope::SourceModel );
+    CHECK( state->revision == owner.reviewMarksRevision() );
+    REQUIRE( state->groups.size() == 1 );
+    CHECK( state->groups.front().memberPath.isEmpty() );
+    CHECK( state->groups.front().rows == QList<LineNumber>{ 0_lnum, 2_lnum } );
+    filtered.deleteMark( 0_lnum );
+    CHECK( owner.reviewMarksRevision() != state->revision );
+    CHECK( state->groups.front().rows == QList<LineNumber>{ 0_lnum, 2_lnum } );
+    CHECK( data.observations->payloadReads == 0 );
+}
+
+TEST_CASE( "Source mark observation rejects oversized stores before copying rows",
+           "[review-marks-owner]" )
+{
+    PaneData data;
+    data.count = LinesCount( klogg::ReviewMarksOwner::MaxMarks + 1 );
+    LogFilteredData filtered{ &data };
+    for ( uint64_t row = 0; row < data.count.get(); ++row ) filtered.addMark( LineNumber( row ) );
+    CHECK_FALSE( filtered.reviewMarksSnapshot() );
+    CHECK( data.observations->payloadReads == 0 );
+}
+
+TEST_CASE( "Folder mark observation includes absent members in stable order without opening files",
+           "[review-marks-owner]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    FolderCrawlerWidget folder;
+    folder.setFolder( root.path(), {} );
+    const QJsonObject marks{ { "z.log", QJsonArray{ 2, 0, 2 } }, { "a.log", QJsonArray{ 1 } } };
+    folder.setViewContext( QString::fromUtf8( QJsonDocument( QJsonObject{ { "M", marks } } ).toJson() ) );
+    const auto state = folder.reviewMarksSnapshot();
+    REQUIRE( state );
+    CHECK( state->scope == klogg::ReviewMarksSnapshot::Scope::FolderTab );
+    CHECK( state->revision == folder.reviewMarksRevision() );
+    REQUIRE( state->groups.size() == 2 );
+    CHECK( state->groups.at( 0 ).memberPath == root.filePath( "a.log" ) );
+    CHECK( state->groups.at( 0 ).rows == QList<LineNumber>{ 1_lnum } );
+    CHECK( state->groups.at( 1 ).memberPath == root.filePath( "z.log" ) );
+    CHECK( state->groups.at( 1 ).rows == QList<LineNumber>{ 0_lnum, 2_lnum } );
+    folder.setViewContext( QStringLiteral( "{}" ) );
+    CHECK( folder.reviewMarksRevision() != state->revision );
+    CHECK( state->groups.size() == 2 );
+    CHECK( folder.reviewMarksSnapshot()->groups.empty() );
+}
+
+TEST_CASE( "Folder mark snapshots bound member count row count and member text",
+           "[review-marks-owner]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    FolderCrawlerWidget folder;
+    folder.setFolder( root.path(), {} );
+    QJsonObject marks;
+    SECTION( "member count" ) {
+        for ( size_t i = 0; i <= klogg::ReviewMarksOwner::MaxMembers; ++i )
+            marks.insert( QString::number( i ), QJsonArray{ 0 } );
+    }
+    SECTION( "row count" ) {
+        QJsonArray rows;
+        for ( size_t i = 0; i <= klogg::ReviewMarksOwner::MaxMarks; ++i ) rows.append( static_cast<int>( i ) );
+        marks.insert( "many.log", rows );
+    }
+    SECTION( "member text" ) {
+        marks.insert( QString( static_cast<int>( klogg::ReviewMarksOwner::MaxTextUnits ), 'x' ), QJsonArray{ 0 } );
+    }
+    folder.setViewContext( QString::fromUtf8( QJsonDocument( QJsonObject{ { "M", marks } } ).toJson() ) );
+    CHECK_FALSE( folder.reviewMarksSnapshot() );
+}
+
+TEST_CASE( "Folder mark owner prepares every kept pane and publishes after all guards release",
+           "[review-mark-owner-publication]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto path = root.filePath( "kept.log" );
+    QFile file{ path };
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    const QByteArray text{ "foo first\nbar middle\nfoo last\n" };
+    REQUIRE( file.write( text ) == text.size() );
+    file.close();
+    FolderCrawlerWidget folder;
+    folder.setFolder( root.path(), { path } );
+    auto* engine = folder.findChild<FolderSearchEngine*>();
+    REQUIRE( engine );
+    const auto search = [&]( const QString& pattern ) {
+        QObject completion;
+        bool finished = false;
+        QObject::connect( engine, &FolderSearchEngine::searchFinished, &completion,
+                          [&] { finished = true; }, Qt::QueuedConnection );
+        folder.searchFor( pattern );
+        REQUIRE( waitUiState( [&] { return finished && !folder.isSearchActive(); } ) );
+    };
+    search( "foo" );
+    auto* kept = folder.folderResults();
+    folder.searchToolbar()->setKeepResultsChecked( true );
+    search( "bar" );
+    auto* active = folder.folderResults();
+    REQUIRE( active != kept );
+    auto candidate = *folder.reviewMarksSnapshot();
+    candidate.groups.push_back( { path, { 1_lnum } } );
+    klogg::ReviewMarksBudget budget;
+    const auto prepare = folder.prepareReviewMarks( candidate, budget );
+    REQUIRE( prepare );
+    std::atomic<bool> cancelled{ false };
+    std::shared_ptr<klogg::PreparedReviewMarks> prepared;
+    std::thread worker( [&] { prepared = prepare( cancelled ); } );
+    worker.join();
+    REQUIRE( prepared );
+    CHECK( folder.reviewMarksSnapshot()->groups.empty() );
+    CHECK( kept->getNbLine() == 3_lcount );
+    SECTION( "publish every pane before the first observer" ) {
+        QSignalSpy keptChanged( kept, &FolderSearchResults::layoutChanged );
+        QSignalSpy activeChanged( active, &FolderSearchResults::layoutChanged );
+        bool allInstalled = false;
+        QObject::connect( kept, &FolderSearchResults::layoutChanged, &folder, [&] {
+            allInstalled = kept->getNbLine() == 4_lcount && active->getNbLine() == 2_lcount
+                && folder.reviewMarksRevision() == candidate.revision + 1;
+        } );
+        const auto* focus = QApplication::focusWidget();
+        auto publication = prepared->acquire();
+        REQUIRE( publication );
+        publication->install();
+        CHECK( keptChanged.count() == 0 );
+        CHECK( activeChanged.count() == 0 );
+        publication->release();
+        publication->notify();
+        publication->notify();
+        CHECK( allInstalled );
+        CHECK( keptChanged.count() == 1 );
+        CHECK( activeChanged.count() == 1 );
+        CHECK( folder.resultsTabs()->currentIndex() == 1 );
+        CHECK( QApplication::focusWidget() == focus );
+        CHECK_FALSE( prepared->acquire() );
+    }
+    SECTION( "later pane conflict releases an earlier acquired guard" ) {
+        active->collapseAll();
+        CHECK_FALSE( prepared->acquire() );
+        active->expandAll();
+        REQUIRE( prepared->acquire() );
+    }
+    SECTION( "new kept pane invalidates the captured participant set" ) {
+        folder.searchToolbar()->setKeepResultsChecked( true );
+        search( "last" );
+        CHECK_FALSE( prepared->acquire() );
+    }
+    SECTION( "closed kept pane invalidates the captured participant set" ) {
+        REQUIRE( QMetaObject::invokeMethod( folder.resultsTabs(), "tabCloseRequested", Qt::DirectConnection,
+                                           Q_ARG( int, 0 ) ) );
+        CHECK_FALSE( prepared->acquire() );
+    }
+    SECTION( "aggregate projection budget is shared across panes" ) {
+        klogg::ReviewMarksBudget exhausted;
+        exhausted.remainingBytes = 0;
+        CHECK_FALSE( folder.prepareReviewMarks( candidate, exhausted ) );
+    }
+}
+
+TEST_CASE( "Source mark owner separates worker preparation installation and notification",
+           "[review-mark-owner-publication]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "a\nb\nc\n" );
+    auto filtered = data.getNewFilteredData();
+    auto candidate = *filtered->reviewMarksSnapshot();
+    candidate.groups.push_back( { {}, { 1_lnum } } );
+    klogg::ReviewMarksBudget budget;
+    const auto prepare = filtered->prepareReviewMarks( candidate, budget );
+    REQUIRE( prepare );
+    CHECK( budget.remainingBytes < klogg::ReviewMarksBudget::MaxBytes );
+    std::atomic<bool> cancelled{ false };
+    std::shared_ptr<klogg::PreparedReviewMarks> prepared;
+    std::thread worker( [&] { prepared = prepare( cancelled ); } );
+    worker.join();
+    REQUIRE( prepared );
+    CHECK( filtered->getNbMarks() == 0_lcount );
+    QSignalSpy changed( filtered.get(), &LogFilteredData::marksChanged );
+    auto publication = prepared->acquire();
+    REQUIRE( publication );
+    publication->install();
+    CHECK( filtered->getMarks() == QList<LineNumber>{ 1_lnum } );
+    CHECK( changed.count() == 0 );
+    publication->release();
+    publication->notify();
+    publication->notify();
+    CHECK( changed.count() == 1 );
+    CHECK_FALSE( prepared->acquire() );
+}
+
+TEST_CASE( "Source mark owner admission cancellation and closure never publish a prefix",
+           "[review-mark-owner-publication]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "a\nb\n" );
+    auto filtered = data.getNewFilteredData();
+    auto candidate = *filtered->reviewMarksSnapshot();
+    candidate.groups.push_back( { {}, { 1_lnum } } );
+    klogg::ReviewMarksBudget budget;
+    const auto prepare = filtered->prepareReviewMarks( candidate, budget );
+    REQUIRE( prepare );
+    std::atomic<bool> cancelled{ false };
+    SECTION( "wrong scope" ) {
+        candidate.scope = klogg::ReviewMarksSnapshot::Scope::FolderTab;
+        CHECK_FALSE( filtered->prepareReviewMarks( candidate, budget ) );
+    }
+    SECTION( "aggregate budget exhausted" ) {
+        budget.remainingBytes = 0;
+        CHECK_FALSE( filtered->prepareReviewMarks( candidate, budget ) );
+    }
+    SECTION( "cancel before work" ) { cancelled = true; CHECK_FALSE( prepare( cancelled ) ); }
+    SECTION( "owner closed before worker completion" ) {
+        filtered.reset();
+        const auto prepared = prepare( cancelled );
+        REQUIRE( prepared );
+        CHECK_FALSE( prepared->acquire() );
+    }
+}
+
+TEST_CASE( "Source marks prepare context privately and publish one native revision",
+           "[review-mark-preparation]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "a\nb\nc\nd\ne\n" );
+    auto filtered = data.getNewFilteredData();
+    filtered->setVisibility( LogFilteredData::VisibilityFlags::Marks );
+    filtered->setContextLines( 1, 1 );
+    filtered->addMark( 0_lnum );
+    const auto revision = filtered->reviewMarksRevision();
+    const auto captured = filtered->captureMarksUpdate( { 2_lnum, 4_lnum } );
+    REQUIRE( captured );
+    std::shared_ptr<LogFilteredData::PreparedMarksUpdate> prepared;
+    std::thread worker( [&] { prepared = LogFilteredData::prepareMarksUpdate( captured ); } );
+    worker.join();
+    REQUIRE( prepared );
+    CHECK( filtered->getMarks() == QList<LineNumber>{ 0_lnum } );
+    CHECK( filtered->getNbLine() == 2_lcount );
+    auto publication = filtered->lockMarksUpdate( prepared );
+    REQUIRE( publication );
+    CHECK( publication->install() );
+    CHECK_FALSE( publication->install() );
+    publication.reset();
+    CHECK( filtered->reviewMarksRevision() == revision + 1 );
+    CHECK( filtered->getMarks() == QList<LineNumber>{ 2_lnum, 4_lnum } );
+    CHECK( filtered->getNbLine() == 4_lcount );
+    CHECK( filtered->getMatchingLineNumber( 0_lnum ) == 1_lnum );
+    CHECK( filtered->getMatchingLineNumber( 3_lnum ) == 4_lnum );
+    CHECK_FALSE( filtered->lockMarksUpdate( prepared ) );
+}
+
+TEST_CASE( "Source mark preparation rejects concurrent edits and replacement but accepts safe append",
+           "[review-mark-preparation]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "a\nb\nc\n" );
+    auto filtered = data.getNewFilteredData();
+    filtered->setVisibility( LogFilteredData::VisibilityFlags::Marks );
+    const auto captured = filtered->captureMarksUpdate( { 1_lnum } );
+    REQUIRE( captured );
+    const auto prepared = LogFilteredData::prepareMarksUpdate( captured );
+    REQUIRE( prepared );
+    bool valid = false;
+    SECTION( "human mark ABA" ) { filtered->addMark( 0_lnum ); filtered->deleteMark( 0_lnum ); }
+    SECTION( "human context" ) { filtered->setContextLines( 1, 1 ); }
+    SECTION( "human visibility" ) { filtered->setVisibility( LogFilteredData::VisibilityFlags::Matches ); }
+    SECTION( "source replacement" ) { data.clearCapture(); data.appendUtf8( "x\ny\nz\n" ); }
+    SECTION( "sealed append preserves targeted rows" ) { data.appendUtf8( "d\n" ); valid = true; }
+    SECTION( "another owner" ) {
+        auto other = data.getNewFilteredData();
+        other->setVisibility( LogFilteredData::VisibilityFlags::Marks );
+        CHECK_FALSE( other->lockMarksUpdate( prepared ) );
+        return;
+    }
+    auto publication = filtered->lockMarksUpdate( prepared );
+    CHECK( static_cast<bool>( publication ) == valid );
+    CHECK( filtered->getNbMarks() == 0_lcount );
+    if ( publication ) CHECK( publication->install() );
+}
+
+TEST_CASE( "Source mark no-op remains revision neutral and bounded admission rejects excessive context",
+           "[review-mark-preparation]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "a\nb\nc\n" );
+    auto filtered = data.getNewFilteredData();
+    filtered->setVisibility( LogFilteredData::VisibilityFlags::Marks );
+    filtered->addMark( 1_lnum );
+    const auto revision = filtered->reviewMarksRevision();
+    const auto captured = filtered->captureMarksUpdate( { 1_lnum, 1_lnum } );
+    REQUIRE( captured );
+    auto publication = filtered->lockMarksUpdate( LogFilteredData::prepareMarksUpdate( captured ) );
+    REQUIRE( publication );
+    REQUIRE( publication->install() );
+    publication.reset();
+    CHECK( filtered->reviewMarksRevision() == revision );
+    filtered->setContextLines( static_cast<int>( LogFilteredData::MaxPreparedContextRows ), 0 );
+    CHECK_FALSE( filtered->captureMarksUpdate( { 2_lnum } ) );
+    QList<LineNumber> excessive;
+    for ( size_t index = 0; index <= klogg::ReviewMarksOwner::MaxMarks; ++index ) excessive.append( 0_lnum );
+    CHECK_FALSE( filtered->captureMarksUpdate( excessive ) );
+}
+
+TEST_CASE( "Prepared source context permits append only beyond its completed ranges",
+           "[review-mark-preparation]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "a\nb\nc\n" );
+    auto filtered = data.getNewFilteredData();
+    filtered->setVisibility( LogFilteredData::VisibilityFlags::Marks );
+    filtered->setContextLines( 0, 1 );
+    const bool clipped = GENERATE( false, true );
+    const auto captured = filtered->captureMarksUpdate( { clipped ? 2_lnum : 1_lnum } );
+    REQUIRE( captured );
+    const auto prepared = LogFilteredData::prepareMarksUpdate( captured );
+    REQUIRE( prepared );
+    data.appendUtf8( "d\n" );
+    auto publication = filtered->lockMarksUpdate( prepared );
+    REQUIRE( static_cast<bool>( publication ) == !clipped );
+    if ( publication ) {
+        REQUIRE( publication->install() );
+        publication.reset();
+        CHECK( filtered->getNbLine() == 2_lcount );
+        CHECK( filtered->getMatchingLineNumber( 1_lnum ) == 2_lnum );
+    }
+    else CHECK( filtered->getNbMarks() == 0_lcount );
+}
+
+TEST_CASE( "Source private mark work survives owner deletion and rejects unobserved rows",
+           "[review-mark-preparation]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    data.appendUtf8( "a\nb\n" );
+    REQUIRE( data.getNbLine() == 2_lcount );
+    auto filtered = data.getNewFilteredData();
+    const auto captured = filtered->captureMarksUpdate( { 1_lnum } );
+    REQUIRE( captured );
+    SECTION( "worker uses only detached input" ) {
+        filtered.reset();
+        std::shared_ptr<LogFilteredData::PreparedMarksUpdate> prepared;
+        std::thread worker( [&] { prepared = LogFilteredData::prepareMarksUpdate( captured ); } );
+        worker.join();
+        CHECK( prepared );
+    }
+    SECTION( "future row has not been observed" ) {
+        CHECK_FALSE( filtered->captureMarksUpdate( { 2_lnum } ) );
+    }
+}
+
+TEST_CASE( "Mark source identities resolve current live rows rather than segment-local ordinals",
+           "[review-marks-source]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    limits.maxTotalLines = 2;
+    data.setCaptureLimits( limits );
+    data.appendUtf8( "a\nb\n" );
+    auto filtered = data.getNewFilteredData();
+    const auto snapshot = data.createReadSnapshot( Scope::PresentedRows );
+    REQUIRE( snapshot );
+    const auto evicted = snapshot->row( 0_lnum ).identity;
+    const auto survivor = snapshot->row( 1_lnum ).identity;
+    const auto before = filtered->resolveReviewMark( survivor );
+    REQUIRE( before );
+    CHECK( before->memberPath.isEmpty() );
+    CHECK( before->row == 1_lnum );
+    data.appendUtf8( "c\n" );
+    CHECK_FALSE( filtered->resolveReviewMark( evicted ) );
+    const auto after = filtered->resolveReviewMark( survivor );
+    REQUIRE( after );
+    CHECK( after->row == 0_lnum );
+    CHECK( *before != *after );
+    data.clearCapture();
+    data.appendUtf8( "replacement\n" );
+    CHECK_FALSE( filtered->resolveReviewMark( survivor ) );
+    CHECK( filtered->getNbMarks() == 0_lcount );
+}
+
+TEST_CASE( "Folder mark sources resolve hidden retained rows without reopening their paths",
+           "[review-marks-source]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto path = root.filePath( "retained.log" );
+    QFile file{ path };
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    const QByteArray text{ "before\nhit\nafter\n" };
+    REQUIRE( file.write( text ) == text.size() );
+    file.close();
+    RegularExpression expression{ RegularExpressionPattern{ "hit" } };
+    const auto matcher = expression.createMatcher();
+    auto group = FolderSearchEngine::scanFile( path, *matcher );
+    REQUIRE( group.content );
+    const auto content = group.content;
+    const auto identity = content->identity( 0_lnum ); // Nonmatching but retained.
+    FolderCrawlerWidget folder;
+    folder.folderResults()->setResults( { std::move( group ) } );
+    folder.folderResults()->setCollapsed( 0, true );
+    REQUIRE_FALSE( folder.folderResults()->rowForIdentity( identity ) );
+    REQUIRE( QFile::remove( path ) );
+    const auto reads = content->bytesReadForTesting();
+    const auto location = folder.resolveReviewMark( identity );
+    REQUIRE( location );
+    CHECK( location->memberPath == path );
+    CHECK( location->row == 0_lnum );
+    CHECK( content->bytesReadForTesting() == reads );
+    auto foreign = identity;
+    foreign.origin = klogg::LogRowId::Origin::Capture;
+    CHECK_FALSE( folder.resolveReviewMark( foreign ) );
+    folder.folderResults()->beginSearch( QStringList{ path } );
+    CHECK_FALSE( folder.resolveReviewMark( identity ) );
+    CHECK( folder.marksSnapshot().marks.isEmpty() );
+}
+
+TEST_CASE( "Folder mark identity resolution retains indexed members across human navigation",
+           "[review-marks-source]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto firstPath = root.filePath( "a.log" );
+    const auto secondPath = root.filePath( "b.log" );
+    for ( const auto& path : { firstPath, secondPath } ) {
+        QFile file{ path };
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "hit\n" ) == 4 );
+    }
+    RegularExpression expression{ RegularExpressionPattern{ "hit" } };
+    const auto matcher = expression.createMatcher();
+    FolderCrawlerWidget folder;
+    folder.setFolder( root.path(), QStringList{ firstPath, secondPath } );
+    folder.folderResults()->setResults( { FolderSearchEngine::scanFile( firstPath, *matcher ),
+                                         FolderSearchEngine::scanFile( secondPath, *matcher ) } );
+    const auto open = [&]( LineNumber resultRow, const QString& path ) {
+        const auto ready = [&] {
+            const auto info = folder.currentMainViewInfo();
+            return info && info->path == path && info->nbLines == 1;
+        };
+        folder.selectResultRow( resultRow );
+        REQUIRE( waitUiState( ready ) );
+        const auto snapshot = folder.createPaneSnapshot( Pane::Main, Scope::PresentedRows );
+        REQUIRE( snapshot );
+        return snapshot->row( 0_lnum ).identity;
+    };
+    const auto firstId = open( 1_lnum, firstPath );
+    const auto secondId = open( 3_lnum, secondPath );
+    CHECK( firstId != secondId );
+    const auto* focus = QApplication::focusWidget();
+    const auto first = folder.resolveReviewMark( firstId );
+    const auto second = folder.resolveReviewMark( secondId );
+    REQUIRE( first );
+    REQUIRE( second );
+    CHECK( first->memberPath == firstPath );
+    CHECK( second->memberPath == secondPath );
+    CHECK( folder.currentMainViewInfo()->path == secondPath );
+    CHECK( QApplication::focusWidget() == focus );
+    CHECK( folder.marksSnapshot().marks.isEmpty() );
+}
 
 TEST_CASE( "Review pane metadata reads widget state without payload or presentation work",
            "[review-panes]" )

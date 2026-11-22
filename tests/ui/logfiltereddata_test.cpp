@@ -242,6 +242,9 @@ TEST_CASE( "Native file presentation proof accepts sealed append and rejects a c
     LogDataLoader loader;
     const auto sealed = loader.log_data.searchableSnapshot();
     REQUIRE( sealed );
+    auto filtered = loader.log_data.getNewFilteredData();
+    const auto sealedMarks = LogFilteredData::prepareMarksUpdate( filtered->captureMarksUpdate( { 0_lnum } ) );
+    REQUIRE( sealedMarks );
     const auto append = [ &loader ]( const QByteArray& bytes ) {
         SafeQSignalSpy loaded{ &loader.log_data, &SearchableLogData::loadingFinished };
         {
@@ -259,15 +262,57 @@ TEST_CASE( "Native file presentation proof accepts sealed append and rejects a c
     REQUIRE( tail );
     REQUIRE( tail->isAppendOf( *sealed ) );
     CHECK( tail->preservesPresentationOf( *sealed ) );
+    CHECK( filtered->lockMarksUpdate( sealedMarks ) );
+    const auto tailMarks = LogFilteredData::prepareMarksUpdate(
+        filtered->captureMarksUpdate( { LineNumber{ tail->lineCount().get() - 1 } } ) );
+    REQUIRE( tailMarks );
     append( QByteArrayLiteral( " extended" ) );
     const auto changed = loader.log_data.searchableSnapshot();
     REQUIRE( changed );
     REQUIRE( changed->isAppendOf( *tail ) );
     REQUIRE( changed->lineCount() == tail->lineCount() );
     CHECK_FALSE( changed->preservesPresentationOf( *tail ) );
+    CHECK_FALSE( filtered->lockMarksUpdate( tailMarks ) );
+    CHECK( filtered->lockMarksUpdate( sealedMarks ) );
     CHECK( changed->preservesPresentationOf( *sealed ) );
     CHECK( tail->lineString( LineNumber{ tail->lineCount().get() - 1 } )
            == QStringLiteral( "ERROR mutable tail" ) );
+}
+
+TEST_CASE( "Prepared file marks compose with actual search results and reject replaced membership",
+           "[review-mark-preparation][context]" )
+{
+    LogDataLoader loader;
+    auto filtered = loader.log_data.getNewFilteredData();
+    SafeQSignalSpy searched( filtered.get(), &LogFilteredData::searchProgressed );
+    runSearch( filtered.get(), QStringLiteral( "000010|000020" ), searched );
+    REQUIRE( filtered->getNbMatches() == 2_lcount );
+    filtered->setVisibility( VisibilityFlags::Marks | VisibilityFlags::Matches );
+    filtered->setContextLines( 1, 1 );
+    const auto prepared = LogFilteredData::prepareMarksUpdate( filtered->captureMarksUpdate( { 15_lnum } ) );
+    REQUIRE( prepared );
+    SECTION( "native union and context install without changing the accepted matches" ) {
+        auto publication = filtered->lockMarksUpdate( prepared );
+        REQUIRE( publication );
+        REQUIRE( publication->install() );
+        publication.reset();
+        CHECK( filtered->getNbMarks() == 1_lcount );
+        CHECK( filtered->getNbMatches() == 2_lcount );
+        CHECK( filtered->getNbLine() == 9_lcount );
+        CHECK( filtered->getMatchingLineNumber( 0_lnum ) == 9_lnum );
+        CHECK( filtered->getMatchingLineNumber( 3_lnum ) == 14_lnum );
+        CHECK( filtered->getMatchingLineNumber( 8_lnum ) == 21_lnum );
+        const auto snapshot = filtered->createReadSnapshot( klogg::SnapshotScope::PresentedRows );
+        REQUIRE( snapshot );
+        CHECK( snapshot->lineCount() == 9_lcount );
+    }
+    SECTION( "another search publishes before mark commit" ) {
+        searched.clear();
+        runSearch( filtered.get(), QStringLiteral( "000030" ), searched );
+        CHECK_FALSE( filtered->lockMarksUpdate( prepared ) );
+        CHECK( filtered->getNbMarks() == 0_lcount );
+        CHECK( filtered->getNbMatches() == 1_lcount );
+    }
 }
 
 TEST_CASE( "Overview range counts classify only visible matches and marks",

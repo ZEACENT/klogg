@@ -33,12 +33,11 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
-#if QT_VERSION_MAJOR < 6
-#include <QDateTime> // Qt5 use
-#endif
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QTimer>
@@ -140,16 +139,13 @@ struct WatchedFile {
     std::string name;
     int64_t mTime;
     int64_t size;
+    std::set<const void*> owners;
 
     bool operator==( const std::string& filename ) const
     {
         return name == filename;
     }
 
-    bool operator!=( const WatchedFile& other ) const
-    {
-        return name != other.name || mTime != other.mTime || size != other.size;
-    }
 };
 
 struct WatchedDirecotry {
@@ -200,7 +196,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         }
     }
 
-    void addFile( const QString& fullFileName )
+    void addFile( const QString& fullFileName, const void* owner )
     {
         ScopedRecursiveLock lock( mutex_ );
         recordOperationThread();
@@ -211,7 +207,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
 
         auto watchedFile
             = WatchedFile{ fileInfo.fileName().toStdString(),
-                           fileInfo.lastModified().toMSecsSinceEpoch(), fileInfo.size() };
+                           fileInfo.lastModified().toMSecsSinceEpoch(), fileInfo.size(), { owner } };
 
         const auto directory = fileInfo.absolutePath().toStdString();
 
@@ -241,9 +237,10 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
                 watchedDirectory->watchId = tryWatchDirectory( directory );
             }
 
-            if ( std::find( watchedDirectory->files.begin(), watchedDirectory->files.end(),
-                            watchedFile.name )
-                 != watchedDirectory->files.end() ) {
+            const auto existing = std::find( watchedDirectory->files.begin(), watchedDirectory->files.end(),
+                                             watchedFile.name );
+            if ( existing != watchedDirectory->files.end() ) {
+                existing->owners.insert( owner );
                 LOG_DEBUG << "already watching " << watchedFile.name << " in " << directory;
                 return;
             }
@@ -256,7 +253,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         }
     }
 
-    void removeFile( const QString& fullFileName )
+    void removeFile( const QString& fullFileName, const void* owner )
     {
         ScopedRecursiveLock lock( mutex_ );
         recordOperationThread();
@@ -279,7 +276,8 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
             auto watchedFile = std::find( files.begin(), files.end(), filename );
 
             if ( watchedFile != files.end() ) {
-                files.erase( watchedFile );
+                watchedFile->owners.erase( owner );
+                if ( watchedFile->owners.empty() ) files.erase( watchedFile );
             }
 
             if ( files.empty() ) {
@@ -320,16 +318,15 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
 
                     const auto fileInfo = QFileInfo{ path };
 
-                    auto watchedFile = WatchedFile{ fileInfo.fileName().toStdString(),
-                                                    fileInfo.lastModified().toMSecsSinceEpoch(),
-                                                    fileInfo.size() };
-
-                    if ( file != watchedFile ) {
+                    const auto modified = fileInfo.lastModified().toMSecsSinceEpoch();
+                    const auto size = fileInfo.size();
+                    if ( file.mTime != modified || file.size != size ) {
                         changedFiles.push_back( path );
                         LOG_INFO << "will notify for " << path;
                     }
-
-                    file = std::move( watchedFile );
+                    // Polling updates disk observations, never registration ownership.
+                    file.mTime = modified;
+                    file.size = size;
                 }
             }
 
@@ -522,8 +519,10 @@ FileWatcher* FileWatcher::existingInstance()
     return fileWatcherInstance;
 }
 
-void FileWatcher::addFile( const QString& fileName )
+void FileWatcher::addFile( const QString& fileName, const void* owner )
 {
+    Q_ASSERT( owner != nullptr );
+    if ( !owner ) return;
     updateConfiguration();
     // Dispatch the efsw watch setup to a worker thread to keep the main
     // thread responsive. On macOS, open() on TCC-protected directories
@@ -531,16 +530,18 @@ void FileWatcher::addFile( const QString& fileName )
     // responds to the system permission dialog.
     // Uses a dedicated worker thread to avoid contention on the global QThreadPool.
     auto* watcher = efswWatcher_.get();
-    worker_->post( [ watcher, fileName ] { watcher->addFile( fileName ); } );
+    worker_->post( [ watcher, fileName, owner ] { watcher->addFile( fileName, owner ); } );
 }
 
-void FileWatcher::removeFile( const QString& fileName )
+void FileWatcher::removeFile( const QString& fileName, const void* owner )
 {
+    Q_ASSERT( owner != nullptr );
+    if ( !owner ) return;
     updateConfiguration();
     // Dispatch to the same dedicated worker pool so that removeFile is
     // serialized with any in-progress addFile on the same worker thread.
     auto* watcher = efswWatcher_.get();
-    worker_->post( [ watcher, fileName ] { watcher->removeFile( fileName ); } );
+    worker_->post( [ watcher, fileName, owner ] { watcher->removeFile( fileName, owner ); } );
 }
 
 bool FileWatcher::waitForIdle( int timeoutMs )

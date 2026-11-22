@@ -1,24 +1,31 @@
 #include "highlightersmenu.h"
 
-#include "mainwindow.h"
+#include "highlighterstatepublisher.h"
 #include <qaction.h>
 
 HighlightersMenu::HighlightersMenu( const QString& title, QWidget* parent )
     : HoverMenu( title, parent )
     , highLighters_{ nullptr }
-    , applyChange_{}
 {
-    connect( this, &QMenu::aboutToShow, this, &HighlightersMenu::updateActionsStatus );
+    connect( this, &QMenu::aboutToShow, this, [this] {
+        if ( contentDirty_ ) {
+            clearHighlightersMenu();
+            createHighlightersMenu();
+            populateHighlightersMenu();
+        }
+        updateActionsStatus();
+    } );
+    connect( &HighlighterStatePublisher::instance(), &HighlighterStatePublisher::changed,
+             this, [this] {
+        // Do not replace actions while a menu is open or emitting triggered().
+        // The next presentation reads the authoritative collection afresh.
+        contentDirty_ = true;
+    } );
 }
 
 void HighlightersMenu::applySelectionHighlighters( QAction* action ) const
 {
     saveCurrentHighlighterFromAction( action );
-
-    if ( !applyChange_ ) {
-        return;
-    }
-    applyChange_();
 
     updateActionsStatus();
 }
@@ -29,7 +36,9 @@ void HighlightersMenu::clearHighlightersMenu()
 
     if ( highLighters_ ) {
         highLighters_->deleteLater();
+        highLighters_ = nullptr;
     }
+    contentDirty_ = true;
 }
 
 void HighlightersMenu::createHighlightersMenu()
@@ -59,6 +68,7 @@ void HighlightersMenu::populateHighlightersMenu()
         setAction->setChecked( activeSetIds.contains( highlighter.id() ) );
         setAction->setData( highlighter.id() );
     }
+    contentDirty_ = false;
 }
 
 void HighlightersMenu::saveCurrentHighlighterFromAction( const QAction* action ) const
@@ -76,7 +86,7 @@ void HighlightersMenu::saveCurrentHighlighterFromAction( const QAction* action )
         highlighterSets.deactivateSet( setId );
     }
 
-    highlighterSets.save();
+    HighlighterStatePublisher::instance().publish();
 }
 
 void HighlightersMenu::updateActionsStatus() const

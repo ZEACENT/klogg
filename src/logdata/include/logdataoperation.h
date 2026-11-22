@@ -119,6 +119,9 @@ class OperationQueue {
     void setWorker( std::unique_ptr<LogDataWorker>&& worker );
 
     void interrupt();
+    // Stop admission and request interruption without joining the worker. Returns
+    // true only when no operation awaits owner-thread completion.
+    bool beginRetirement();
     void shutdown();
     void waitForWorkerDone();
 

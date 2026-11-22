@@ -38,6 +38,7 @@
 
 #include <QFileDialog>
 #include <QTimer>
+#include <QPointer>
 
 #include <qcheckbox.h>
 #include <qcolor.h>
@@ -49,6 +50,7 @@
 #include "containers.h"
 #include "dispatch_to.h"
 #include "highlightersdialog.h"
+#include "highlighterstatepublisher.h"
 #include "highlighterset.h"
 #include "iconloader.h"
 #include "log.h"
@@ -319,19 +321,16 @@ void HighlightersDialog::resolveDialog( QAbstractButton* button )
 
     // persist it to disk
     auto& persistentHighlighterSet = HighlighterSetCollection::get();
-    if ( role == QDialogButtonBox::AcceptRole ) {
-        persistentHighlighterSet = std::move( highlighterSetCollection_ );
-        accept();
-    }
-    else if ( role == QDialogButtonBox::ApplyRole ) {
-        persistentHighlighterSet = highlighterSetCollection_;
-    }
-    else {
+    if ( role != QDialogButtonBox::AcceptRole && role != QDialogButtonBox::ApplyRole ) {
         LOG_ERROR << "unhandled role : " << role;
         return;
     }
-    persistentHighlighterSet.save();
+    persistentHighlighterSet = highlighterSetCollection_;
+    const QPointer<HighlightersDialog> guard{ this };
+    HighlighterStatePublisher::instance().publish();
+    if ( !guard ) return;
     Q_EMIT optionsChanged();
+    if ( guard && role == QDialogButtonBox::AcceptRole ) accept();
 }
 
 void HighlightersDialog::setCurrentRow( int row )

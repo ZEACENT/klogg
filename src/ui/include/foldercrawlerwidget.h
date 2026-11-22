@@ -42,6 +42,7 @@
 #include "regularexpressionpattern.h"
 #include "viewsignalwiring.h"
 #include "abstractcrawlerwidget.h"
+#include "reviewmarks.h"
 
 #include <QWidget>
 
@@ -85,7 +86,8 @@ enum class DataStatus;
 // file is instant.
 class FolderCrawlerWidget : public QWidget,
                            public AbstractCrawlerWidget,
-                           public QuickFindMuxSelectorInterface {
+                           public QuickFindMuxSelectorInterface,
+                           public klogg::ReviewMarksOwner {
     Q_OBJECT
 
   public:
@@ -94,7 +96,9 @@ class FolderCrawlerWidget : public QWidget,
 
     explicit FolderCrawlerWidget( QWidget* parent = nullptr );
     ~FolderCrawlerWidget() override;
+    std::vector<QFuture<void>> retireResources() override;
 
+    std::vector<klogg::ReviewMarksOwner*> reviewMarksOwners() override { return { this }; }
     ReviewControls reviewControls() override
     {
         return { searchToolbar_, &colorLabelsController_ };
@@ -117,6 +121,12 @@ class FolderCrawlerWidget : public QWidget,
     // does not open sources, select rows, search, or alter presentation. The
     // owner-local revision advances only when the stored marks change.
     MarksSnapshot marksSnapshot() const;
+    QObject* reviewMarksObject() override { return this; }
+    uint64_t reviewMarksRevision() const override { return marksRevision_; }
+    std::optional<klogg::ReviewMarksSnapshot> reviewMarksSnapshot() const override;
+    klogg::ReviewMarksPreparer prepareReviewMarks(
+        const klogg::ReviewMarksSnapshot& candidate, klogg::ReviewMarksBudget& budget ) override;
+    std::optional<klogg::ReviewMarkLocation> resolveReviewMark( const klogg::LogRowId& identity ) const override;
 
     // --- Test access / programmatic driving (no UI events needed) ---
     // folderResults()/filteredView() return the ACTIVE pane's objects (keeps
@@ -274,6 +284,7 @@ class FolderCrawlerWidget : public QWidget,
 
   protected:
     const AbstractLogView* reviewPane( Pane pane ) const override;
+    std::vector<PaneReference> reviewPanes() const override;
 
     // ViewInterface (single-file APIs are no-ops in folder mode).
     void doSetData( std::shared_ptr<SearchableLogData> log_data,
@@ -372,7 +383,7 @@ class FolderCrawlerWidget : public QWidget,
     ColorLabelsController colorLabelsController_;
 
     // Shared view-signal wiring (scratchpad / search composition / splitter /
-    // font zoom / exitView / highlightersChange / hover) -- unique_ptr because
+    // font zoom / exitView / hover) -- unique_ptr because
     // it needs searchToolbar_, created in the ctor body. Same component
     // CrawlerWidget uses (single-file parity by construction).
     std::unique_ptr<ViewSignalWiring> viewSignalWiring_;
@@ -411,6 +422,8 @@ class FolderCrawlerWidget : public QWidget,
         QString title;
         bool presentationRefreshPending = false;
         bool searchComplete = false;
+        // Attribution survives pane switches and deferred presentation updates.
+        RegularExpressionPattern appliedPattern;
     };
     std::vector<std::unique_ptr<ResultPane>> panes_;
     int activePaneIndex_ = -1;
@@ -549,6 +562,7 @@ class FolderCrawlerWidget : public QWidget,
     // whose generation differs are dropped (superseded by a newer search).
     quint64 currentSearchGeneration_ = 0;
     bool searchActive_ = false;
+    bool resourcesRetiring_ = false;
     bool presentationActive_ = true;
     bool presentationDirty_ = false;
     bool presentationCatchUpQueued_ = false;
@@ -685,6 +699,8 @@ class FolderCrawlerWidget : public QWidget,
     // shared folderMarks_ store, so a mark added in one pane must repaint/rebuild
     // in ALL panes (frozen ones too), not just the active one.
     void refreshAllPanesForMarks();
+    void publishPreparedMarks();
+    class ReviewMarksUpdate;
     // visibilityBox_ currentIndexChanged handler -> FolderSearchResults setVisibility.
     void changeFilteredViewVisibility( int index );
     // Resolve (before, after) from the context combo+spinbox into contextBefore_/

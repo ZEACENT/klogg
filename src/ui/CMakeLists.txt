@@ -89,8 +89,12 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelsmanager.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelscontroller.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewtransaction.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/highlighterstatepublisher.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/highlighterstatepublisher.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewcontroladapter.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewcontroladapter.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewhighlightercodec.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewhighlightercodec.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewpanemetadata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractcrawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewcontentadapter.h
@@ -117,6 +121,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adbtrackeddeviceprovider.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatsource.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerwidget.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerfilterpublication.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filteredview.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filterfavoritesmodel.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderenumeration.cpp
@@ -147,6 +152,13 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livelogsession.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livesourcetransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindow.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/windowpublication.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewdocumentadapter.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewdocumentadapter.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewfilteradapter.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewfilteradapter.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewfiltercodec.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewfiltercodec.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindowtext.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/matchselection.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/matchselectionjob.cpp

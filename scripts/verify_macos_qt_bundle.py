@@ -53,11 +53,26 @@ def runtime_issues(app: pathlib.Path, output: str) -> list[str]:
     if re.search(r"Class .+ is implemented in both", output):
         issues.append("Objective-C class is implemented in two runtime images")
 
-    app_text = str(app.resolve())
-    for path in re.findall(r"(?<![\w@])/(?:[^\s:'\"]+/)*Qt[^\s:'\"]+", output):
-        if path.startswith(SYSTEM_PREFIXES) or path.startswith(app_text):
+    paths: set[str] = set()
+    for line in output.splitlines():
+        # DYLD_PRINT_LIBRARIES emits a complete, unquoted path after its prefix.
+        # Whitespace tokenization loses images under relocated SDK/app folders.
+        image = re.match(r"^dyld(?:\[\d+\])?:\s+(?:loaded:\s+|<[^>]+>\s+)?(/.*)$", line)
+        if image is not None:
+            path = image.group(1)
+            if re.search(r"(?:^|/)Qt[^/]*(?:\.framework/|$)", path):
+                paths.add(path)
+        else:
+            paths.update(re.findall(r"(?<![\w@])/(?:[^\s:'\"]+/)*Qt[^\s:'\"]+", line))
+
+    app_resolved = app.resolve()
+    for path in sorted(paths):
+        if path.startswith(SYSTEM_PREFIXES):
             continue
-        issues.append(f"runtime loaded Qt outside the app bundle: {path}")
+        try:
+            pathlib.Path(path).resolve().relative_to(app_resolved)
+        except (OSError, ValueError):
+            issues.append(f"runtime loaded Qt outside the app bundle: {path}")
     return issues
 
 
@@ -130,11 +145,12 @@ def validate_qt_conf(app: pathlib.Path) -> list[str]:
 
 
 def validate_bundle(app: pathlib.Path, expected_architecture: str) -> list[str]:
-    executable = app / "Contents" / "MacOS" / "klogg"
+    executables = [app / "Contents" / "MacOS" / name for name in ("klogg", "kloggctl")]
     cocoa = app / "Contents" / "PlugIns" / "platforms" / "libqcocoa.dylib"
     issues: list[str] = []
-    if not executable.is_file():
-        issues.append(f"missing application executable: {executable}")
+    for executable in executables:
+        if not executable.is_file():
+            issues.append(f"missing application executable: {executable}")
     if not cocoa.is_file():
         issues.append(f"missing deployed Cocoa platform plugin: {cocoa}")
     issues.extend(validate_qt_conf(app))
@@ -152,16 +168,17 @@ def validate_bundle(app: pathlib.Path, expected_architecture: str) -> list[str]:
             if dependencies is not None:
                 issues.extend(dependency_issues(app, candidate, dependencies))
 
-    executable_dependencies = macho_dependencies(executable)
-    executable_rpaths = macho_rpaths(executable)
-    if executable_dependencies is not None and executable_rpaths is not None:
-        issues.extend(
-            executable_rpath_issues(
-                executable, executable_dependencies, executable_rpaths
+    for executable in executables:
+        executable_dependencies = macho_dependencies(executable)
+        executable_rpaths = macho_rpaths(executable)
+        if executable_dependencies is not None and executable_rpaths is not None:
+            issues.extend(
+                executable_rpath_issues(
+                    executable, executable_dependencies, executable_rpaths
+                )
             )
-        )
 
-    for path in (executable, cocoa):
+    for path in (*executables, cocoa):
         architectures = command_output(["lipo", "-archs", str(path)]).split()
         if expected_architecture not in architectures:
             issues.append(
@@ -197,27 +214,46 @@ def smoke_bundle(
         environment.pop(name, None)
     environment["DYLD_PRINT_LIBRARIES"] = "1"
 
+    cli = app / "Contents" / "MacOS" / "kloggctl"
+    commands = [
+        (platform, [str(executable), "-platform", platform, "-v"]),
+        ("kloggctl --version", [str(cli), "--version"]),
+        ("kloggctl --help", [str(cli), "--help"]),
+    ]
+    issues: list[str] = []
     with tempfile.TemporaryDirectory(prefix="klogg-macos-smoke-") as home:
         environment["HOME"] = home
-        try:
-            result = subprocess.run(
-                [str(executable), "-platform", platform, "-v"],
-                capture_output=True,
-                text=True,
-                env=environment,
-                timeout=30,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return [f"{platform} startup smoke timed out"]
+        for name, directory in (
+            ("KLOGG_PORTABLE_CONFIG_DIR", "config"),
+            ("KLOGG_CAPTURE_COORDINATION_ROOT", "coordination"),
+        ):
+            path = pathlib.Path(home) / directory
+            path.mkdir()
+            environment[name] = str(path)
+        for label, command in commands:
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                    timeout=30,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                issues.append(f"{label} startup smoke timed out")
+                continue
+            except OSError as error:
+                issues.append(f"{label} startup smoke could not execute: {error}")
+                continue
 
-    output = result.stdout + result.stderr
-    if log_output is not None:
-        with log_output.open("a", encoding="utf-8") as stream:
-            stream.write(f"===== platform={platform} =====\n{output}\n")
-    issues = runtime_issues(app, output)
-    if result.returncode != 0:
-        issues.append(f"{platform} startup smoke exited with {result.returncode}")
+            output = result.stdout + result.stderr
+            if log_output is not None:
+                with log_output.open("a", encoding="utf-8") as stream:
+                    stream.write(f"===== {label} =====\n{output}\n")
+            issues.extend(runtime_issues(app, output))
+            if result.returncode != 0:
+                issues.append(f"{label} startup smoke exited with {result.returncode}")
     return issues
 
 
