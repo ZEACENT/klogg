@@ -305,8 +305,10 @@ std::shared_ptr<const FolderSearchResults::SnapshotLayout>
 FolderSearchResults::buildSnapshotLayout( const LayoutInput& input,
                                           const LayoutProjection& projection )
 {
+    const auto& groups = input.groups.get();
+    const auto& sources = input.sources.get();
     auto layout = std::make_shared<SnapshotLayout>();
-    layout->groups = input.groups;
+    layout->groups = groups;
     layout->visible = projection.visible;
     layout->presented.reserve( projection.visible->size() );
     for ( size_t index = 0; index < projection.visible->size(); ++index ) {
@@ -318,7 +320,7 @@ FolderSearchResults::buildSnapshotLayout( const LayoutInput& input,
             // Match records already own group.content. Only visible marked
             // nonmatches need this lookup: sharing the entire registry would
             // detach/copy every earlier member on each streaming insertion.
-            layout->sources.insert( row.markFilePath, input.sources.value( row.markFilePath ) );
+            layout->sources.insert( row.markFilePath, sources.value( row.markFilePath ) );
         }
     }
     const auto registerMember = [&]( const klogg::folder::ScannedFileContent::Ptr& source,
@@ -328,9 +330,9 @@ FolderSearchResults::buildSnapshotLayout( const LayoutInput& input,
             layout->members.emplace( std::make_pair( identity.incarnation, identity.member ), file );
         }
     };
-    for ( size_t file = 0; file < input.groups.size(); ++file ) {
-        registerMember( input.groups[ file ]->content, static_cast<klogg::folder::FileId>( file ) );
-        const auto& records = input.groups[ file ]->matches;
+    for ( size_t file = 0; file < groups.size(); ++file ) {
+        registerMember( groups[ file ]->content, static_cast<klogg::folder::FileId>( file ) );
+        const auto& records = groups[ file ]->matches;
         for ( size_t match = 0; match < records.size(); ++match ) {
             if ( records[ match ].role == klogg::folder::RecordRole::Match ) {
                 layout->matches.push_back( { static_cast<klogg::folder::FileId>( file ), match } );
@@ -338,8 +340,8 @@ FolderSearchResults::buildSnapshotLayout( const LayoutInput& input,
         }
     }
     for ( size_t file = 0; file < projection.markGroups.size(); ++file ) {
-        registerMember( input.sources.value( projection.markGroups[ file ].filePath ),
-                        static_cast<klogg::folder::FileId>( input.groups.size() + file ) );
+        registerMember( sources.value( projection.markGroups[ file ].filePath ),
+                        static_cast<klogg::folder::FileId>( groups.size() + file ) );
     }
     return layout;
 }
@@ -1175,9 +1177,9 @@ FolderSearchResults::captureSearchReplacement( std::optional<Visibility> candida
     if ( groups_.empty() ) {
         captured->collapsedPaths = pendingCollapsePaths_;
     } else {
-        for ( const auto id : collapsed_ ) {
-            if ( id >= 0 && static_cast<size_t>( id ) < groups_.size() ) {
-                captured->collapsedPaths.insert( groups_[ static_cast<size_t>( id ) ]->filePath );
+        for ( const auto fileId : collapsed_ ) {
+            if ( fileId >= 0 && static_cast<size_t>( fileId ) < groups_.size() ) {
+                captured->collapsedPaths.insert( groups_[ static_cast<size_t>( fileId ) ]->filePath );
             }
         }
     }
@@ -1191,7 +1193,7 @@ FolderSearchResults::prepareSearchReplacement(
          || completed.groups.size() != static_cast<size_t>( completed.filePaths.size() )
          || completed.groups.size() > MaxPreparedLayoutRows ) return {};
     const auto& context = *captured->context;
-    size_t rows = static_cast<size_t>( context.original.size() );
+    auto rows = static_cast<size_t>( context.original.size() );
     for ( auto it = context.original.cbegin(); it != context.original.cend(); ++it ) rows += it->size();
     for ( const auto& group : completed.groups ) {
         if ( rows >= MaxPreparedLayoutRows || group.matches.size() > MaxPreparedLayoutRows - rows - 1
@@ -1255,7 +1257,7 @@ FolderSearchResults::lockSearchReplacement( const std::shared_ptr<PreparedSearch
     return std::unique_ptr<SearchReplacementPublication>( new SearchReplacementPublication( std::move( state ) ) );
 }
 
-void FolderSearchResults::installLayout( LayoutProjection&& projection ) noexcept
+void FolderSearchResults::installLayout( LayoutProjection projection ) noexcept
 {
     visibleRows_ = std::move( projection.visible );
     marksGroups_ = std::move( projection.markGroups );
@@ -1272,12 +1274,14 @@ void FolderSearchResults::rebuildVisibleRows()
 
 FolderSearchResults::LayoutProjection FolderSearchResults::buildLayout( const LayoutInput& input )
 {
+    const auto& groups = input.groups.get();
+    const auto& collapsed = input.collapsed.get();
     LayoutProjection result;
 
     // result.maxLocalLine sizes the line-number gutter; it must cover ALL records
     // (independent of collapse/visibility) so the gutter is wide enough when a
     // collapsed group is later expanded.
-    for ( const auto& group : input.groups ) {
+    for ( const auto& group : groups ) {
         for ( const auto& rec : group->matches ) {
             result.maxLocalLine = std::max( result.maxLocalLine, rec.localLine );
         }
@@ -1295,14 +1299,14 @@ FolderSearchResults::LayoutProjection FolderSearchResults::buildLayout( const La
     result.markGroups.clear();
     if ( injectMarks ) {
         QSet<QString> groupFiles;
-        groupFiles.reserve( static_cast<int>( input.groups.size() ) );
-        for ( const auto& g : input.groups ) {
-            groupFiles.insert( g->filePath );
+        groupFiles.reserve( static_cast<int>( groups.size() ) );
+        for ( const auto& group : groups ) {
+            groupFiles.insert( group->filePath );
         }
         for ( auto it = input.marks->constBegin(); it != input.marks->constEnd(); ++it ) {
             if ( it.value().empty() || groupFiles.contains( it.key() )
                  || ( input.restrictMarks
-                      && !input.expectedFiles.contains( it.key() ) ) ) {
+                      && !input.expectedFiles.get().contains( it.key() ) ) ) {
                 continue;
             }
             MarksGroup mg;
@@ -1324,8 +1328,8 @@ FolderSearchResults::LayoutProjection FolderSearchResults::buildLayout( const La
     }
 
     // Real groups: header + match rows + injected Mark rows.
-    for ( klogg::folder::FileId fid = 0; fid < static_cast<int>( input.groups.size() ); ++fid ) {
-        const auto& group = *input.groups[ static_cast<size_t>( fid ) ];
+    for ( klogg::folder::FileId fid = 0; fid < static_cast<int>( groups.size() ); ++fid ) {
+        const auto& group = *groups[ static_cast<size_t>( fid ) ];
 
         std::vector<LineNumber> markRows;
         if ( injectMarks ) {
@@ -1375,9 +1379,9 @@ FolderSearchResults::LayoutProjection FolderSearchResults::buildLayout( const La
 
         // Header (always shown for a visible group).
         result.visible->push_back( VisibleRow{ LineKind::Header, false, fid, 0, 0_lnum, {} } );
-        result.maxLength = std::max( result.maxLength, LineLength( formatGroupHeader( group, input.collapsed.contains( fid ) ).size() ) );
+        result.maxLength = std::max( result.maxLength, LineLength( formatGroupHeader( group, collapsed.contains( fid ) ).size() ) );
 
-        if ( input.collapsed.contains( fid ) ) {
+        if ( collapsed.contains( fid ) ) {
             continue;
         }
 
@@ -1426,17 +1430,17 @@ FolderSearchResults::LayoutProjection FolderSearchResults::buildLayout( const La
     // Marks-only groups (files with marks but no match group).
     if ( injectMarks ) {
         for ( size_t mgi = 0; mgi < result.markGroups.size(); ++mgi ) {
-            const auto fid = static_cast<klogg::folder::FileId>( input.groups.size() + mgi );
-            const auto& mg = result.markGroups[ mgi ];
+            const auto fid = static_cast<klogg::folder::FileId>( groups.size() + mgi );
+            const auto& group = result.markGroups[ mgi ];
             result.visible->push_back( VisibleRow{ LineKind::Header, false, fid, 0, 0_lnum, {} } );
-            result.maxLength = std::max( result.maxLength, LineLength( formatMarksHeader( mg, input.collapsed.contains( fid ) ).size() ) );
-            if ( input.collapsed.contains( fid ) ) {
+            result.maxLength = std::max( result.maxLength, LineLength( formatMarksHeader( group, collapsed.contains( fid ) ).size() ) );
+            if ( collapsed.contains( fid ) ) {
                 continue;
             }
-            for ( const auto& ln : mg.localLines ) {
+            for ( const auto& localLine : group.localLines ) {
                 result.visible->push_back(
-                    VisibleRow{ LineKind::Data, true, fid, 0, ln, mg.filePath } );
-                result.maxLocalLine = std::max( result.maxLocalLine, ln );
+                    VisibleRow{ LineKind::Data, true, fid, 0, localLine, group.filePath } );
+                result.maxLocalLine = std::max( result.maxLocalLine, localLine );
             }
         }
     }
@@ -1454,8 +1458,8 @@ bool FolderSearchResults::marksContain( const MarksStore* marks, const QString& 
     if ( marks == nullptr ) {
         return false;
     }
-    const auto it = marks->constFind( filePath );
-    return it != marks->cend() && it->count( localLine.get() ) > 0;
+    const auto fileMarks = marks->constFind( filePath );
+    return fileMarks != marks->cend() && fileMarks->count( localLine.get() ) > 0;
 }
 
 void FolderSearchResults::setVisibility( Visibility visibility )
@@ -1634,18 +1638,18 @@ QString FolderSearchResults::marksGroupHeader( size_t marksGroupIndex ) const
     return formatMarksHeader( marksGroups_[ marksGroupIndex ], collapsed_.contains( fid ) );
 }
 
-QString FolderSearchResults::formatMarksHeader( const MarksGroup& mg, bool collapsed )
+QString FolderSearchResults::formatMarksHeader( const MarksGroup& group, bool collapsed )
 {
     const QChar arrow = collapsed ? QChar( 0x25B8 ) : QChar( 0x25BE );
     QString text;
-    text.reserve( mg.filePath.size() + 24 );
+    text.reserve( group.filePath.size() + 24 );
     text += arrow;
     text += QLatin1Char( ' ' );
-    text += mg.filePath;
+    text += group.filePath;
     text += QLatin1Char( ' ' );
     text += QChar( 0x2014 ); // em dash
     text += QLatin1Char( ' ' );
-    text += QString::number( static_cast<int>( mg.localLines.size() ) );
+    text += QString::number( static_cast<int>( group.localLines.size() ) );
     text += QLatin1String( " marks" );
     return text;
 }

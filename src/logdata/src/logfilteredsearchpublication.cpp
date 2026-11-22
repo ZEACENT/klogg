@@ -178,9 +178,9 @@ LogFilteredData::SearchUpdatePublication::~SearchUpdatePublication() { release()
 
 bool LogFilteredData::SearchUpdatePublication::install()
 {
-    static_assert( std::is_nothrow_move_assignable<SearchResultArray>::value,
+    static_assert( std::is_nothrow_move_assignable_v<SearchResultArray>,
                    "Search publication requires allocation-free bitmap moves" );
-    static_assert( std::is_nothrow_move_assignable<klogg::vector<LineNumber>>::value,
+    static_assert( std::is_nothrow_move_assignable_v<klogg::vector<LineNumber>>,
                    "Search publication requires allocation-free context moves" );
     if ( !state_->owner || state_->released || state_->installed ) return false;
     auto& owner = *state_->owner;

@@ -306,7 +306,7 @@ public:
         : fileName_( fileName )
         , indexing_data_( indexingData )
         , interruptRequest_( interruptRequest )
-        , settings_( std::move( settings ) )
+        , settings_( settings )
     {
     }
 
@@ -327,7 +327,7 @@ protected:
     // Returns the total size indexed
     // Modify the passed linePosition and maxLength
     void doIndex( OffsetInFile initialPosition );
-    void doIndex( QFile& source, OffsetInFile initialPosition,
+    void doIndex( QFile& file, OffsetInFile initialPosition,
                   const IndexedContentSnapshot::Ptr& previousContent,
                   std::optional<qint64> extent = std::nullopt,
                   std::optional<LineLength> maximumLineLength = std::nullopt );
@@ -357,7 +357,7 @@ public:
     FullIndexOperation( const QString& fileName, const std::shared_ptr<IndexingData>& indexingData,
                         AtomicFlag& interruptRequest, QTextCodec* forcedEncoding = nullptr,
                         IndexingSettings settings = IndexingSettings::capture() )
-        : IndexOperation( fileName, indexingData, interruptRequest, std::move( settings ) )
+        : IndexOperation( fileName, indexingData, interruptRequest, settings )
         , forcedEncoding_( forcedEncoding )
     {
     }
@@ -378,7 +378,7 @@ public:
                            const std::shared_ptr<IndexingData>& indexingData,
                            AtomicFlag& interruptRequest,
                            IndexingSettings settings = IndexingSettings::capture() )
-        : IndexOperation( fileName, indexingData, interruptRequest, std::move( settings ) )
+        : IndexOperation( fileName, indexingData, interruptRequest, settings )
     {
     }
 
@@ -392,7 +392,7 @@ public:
                                const std::shared_ptr<IndexingData>& indexingData,
                                AtomicFlag& interruptRequest,
                                IndexingSettings settings = IndexingSettings::capture() )
-        : IndexOperation( fileName, indexingData, interruptRequest, std::move( settings ) )
+        : IndexOperation( fileName, indexingData, interruptRequest, settings )
     {
     }
 

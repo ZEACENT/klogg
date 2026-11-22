@@ -175,7 +175,7 @@ class FolderSearchResults : public AbstractLogData {
     // observers. The owner publishes marks and releases all guards before signals.
     // An optional candidate visibility publishes the native filter-reset layout
     // in the same boundary; omitted visibility preserves the captured choice.
-    static constexpr size_t MaxPreparedLayoutRows = 256 * 1024;
+    static constexpr size_t MaxPreparedLayoutRows = size_t{ 256 } * 1024;
     struct MarksLayoutCapture;
     struct PreparedMarksLayout;
     class MarksLayoutPublication {
@@ -322,10 +322,10 @@ class FolderSearchResults : public AbstractLogData {
     };
     class ReadSnapshot;
     struct LayoutInput {
-        const std::vector<GroupPtr>& groups;
-        const QHash<QString, klogg::folder::ScannedFileContent::Ptr>& sources;
-        const QSet<klogg::folder::FileId>& collapsed;
-        const QSet<QString>& expectedFiles;
+        std::reference_wrapper<const std::vector<GroupPtr>> groups;
+        std::reference_wrapper<const QHash<QString, klogg::folder::ScannedFileContent::Ptr>> sources;
+        std::reference_wrapper<const QSet<klogg::folder::FileId>> collapsed;
+        std::reference_wrapper<const QSet<QString>> expectedFiles;
         bool restrictMarks;
         Visibility visibility;
         const MarksStore* marks;
@@ -343,7 +343,7 @@ class FolderSearchResults : public AbstractLogData {
     static bool marksContain( const MarksStore* marks, const QString& path, LineNumber line );
     static QString formatGroupHeader( const klogg::folder::FileGroup& group, bool collapsed );
     static QString formatMarksHeader( const MarksGroup& group, bool collapsed );
-    void installLayout( LayoutProjection&& projection ) noexcept;
+    void installLayout( LayoutProjection projection ) noexcept;
     void rebuildVisibleRows();
     // Retain every scanned member; return whether presented text or failure
     // status changed and therefore needs a new layout publication.

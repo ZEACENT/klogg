@@ -672,9 +672,9 @@ LogFilteredData::MarksUpdatePublication::~MarksUpdatePublication()
 }
 bool LogFilteredData::MarksUpdatePublication::install() noexcept
 {
-    static_assert( std::is_nothrow_move_assignable<SearchResultArray>::value,
+    static_assert( std::is_nothrow_move_assignable_v<SearchResultArray>,
                    "Mark publication requires allocation-free bitmap moves" );
-    static_assert( std::is_nothrow_move_assignable<klogg::vector<LineNumber>>::value,
+    static_assert( std::is_nothrow_move_assignable_v<klogg::vector<LineNumber>>,
                    "Mark publication requires allocation-free context moves" );
     auto& owner = *state_->owner;
     auto& prepared = *state_->prepared;
@@ -729,7 +729,7 @@ LogFilteredData::captureMarksUpdate( const QList<LineNumber>& candidate ) const
             captured->contextWorkUnits += static_cast<size_t>( seeds.cardinality() * expansion );
             if ( !seeds.isEmpty() ) {
                 const LineNumber last{ seeds.maximum() };
-                if ( !captured->lastContextSeed || last > *captured->lastContextSeed ) captured->lastContextSeed = last;
+                if ( captured->lastContextSeed < last ) captured->lastContextSeed = last;
             }
         }
     }
@@ -1038,9 +1038,11 @@ void LogFilteredData::rebuildContextLinesList() const
 {
     maxLengthContext_.reset();
     const bool hasContext = contextLinesBefore_ != 0 || contextLinesAfter_ != 0;
-    if ( hasContext && !sourceLogData_ ) return;
-    const auto totalLines = !hasContext ? 0_lcount
-        : presentedSource_ ? presentedSource_->lineCount() : sourceLogData_->getNbLine();
+    auto totalLines = 0_lcount;
+    if ( hasContext ) {
+        if ( !sourceLogData_ ) return;
+        totalLines = presentedSource_ ? presentedSource_->lineCount() : sourceLogData_->getNbLine();
+    }
     contextLinesList_ = buildContextLines( matching_lines_, marks_, visibility_,
                                            contextLinesBefore_, contextLinesAfter_, totalLines );
     contextLinesListValid_ = true;

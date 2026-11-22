@@ -159,8 +159,8 @@ class LogFilteredData : public AbstractLogData, public klogg::ReviewMarksOwner {
 
     // Private replacement preparation never reads mutable model state on workers.
     // Acquire every owner before installation; guards must not span event-loop turns.
-    static constexpr size_t MaxPreparedContextRows = 256 * 1024;
-    static constexpr size_t MaxPreparedBitmapBytes = 8 * 1024 * 1024;
+    static constexpr size_t MaxPreparedContextRows = size_t{ 256 } * 1024;
+    static constexpr size_t MaxPreparedBitmapBytes = size_t{ 8 } * 1024 * 1024;
     struct MarksUpdateCapture;
     struct PreparedMarksUpdate;
     class MarksUpdatePublication {

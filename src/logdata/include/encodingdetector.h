@@ -81,7 +81,7 @@ class EncodingDetector {
     // An explicit fallback is a captured input. Legacy callers consult current
     // preferences only if detection actually needs a fallback, not on UTF-8's fast path.
     QTextCodec* detectEncoding( const klogg::vector<char>& block,
-                               std::optional<int> defaultEncodingMib = std::nullopt ) const;
+                               std::optional<int> capturedDefaultMib = std::nullopt ) const;
 
     // Test instrumentation: how many times the expensive uchardet fallback ran.
     // The clear-UTF-8 fast path must not increment this; legacy/BOM/NUL samples

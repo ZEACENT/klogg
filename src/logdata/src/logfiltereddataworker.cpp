@@ -904,7 +904,7 @@ bool LogFilteredDataWorker::adoptPreparedResult( PreparedResult&& prepared )
              || operationId_.load() == exhausted || requestedTicket_.load() == exhausted ) return false;
     }
     bumpGeneration();
-    installCompletedResult( std::move( prepared.result_ ) );
+    installCompletedResult( std::move( prepared ).result_ );
     return true;
 }
 

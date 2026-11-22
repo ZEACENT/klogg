@@ -114,7 +114,7 @@ struct CompletedSearchResult {
     quint64 operationId = 0;
     quint64 requestTicket = 0;
     // Retain the exact compiled query with its result, including cache hits.
-    std::shared_ptr<RegularExpression> compiled{};
+    std::shared_ptr<RegularExpression> compiled;
 };
 
 struct SearchPerformanceCounters {

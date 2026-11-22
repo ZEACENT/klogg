@@ -98,12 +98,12 @@ Status scanMembers( const QStringList& paths, const RegularExpression& expressio
             return failed.load( std::memory_order_relaxed ) || stop();
         };
         while ( true ) {
-            const int i = next.fetch_add( 1, std::memory_order_relaxed );
-            if ( i >= paths.size() || shouldStop() ) break;
-            auto group = FolderSearchEngine::scanFileWithSettings( paths[ i ], *matchers[ workerIndex ],
+            const int fileIndex = next.fetch_add( 1, std::memory_order_relaxed );
+            if ( fileIndex >= paths.size() || shouldStop() ) break;
+            auto group = FolderSearchEngine::scanFileWithSettings( paths[ fileIndex ], *matchers[ workerIndex ],
                 settings, FolderSearchEngine::DefaultBlockSize, shouldStop, context, arena );
             if ( !group.retentionError.isEmpty() ) retentionFailed = true;
-            publish( i, std::move( group ) );
+            publish( fileIndex, std::move( group ) );
         }
     };
     const auto launch = []( std::function<void()> task ) { return std::thread( std::move( task ) ); };
@@ -287,12 +287,14 @@ std::optional<FolderSearchEngine::CompletedSearch> FolderSearchEngine::takeCompl
     std::lock_guard<std::mutex> lock( resultsMutex_ );
     if ( !completion_ || completion_->generation != generation
          || currentGeneration() != generation ) return {};
-    const bool available = !resultsConsumed_
-        && pending_.size() == static_cast<size_t>( completion_->filePaths.size() )
-        && std::all_of( pending_.begin(), pending_.end(), []( const auto& group ) { return group.has_value(); } );
+    const bool sizeMatches = pending_.size() == static_cast<size_t>( completion_->filePaths.size() );
     std::vector<klogg::folder::FileGroup> groups;
-    if ( completion_->status == CompletionStatus::Ready && available ) {
+    if ( !resultsConsumed_ && completion_->status == CompletionStatus::Ready && sizeMatches ) {
         groups.reserve( pending_.size() ); // Allocate before consuming the receipt.
+        for ( auto& group : pending_ ) {
+            if ( !group ) break;
+            groups.push_back( std::move( *group ) );
+        }
     }
     auto result = std::move( *completion_ );
     completion_.reset();
@@ -303,8 +305,7 @@ std::optional<FolderSearchEngine::CompletedSearch> FolderSearchEngine::takeCompl
         return result;
     }
     if ( result.status == CompletionStatus::Ready ) {
-        if ( available ) {
-            for ( auto& group : pending_ ) groups.push_back( std::move( *group ) );
+        if ( sizeMatches && groups.size() == pending_.size() ) {
             result.groups = std::move( groups );
         } else {
             result.status = CompletionStatus::Failed;
@@ -367,28 +368,29 @@ void FolderSearchEngine::runSearchWithSettings( quint64 gen, const QStringList& 
         }
         Q_EMIT searchStarted( gen );
         std::atomic<int> completedCount{ 0 };
-        const auto publish = [&]( int i, klogg::folder::FileGroup group ) {
+        const auto publish = [&]( int fileIndex, klogg::folder::FileGroup group ) {
             // Context rows must not inflate the native status/header count.
             const auto matches = std::count_if( group.matches.begin(), group.matches.end(),
                 []( const auto& record ) { return record.role == klogg::folder::RecordRole::Match; } );
             {
                 std::lock_guard<std::mutex> lock( resultsMutex_ );
                 if ( currentGeneration() != gen ) return;
-                pending_[ static_cast<size_t>( i ) ] = std::move( group );
+                pending_[ static_cast<size_t>( fileIndex ) ] = std::move( group );
                 matchCount_.fetch_add( static_cast<quint64>( matches ), std::memory_order_relaxed );
             }
-            Q_EMIT fileGroupReady( i, gen );
+            Q_EMIT fileGroupReady( fileIndex, gen );
             const auto done = completedCount.fetch_add( 1, std::memory_order_relaxed ) + 1;
             const auto percent = static_cast<int>( qint64{ done } * 100 / filePaths.size() );
             Q_EMIT searchProgressed( matchCount(), percent, gen );
         };
         return scanMembers( filePaths, expression, context, settings, stop, publish );
     };
-    auto status = Status::Failed;
+    Status status;
     try {
         status = run();
     } catch ( ... ) {
         // A setup failure (e.g. cloning the matcher scratch) is request-local.
+        status = Status::Failed;
     }
     finishSearch( gen, status, settings, filePaths );
 }
@@ -424,8 +426,8 @@ FolderSearchEngine::CompletedSearch FolderSearchEngine::prepareFolderSearch(
         if ( stop() ) return Status::Cancelled;
         result.groups.resize( static_cast<size_t>( result.filePaths.size() ) );
         return scanMembers( result.filePaths, expression, context, settings, stop,
-                            [&]( int i, klogg::folder::FileGroup group ) {
-                                result.groups[ static_cast<size_t>( i ) ] = std::move( group );
+                            [&]( int fileIndex, klogg::folder::FileGroup group ) {
+                                result.groups[ static_cast<size_t>( fileIndex ) ] = std::move( group );
                             } );
     };
     try {
