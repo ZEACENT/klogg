@@ -111,6 +111,16 @@ TEST_CASE( "A highlighter menu publishes once to every live and folder view with
     CHECK( mirrored->isChecked() );
 }
 
+TEST_CASE( "Closing a highlighter dialog cancels its queued editor updates", "[highlighter-queued-lifetime]" )
+{
+    GlobalState global;
+    { HighlightersDialog dialog; }
+    // Deliver exactly the metacalls queued by construction/selection. A raw
+    // widget capture posted to the dispatcher would outlive the closed dialog.
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    SUCCEED( "Closed dialog and editor received no stale metacalls" );
+}
+
 TEST_CASE( "The human highlighter dialog publishes before accepted observers can retrieve state",
            "[highlighter-publication-ui][highlighter-dialog-publication]" )
 {

@@ -45,7 +45,6 @@
 #include "highlightersetedit.h"
 
 #include "containers.h"
-#include "dispatch_to.h"
 #include "iconloader.h"
 #include "log.h"
 
@@ -93,7 +92,7 @@ HighlighterSetEdit::HighlighterSetEdit( QWidget* parent )
     connect( highlighterEdit_, &HighlighterEdit::changed, this,
              &HighlighterSetEdit::updateHighlighterProperties );
 
-    dispatchToMainThread( [ this ] {
+    QTimer::singleShot( 0, this, [ this ] {
         IconLoader iconLoader( this );
 
         addHighlighterButton->setIcon( iconLoader.load( "icons8-plus" ) );
@@ -178,7 +177,7 @@ void HighlighterSetEdit::removeHighlighter()
         setCurrentRow( -1 );
         highlighterSet_.highlighterList_.removeAt( index );
 
-        dispatchToMainThread( [ this, index ] {
+        QTimer::singleShot( 0, this, [ this, index ] {
             delete highlighterListWidget->takeItem( index );
 
             int count = highlighterListWidget->count();
@@ -204,7 +203,7 @@ void HighlighterSetEdit::moveHighlighterUp()
     if ( index > 0 ) {
         highlighterSet_.highlighterList_.move( index, index - 1 );
 
-        dispatchToMainThread( [ this, index ] {
+        QTimer::singleShot( 0, this, [ this, index ] {
             QListWidgetItem* item = highlighterListWidget->takeItem( index );
             highlighterListWidget->insertItem( index - 1, item );
 
@@ -223,7 +222,7 @@ void HighlighterSetEdit::moveHighlighterDown()
     if ( ( index >= 0 ) && ( index < ( highlighterListWidget->count() - 1 ) ) ) {
         highlighterSet_.highlighterList_.move( index, index + 1 );
 
-        dispatchToMainThread( [ this, index ] {
+        QTimer::singleShot( 0, this, [ this, index ] {
             QListWidgetItem* item = highlighterListWidget->takeItem( index );
             highlighterListWidget->insertItem( index + 1, item );
 
@@ -237,7 +236,7 @@ void HighlighterSetEdit::moveHighlighterDown()
 void HighlighterSetEdit::setCurrentRow( int row )
 {
     // ugly hack for mac
-    dispatchToMainThread( [ this, row ]() { highlighterListWidget->setCurrentRow( row ); } );
+    QTimer::singleShot( 0, this, [ this, row ]() { highlighterListWidget->setCurrentRow( row ); } );
 }
 
 void HighlighterSetEdit::updatePropertyFields()

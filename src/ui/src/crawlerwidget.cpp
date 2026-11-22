@@ -79,7 +79,6 @@
 
 #include "configuration.h"
 #include "crawlershortcuts.h"
-#include "dispatch_to.h"
 #include "filewatcher.h"
 #include "fontutils.h"
 #include "infoline.h"
@@ -394,7 +393,7 @@ void CrawlerWidget::doSendAllStateSignals()
 void CrawlerWidget::changeEvent( QEvent* event )
 {
     if ( event->type() == QEvent::StyleChange ) {
-        dispatchToMainThread( [ this ] {
+        QTimer::singleShot( 0, this, [ this ] {
             loadIcons();
             searchInfoLineDefaultPalette_ = this->palette();
         } );

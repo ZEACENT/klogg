@@ -102,7 +102,6 @@
 #include "clipboard.h"
 #include "crawlerwidget.h"
 #include "decompressor.h"
-#include "dispatch_to.h"
 #include "downloader.h"
 #include "droppathclassification.h"
 #include "encodings.h"
@@ -139,7 +138,7 @@ namespace {
 
 void signalCrawlerToFollowFile( CrawlerWidget* crawler_widget )
 {
-    dispatchToMainThread( [ crawler_widget ]() { crawler_widget->followSet( true ); } );
+    QTimer::singleShot( 0, crawler_widget, [ crawler_widget ]() { crawler_widget->followSet( true ); } );
 }
 
 // Debounce window for session persistence (see scheduleSessionPersistence).
@@ -2205,7 +2204,7 @@ void MainWindow::tryOpenClipboard( int tryTimes )
     auto text = clipboard->text();
 
     if ( text.isEmpty() && tryTimes > 0 ) {
-        QTimer::singleShot( 50, [ tryTimes, this ]() { tryOpenClipboard( tryTimes - 1 ); } );
+        QTimer::singleShot( 50, this, [ tryTimes, this ]() { tryOpenClipboard( tryTimes - 1 ); } );
     }
     else {
         auto tempFile = new QTemporaryFile( tempDir_.filePath( "klogg_clipboard" ), this );
@@ -3351,7 +3350,7 @@ void MainWindow::changeEvent( QEvent* event )
 
         if ( this->windowState() & Qt::WindowMinimized ) {
             if ( Configuration::get().minimizeToTray() ) {
-                dispatchToMainThread( [ this ] {
+                QTimer::singleShot( 0, this, [ this ] {
                     trayIcon_->show();
                     this->hide();
                 } );
@@ -3359,7 +3358,7 @@ void MainWindow::changeEvent( QEvent* event )
         }
     }
     else if ( event->type() == QEvent::StyleChange ) {
-        dispatchToMainThread( [ this ] {
+        QTimer::singleShot( 0, this, [ this ] {
             loadIcons();
             updateOpenedFilesMenu();
             updateFavoritesMenu();
@@ -4433,7 +4432,7 @@ void MainWindow::selectOpenedFile()
                                                  QItemSelectionModel::SelectCurrent );
              } );
 
-    dispatchToMainThread( [ edit = filterEdit.get() ]() { edit->setFocus(); } );
+    QTimer::singleShot( 0, filterEdit.get(), [ edit = filterEdit.get() ]() { edit->setFocus(); } );
 
     connect( selectFileDialog.get(), &QDialog::finished,
              [ this, openedDocuments, dialog = selectFileDialog.get(), model = filteredModel.get(),
