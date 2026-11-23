@@ -1,20 +1,20 @@
 #include "reviewcontentadapter.h"
 #include <new>
 #include "asyncworkbudget.h"
+#include "ownedtaskfuture.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <future>
 #include <map>
 #include <utility>
-#include <QFuture>
-#include <QFutureInterface>
 #include <QPointer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QThread>
 #include <QTimer>
 #include <QUuid>
-#include <QtConcurrent/QtConcurrentRun>
 
 namespace {
 using namespace klogg::control;
@@ -123,15 +123,19 @@ struct Lease {
     QString scope;
 };
 struct Operation {
-    QFuture<ReadOutcome> future;
+    std::shared_future<ReadOutcome> future;
     std::shared_ptr<std::atomic<bool>> cancelled;
     qint64 created;
     qint64 lifetime = Limits::LifetimeMs;
     std::function<void()> onCancel;
     QString scope;
+    bool isFinished() const
+    {
+        return future.wait_for( std::chrono::seconds::zero() ) == std::future_status::ready;
+    }
     void cancel() const
     {
-        if ( future.isFinished() ) return;
+        if ( isFinished() ) return;
         *cancelled = true;
         if ( onCancel ) {
             try { onCancel(); }
@@ -143,9 +147,9 @@ QJsonObject operationJson( const QString& operationId, const Operation& operatio
 {
     QJsonObject value{ { "operation_id", operationId }, { "status", "pending" },
                        { "cancel_requested", operation.cancelled->load() } };
-    if ( !operation.future.isFinished() ) return value;
+    if ( !operation.isFinished() ) return value;
     try {
-        const auto outcome = operation.future.result();
+        const auto& outcome = operation.future.get();
         if ( outcome.cancelled ) value.insert( "status", "cancelled" );
         else if ( !outcome.error.isEmpty() ) {
             value.insert( "status", "failed" );
@@ -174,7 +178,7 @@ struct ReviewContentAdapter::State {
     {
         if ( operations.size() < MaxOperations ) return true;
         const auto retired = std::find_if( operations.begin(), operations.end(),
-            []( const auto& item ) { return item.second.future.isFinished(); } );
+            []( const auto& item ) { return item.second.isFinished(); } );
         if ( retired == operations.end() ) return false;
         operations.erase( retired );
         return true;
@@ -222,9 +226,8 @@ std::optional<ReviewContentAdapter::PendingOperation> ReviewContentAdapter::begi
     const auto operationId = QUuid::createUuid().toString( QUuid::WithoutBraces );
     auto cancelled = std::make_shared<std::atomic<bool>>( false );
     auto completed = std::make_shared<std::atomic<bool>>( false );
-    auto promise = std::make_shared<QFutureInterface<ReadOutcome>>();
-    promise->reportStarted();
-    state_->operations.emplace( operationId, Operation{ promise->future(), cancelled, state_->now(),
+    auto promise = std::make_shared<std::promise<ReadOutcome>>();
+    state_->operations.emplace( operationId, Operation{ promise->get_future().share(), cancelled, state_->now(),
                                                        lifetimeMs, std::move( cancel ), {} } );
     state_->timer.start();
     const QPointer<ReviewContentAdapter> owner{ this };
@@ -234,12 +237,11 @@ std::optional<ReviewContentAdapter::PendingOperation> ReviewContentAdapter::begi
             owner->state_->expire();
             const auto found = owner->state_->operations.find( operationId );
             return found != owner->state_->operations.end() && found->second.cancelled == cancelled
-                && !cancelled->load() && !found->second.future.isFinished();
+                && !cancelled->load() && !found->second.isFinished();
         },
         [promise, cancelled, completed]( QJsonObject result, QString error ) {
             if ( completed->exchange( true ) ) return;
-            promise->reportResult( ReadOutcome{ std::move( error ), std::move( result ), cancelled->load() } );
-            promise->reportFinished();
+            promise->set_value( ReadOutcome{ std::move( error ), std::move( result ), cancelled->load() } );
         } };
 }
 
@@ -337,14 +339,14 @@ DecodedResponse ReviewContentAdapter::dispatch( const RpcRequest& request, const
     if ( !permit ) return failure( request, "RESOURCE_LIMIT" );
     const auto operationId = QUuid::createUuid().toString( QUuid::WithoutBraces );
     auto cancelled = std::make_shared<std::atomic<bool>>( false );
-    auto future = QtConcurrent::run( [source = lease->second.source, snapshotId, start = *start,
-        count, cancelled, permit = std::move( permit )]() mutable {
-        auto result = readRows( source, snapshotId, start, static_cast<uint64_t>( count ), *cancelled );
+    auto task = klogg::runSingleOwnerTask( [source = lease->second.source, snapshotId, firstRow = *start,
+        count, cancelled, admission = std::move( permit )]() mutable {
+        auto result = readRows( source, snapshotId, firstRow, static_cast<uint64_t>( count ), *cancelled );
         source.reset();
-        permit.reset();
+        admission.reset();
         return result;
     } );
-    state_->operations.emplace( operationId, Operation{ std::move( future ), std::move( cancelled ), state_->now(),
+    state_->operations.emplace( operationId, Operation{ task.result.share(), std::move( cancelled ), state_->now(),
                                                        LifetimeMs, {}, scope } );
     state_->timer.start();
     return QJsonObject{ { "operation_id", operationId }, { "status", "pending" } };

@@ -3,7 +3,6 @@
 
 #include <atomic>
 #include <functional>
-#include <future>
 #include <memory>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +18,7 @@
 #include "reviewmarks.h"
 #include "logsnapshot.h"
 #include "asyncworkbudget.h"
+#include "ownedtaskfuture.h"
 
 // Owner-thread atomic publication of annotations and a prepared document/filter.
 // Native projections/matchers prepare privately off-thread. Final validation and
@@ -47,10 +47,7 @@ class ReviewTransaction {
     };
     // Qt notifies the GUI of completion; only the transaction may consume the
     // result. A copied completion handle must not retain projections or admission.
-    struct PreparationTask {
-        QFuture<void> finished;
-        std::future<Preparation> result;
-    };
+    using PreparationTask = klogg::SingleOwnerTaskFuture<Preparation>;
     using Preparer = std::function<std::optional<PreparationTask>( PreparationInput )>;
 
     explicit ReviewTransaction( Preparer prepare = {} );

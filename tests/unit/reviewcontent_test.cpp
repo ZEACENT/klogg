@@ -166,6 +166,7 @@ TEST_CASE( "Explicit content reads use immutable leases off the GUI thread", "[r
     source.reset();
     const auto result = fixture.finished( operation );
     CHECK( result.value( "status" ) == QLatin1String( "completed" ) );
+    CHECK( object( fixture.call( "operation.get", { { "operation_id", operation } } ) ) == result );
     const auto data = result.value( "result" ).toObject();
     CHECK( data.value( "source_bytes" ) == QLatin1String( "16" ) );
     const auto rows = data.value( "rows" ).toArray();

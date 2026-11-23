@@ -11,7 +11,7 @@
 
 #include <QCoreApplication>
 #include <QThread>
-#include <QtConcurrent/QtConcurrentRun>
+#include "ownedtaskfuture.h"
 
 #include "asyncworkbudget.h"
 #include "configuration.h"
@@ -47,7 +47,7 @@ klogg::AsyncWorkBudget::Lease acquirePreparationPermit()
 
 ReviewTransaction::PreparationTask prepareReview( ReviewTransaction::PreparationInput captured )
 {
-    auto task = std::make_shared<std::packaged_task<Preparation()>>( [input = std::move( captured )]() mutable {
+    return klogg::runSingleOwnerTask( [input = std::move( captured )]() mutable {
         Preparation outcome;
         // Completed-but-unpublished projections retain admission as well as
         // queued/running work. Cancellation never frees a still-live worker.
@@ -77,11 +77,6 @@ ReviewTransaction::PreparationTask prepareReview( ReviewTransaction::Preparation
         catch ( ... ) { outcome.failure = Status::PreparationFailed; }
         return outcome;
     } );
-    auto result = task->get_future();
-    // The result is handed off through the standard shared state, before Qt
-    // signals finished. The watcher never touches a typed Qt result store.
-    auto finished = QtConcurrent::run( [task] { ( *task )(); } );
-    return { std::move( finished ), std::move( result ) };
 }
 }
 

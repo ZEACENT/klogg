@@ -1009,11 +1009,16 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("void deliverNotification( const QString& message );", QUICKFIND_HEADER.read_text())
 
     def test_snapshot_tasks_use_owned_execution_not_uninstrumented_qt_pool_handoffs(self):
-        for relative in ("src/ui/src/quickfind.cpp", "src/ui/src/matchselection.cpp"):
+        for relative, submit in (
+            ("src/ui/src/quickfind.cpp", "runOwnedTask"),
+            ("src/ui/src/matchselection.cpp", "runOwnedTask"),
+            ("src/ui/src/reviewtransaction.cpp", "runSingleOwnerTask"),
+            ("src/ui/src/reviewcontentadapter.cpp", "runSingleOwnerTask"),
+        ):
             with self.subTest(source=relative):
                 source = (ROOT / relative).read_text()
                 self.assertNotIn("QtConcurrent::run", source)
-                self.assertIn("klogg::runOwnedTask(", source)
+                self.assertIn(f"klogg::{submit}(", source)
         bridge = (ROOT / "src/utils/include/ownedtaskfuture.h").read_text()
         self.assertIn("std::packaged_task<Result()>", bridge)
         self.assertIn("std::shared_future<Result>", bridge)
