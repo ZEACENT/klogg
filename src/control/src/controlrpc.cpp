@@ -1,8 +1,6 @@
 #include "controlrpc.h"
 
-#include <cmath>
 #include <cstdint>
-#include <limits>
 #include <utility>
 
 #include <QJsonArray>
@@ -127,13 +125,13 @@ DecodedResponse decodeResponse( const QByteArray& payload, const QString& expect
     }
     const auto error = errorValue.toObject();
     const auto codeValue = error.value( QStringLiteral( "code" ) );
-    const auto code = codeValue.toDouble();
-    if ( !codeValue.isDouble() || !std::isfinite( code ) || std::trunc( code ) != code
-         || code < std::numeric_limits<int>::min() || code > std::numeric_limits<int>::max()
-         || !error.value( QStringLiteral( "message" ) ).isString() ) {
+    // toInt returns its default (zero) for non-integral or out-of-range numbers.
+    // Only accept it if the exact JSON number survives the conversion.
+    const int code = codeValue.toInt();
+    if ( codeValue != QJsonValue( code ) || !error.value( QStringLiteral( "message" ) ).isString() ) {
         return invalid();
     }
-    return RpcError{ requestId, static_cast<int>( code ),
+    return RpcError{ requestId, code,
                      error.value( QStringLiteral( "message" ) ).toString(),
                      error.value( QStringLiteral( "data" ) ), true, true };
 }

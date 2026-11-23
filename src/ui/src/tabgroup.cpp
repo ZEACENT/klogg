@@ -90,13 +90,13 @@ TabGroupManager::prepareTabRemovals( const QStringList& paths )
             break;
         }
     }
-    if ( state->changed ) state->next = std::make_shared<const uint8_t>( 0 );
+    if ( state->changed ) state->next = std::make_shared<const uint8_t>();
     return std::unique_ptr<PreparedRemoval>( new PreparedRemoval( std::move( state ) ) );
 }
 
 void TabGroupManager::advanceMutationIdentity()
 {
-    mutationIdentity_ = std::make_shared<const uint8_t>( 0 );
+    mutationIdentity_ = std::make_shared<const uint8_t>();
 }
 
 QList<TabGroup> TabGroupManager::groups() const

@@ -1,6 +1,7 @@
 #include "controlschema.h"
 
 #include <QJsonArray>
+#include <QStringList>
 
 namespace klogg::control {
 namespace {

@@ -1064,6 +1064,14 @@ cmake --build build
   - `logfiltereddata_test.cpp`
   - `mainwindow_test.cpp`
 
+### Local control portability check
+
+With a configured Clang build and Homebrew Qt 5, run
+`python3 scripts/probe_control_portability.py --qt5-prefix "$(brew --prefix qt@5)"`.
+This syntax-checks the real client sources and GUI adapter test against Qt 5,
+including the document-open callback under stricter shadow warnings. It does
+not replace package smoke tests or native platform builds.
+
 ### Test Data
 
 The automated tests keep fixtures close to the tests that use them under `tests/`.

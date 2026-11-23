@@ -395,7 +395,7 @@ class FolderSearchResults : public AbstractLogData {
     // incl. the QuickFind worker's reads. The file-content caches named below are
     // instead guarded by fileIoMutex_.
     mutable SharedMutex dataMutex_;
-    const std::shared_ptr<const uint8_t> layoutIdentity_ = std::make_shared<const uint8_t>( 0 );
+    const std::shared_ptr<const uint8_t> layoutIdentity_ = std::make_shared<const uint8_t>();
     // Guards openFiles_, markLineCache_, markTextCache_, markTextCacheBytes_, and
     // every seek/read on the shared per-group QFile handles (two concurrent
     // readMatchLine callers would otherwise tear the file cursor). Always taken

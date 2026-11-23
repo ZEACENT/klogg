@@ -168,7 +168,8 @@ TEST_CASE( "An abandoned transaction releases its unpublished document without a
     } ) );
     REQUIRE( receipt.value( "status" ) == "completed" );
     QPointer<FolderCrawlerWidget> staged;
-    const auto id = receipt.value( "result" ).toObject().value( "tab_id" );
+    const auto id = receipt.value( "result" ).toObject().value( "tab_id" ).toString();
+    REQUIRE_FALSE( id.isEmpty() );
     for ( auto* widget : QApplication::allWidgets() ) {
         auto* folder = qobject_cast<FolderCrawlerWidget*>( widget );
         if ( folder && folder->runtimeTabId() == id ) staged = folder;

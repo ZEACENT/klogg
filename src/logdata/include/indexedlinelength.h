@@ -33,7 +33,9 @@ Length tabSpaces( Length additionalSpaces, int tabOffset, int tabStop )
     const auto expanded = spaces + tabOffset;
     const auto added = static_cast<std::int64_t>( tabStop ) - ( expanded % tabStop ) - 1;
     if ( spaces > maximum - added ) return static_cast<Length>( maximum );
-    return static_cast<Length>( spaces + added );
+    // Both the increment and the sum now fit the destination type.
+    additionalSpaces += static_cast<Length>( added );
+    return additionalSpaces;
 }
 }
 

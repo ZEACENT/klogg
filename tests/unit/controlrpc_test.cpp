@@ -1,4 +1,5 @@
 #include <catch2/catch.hpp>
+#include <limits>
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -89,10 +90,28 @@ TEST_CASE( "Control RPC response decoding validates correlation and exclusive ou
         QByteArray( R"({"jsonrpc":"2.0","id":"x"})" ),
         QByteArray( R"({"jsonrpc":"2.0","id":"x","error":{"code":1.5,"message":"bad"}})" ),
         QByteArray( R"({"jsonrpc":"2.0","id":"x","error":{"code":1e30,"message":"bad"}})" ),
+        QByteArray( R"({"jsonrpc":"2.0","id":"x","error":{"code":-2147483649,"message":"bad"}})" ),
+        QByteArray( R"({"jsonrpc":"2.0","id":"x","error":{"code":"0","message":"bad"}})" ),
         QByteArray( R"({"jsonrpc":"2.0","id":"x","error":{"code":-1,"message":false}})" ) );
     const auto rejected = decodeResponse( malformed, QStringLiteral( "x" ) );
     REQUIRE( std::holds_alternative<RpcError>( rejected ) );
     CHECK_FALSE( std::get<RpcError>( rejected ).remote );
+}
+
+TEST_CASE( "Control RPC accepts zero and both integral error code boundaries", "[control-rpc]" )
+{
+    const int code = GENERATE( 0, std::numeric_limits<int>::min(), std::numeric_limits<int>::max() );
+    RpcError sent;
+    sent.id = QStringLiteral( "x" );
+    sent.code = code;
+    sent.message = QStringLiteral( "test" );
+    const auto encoded = encodeError( sent );
+    REQUIRE( encoded );
+    const auto result = decodeResponse( *encoded, QStringLiteral( "x" ) );
+    REQUIRE( std::holds_alternative<RpcError>( result ) );
+    const auto& received = std::get<RpcError>( result );
+    REQUIRE( received.remote );
+    CHECK( received.code == code );
 }
 
 TEST_CASE( "Control RPC preserves remote error data without interpreting it as commands",

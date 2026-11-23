@@ -263,7 +263,7 @@ private:
     // List of open files
     typedef std::unordered_map<const ViewInterface*, OpenFile> OpenFileMap;
     OpenFileMap openFiles_;
-    const std::shared_ptr<const uint8_t> preparationIdentity_ = std::make_shared<const uint8_t>( 0 );
+    const std::shared_ptr<const uint8_t> preparationIdentity_ = std::make_shared<const uint8_t>();
     // QObject children own retired graphs; completion observers never retain Session.
     std::unique_ptr<QObject> retiredDocuments_;
 

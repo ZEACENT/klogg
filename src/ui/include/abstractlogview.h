@@ -261,7 +261,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     }
 
     using QuickHighlighters = QList<QuickLabelEntry>;
-    void setQuickHighlighters( std::vector<QuickHighlighters> wordHighlighters );
+    void setQuickHighlighters( std::vector<QuickHighlighters> quickHighlighters );
 
     void registerShortcuts();
 

@@ -113,7 +113,7 @@ class TabGroupManager : public QObject, public Persistable<TabGroupManager> {
     QList<TabGroup> groups_;
     // Retained identity catches ABA without a wrapping public counter. Only
     // revision-owning commands may mutate groups; lookup results are read-only.
-    std::shared_ptr<const uint8_t> mutationIdentity_ = std::make_shared<const uint8_t>( 0 );
+    std::shared_ptr<const uint8_t> mutationIdentity_ = std::make_shared<const uint8_t>();
 };
 
 Q_DECLARE_METATYPE( TabGroup )

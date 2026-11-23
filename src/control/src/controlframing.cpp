@@ -1,6 +1,7 @@
 #include "controlframing.h"
 
 #include <algorithm>
+#include <limits> // Qt 5.12's QtEndian uses std::numeric_limits.
 #include <utility>
 
 #include <QtEndian>
