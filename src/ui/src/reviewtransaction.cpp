@@ -1,6 +1,8 @@
 #include "reviewtransaction.h"
 
 #include <algorithm>
+#include <chrono>
+#include <future>
 #include <limits>
 #include <map>
 #include <set>
@@ -43,9 +45,9 @@ klogg::AsyncWorkBudget::Lease acquirePreparationPermit()
     return budget.tryAcquire();
 }
 
-std::optional<QFuture<Preparation>> prepareReview( ReviewTransaction::PreparationInput input )
+ReviewTransaction::PreparationTask prepareReview( ReviewTransaction::PreparationInput captured )
 {
-    return QtConcurrent::run( [input = std::move( input )]() mutable -> Preparation {
+    auto task = std::make_shared<std::packaged_task<Preparation()>>( [input = std::move( captured )]() mutable {
         Preparation outcome;
         // Completed-but-unpublished projections retain admission as well as
         // queued/running work. Cancellation never frees a still-live worker.
@@ -75,6 +77,11 @@ std::optional<QFuture<Preparation>> prepareReview( ReviewTransaction::Preparatio
         catch ( ... ) { outcome.failure = Status::PreparationFailed; }
         return outcome;
     } );
+    auto result = task->get_future();
+    // The result is handed off through the standard shared state, before Qt
+    // signals finished. The watcher never touches a typed Qt result store.
+    auto finished = QtConcurrent::run( [task] { ( *task )(); } );
+    return { std::move( finished ), std::move( result ) };
 }
 }
 
@@ -450,11 +457,13 @@ ReviewTransaction::Status ReviewTransaction::commit( const std::function<void()>
         }
         if ( changedHighlighters && Configuration::get().regexpEngine() != *preparationEngine_ )
             return finish( Status::Conflict );
-        if ( !preparation_->isFinished() ) return Status::Preparing;
+        if ( !preparation_->finished.isFinished() ) return Status::Preparing;
         publicationPermit = preparationPermit_;
         try {
-            if ( preparation_->resultCount() != 1 ) return finish( Status::PreparationFailed );
-            auto outcome = preparation_->result();
+            auto& result = preparation_->result;
+            if ( !result.valid() || result.wait_for( std::chrono::seconds::zero() ) != std::future_status::ready )
+                return finish( Status::PreparationFailed );
+            auto outcome = result.get();
             if ( outcome.failure != Status::Open ) {
                 switch ( outcome.failure ) {
                 case Status::InvalidArgument:

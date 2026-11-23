@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <functional>
+#include <future>
 #include <memory>
 #include <cstddef>
 #include <cstdint>
@@ -44,7 +45,13 @@ class ReviewTransaction {
         std::vector<klogg::ReviewMarksPreparer> marks;
         klogg::AsyncWorkBudget::Lease permit;
     };
-    using Preparer = std::function<std::optional<QFuture<Preparation>>( PreparationInput )>;
+    // Qt notifies the GUI of completion; only the transaction may consume the
+    // result. A copied completion handle must not retain projections or admission.
+    struct PreparationTask {
+        QFuture<void> finished;
+        std::future<Preparation> result;
+    };
+    using Preparer = std::function<std::optional<PreparationTask>( PreparationInput )>;
 
     explicit ReviewTransaction( Preparer prepare = {} );
     ~ReviewTransaction();
@@ -97,7 +104,11 @@ class ReviewTransaction {
     Status stageMarks( klogg::ReviewMarksOwner& owner, const MarkEdit& edit, bool privateOwner = false );
     Status stageHighlighters( QList<HighlighterSet> sets, QStringList activeSetIds );
     bool committedHighlighters() const { return highlightersCommitted_; }
-    std::optional<QFuture<Preparation>> preparationFuture() const { return preparation_; }
+    std::optional<QFuture<void>> preparationFuture() const
+    {
+        if ( !preparation_ ) return {};
+        return preparation_->finished;
+    }
     // A pending private preparation returns Preparing. The application pumps
     // commit again on completion, revalidates every owner, then publishes once.
     Status commit( const std::function<void()>& published = {} );
@@ -148,7 +159,7 @@ class ReviewTransaction {
     std::vector<Marks> marks_;
     std::optional<Highlighters> highlighters_;
     Preparer preparer_;
-    std::optional<QFuture<Preparation>> preparation_;
+    std::optional<PreparationTask> preparation_;
     std::shared_ptr<std::atomic<bool>> preparationCancelled_;
     std::optional<RegexpEngine> preparationEngine_;
     klogg::AsyncWorkBudget::Lease preparationPermit_;

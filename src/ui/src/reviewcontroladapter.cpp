@@ -683,7 +683,7 @@ DecodedResponse ReviewControlAdapter::dispatch( const RpcRequest& request )
             // only worker preparation has a future that needs a watcher.
             if ( !future ) return response;
             // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): the adapter parents the asynchronous watcher.
-            auto* watcher = new QFutureWatcher<ReviewTransaction::Preparation>( self );
+            auto* watcher = new QFutureWatcher<void>( self );
             QPointer<QObject> watcherGuard( watcher );
             candidate->observingPreparation = true;
             // Retain no request payload while compiling. The candidate owns its

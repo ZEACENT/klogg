@@ -231,12 +231,17 @@ TEST_CASE( "Completed private mark results retain process admission until public
     REQUIRE( second.stageMarks( *fixture.marks, { Kind::Add, { two } } ) == Status::Open );
     REQUIRE( first.commit() == Status::Preparing );
     REQUIRE( second.commit() == Status::Preparing );
+    // A completion observer can outlive publication (for example, a watcher
+    // waiting for deferred deletion). It must not keep a prepared result or its permit.
+    const auto observer = first.preparationFuture();
+    REQUIRE( observer );
     waitPreparation( first );
     waitPreparation( second );
     ReviewTransaction rejected;
     REQUIRE( rejected.stageMarks( *fixture.marks, { Kind::Add, { one } } ) == Status::Open );
     CHECK( rejected.commit() == Status::ResourceLimit );
     REQUIRE( first.commit() == Status::Committed );
+    CHECK( observer->isFinished() );
     ReviewTransaction next;
     REQUIRE( next.stageMarks( *fixture.marks, { Kind::Add, { two } } ) == Status::Open );
     REQUIRE( next.commit() == Status::Preparing );

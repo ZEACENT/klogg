@@ -38,7 +38,8 @@ struct Owners {
 };
 
 struct DeferredPreparation {
-    QFutureInterface<Preparation> completion;
+    QFutureInterface<void> completion;
+    std::promise<Preparation> result;
     std::optional<HighlighterSetCollection::Snapshot> captured;
     RegexpEngine engine = RegexpEngine::QRegularExpression;
     std::shared_ptr<std::atomic<bool>> cancelled;
@@ -46,13 +47,13 @@ struct DeferredPreparation {
 
     ReviewTransaction::Preparer callback()
     {
-        return [this]( ReviewTransaction::PreparationInput input ) -> std::optional<QFuture<Preparation>> {
+        return [this]( ReviewTransaction::PreparationInput input ) {
             ++calls;
             captured = std::move( input.highlighters );
             engine = input.engine;
             cancelled = std::move( input.cancelled );
             completion.reportStarted();
-            return completion.future();
+            return ReviewTransaction::PreparationTask{ completion.future(), result.get_future() };
         };
     }
     void finish()
@@ -60,7 +61,7 @@ struct DeferredPreparation {
         REQUIRE( captured );
         auto update = std::make_shared<HighlighterSetCollection::PreparedUpdate>(
             HighlighterSetCollection::prepareUpdate( *captured, engine ) );
-        completion.reportResult( Preparation{ std::move( update ), Status::Open, {}, {} } );
+        result.set_value( Preparation{ std::move( update ), Status::Open, {}, {} } );
         completion.reportFinished();
     }
 };
@@ -260,23 +261,22 @@ TEST_CASE( "Failed private highlighter preparation leaves all owners unchanged",
     Owners owners;
     DeferredPreparation deferred;
     ReviewTransaction transaction{ deferred.callback() };
-    auto proposed = owners.proposed;
-    Status expected = Status::InvalidArgument;
-    bool missingResult = false;
-    SECTION( "invalid compiled pattern" ) {
-        proposed = HighlighterSet::fromDescription( "invalid", "Invalid",
-            { Highlighter{ "(", false, true, QColor( Qt::black ), QColor( Qt::yellow ) } } );
-    }
-    SECTION( "missing worker result" ) {
-        missingResult = true;
-        expected = Status::PreparationFailed;
-    }
+    const auto proposed = HighlighterSet::fromDescription( "invalid", "Invalid",
+        { Highlighter{ "(", false, true, QColor( Qt::black ), QColor( Qt::yellow ) } } );
+    Status expected = Status::PreparationFailed;
     const auto before = HighlighterSetCollection::get().snapshot();
     REQUIRE( transaction.stageLabels( owners.labels, { Owners::label() } ) == Status::Open );
     REQUIRE( transaction.stageHighlighters( { proposed }, { proposed.id() } ) == Status::Open );
     REQUIRE( transaction.commit() == Status::Preparing );
-    if ( missingResult ) deferred.completion.reportFinished();
-    else deferred.finish();
+    SECTION( "invalid compiled pattern" ) {
+        expected = Status::InvalidArgument;
+        deferred.finish();
+    }
+    SECTION( "completion without an outcome must not wait" ) { deferred.completion.reportFinished(); }
+    SECTION( "abandoned producer" ) {
+        deferred.result = std::promise<Preparation>{};
+        deferred.completion.reportFinished();
+    }
     CHECK( transaction.commit() == expected );
     CHECK( owners.labels.snapshot().revision == 0 );
     CHECK( HighlighterSetCollection::get().revision() == before.revision );
