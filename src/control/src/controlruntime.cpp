@@ -14,6 +14,20 @@ namespace klogg::control {
 namespace {
 constexpr int MaxDescriptorBytes = 8192;
 constexpr int MaxDescriptors = 256;
+// Budget physical directory entries as well as admitted live descriptors,
+// including files we will never read or remove. Never return a partial list.
+constexpr int MaxInspectedEntries = 2 * MaxDescriptors + 2;
+QString registryPath( const RuntimeOptions& options )
+{
+    // Older development builds did not hold kernel leases. Do not interpret or
+    // garbage-collect their files, nor let them consume the new registry budget.
+    return QDir( options.descriptorRoot ).filePath( QStringLiteral( "epochs-v1" ) );
+}
+QString identityKey( pal::FileIdentity identity )
+{
+    return identity.valid ? QString::number( identity.device ) + QLatin1Char( ':' )
+                                + QString::number( identity.file ) : QString{};
+}
 
 RuntimeOptions resolved( RuntimeOptions options )
 {
@@ -35,9 +49,11 @@ bool identityText( const QString& value )
 {
     return value.size() <= 256 && !value.contains( QChar( 0 ) );
 }
-QJsonObject object( const InstanceDescriptor& descriptor )
+QJsonObject object( const InstanceDescriptor& descriptor, pal::FileIdentity file, pal::FileIdentity socket )
 {
     return { { QStringLiteral( "descriptorVersion" ), descriptor.descriptorVersion },
+             { QStringLiteral( "publishedFile" ), identityKey( file ) },
+             { QStringLiteral( "publishedSocket" ), identityKey( socket ) },
              { QStringLiteral( "protocolMin" ), descriptor.protocolMin },
              { QStringLiteral( "protocolMax" ), descriptor.protocolMax },
              { QStringLiteral( "instanceId" ), descriptor.instanceId },
@@ -46,12 +62,9 @@ QJsonObject object( const InstanceDescriptor& descriptor )
              { QStringLiteral( "endpoint" ), descriptor.endpoint },
              { QStringLiteral( "token" ), descriptor.token } };
 }
-std::optional<InstanceDescriptor> decode( const QByteArray& bytes, const QString& name,
+std::optional<InstanceDescriptor> decode( const QJsonObject& value, const QString& name,
                                           const RuntimeOptions& options )
 {
-    const auto document = QJsonDocument::fromJson( bytes );
-    if ( !document.isObject() ) return {};
-    const auto value = document.object();
     InstanceDescriptor descriptor;
     if ( value.value( "descriptorVersion" ) != QJsonValue( 1 )
          || value.value( "protocolMin" ) != QJsonValue( ControlProtocolVersion )
@@ -65,7 +78,7 @@ std::optional<InstanceDescriptor> decode( const QByteArray& bytes, const QString
     descriptor.endpoint = value.value( "endpoint" ).toString();
     descriptor.token = value.value( "token" ).toString();
     if ( !hex( descriptor.instanceId, 32 ) || !hex( descriptor.token, 64 )
-         || name != descriptor.instanceId + QStringLiteral( ".json" )
+         || name != descriptor.instanceId + QStringLiteral( ".instance" )
          || !identityText( descriptor.installationId ) || !identityText( descriptor.profileId )
          || !pal::validEndpoint( descriptor.endpoint, options.socketRoot, descriptor.instanceId ) ) return {};
     return descriptor;
@@ -75,33 +88,77 @@ bool fail( QString* error, const QString& message )
     if ( error ) *error = message;
     return false;
 }
+// Reap only an immutable epoch record read from its original verified inode.
+// Never follow a path supplied by the record, delete a replacement socket, or
+// modify a live, malformed, inaccessible, or unrecognized registration.
+void retireEpoch( pal::PrivateDirectory& registry, const QString& name, pal::FileIdentity file,
+                  const RuntimeOptions& options, const InstanceDescriptor& epoch, const QString& socketKey )
+{
+    const auto path = pal::socketDirectory( options.socketRoot, epoch.instanceId );
+    if ( !path.isEmpty() && !socketKey.isEmpty() && pal::privateEndpoint( epoch.endpoint, epoch.instanceId ) ) {
+        pal::PrivateDirectory directory;
+        if ( directory.open( path, false ) ) {
+            const auto socket = directory.identity( QStringLiteral( "s" ) );
+            if ( identityKey( socket ) == socketKey ) {
+                directory.removeOwned( QStringLiteral( "s" ), socket );
+                directory.removeDirectory();
+            }
+        }
+    }
+    registry.removeOwned( name, file );
+}
+DiscoveryResult inspectEpochs( pal::PrivateDirectory& registry, const RuntimeOptions& options, bool reclaim )
+{
+    DiscoveryResult result;
+    const auto entries = registry.entries( MaxInspectedEntries );
+    int liveCount = 0;
+    for ( const auto& name : entries.names ) {
+        const auto file = registry.read( name, MaxDescriptorBytes );
+        if ( !file ) { ++result.rejectedDescriptors; continue; }
+        const auto value = QJsonDocument::fromJson( file->bytes ).object();
+        const auto descriptor = decode( value, name, options );
+        if ( !descriptor || !file->identity.valid || value.value( "publishedFile" ).toString() != identityKey( file->identity ) ) {
+            ++result.rejectedDescriptors;
+            continue;
+        }
+        if ( !file->ownerPresent ) {
+            if ( reclaim ) retireEpoch( registry, name, file->identity, options, *descriptor,
+                                        value.value( "publishedSocket" ).toString() );
+            continue;
+        }
+        ++liveCount;
+        if ( reclaim ) continue;
+        if ( !options.installationId.isEmpty() && descriptor->installationId != options.installationId ) continue;
+        if ( !options.profileId.isEmpty() && descriptor->profileId != options.profileId ) continue;
+        result.instances.push_back( *descriptor );
+    }
+    if ( !entries.complete || liveCount > MaxDescriptors || ( reclaim && liveCount == MaxDescriptors ) ) {
+        result.instances.clear();
+        result.error = QStringLiteral( "Control discovery limit exceeded or registry unreadable" );
+    }
+    return result;
+}
 } // namespace
 
 DiscoveryResult discoverInstances( const RuntimeOptions& requested )
 {
     const auto options = resolved( requested );
     DiscoveryResult result;
-    pal::PrivateDirectory directory;
-    // Discovery never creates resources. An absent root means no enabled server.
+    pal::PrivateDirectory root;
+    // Discovery never creates or deletes resources and never contacts an endpoint.
     if ( !QFileInfo::exists( options.descriptorRoot ) && !QFileInfo( options.descriptorRoot ).isSymLink() ) return result;
-    if ( !directory.open( options.descriptorRoot, false ) ) {
+    if ( !root.open( options.descriptorRoot, false ) ) {
         result.error = QStringLiteral( "Unsafe control discovery directory" );
         return result;
     }
-    const auto entries = directory.entries( MaxDescriptors + 1 );
-    if ( entries.size() > MaxDescriptors ) {
-        result.error = QStringLiteral( "Control discovery limit exceeded" );
+    const auto path = registryPath( options );
+    if ( !QFileInfo::exists( path ) && !QFileInfo( path ).isSymLink() ) return result;
+    pal::PrivateDirectory registry;
+    if ( !registry.open( path, false ) ) {
+        result.error = QStringLiteral( "Unsafe control epoch registry" );
         return result;
     }
-    for ( const auto& name : entries ) {
-        const auto bytes = directory.read( name, MaxDescriptorBytes );
-        const auto descriptor = bytes ? decode( *bytes, name, options ) : std::nullopt;
-        if ( !descriptor ) { ++result.rejectedDescriptors; continue; }
-        if ( !options.installationId.isEmpty() && descriptor->installationId != options.installationId ) continue;
-        if ( !options.profileId.isEmpty() && descriptor->profileId != options.profileId ) continue;
-        result.instances.push_back( *descriptor );
-    }
-    return result;
+    return inspectEpochs( registry, options, false );
 }
 
 struct ControlRuntime::Private {
@@ -131,9 +188,15 @@ bool ControlRuntime::prepare( const RuntimeOptions& requested, QString* error )
     if ( !identityText( options.installationId ) || !identityText( options.profileId ) )
         return fail( error, QStringLiteral( "Invalid control identity" ) );
     d_->discovery = std::make_unique<pal::PrivateDirectory>();
-    if ( !d_->discovery->open( options.descriptorRoot, true ) ) {
+    pal::PrivateDirectory root;
+    if ( !root.open( options.descriptorRoot, true ) || !d_->discovery->open( registryPath( options ), true ) ) {
         clear();
         return fail( error, QStringLiteral( "Unsafe control discovery directory" ) );
+    }
+    const auto inspected = inspectEpochs( *d_->discovery, options, true );
+    if ( !inspected.error.isEmpty() ) {
+        clear();
+        return fail( error, inspected.error );
     }
     auto& instance = d_->descriptor;
     instance.instanceId = QUuid::createUuid().toString( QUuid::Id128 );
@@ -147,7 +210,7 @@ bool ControlRuntime::prepare( const RuntimeOptions& requested, QString* error )
         secret.append( reinterpret_cast<const char*>( &random ), sizeof( random ) );
     }
     instance.token = QString::fromLatin1( secret.toHex() );
-    d_->name = instance.instanceId + QStringLiteral( ".json" );
+    d_->name = instance.instanceId + QStringLiteral( ".instance" );
     const auto socketPath = pal::socketDirectory( options.socketRoot, instance.instanceId );
     if ( !socketPath.isEmpty() ) {
         d_->socket = std::make_unique<pal::PrivateDirectory>();
@@ -163,8 +226,9 @@ bool ControlRuntime::prepare( const RuntimeOptions& requested, QString* error )
 bool ControlRuntime::publish( QString* error )
 {
     if ( !d_->discovery || d_->descriptorIdentity.valid
-         || !d_->discovery->publish( d_->name, QJsonDocument( object( d_->descriptor ) ).toJson( QJsonDocument::Compact ),
-                                     &d_->descriptorIdentity ) )
+         || !d_->discovery->publish( d_->name, [this]( pal::FileIdentity file ) {
+             return QJsonDocument( object( d_->descriptor, file, d_->socketIdentity ) ).toJson( QJsonDocument::Compact );
+         }, &d_->descriptorIdentity ) )
         return fail( error, QStringLiteral( "Cannot publish control descriptor" ) );
     return true;
 }

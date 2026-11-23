@@ -364,6 +364,31 @@ verification, not just possession of a guessed pathname.
 - Explicit LeakSanitizer activation is unsupported by this AppleClang runtime;
   ASan/UBSan results are not a LeakSanitizer claim.
 
+### Discovery after an unclean exit
+
+A successful publisher holds an exclusive OS lease on its immutable registration
+from before publication until cleanup or process exit (`flock` on Unix, a
+nonblocking byte-range lock beyond the descriptor contents on Windows). Readers
+probe for a shared lease on the same privately opened file: readers do not
+conflict with other readers and cannot pose as live publishers. Discovery never
+opens a candidate socket, transmits credentials, deletes files, or guesses from
+a PID or timestamp. An observed live instance can still exit before a call.
+
+Startup inspects the private `epochs-v1` registry before publishing a new epoch.
+It reclaims only well-formed, abandoned registrations bound to the same file
+identity as the record that was opened. A Unix socket must also have its original
+identity, type and expected location; replacements are not removed. Unknown or
+unsafe files and the older unleased development registry are left untouched.
+The walk inspects at most 514 directory entries plus an end/overflow check, and
+admits at most 256 live registrations. An incomplete walk or capacity failure
+returns an error, not a partial inventory. Death during creation of an unpublished
+temporary file may leave debris: the reaper is not an arbitrary directory cleaner.
+
+A subprocess regression publishes three epochs with abrupt exits and no
+intervening discovery. Each restart reclaims the previous published epoch, the
+surviving instance remains callable, and a copied descriptor cannot authorize
+reclamation or masquerade as its original owner.
+
 ## Slice 11: global setting and application composition
 
 `control.enabled` defaults true and preserves explicit false on storage reload.

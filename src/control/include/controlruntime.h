@@ -40,7 +40,7 @@ struct DiscoveryResult {
     std::size_t rejectedDescriptors = 0;
 };
 
-// No liveness probes, stale-file deletion, or execution of descriptor contents.
+// Read-only kernel lease checks. No endpoint probes, deletion, or execution of descriptor contents.
 DiscoveryResult discoverInstances( const RuntimeOptions& requested = {} );
 
 // Owns one enable epoch. Internal transport resource owner; public so the

@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
@@ -12,8 +13,11 @@
 #include <QElapsedTimer>
 #include <QProcess>
 #include <stdexcept>
+#include <cstdlib>
+#include <QProcessEnvironment>
 #include <functional>
 
+#include "controlcli.h"
 #include "controlframing.h"
 #include <QTemporaryDir>
 #include <QThread>
@@ -415,6 +419,63 @@ TEST_CASE( "Control discovery rejects descriptor substitution and invalid identi
     CHECK( discovery.rejectedDescriptors == 1 );
 }
 
+TEST_CASE( "Control test child abandons its published instance", "[.control-crash-publisher]" )
+{
+    const auto root = qEnvironmentVariable( "KLOGG_TEST_ABANDON_CONTROL_ROOT" );
+    const auto sockets = qEnvironmentVariable( "KLOGG_TEST_ABANDON_SOCKET_ROOT" );
+    REQUIRE_FALSE( root.isEmpty() );
+    REQUIRE_FALSE( sockets.isEmpty() );
+    ControlServer child;
+    REQUIRE( child.start( { root, sockets, "test-install", "test-profile" }, okay ) );
+    // Like a killed GUI, the OS closes its handles without running any application cleanup.
+    std::_Exit( EXIT_SUCCESS );
+}
+
+TEST_CASE( "Abandoned control epochs never hide the only live GUI or accumulate on restart",
+           "[controltransport][control-abandoned]" )
+{
+    QTemporaryDir directory;
+    auto options = roots( directory );
+    // Darwin's deep per-user TMPDIR can exceed the AF_UNIX pathname limit.
+    const auto shortRoot = QSysInfo::kernelType() == QStringLiteral( "winnt" )
+        ? QDir::tempPath() : QFileInfo( QStringLiteral( "/tmp" ) ).canonicalFilePath();
+    QTemporaryDir sockets( shortRoot + QStringLiteral( "/kt-XXXXXX" ) );
+    REQUIRE( sockets.isValid() );
+    options.socketRoot = QFileInfo( sockets.path() ).canonicalFilePath();
+    ControlServer live;
+    REQUIRE( live.start( options, okay ) );
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert( "KLOGG_TEST_ABANDON_CONTROL_ROOT", options.descriptorRoot );
+    environment.insert( "KLOGG_TEST_ABANDON_SOCKET_ROOT", options.socketRoot );
+    const auto countRegistrations = [&] {
+        return QFileInfo( live.descriptorPath() ).absoluteDir().entryList( QDir::Files | QDir::Hidden ).size();
+    };
+    for ( int attempt = 0; attempt < 3; ++attempt ) {
+        QProcess child;
+        child.setProcessEnvironment( environment );
+        child.start( QCoreApplication::applicationFilePath(), { "Control test child abandons its published instance" } );
+        REQUIRE( child.waitForFinished( 30000 ) );
+        REQUIRE( child.exitStatus() == QProcess::NormalExit );
+        REQUIRE( child.exitCode() == 0 );
+        // Do not depend on intervening CLI calls for garbage collection.
+        CHECK( countRegistrations() == 2 );
+        if ( QSysInfo::kernelType() != QStringLiteral( "winnt" ) ) {
+            CHECK( QDir( options.socketRoot ).entryList( QDir::Dirs | QDir::NoDotAndDotDot ).size() == 2 );
+        }
+    }
+    const auto discovered = discoverInstances( options );
+    REQUIRE( discovered.error.isEmpty() );
+    REQUIRE( discovered.instances.size() == 1 );
+    CHECK( discovered.instances.front().instanceId == live.descriptor().instanceId );
+    // Exercise the CLI default selector and real transport. Only the calling
+    // thread differs from a separate CLI so this test's GUI thread can serve.
+    CliServices cli;
+    cli.call = invoke;
+    QBuffer input;
+    REQUIRE( input.open( QIODevice::ReadOnly ) );
+    CHECK( runControlCli( { "state", "get" }, input, "test", cli, options ).exit == CliExit::Success );
+}
+
 TEST_CASE( "Control discovery isolates installation and profile identities", "[controltransport]" )
 {
     QTemporaryDir directory;
@@ -430,6 +491,47 @@ TEST_CASE( "Control discovery isolates installation and profile identities", "[c
     CHECK( discoverInstances( all ).instances.size() == 2 );
     first.stop();
     CHECK( discoverInstances( other ).instances.size() == 1 );
+}
+
+TEST_CASE( "A valid copy cannot impersonate a published control epoch or authorize reclamation",
+           "[controltransport][control-abandoned]" )
+{
+    QTemporaryDir directory;
+    const auto options = roots( directory );
+    ControlServer original;
+    REQUIRE( original.start( options, okay ) );
+    const auto path = original.descriptorPath();
+    REQUIRE( QFile::rename( path, path + ".original" ) );
+    original.stop();
+    REQUIRE( QFile::copy( path + ".original", path ) );
+    ControlServer replacement;
+    REQUIRE( replacement.start( options, okay ) );
+    const auto found = discoverInstances( options );
+    REQUIRE( found.error.isEmpty() );
+    REQUIRE( found.instances.size() == 1 );
+    CHECK( found.instances.front().instanceId == replacement.descriptor().instanceId );
+    CHECK( found.rejectedDescriptors == 1 );
+    CHECK( QFileInfo::exists( path ) );
+}
+
+TEST_CASE( "An overfull discovery registry fails closed without deleting unknown files",
+           "[controltransport][control-abandoned]" )
+{
+    QTemporaryDir directory;
+    const auto options = roots( directory );
+    ControlServer live;
+    REQUIRE( live.start( options, okay ) );
+    const auto registry = QFileInfo( live.descriptorPath() ).absoluteDir();
+    for ( int index = 0; index < 515; ++index ) {
+        QFile unknown( registry.filePath( QString::number( index ) ) );
+        REQUIRE( unknown.open( QIODevice::WriteOnly | QIODevice::NewOnly ) );
+    }
+    const auto found = discoverInstances( options );
+    CHECK_FALSE( found.error.isEmpty() );
+    CHECK( found.instances.empty() );
+    ControlServer another;
+    CHECK_FALSE( another.start( options, okay ) );
+    CHECK( registry.entryList( QDir::Files | QDir::Hidden ).size() == 516 );
 }
 
 TEST_CASE( "Control resource cleanup does not remove replacement descriptors", "[controltransport]" )

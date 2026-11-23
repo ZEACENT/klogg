@@ -1,6 +1,7 @@
 #ifndef KLOGG_CONTROLRUNTIME_PAL_H
 #define KLOGG_CONTROLRUNTIME_PAL_H
 
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -15,6 +16,16 @@ struct FileIdentity {
     bool valid = false;
 };
 
+struct DirectoryEntries {
+    QStringList names;
+    bool complete = false;
+};
+struct RegisteredFile {
+    QByteArray bytes;
+    FileIdentity identity;
+    bool ownerPresent;
+};
+
 // Native no-follow opens, owner/mode/ACL checks, and anchored descriptor I/O.
 class PrivateDirectory {
   public:
@@ -22,9 +33,12 @@ class PrivateDirectory {
     ~PrivateDirectory();
     bool open( const QString& directoryPath, bool create );
     QString path() const;
-    QStringList entries( int limit ) const;
-    std::optional<QByteArray> read( const QString& name, int limit ) const;
-    bool publish( const QString& name, const QByteArray& bytes, FileIdentity* identityOut );
+    DirectoryEntries entries( int limit ) const;
+    std::optional<RegisteredFile> read( const QString& name, int limit ) const;
+    // The publisher holds an exclusive kernel lease from before publication
+    // through teardown. Shared nonblocking probes cannot impersonate an owner.
+    using RecordWriter = std::function<QByteArray( FileIdentity )>;
+    bool publish( const QString& name, const RecordWriter& serialize, FileIdentity* identityOut );
     FileIdentity identity( const QString& name ) const;
     void removeOwned( const QString& name, FileIdentity expected );
     void removeDirectory();

@@ -27,6 +27,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -158,6 +159,7 @@ FileIdentity fileIdentity( HANDLE handle )
 
 struct PrivateDirectory::Private {
     Handle handle;
+    Handle published;
     QString path;
     FileIdentity identity;
     // Pin ancestors too, preventing rename/reparse substitution of a parent.
@@ -201,21 +203,28 @@ bool PrivateDirectory::unchanged() const
     return handle.value != INVALID_HANDLE_VALUE && privateHandle( handle.value, true )
            && same( d_->identity, fileIdentity( handle.value ) );
 }
-QStringList PrivateDirectory::entries( int limit ) const
+DirectoryEntries PrivateDirectory::entries( int limit ) const
 {
-    if ( !unchanged() ) return {};
-    QStringList result;
+    DirectoryEntries result;
+    if ( !unchanged() ) return result;
     WIN32_FIND_DATAW data{};
-    const auto pattern = QDir( d_->path ).filePath( QStringLiteral( "*.json" ) );
+    const auto pattern = QDir( d_->path ).filePath( QStringLiteral( "*" ) );
     const HANDLE search = FindFirstFileW( reinterpret_cast<LPCWSTR>( pattern.utf16() ), &data );
-    if ( search == INVALID_HANDLE_VALUE ) return result;
+    if ( search == INVALID_HANDLE_VALUE ) {
+        result.complete = GetLastError() == ERROR_FILE_NOT_FOUND;
+        return result;
+    }
+    int inspected = 0;
     do {
-        result.push_back( QString::fromWCharArray( data.cFileName ) );
-    } while ( result.size() < limit && FindNextFileW( search, &data ) );
+        if ( ++inspected > limit ) { FindClose( search ); return result; }
+        const auto name = QString::fromWCharArray( data.cFileName );
+        if ( name.endsWith( QStringLiteral( ".instance" ) ) ) result.names.push_back( name );
+    } while ( FindNextFileW( search, &data ) );
+    result.complete = GetLastError() == ERROR_NO_MORE_FILES;
     FindClose( search );
     return result;
 }
-std::optional<QByteArray> PrivateDirectory::read( const QString& name, int limit ) const
+std::optional<RegisteredFile> PrivateDirectory::read( const QString& name, int limit ) const
 {
     if ( !safeName( name ) || !unchanged() ) return {};
     Handle handle( openNative( QDir( d_->path ).filePath( name ), GENERIC_READ | READ_CONTROL, false ) );
@@ -226,7 +235,12 @@ std::optional<QByteArray> PrivateDirectory::read( const QString& name, int limit
     DWORD readCount = 0;
     if ( !ReadFile( handle.value, bytes.data(), static_cast<DWORD>( bytes.size() ), &readCount, nullptr )
          || readCount != static_cast<DWORD>( bytes.size() ) ) return {};
-    return bytes;
+    // Use a byte beyond all descriptor contents: the lease cannot block ReadFile.
+    OVERLAPPED lease{};
+    lease.OffsetHigh = 1;
+    const bool shared = LockFileEx( handle.value, LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &lease ) != FALSE;
+    if ( !shared && GetLastError() != ERROR_LOCK_VIOLATION ) return {};
+    return RegisteredFile{ std::move( bytes ), fileIdentity( handle.value ), !shared };
 }
 FileIdentity PrivateDirectory::identity( const QString& name ) const
 {
@@ -234,26 +248,34 @@ FileIdentity PrivateDirectory::identity( const QString& name ) const
     Handle handle( openNative( QDir( d_->path ).filePath( name ), FILE_READ_ATTRIBUTES, false ) );
     return handle.value == INVALID_HANDLE_VALUE ? FileIdentity{} : fileIdentity( handle.value );
 }
-bool PrivateDirectory::publish( const QString& name, const QByteArray& bytes, FileIdentity* identityOut )
+bool PrivateDirectory::publish( const QString& name, const RecordWriter& serialize, FileIdentity* identityOut )
 {
     if ( !safeName( name ) || !unchanged() ) return false;
     UserSecurity security;
     if ( !security.descriptor ) return false;
     const auto finalPath = QDir( d_->path ).filePath( name );
     const auto temporary = finalPath + QStringLiteral( "." ) + QUuid::createUuid().toString( QUuid::Id128 );
-    bool written = false;
-    {
-        Handle handle( CreateFileW( reinterpret_cast<LPCWSTR>( temporary.utf16() ), GENERIC_WRITE,
-                                   0, &security.attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr ) );
-        if ( handle.value == INVALID_HANDLE_VALUE ) return false;
-        DWORD count = 0;
-        written = WriteFile( handle.value, bytes.constData(), static_cast<DWORD>( bytes.size() ), &count, nullptr )
-                  && count == static_cast<DWORD>( bytes.size() ) && FlushFileBuffers( handle.value );
-        *identityOut = fileIdentity( handle.value );
-    }
+    Handle handle( CreateFileW( reinterpret_cast<LPCWSTR>( temporary.utf16() ), GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security.attributes,
+                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr ) );
+    if ( handle.value == INVALID_HANDLE_VALUE ) return false;
+    OVERLAPPED lease{};
+    lease.OffsetHigh = 1;
+    const auto publishedIdentity = fileIdentity( handle.value );
+    const auto bytes = serialize( publishedIdentity );
+    DWORD count = 0;
+    const bool written = publishedIdentity.valid
+        && LockFileEx( handle.value, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &lease )
+        && WriteFile( handle.value, bytes.constData(), static_cast<DWORD>( bytes.size() ), &count, nullptr )
+        && count == static_cast<DWORD>( bytes.size() ) && FlushFileBuffers( handle.value );
     const bool moved = written && MoveFileExW( reinterpret_cast<LPCWSTR>( temporary.utf16() ),
-                                             reinterpret_cast<LPCWSTR>( finalPath.utf16() ), MOVEFILE_WRITE_THROUGH );
-    if ( !moved ) DeleteFileW( reinterpret_cast<LPCWSTR>( temporary.utf16() ) );
+                                              reinterpret_cast<LPCWSTR>( finalPath.utf16() ), MOVEFILE_WRITE_THROUGH );
+    if ( moved ) {
+        d_->published.value = std::exchange( handle.value, INVALID_HANDLE_VALUE );
+        *identityOut = publishedIdentity;
+    } else {
+        DeleteFileW( reinterpret_cast<LPCWSTR>( temporary.utf16() ) );
+    }
     return moved;
 }
 void PrivateDirectory::removeOwned( const QString& name, FileIdentity expected )
@@ -387,6 +409,7 @@ bool privateDirectory( const struct stat& info )
 } // namespace
 struct PrivateDirectory::Private {
     Fd fd;
+    Fd published;
     QString path;
     FileIdentity identity;
 };
@@ -429,26 +452,27 @@ bool PrivateDirectory::unchanged() const
            && accessIsSafe( d_->fd.value, privateDirectory( opened ) )
            && same( d_->identity, fileIdentity( info ) );
 }
-QStringList PrivateDirectory::entries( int limit ) const
+DirectoryEntries PrivateDirectory::entries( int limit ) const
 {
-    QStringList result;
+    DirectoryEntries result;
     if ( !unchanged() ) return result;
     const int copy = dup( d_->fd.value );
     if ( copy < 0 ) return result;
     DIR* directory = fdopendir( copy );
     if ( !directory ) { ::close( copy ); return result; }
     rewinddir( directory );
-    while ( const auto* entry = readdir( directory ) ) {
+    for ( int inspected = 0; inspected <= limit; ++inspected ) {
+        errno = 0;
+        const auto* entry = readdir( directory );
+        if ( !entry ) { result.complete = errno == 0; break; }
+        if ( inspected == limit ) break;
         const auto name = QFile::decodeName( entry->d_name );
-        if ( name.endsWith( QStringLiteral( ".json" ) ) ) {
-            result.push_back( name );
-            if ( result.size() >= limit ) break;
-        }
+        if ( name.endsWith( QStringLiteral( ".instance" ) ) ) result.names.push_back( name );
     }
     closedir( directory );
     return result;
 }
-std::optional<QByteArray> PrivateDirectory::read( const QString& name, int limit ) const
+std::optional<RegisteredFile> PrivateDirectory::read( const QString& name, int limit ) const
 {
     if ( !safeName( name ) || !unchanged() ) return {};
     Fd file( filesystemsecurity::openReadOnlyAt( d_->fd.value, QFile::encodeName( name ).constData(),
@@ -467,7 +491,9 @@ std::optional<QByteArray> PrivateDirectory::read( const QString& name, int limit
     }
     char extra = 0;
     if ( ::read( file.value, &extra, 1 ) != 0 ) return {};
-    return bytes;
+    const bool shared = ::flock( file.value, LOCK_SH | LOCK_NB ) == 0;
+    if ( !shared && errno != EWOULDBLOCK ) return {};
+    return RegisteredFile{ std::move( bytes ), fileIdentity( info ), !shared };
 }
 FileIdentity PrivateDirectory::identity( const QString& name ) const
 {
@@ -476,27 +502,31 @@ FileIdentity PrivateDirectory::identity( const QString& name ) const
          || fstatat( d_->fd.value, QFile::encodeName( name ).constData(), &info, AT_SYMLINK_NOFOLLOW ) != 0 ) return {};
     return fileIdentity( info );
 }
-bool PrivateDirectory::publish( const QString& name, const QByteArray& bytes, FileIdentity* identityOut )
+bool PrivateDirectory::publish( const QString& name, const RecordWriter& serialize, FileIdentity* identityOut )
 {
     if ( !safeName( name ) || !unchanged() ) return false;
     const auto temporary = QFile::encodeName( QStringLiteral( "." ) + QUuid::createUuid().toString( QUuid::Id128 ) );
     Fd file( filesystemsecurity::createPrivateFileAt( d_->fd.value, temporary.constData() ) );
     if ( file.value < 0 ) return false;
-    bool okay = true;
+    struct stat info{};
+    bool okay = ::flock( file.value, LOCK_EX | LOCK_NB ) == 0 && fstat( file.value, &info ) == 0;
+    const auto bytes = serialize( fileIdentity( info ) );
     qint64 offset = 0;
-    while ( offset < bytes.size() ) {
+    while ( okay && offset < bytes.size() ) {
         const auto count = ::write( file.value, bytes.constData() + offset, static_cast<size_t>( bytes.size() - offset ) );
         if ( count < 0 && errno == EINTR ) continue;
         if ( count <= 0 ) { okay = false; break; }
         offset += count;
     }
-    struct stat info{};
-    okay = okay && fsync( file.value ) == 0 && fstat( file.value, &info ) == 0;
+    okay = okay && fsync( file.value ) == 0;
     // linkat is an atomic publish without overwriting an existing descriptor.
     okay = okay && linkat( d_->fd.value, temporary.constData(), d_->fd.value,
                           QFile::encodeName( name ).constData(), 0 ) == 0;
     unlinkat( d_->fd.value, temporary.constData(), 0 );
-    if ( okay ) *identityOut = fileIdentity( info );
+    if ( okay ) {
+        d_->published.value = std::exchange( file.value, -1 );
+        *identityOut = fileIdentity( info );
+    }
     return okay;
 }
 void PrivateDirectory::removeOwned( const QString& name, FileIdentity expected )

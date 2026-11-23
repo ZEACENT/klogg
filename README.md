@@ -168,6 +168,11 @@ kloggctl --instance INSTANCE call operation.get --params '{"operation_id":"OPERA
 kloggctl --help
 ```
 
+`instance list` checks a local kernel lease, not a timestamp or PID. A GUI that
+exited without cleanup is not counted as a second live instance. Listing never
+connects to candidate endpoints or sends credentials. Start a matching GUI if
+upgrading from a development build that predates leased discovery.
+
 Use IDs returned by the GUI and operation responses. The `filter` object is a
 strict patch: `text` is a string; `match_case`, `use_regexp`, `inverse`, `boolean`,
 `auto_refresh`, and `keep_results` are booleans. Omitted fields retain the current
