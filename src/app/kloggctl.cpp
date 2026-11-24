@@ -5,15 +5,14 @@
 
 #include "controlcli.h"
 #include "klogg_version.h"
+#include "kloggctl_stdio.h"
 
 int main( int argc, char* argv[] )
 {
     QCoreApplication application( argc, argv );
     QCoreApplication::setApplicationName( QStringLiteral( "kloggctl" ) );
     QFile standardInput;
-    // Opening the handle does not read it. Offline commands work even when
-    // stdin is closed; the CLI reports input failure only if explicitly used.
-    static_cast<void>( standardInput.open( stdin, QIODevice::ReadOnly ) );
+    klogg::platform::openControlStdin( standardInput );
     const auto result = klogg::control::runControlCli(
         QCoreApplication::arguments().mid( 1 ), standardInput, kloggVersion() );
     const auto write = []( FILE* stream, const QByteArray& bytes ) {

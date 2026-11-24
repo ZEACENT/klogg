@@ -24,7 +24,9 @@ def main():
             [binary, *arguments], input=data, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=environment, timeout=10, check=False,
         )
-        assert completed.returncode == expected, "Unexpected CLI exit status"
+        assert completed.returncode == expected, (
+            f"Unexpected CLI exit status: expected {expected}, got {completed.returncode}"
+        )
         assert not completed.stderr, "Unexpected CLI diagnostics"
         assert completed.stdout.endswith(b"\n"), "Missing output terminator"
         checks += 1
@@ -56,8 +58,13 @@ def main():
     target = ["--instance", "cli-smoke-deliberately-missing-instance"]
     result = run([*target, "state", "get"], 3)
     assert result["error"]["data"]["code"] in {"INSTANCE_NOT_FOUND", "DISCOVERY_FAILED"}
-    params = json.dumps({"line": "18446744073709551615", "text": "café"}).encode()
-    run([*target, "call", "label.set", "--params-file", "-"], 3, params)
+    params = json.dumps({"line": "18446744073709551615", "text": "café"}, ensure_ascii=False).encode()
+    piped_call = [*target, "call", "label.set", "--params-file", "-"]
+    run(piped_call, 3, params)
+    # Multiple reads, then a short read and a clean EOF. Windows text-mode
+    # Ctrl-Z must not hide invalid trailing data or bypass the byte budget.
+    run(piped_call, 3, b" " * 17000 + params)
+    run(piped_call, 2, params + b"\x1anot-json")
     with tempfile.TemporaryDirectory(prefix="klogg-cli-smoke-") as directory:
         path = Path(directory) / "params café.json"
         path.write_bytes(params)
