@@ -13,7 +13,7 @@
 #include <QElapsedTimer>
 #include <QProcess>
 #include <stdexcept>
-#include <cstdlib>
+#include <cstdio>
 #include <QProcessEnvironment>
 #include <functional>
 
@@ -26,10 +26,27 @@
 #include <thread>
 
 #include "controltransport.h"
+#include "../helpers/controltestdirectory.h"
 
 using namespace klogg::control;
 
 namespace {
+constexpr char PublicationReady[] = "control-registration-published";
+constexpr int ChildTimeoutMs = 30000;
+
+bool waitForPublication( QProcess& child )
+{
+    QElapsedTimer timer;
+    timer.start();
+    for ( ;; ) {
+        while ( child.canReadLine() ) {
+            if ( child.readLine().trimmed() == PublicationReady ) return true;
+        }
+        const auto remaining = ChildTimeoutMs - timer.elapsed();
+        if ( remaining <= 0 || !child.waitForReadyRead( static_cast<int>( remaining ) ) ) return false;
+    }
+}
+
 RuntimeOptions roots( const QTemporaryDir& directory )
 {
     const auto path = QFileInfo( directory.path() ).canonicalFilePath();
@@ -427,8 +444,11 @@ TEST_CASE( "Control test child abandons its published instance", "[.control-cras
     REQUIRE_FALSE( sockets.isEmpty() );
     ControlServer child;
     REQUIRE( child.start( { root, sockets, "test-install", "test-profile" }, okay ) );
-    // Like a killed GUI, the OS closes its handles without running any application cleanup.
-    std::_Exit( EXIT_SUCCESS );
+    // Let the parent kill this live publisher. If the parent disappears first,
+    // the pipe closes and the child can return rather than becoming an orphan.
+    REQUIRE( std::puts( PublicationReady ) >= 0 );
+    REQUIRE( std::fflush( stdout ) == 0 );
+    static_cast<void>( std::getchar() );
 }
 
 TEST_CASE( "Abandoned control epochs never hide the only live GUI or accumulate on restart",
@@ -436,10 +456,7 @@ TEST_CASE( "Abandoned control epochs never hide the only live GUI or accumulate 
 {
     QTemporaryDir directory;
     auto options = roots( directory );
-    // Darwin's deep per-user TMPDIR can exceed the AF_UNIX pathname limit.
-    const auto shortRoot = QSysInfo::kernelType() == QStringLiteral( "winnt" )
-        ? QDir::tempPath() : QFileInfo( QStringLiteral( "/tmp" ) ).canonicalFilePath();
-    QTemporaryDir sockets( shortRoot + QStringLiteral( "/kt-XXXXXX" ) );
+    QTemporaryDir sockets( klogg::test::controlDirectoryTemplate() );
     REQUIRE( sockets.isValid() );
     options.socketRoot = QFileInfo( sockets.path() ).canonicalFilePath();
     ControlServer live;
@@ -454,9 +471,14 @@ TEST_CASE( "Abandoned control epochs never hide the only live GUI or accumulate 
         QProcess child;
         child.setProcessEnvironment( environment );
         child.start( QCoreApplication::applicationFilePath(), { "Control test child abandons its published instance" } );
-        REQUIRE( child.waitForFinished( 30000 ) );
-        REQUIRE( child.exitStatus() == QProcess::NormalExit );
-        REQUIRE( child.exitCode() == 0 );
+        REQUIRE( child.waitForStarted( ChildTimeoutMs ) );
+        const bool published = waitForPublication( child );
+        INFO( "Publisher stderr: " << child.readAllStandardError().left( 4096 ).toStdString() );
+        INFO( "Publisher process error: " << child.errorString().toStdString() );
+        REQUIRE( published );
+        REQUIRE( child.state() == QProcess::Running );
+        child.kill();
+        REQUIRE( child.waitForFinished( ChildTimeoutMs ) );
         // Do not depend on intervening CLI calls for garbage collection.
         CHECK( countRegistrations() == 2 );
         if ( QSysInfo::kernelType() != QStringLiteral( "winnt" ) ) {

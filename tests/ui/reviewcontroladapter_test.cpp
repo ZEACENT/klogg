@@ -28,6 +28,7 @@
 #include "reviewcontentadapter.h"
 #include "reviewcontrolservice.h"
 #include "test_utils.h"
+#include "../helpers/controltestdirectory.h"
 #include "searchtoolbar.h"
 #include "session.h"
 #include "tabbedcrawlerwidget.h"
@@ -119,6 +120,24 @@ struct ReviewFixture {
         return id;
     }
 };
+struct ServiceFixture : ReviewFixture {
+    QTemporaryDir registry{ klogg::test::controlDirectoryTemplate() };
+    RuntimeOptions runtime;
+    ServiceFixture()
+    {
+        REQUIRE( registry.isValid() );
+        runtime.descriptorRoot = registry.filePath( QStringLiteral( "control" ) );
+    }
+};
+
+void requireServiceEnabled( ReviewControlService& service, bool enabled = true )
+{
+    const bool applied = service.setEnabled( enabled );
+    INFO( service.lastError().toStdString() );
+    REQUIRE( applied );
+    REQUIRE( service.isRunning() );
+}
+
 struct RestoreHighlighters {
     HighlighterSetCollection saved = HighlighterSetCollection::get();
     ~RestoreHighlighters() { HighlighterSetCollection::get() = saved; HighlighterSetCollection::get().save(); }
@@ -1119,24 +1138,22 @@ TEST_CASE( "Control tab reads retain draft preconditions while unrelated labels 
 TEST_CASE( "Local service exposes real GUI owners and global disable discards staged writes",
            "[ui][control-service]" )
 {
-    ReviewFixture fixture;
+    ServiceFixture fixture;
     fixture.window.show();
     QCoreApplication::processEvents();
-    RuntimeOptions runtime;
-    runtime.descriptorRoot = QFileInfo( fixture.directory.path() ).canonicalFilePath() + "/control";
+    const auto& runtime = fixture.runtime;
     ReviewControlService service{ [ & ] {
         return std::vector<QPointer<MainWindow>>{ &fixture.window };
     }, runtime };
     CHECK_FALSE( service.isRunning() );
-    REQUIRE( service.setEnabled( Configuration{}.localControlEnabled() ) );
-    REQUIRE( service.isRunning() );
+    requireServiceEnabled( service, Configuration{}.localControlEnabled() );
     REQUIRE( service.lastError().isEmpty() );
     auto discovered = discoverInstances( runtime );
     REQUIRE( discovered.error.isEmpty() );
     REQUIRE( discovered.instances.size() == 1 );
     const auto descriptor = discovered.instances.front();
     CHECK( service.instanceId() == descriptor.instanceId );
-    REQUIRE( service.setEnabled( true ) );
+    requireServiceEnabled( service );
     CHECK( service.instanceId() == descriptor.instanceId );
     const auto* focus = QApplication::focusWidget();
     const auto current = fixture.window.inventorySnapshot().currentTabId;
@@ -1152,7 +1169,7 @@ TEST_CASE( "Local service exposes real GUI owners and global disable discards st
     REQUIRE( service.setEnabled( false ) );
     CHECK_FALSE( service.isRunning() );
     CHECK( discoverInstances( runtime ).instances.empty() );
-    REQUIRE( service.setEnabled( true ) );
+    requireServiceEnabled( service );
     discovered = discoverInstances( runtime );
     REQUIRE( discovered.instances.size() == 1 );
     const auto next = discovered.instances.front();
@@ -1170,7 +1187,7 @@ TEST_CASE( "Local service exposes real GUI owners and global disable discards st
 TEST_CASE( "Settings Apply reaches the application policy observer before the dialog closes",
            "[ui][control-service][control-policy]" )
 {
-    ReviewFixture fixture;
+    ServiceFixture fixture;
     auto& config = Configuration::get();
     struct Restore {
         QString style;
@@ -1187,12 +1204,11 @@ TEST_CASE( "Settings Apply reaches the application policy observer before the di
     } restore{ config.style(), config.localControlEnabled() };
     config.setStyle( StyleManager::DarkStyleKey );
     config.setLocalControlEnabled( true );
-    RuntimeOptions runtime;
-    runtime.descriptorRoot = QFileInfo( fixture.directory.path() ).canonicalFilePath() + "/control";
+    const auto& runtime = fixture.runtime;
     ReviewControlService service{ [ & ] {
         return std::vector<QPointer<MainWindow>>{ &fixture.window };
     }, runtime };
-    REQUIRE( service.setEnabled( true ) );
+    requireServiceEnabled( service );
     int notifications = 0;
     QObject::connect( &fixture.window, &MainWindow::optionsChanged, &service, [ & ] {
         ++notifications;
@@ -1222,14 +1238,13 @@ TEST_CASE( "Settings Apply reaches the application policy observer before the di
 TEST_CASE( "The real console executable stages GUI evidence and observes human conflicts",
            "[ui][control-service][control-cli-gui]" )
 {
-    ReviewFixture fixture;
+    ServiceFixture fixture;
     RestoreHighlighters restore;
-    RuntimeOptions runtime;
-    runtime.descriptorRoot = QFileInfo( fixture.directory.path() ).canonicalFilePath() + "/control";
+    const auto& runtime = fixture.runtime;
     ReviewControlService service{ [ & ] {
         return std::vector<QPointer<MainWindow>>{ &fixture.window };
     }, runtime };
-    REQUIRE( service.setEnabled( true ) );
+    requireServiceEnabled( service );
     const auto run = [ & ]( QStringList args, int expectedExit = 0 ) {
         QProcess child;
         auto environment = QProcessEnvironment::systemEnvironment();

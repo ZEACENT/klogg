@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QUuid>
 
+#include <utility>
 #include <vector>
 
 #include "qtcontainerindex.h"
@@ -19,18 +20,23 @@
 #endif
 
 namespace klogg::control::installpal {
-namespace {
-constexpr qint64 MaxConfigBytes = 4LL * 1024 * 1024;
 #ifndef Q_OS_WIN
-using filesystemsecurity::ReadFlags;
-
-class Fd {
+class FileDescriptor {
   public:
-    explicit Fd( int value = -1 ) : value_( value ) {}
-    ~Fd() { reset(); }
-    Fd( const Fd& ) = delete;
-    Fd& operator=( const Fd& ) = delete;
+    explicit FileDescriptor( int value = -1 ) : value_( value ) {}
+    ~FileDescriptor() { reset(); }
+    FileDescriptor( const FileDescriptor& ) = delete;
+    FileDescriptor& operator=( const FileDescriptor& ) = delete;
+    FileDescriptor( FileDescriptor&& other ) noexcept : value_( std::exchange( other.value_, -1 ) ) {}
+    FileDescriptor& operator=( FileDescriptor&& ) = delete;
     int get() const { return value_; }
+    bool sameObject( const FileDescriptor& other ) const
+    {
+        struct stat first {};
+        struct stat second {};
+        return ::fstat( value_, &first ) == 0 && ::fstat( other.value_, &second ) == 0
+               && first.st_dev == second.st_dev && first.st_ino == second.st_ino;
+    }
     void reset( int value = -1 )
     {
         if ( value_ >= 0 ) ::close( value_ );
@@ -39,6 +45,12 @@ class Fd {
   private:
     int value_;
 };
+#endif
+
+namespace {
+constexpr qint64 MaxConfigBytes = 4LL * 1024 * 1024;
+#ifndef Q_OS_WIN
+using filesystemsecurity::ReadFlags;
 
 bool trustedAncestor( int descriptor )
 {
@@ -51,7 +63,7 @@ bool ownedDirectory( int descriptor )
     return ::fstat( descriptor, &info ) == 0 && info.st_uid == ::geteuid()
            && filesystemsecurity::safeAncestor( descriptor, info );
 }
-InstallStatus openParent( const QString& path, Fd& parent, bool create, bool& touched )
+InstallStatus openParent( const QString& path, FileDescriptor& parent, bool create, bool& touched )
 {
     if ( !QDir::isAbsolutePath( path ) || QDir::cleanPath( path ) != path ) return InstallStatus::UnsafePath;
     auto parts = path.split( '/' );
@@ -87,7 +99,7 @@ qint64 nanos( const struct stat& info )
 InstallStatus readAt( int parent, const QByteArray& name, FileState& state )
 {
     state = {};
-    Fd file( filesystemsecurity::openReadOnlyAt( parent, name.constData(), ReadFlags::NonBlocking ) );
+    FileDescriptor file( filesystemsecurity::openReadOnlyAt( parent, name.constData(), ReadFlags::NonBlocking ) );
     if ( file.get() < 0 ) {
         if ( errno == ENOENT ) return InstallStatus::Available;
         return errno == ELOOP ? InstallStatus::UnsafePath : InstallStatus::IoError;
@@ -98,8 +110,6 @@ InstallStatus readAt( int parent, const QByteArray& name, FileState& state )
          || !filesystemsecurity::accessIsSafe( file.get(), ( before.st_mode & ( S_IWGRP | S_IWOTH ) ) == 0 )
          || before.st_size < 0 || before.st_size > MaxConfigBytes ) return InstallStatus::UnsafePath;
     state.exists = true;
-    state.device = static_cast<quint64>( before.st_dev );
-    state.identity = static_cast<quint64>( before.st_ino );
     state.mode = static_cast<unsigned>( before.st_mode & 0777 );
     state.modifiedSeconds = before.st_mtime;
     state.modifiedNanoseconds = nanos( before );
@@ -116,18 +126,19 @@ InstallStatus readAt( int parent, const QByteArray& name, FileState& state )
     if ( ::fstat( file.get(), &after ) != 0 ) return InstallStatus::IoError;
     if ( after.st_size != before.st_size || state.bytes.size() != before.st_size
          || after.st_mtime != before.st_mtime || nanos( after ) != nanos( before ) ) return InstallStatus::ConcurrentChange;
+    state.observed = std::make_shared<FileDescriptor>( std::move( file ) );
     return InstallStatus::Available;
 }
 bool sameFile( const FileState& first, const FileState& second )
 {
     return first.exists == second.exists && ( !first.exists
-        || ( first.device == second.device && first.identity == second.identity
+        || ( first.observed && second.observed && first.observed->sameObject( *second.observed )
              && first.mode == second.mode && first.modifiedSeconds == second.modifiedSeconds
              && first.modifiedNanoseconds == second.modifiedNanoseconds && first.bytes == second.bytes ) );
 }
 bool createFile( int parent, const QByteArray& name, const QByteArray& bytes, unsigned mode )
 {
-    Fd file( filesystemsecurity::createPrivateFileAt( parent, name.constData() ) );
+    FileDescriptor file( filesystemsecurity::createPrivateFileAt( parent, name.constData() ) );
     if ( file.get() < 0 ) return false;
     ContainerIndex offset = 0;
     while ( offset < bytes.size() ) {
@@ -237,7 +248,7 @@ UserPathMutation replaceUserPath( const UserPathState& expected, const UserPathS
 InstallStatus readFile( const QString& path, FileState& state )
 {
 #ifndef Q_OS_WIN
-    Fd parent;
+    FileDescriptor parent;
     bool touched = false;
     const auto status = openParent( path, parent, false, touched );
     if ( status != InstallStatus::Available ) return status;
@@ -255,7 +266,7 @@ Mutation replaceFile( const QString& path, const FileState& expected,
 {
     Mutation result;
 #ifndef Q_OS_WIN
-    Fd parent;
+    FileDescriptor parent;
     result.status = openParent( path, parent, true, result.touched );
     if ( result.status != InstallStatus::Available ) return result;
     const auto name = QFile::encodeName( QFileInfo( path ).fileName() );
@@ -305,7 +316,7 @@ bool executableIsSafe( const QString& path )
     auto parts = path.split( '/' );
     parts.removeAll( QString{} );
     if ( parts.isEmpty() || !QDir::isAbsolutePath( path ) ) return false;
-    Fd parent( filesystemsecurity::openRootDirectory() );
+    FileDescriptor parent( filesystemsecurity::openRootDirectory() );
     if ( parent.get() < 0 ) return false;
     for ( ContainerIndex i = 0; i < parts.size(); ++i ) {
         const auto name = QFile::encodeName( parts.at( i ) );
