@@ -23,6 +23,7 @@ klogg_configure_test_target(klogg_control_protocol_tests)
 klogg_add_control_console_test(klogg_control_protocol_tests klogg_control_protocol_tests
   $<TARGET_FILE:klogg_control_protocol_tests>)
 
+find_package(Threads REQUIRED)
 add_executable(klogg_control_tests
   controltransport_main.cpp controltransport_test.cpp controlcli_test.cpp controlruntime_env_test.cpp
 )
@@ -31,7 +32,7 @@ add_executable(klogg_control_tests
 if(UNIX)
   target_sources(klogg_control_tests PRIVATE controlinstall_test.cpp)
 endif()
-target_link_libraries(klogg_control_tests PRIVATE klogg_control Catch2 Qt${QT_VERSION_MAJOR}::Network)
+target_link_libraries(klogg_control_tests PRIVATE klogg_control Catch2 Qt${QT_VERSION_MAJOR}::Network Threads::Threads)
 target_include_directories(klogg_control_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/utils/include")
 klogg_configure_test_target(klogg_control_tests)
 klogg_add_control_console_test(klogg_control_tests klogg_control_tests
@@ -136,8 +137,6 @@ klogg_configure_test_target(klogg_task_scheduler_lifetime_tests)
 add_test(NAME klogg_task_scheduler_lifetime_tests COMMAND klogg_task_scheduler_lifetime_tests)
 set_tests_properties(klogg_task_scheduler_lifetime_tests PROPERTIES TIMEOUT 120)
 klogg_set_test_isolation(klogg_task_scheduler_lifetime_tests)
-
-find_package(Threads REQUIRED)
 
 # Native iOS discovery and stream-worker lifecycle are specified against an
 # injected C-ABI table. Tests include no Qt or libimobiledevice APIs directly:

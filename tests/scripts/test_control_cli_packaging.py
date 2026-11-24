@@ -28,6 +28,27 @@ def action_run(name):
 
 
 class ControlCliPackagingTest(unittest.TestCase):
+    def configure_install_fixture(self, source, build, *options):
+        """Apply the product rules to real targets without building Qt or cross-compiling."""
+        source.mkdir(exist_ok=True)
+        (source / "dummy.c").write_text("/* Not compiled. */\n", encoding="utf-8")
+        (source / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.16)\nproject(ControlInstall NONE)\n"
+            "set(APPLE FALSE)\nset(CMAKE_SKIP_RPATH TRUE)\n"
+            "set(CMAKE_C_LINK_EXECUTABLE unused)\n"
+            "if(DEFINED PROBE_SYSTEM)\n  set(CMAKE_SYSTEM_NAME \"${PROBE_SYSTEM}\")\n"
+            "  set(CMAKE_INSTALL_PREFIX \"${PROBE_PREFIX}\")\nendif()\n"
+            "set(KLOGG_RUNTIME_INSTALL_COMPONENT klogg-runtime)\n"
+            "foreach(target klogg kloggctl)\n"
+            "  add_executable(${target} dummy.c)\n"
+            "  set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)\n"
+            "endforeach()\n" + cli_install_rules() +
+            'file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/cli-rpath" CONTENT "$<TARGET_PROPERTY:kloggctl,INSTALL_RPATH>")\n',
+            encoding="utf-8")
+        result = subprocess.run(["cmake", "-S", str(source), "-B", str(build), *options],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipIf(os.name == "nt", "DESTDIR contract requires POSIX installation paths")
     def test_runtime_component_installs_cli_beside_gui_with_destdir_and_custom_bindir(self):
         """Execute the real install declarations using inert prebuilt fixtures."""
@@ -37,22 +58,8 @@ class ControlCliPackagingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="control package ") as directory:
             root = Path(directory)
             source = root / "source"
-            source.mkdir()
-            (source / "dummy.c").write_text("/* Not compiled. */\n", encoding="utf-8")
-            (source / "CMakeLists.txt").write_text(
-                "cmake_minimum_required(VERSION 3.16)\nproject(ControlInstall NONE)\n"
-                "set(APPLE FALSE)\nset(WIN32 FALSE)\nset(CMAKE_SKIP_RPATH TRUE)\n"
-                "set(CMAKE_C_LINK_EXECUTABLE unused)\n"
-                "set(CMAKE_INSTALL_BINDIR tools)\n"
-                "set(KLOGG_RUNTIME_INSTALL_COMPONENT klogg-runtime)\n"
-                "foreach(target klogg kloggctl)\n"
-                "  add_executable(${target} dummy.c)\n"
-                "  set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)\n"
-                "endforeach()\n" + cli_install_rules(), encoding="utf-8")
             build = root / "build"
-            result = subprocess.run([cmake, "-S", str(source), "-B", str(build)],
-                                    capture_output=True, text=True, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.configure_install_fixture(source, build, "-DCMAKE_INSTALL_BINDIR=tools")
             for name in ("klogg", "kloggctl"):
                 (build / name).write_bytes(name.encode("ascii"))
                 (build / name).chmod(0o755)
@@ -68,6 +75,15 @@ class ControlCliPackagingTest(unittest.TestCase):
             self.assertEqual((sibling / "kloggctl").read_bytes(), b"kloggctl")
             self.assertTrue(os.access(sibling / "kloggctl", os.X_OK))
             self.assertFalse((dest / "relocated/bin").exists())
+
+    def test_threaded_control_transport_target_declares_its_link_dependency(self):
+        # On glibc before 2.34 the transport test's std::thread::join needs a
+        # separate pthread library; newer systems can hide the missing dependency.
+        from test_xcode_generator_contract import cmake_command_tokens
+        unit_cmake = read("tests/unit/CMakeLists.txt")
+        dependencies = [lib for target, *libs in cmake_command_tokens(unit_cmake, "target_link_libraries")
+                        if target == "klogg_control_tests" for lib in libs]
+        self.assertIn("Threads::Threads", dependencies)
 
     def test_gui_only_builds_also_build_the_cli_on_non_apple_platforms(self):
         text = APP.read_text(encoding="utf-8")
@@ -121,22 +137,16 @@ class ControlCliPackagingTest(unittest.TestCase):
 
     def test_cli_uses_relocatable_install_rpath_only_for_linux_usr_bin(self):
         with tempfile.TemporaryDirectory() as directory:
-            script = Path(directory) / "install.cmake"
-            script.write_text("cmake_minimum_required(VERSION 3.14)\nset(APPLE FALSE)\n"
-                              "function(install)\nendfunction()\n"
-                              "function(set_target_properties)\nmessage(STATUS \"properties=${ARGV}\")\n"
-                              "endfunction()\n" + cli_install_rules())
-            for system, prefix, bindir, expected in (("Linux", "/usr", "bin", True),
-                                                     ("Darwin", "/usr", "bin", False),
-                                                     ("Linux", "/opt", "bin", False),
-                                                     ("Linux", "/usr", "tools", False)):
+            root = Path(directory)
+            cases = (("Linux", "/usr", "bin", "$ORIGIN/../lib"), ("Darwin", "/usr", "bin", ""),
+                     ("Linux", "/opt", "bin", ""), ("Linux", "/usr", "tools", ""))
+            for index, (system, prefix, bindir, expected) in enumerate(cases):
                 with self.subTest(system=system, prefix=prefix, bindir=bindir):
-                    result = subprocess.run(["cmake", "-DCMAKE_SYSTEM_NAME=" + system,
-                                             "-DCMAKE_INSTALL_PREFIX=" + prefix, "-DCMAKE_INSTALL_BINDIR=" + bindir,
-                                             "-P", str(script)], check=True, capture_output=True, text=True, timeout=10)
-                    props = [line for line in result.stdout.splitlines() if "properties=" in line]
-                    self.assertEqual(props, ["-- properties=kloggctl;PROPERTIES;INSTALL_RPATH;$ORIGIN/../lib"]
-                                     if expected else [])
+                    build = root / ("build" + str(index))
+                    self.configure_install_fixture(root / "source", build, "-DPROBE_SYSTEM=" + system,
+                                                   "-DPROBE_PREFIX:STRING=" + prefix,
+                                                   "-DCMAKE_INSTALL_BINDIR=" + bindir)
+                    self.assertEqual((build / "cli-rpath").read_text(encoding="utf-8"), expected)
 
     def test_linux_consumer_checks_the_final_appimage_before_upload(self):
         from test_ci_environment_workflow import QUALITY
