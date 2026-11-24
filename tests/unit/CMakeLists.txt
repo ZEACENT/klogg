@@ -130,6 +130,7 @@ klogg_set_test_isolation(klogg_configuration_preapplication_tests)
 # This executable owns its scheduler per case instead of nesting a second
 # lifetime handle inside the unit runner's process-wide owner.
 add_executable(klogg_task_scheduler_lifetime_tests taskschedulerlifetime_test.cpp)
+target_compile_definitions(klogg_task_scheduler_lifetime_tests PRIVATE KLOGG_TESTS)
 target_link_libraries(
   klogg_task_scheduler_lifetime_tests PRIVATE klogg_logdata Catch2
 )

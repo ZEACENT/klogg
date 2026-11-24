@@ -1,4 +1,5 @@
 #include "preparedfilesource.h"
+#include "joinedtbbproducer_p.h"
 #include "logdataworker.h"
 
 #include <QDir>
@@ -22,7 +23,7 @@ FileSourcePreparation prepareFileSource(
     if ( path.isEmpty() || !QDir::isAbsolutePath( path ) ) {
         return { Status::InvalidInput, QStringLiteral( "An absolute source path is required" ), {} };
     }
-    try {
+    const auto prepare = [&]() -> FileSourcePreparation {
         auto source = std::unique_ptr<PreparedFileSource>( new PreparedFileSource );
         source->path_ = path;
         source->file_ = std::make_unique<QFile>( path );
@@ -57,6 +58,9 @@ FileSourcePreparation prepareFileSource(
             return { Status::ReadFailure, QStringLiteral( "Cannot transfer the prepared handle" ), {} };
         }
         return { Status::Ready, {}, std::move( source ) };
+    };
+    try {
+        return klogg::runOnJoinedTbbProducer( prepare );
     } catch ( const std::bad_alloc& ) {
         return { Status::ResourceLimit, QStringLiteral( "Insufficient memory for source preparation" ), {} };
     } catch ( const std::exception& error ) {

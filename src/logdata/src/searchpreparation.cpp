@@ -1,4 +1,5 @@
 #include "searchpreparation.h"
+#include "joinedtbbproducer_p.h"
 
 #include <utility>
 
@@ -10,7 +11,7 @@ SearchPreparation prepareFullSearch( FullSearchPreparationRequest request, Atomi
          || request.settings.matchingThreads == 0 ) {
         return { Status::InvalidInput, {} };
     }
-    try {
+    const auto prepare = [&]() -> SearchPreparation {
         const auto endLine = request.endLine.value_or(
             LineNumber{ request.source->lineCount().get() } );
         if ( request.startLine > endLine ) return { Status::InvalidInput, {} };
@@ -32,6 +33,9 @@ SearchPreparation prepareFullSearch( FullSearchPreparationRequest request, Atomi
             std::move( request.source ), 0, 0, 0, std::move( compiled ) } );
         if ( cancelled ) return { Status::Cancelled, {} };
         return { Status::Ready, std::move( completed ) };
+    };
+    try {
+        return klogg::runOnJoinedTbbProducer( prepare );
     } catch ( ... ) {
         // Native read/matcher failures and allocation failures are terminal, never
         // a successful prefix. All operation-local graph tasks have already drained.
