@@ -31,17 +31,17 @@ class ControlCliPackagingTest(unittest.TestCase):
     def configure_install_fixture(self, source, build, *options):
         """Apply the product rules to real targets without building Qt or cross-compiling."""
         source.mkdir(exist_ok=True)
-        (source / "dummy.c").write_text("/* Not compiled. */\n", encoding="utf-8")
+        (source / "dummy.c").write_text("#include <stdio.h>\nint main(void) { return puts(FIXTURE_NAME) < 0; }\n",
+                                        encoding="utf-8")
         (source / "CMakeLists.txt").write_text(
-            "cmake_minimum_required(VERSION 3.16)\nproject(ControlInstall NONE)\n"
+            "cmake_minimum_required(VERSION 3.16)\nproject(ControlInstall LANGUAGES C)\n"
             "set(APPLE FALSE)\nset(CMAKE_SKIP_RPATH TRUE)\n"
-            "set(CMAKE_C_LINK_EXECUTABLE unused)\n"
             "if(DEFINED PROBE_SYSTEM)\n  set(CMAKE_SYSTEM_NAME \"${PROBE_SYSTEM}\")\n"
             "  set(CMAKE_INSTALL_PREFIX \"${PROBE_PREFIX}\")\nendif()\n"
             "set(KLOGG_RUNTIME_INSTALL_COMPONENT klogg-runtime)\n"
             "foreach(target klogg kloggctl)\n"
             "  add_executable(${target} dummy.c)\n"
-            "  set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)\n"
+            '  target_compile_definitions(${target} PRIVATE FIXTURE_NAME="${target}")\n'
             "endforeach()\n" + cli_install_rules() +
             'file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/cli-rpath" CONTENT "$<TARGET_PROPERTY:kloggctl,INSTALL_RPATH>")\n',
             encoding="utf-8")
@@ -51,7 +51,7 @@ class ControlCliPackagingTest(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "DESTDIR contract requires POSIX installation paths")
     def test_runtime_component_installs_cli_beside_gui_with_destdir_and_custom_bindir(self):
-        """Execute the real install declarations using inert prebuilt fixtures."""
+        """Install native stub targets using the real product declarations."""
         cmake = shutil.which("cmake")
         if not cmake:
             self.skipTest("requires CMake")
@@ -59,21 +59,22 @@ class ControlCliPackagingTest(unittest.TestCase):
             root = Path(directory)
             source = root / "source"
             build = root / "build"
-            self.configure_install_fixture(source, build, "-DCMAKE_INSTALL_BINDIR=tools")
-            for name in ("klogg", "kloggctl"):
-                (build / name).write_bytes(name.encode("ascii"))
-                (build / name).chmod(0o755)
+            self.configure_install_fixture(source, build, "-DCMAKE_INSTALL_BINDIR=tools", "-DCMAKE_BUILD_TYPE=Release")
+            result = subprocess.run([cmake, "--build", str(build), "--config", "Release"],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             dest = root / "destdir"
             environment = dict(os.environ, DESTDIR=str(dest))
             result = subprocess.run([cmake, "--install", str(build), "--prefix", "/relocated",
-                                     "--component", "klogg-runtime"], env=environment,
+                                     "--component", "klogg-runtime", "--config", "Release"], env=environment,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             sibling = dest / "relocated/tools"
             self.assertTrue((sibling / "klogg").is_file())
             self.assertTrue((sibling / "kloggctl").is_file(), "runtime component omitted kloggctl")
-            self.assertEqual((sibling / "kloggctl").read_bytes(), b"kloggctl")
-            self.assertTrue(os.access(sibling / "kloggctl", os.X_OK))
+            result = subprocess.run([str(sibling / "kloggctl")], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "kloggctl")
             self.assertFalse((dest / "relocated/bin").exists())
 
     def test_threaded_control_transport_target_declares_its_link_dependency(self):
@@ -140,9 +141,9 @@ class ControlCliPackagingTest(unittest.TestCase):
             root = Path(directory)
             cases = (("Linux", "/usr", "bin", "$ORIGIN/../lib"), ("Darwin", "/usr", "bin", ""),
                      ("Linux", "/opt", "bin", ""), ("Linux", "/usr", "tools", ""))
-            for index, (system, prefix, bindir, expected) in enumerate(cases):
+            build = root / "build"
+            for system, prefix, bindir, expected in cases:
                 with self.subTest(system=system, prefix=prefix, bindir=bindir):
-                    build = root / ("build" + str(index))
                     self.configure_install_fixture(root / "source", build, "-DPROBE_SYSTEM=" + system,
                                                    "-DPROBE_PREFIX:STRING=" + prefix,
                                                    "-DCMAKE_INSTALL_BINDIR=" + bindir)

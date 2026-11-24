@@ -4,7 +4,7 @@
 Run on macOS before pushing control changes:
   python3 scripts/probe_control_portability.py --qt5-prefix "$(brew --prefix qt@5)"
 It checks the document callback under GCC-equivalent lexical shadow diagnostics,
-RPC with finite-math flags, and the client sources *and real GUI test* with Qt 5.
+RPC with finite-math flags, and the client sources, schema test and GUI test with Qt 5.
 A configured Qt 5 build may instead be supplied via --build-dir.
 """
 import argparse
@@ -21,6 +21,7 @@ PROBES = {
     "src/control/src/controlrpc.cpp": ["-ffinite-math-only"],
     "src/control/src/controlframing.cpp": [],
     "src/control/src/controlschema.cpp": [],
+    "tests/unit/controlschema_test.cpp": [],
     "tests/ui/reviewcontroladapter_test.cpp": [],
 }
 

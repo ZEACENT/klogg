@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <QJsonArray>
+#include <QStringList>
 #include "controlschema.h"
 
 using namespace klogg::control;
