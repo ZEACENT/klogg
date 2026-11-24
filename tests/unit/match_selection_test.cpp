@@ -60,7 +60,24 @@ struct AbstractLogView::access_by<MatchPaintWindowAccess> {
     }
 };
 
+class MatchWorkerAccess;
+template <>
+struct AbstractLogView::access_by<MatchWorkerAccess> {
+    static bool hasPendingWorker( const AbstractLogView& view )
+    {
+        return std::any_of( view.matchSelectionWorkers_.begin(), view.matchSelectionWorkers_.end(),
+                            []( const auto& worker ) { return !worker.isFinished(); } );
+    }
+};
+
 namespace {
+// The pool gate holds the worker; pump both timer and metacall dispatch until
+// the view owns its completion, independent of how Qt implements singleShot(0).
+bool waitForMatchWorker( const AbstractLogView& view )
+{
+    return waitUiState( [&] { return AbstractLogView::access_by<MatchWorkerAccess>::hasPendingWorker( view ); } );
+}
+
 class MatchSelectionData : public AbstractLogData {
 public:
     QStringList lines;
@@ -827,9 +844,8 @@ TEST_CASE( "A newer numbered-copy command supersedes an already dispatched forma
     SafeQSignalSpy copied{ &view, &AbstractLogView::matchSelectionFinished };
     REQUIRE( QMetaObject::invokeMethod( &view, numberedFirst ? "copyWithLineNumbers" : "copy",
                                         Qt::DirectConnection ) );
-    // Dispatch the zero-delay continuation while the sole pool worker is held.
-    // Its serialization policy is captured, but no serialization can complete.
-    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    // The first serialization policy must already be captured before the next copy.
+    REQUIRE( waitForMatchWorker( view ) );
     REQUIRE( copied.count() == 0 );
     REQUIRE( QMetaObject::invokeMethod( &view, numberedFirst ? "copy" : "copyWithLineNumbers",
                                         Qt::DirectConnection ) );
@@ -895,7 +911,7 @@ TEST_CASE( "Retiring a view drains dispatched work without late copy or retained
     SafeQSignalSpy finished{ view.get(), &AbstractLogView::matchSelectionFinished };
     REQUIRE( ( serializing ? view->deferCopyUntilMatchSelection()
                            : view->selectAllMatches( true, true ) ) );
-    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    REQUIRE( waitForMatchWorker( *view ) );
     REQUIRE( finished.count() == 0 );
     SECTION( "Asynchronous retirement exposes pending work and closes admission" ) {
         const auto pending = view->retireSearches();
