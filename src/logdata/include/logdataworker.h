@@ -455,12 +455,16 @@ Q_SIGNALS:
     void deliverCheckFileFinished( MonitoredFileStatus status );
 
   private:
+    template <typename Operation, typename... Args>
+    void startOperation( Args... args );
     OperationResult connectSignalsAndRun( IndexOperation* operationRequested );
     void emitIndexingProgressedOnOwnerThread( int percent );
     void emitIndexingFinishedOnOwnerThread( LoadingStatus status );
     void emitCheckFileFinishedOnOwnerThread( MonitoredFileStatus status );
 
-    Mutex operationsMutex_;
+    // Serializes controller access to fileName_ and opThread_. The background
+    // operation uses its captured request and must never take this lock.
+    Mutex launchMutex_;
     AtomicFlag interruptRequest_;
 
     QString fileName_;

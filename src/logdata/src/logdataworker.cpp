@@ -50,7 +50,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMessageBox>
-#include <QSemaphore>
 #include <tuple>
 
 #include "containers.h"
@@ -209,85 +208,52 @@ LogDataWorker::~LogDataWorker() noexcept
     // the OS thread has completely exited -- no race with internal Qt thread-pool
     // cleanup (QMutex::lock / QThread::isRunning crashes seen in Qt 5.15/6.9).
     interruptRequest_.set();
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
+    waitForDone();
 }
 
 void LogDataWorker::attachFile( const QString& fileName )
 {
-    ScopedLock locker( operationsMutex_ );
-    interruptRequest_.clear();
+    ScopedLock locker( launchMutex_ );
     fileName_ = fileName;
+}
+
+template <typename Operation, typename... Args>
+void LogDataWorker::startOperation( Args... args )
+{
+    ScopedLock locker( launchMutex_ );
+    if ( opThread_.joinable() ) {
+        opThread_.join();
+    }
+    interruptRequest_.clear();
+
+    // std::thread publishes the immutable request to the worker. It never
+    // needs the launcher lock, including when it acquires the index lock or
+    // queues completion. Interrupts after launch are observed even if the
+    // thread has not started running yet.
+    opThread_ = std::thread( [this, fileName = fileName_, settings = IndexingSettings::capture(), args...] {
+        Operation operation{ fileName, indexing_data_, interruptRequest_, args..., settings };
+        connectSignalsAndRun( &operation );
+    } );
 }
 
 void LogDataWorker::indexAll( QTextCodec* forcedEncoding )
 {
-    ScopedLock locker( operationsMutex_ );
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
-    interruptRequest_.clear();
-
     LOG_INFO << "FullIndex requested, forced encoding: "
              << ( forcedEncoding != nullptr ? forcedEncoding->name().toStdString()
                                             : std::string{ "none" } );
-    const auto settings = IndexingSettings::capture();
-    QSemaphore operationStarted;
-    opThread_ = std::thread( [ this, &operationStarted, forcedEncoding, fileName = fileName_, settings ] {
-        LOG_INFO << "FullIndex thread started";
-        operationStarted.release();
-        ScopedLock operationLock( operationsMutex_ );
-        auto operationRequested = std::make_unique<FullIndexOperation>(
-            fileName, indexing_data_, interruptRequest_, forcedEncoding, settings );
-        connectSignalsAndRun( operationRequested.get() );
-    } );
-    operationStarted.acquire();
+    startOperation<FullIndexOperation>( forcedEncoding );
 }
 
 void LogDataWorker::indexAdditionalLines()
 {
-    ScopedLock locker( operationsMutex_ );
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
-    interruptRequest_.clear();
-
     LOG_INFO << "PartialIndex requested";
-
-    const auto settings = IndexingSettings::capture();
-    QSemaphore operationStarted;
-    opThread_ = std::thread( [ this, &operationStarted, fileName = fileName_, settings ] {
-        LOG_INFO << "PartialIndex thread started";
-        operationStarted.release();
-        ScopedLock operationLock( operationsMutex_ );
-        auto operationRequested = std::make_unique<PartialIndexOperation>(
-            fileName, indexing_data_, interruptRequest_, settings );
-        connectSignalsAndRun( operationRequested.get() );
-    } );
-    operationStarted.acquire();
+    startOperation<PartialIndexOperation>();
 }
 
 void LogDataWorker::checkFileChanges()
 {
-    ScopedLock locker( operationsMutex_ );
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
-    interruptRequest_.clear();
-
     LOG_INFO << "Check file changes requested";
-
-    const auto settings = IndexingSettings::capture();
-    QSemaphore operationStarted;
-    opThread_ = std::thread( [ this, &operationStarted, fileName = fileName_, settings ] {
-        operationStarted.release();
-        ScopedLock operationLock( operationsMutex_ );
-        auto operationRequested = std::make_unique<CheckFileChangesOperation>(
-            fileName, indexing_data_, interruptRequest_, settings );
-        connectSignalsAndRun( operationRequested.get() );
-    } );
-    operationStarted.acquire();
+    startOperation<CheckFileChangesOperation>();
 }
 
 OperationResult LogDataWorker::connectSignalsAndRun( IndexOperation* operationRequested )
@@ -319,6 +285,7 @@ void LogDataWorker::interrupt()
 
 void LogDataWorker::waitForDone()
 {
+    ScopedLock locker( launchMutex_ );
     if ( opThread_.joinable() ) {
         opThread_.join();
     }
