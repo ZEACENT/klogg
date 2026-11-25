@@ -18,14 +18,26 @@
  */
 
 #include <catch2/catch.hpp>
+#include <algorithm>
 #include <type_traits>
+#include <utility>
 
+#include <QAbstractEventDispatcher>
+#include <QApplication>
+#include <QDialogButtonBox>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QSignalSpy>
+#include <QTest>
 #include <QSettings>
 #include <QTemporaryDir>
 
 #include "configuration.h"
 #include "highlighterset.h"
+#include "highlightersdialog.h"
 #include "hsregularexpression.h"
 #include "test_utils.h"
 
@@ -112,7 +124,419 @@ HighlighterSetCollection loadHighlighterSetCollection(
     return collection;
 }
 
+struct RestoreHighlighterCollection {
+    HighlighterSetCollection saved;
+    ~RestoreHighlighterCollection()
+    {
+        HighlighterSetCollection::get() = saved;
+        HighlighterSetCollection::get().save();
+    }
+};
+
+void requireSameState( const HighlighterSetCollection::Snapshot& actual,
+                       const HighlighterSetCollection::Snapshot& expected )
+{
+    REQUIRE( actual.sets == expected.sets );
+    REQUIRE( actual.activeSetIds == expected.activeSetIds );
+    REQUIRE( actual.quickHighlighters == expected.quickHighlighters );
+    REQUIRE( actual.quickHighlighterDefaults == expected.quickHighlighterDefaults );
+}
+
 } // namespace
+
+TEST_CASE( "Highlighter state snapshots expose detached complete semantic values",
+           "[highlighter][highlighter-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    auto collection = loadHighlighterSetCollection( dir.filePath( "collection.ini" ),
+                                                    makeRegressionPatterns() );
+    collection.setQuickHighlighterDefaults( { false, true } );
+    const auto before = collection.snapshot();
+    REQUIRE( before.sets.size() == 1 );
+    const auto& set = before.sets.front();
+    REQUIRE( set.name() == QStringLiteral( "Vectorscan Regression" ) );
+    REQUIRE( set.id() == QStringLiteral( "vectorscan-regression" ) );
+    REQUIRE( before.activeSetIds == QStringList{ set.id() } );
+    auto rules = set.highlighters();
+    REQUIRE( rules.size() == 2 );
+    REQUIRE( rules.front().pattern() == makeRegressionPatterns().front().pattern );
+    REQUIRE_FALSE( rules.front().ignoreCase() );
+    REQUIRE( rules.front().useRegex() );
+    REQUIRE( rules.front().highlightOnlyMatch() );
+    REQUIRE_FALSE( rules.front().variateColors() );
+    REQUIRE( rules.front().colorVariance() == 15 );
+    REQUIRE( rules.front().foreColor() == QColor( Qt::black ) );
+    REQUIRE( rules.front().backColor() == QColor( Qt::yellow ) );
+    REQUIRE( before.quickHighlighters.size() == 9 );
+    REQUIRE_FALSE( before.quickHighlighterDefaults.ignoreCase );
+    REQUIRE( before.quickHighlighterDefaults.wholeWord );
+
+    rules.front().setPattern( QStringLiteral( "detached" ) );
+    auto detached = before;
+    detached.sets.clear();
+    detached.activeSetIds.clear();
+    detached.quickHighlighters.front().name = QStringLiteral( "detached" );
+    detached.quickHighlighterDefaults = {};
+    const HighlighterSetCollection& readOnly = collection;
+    requireSameState( readOnly.snapshot(), before );
+    REQUIRE( readOnly.snapshot().revision == before.revision );
+    REQUIRE( before.revision > 0 );
+}
+
+TEST_CASE( "Highlighter collection revisions cover every rule and set semantic field",
+           "[highlighter][highlighter-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = dir.filePath( "set.ini" );
+    const auto original = loadHighlighterSet( path, makeRegressionPatterns() );
+    HighlighterSetCollection collection;
+    collection.setHighlighterSets( { original } );
+    const auto before = collection.snapshot();
+
+    const QList<QPair<QString, QVariant>> edits{
+        { "name", "renamed" }, { "id", "replacement-id" },
+        { "highlighters/1/regexp", "changed-pattern" },
+        { "highlighters/1/ignore_case", true },
+        { "highlighters/1/match_only", false },
+        { "highlighters/1/use_regex", false },
+        { "highlighters/1/variate_colors", true },
+        { "highlighters/1/color_variance", 22 },
+        { "highlighters/1/fore_colour", "#80123456" },
+        { "highlighters/1/back_colour", "#40765432" } };
+    for ( const auto& edit : edits ) {
+        CAPTURE( edit.first );
+        QSettings settings( path, QSettings::IniFormat );
+        original.saveToStorage( settings );
+        settings.setValue( QStringLiteral( "HighlighterSet/" ) + edit.first, edit.second );
+        HighlighterSet changed;
+        changed.retrieveFromStorage( settings );
+        const auto revision = collection.snapshot().revision;
+        collection.setHighlighterSets( { changed } );
+        REQUIRE( collection.snapshot().sets.front() != original );
+        REQUIRE( collection.snapshot().revision == revision + 1 );
+        collection.setHighlighterSets( { changed } );
+        REQUIRE( collection.snapshot().revision == revision + 1 );
+        collection.setHighlighterSets( { original } );
+        REQUIRE( collection.snapshot().revision == revision + 2 );
+    }
+    requireSameState( collection.snapshot(), before );
+
+    const auto second = HighlighterSet::createNewSet( QStringLiteral( "Second" ) );
+    collection.setHighlighterSets( { original, second } );
+    const auto ordered = collection.snapshot();
+    collection.setHighlighterSets( { second, original } );
+    REQUIRE( collection.snapshot().revision == ordered.revision + 1 );
+    collection.setHighlighterSets( { original, second } );
+    REQUIRE( collection.snapshot().revision == ordered.revision + 2 );
+
+    auto reversedPatterns = makeRegressionPatterns();
+    std::reverse( reversedPatterns.begin(), reversedPatterns.end() );
+    const auto reversed = loadHighlighterSet( path, reversedPatterns );
+    collection.setHighlighterSets( { reversed, second } );
+    REQUIRE( collection.snapshot().revision == ordered.revision + 3 );
+}
+
+TEST_CASE( "Highlighter activation palette and defaults track semantic ABA without reads",
+           "[highlighter][highlighter-state]" )
+{
+    HighlighterSetCollection collection;
+    const auto first = HighlighterSet::createNewSet( QStringLiteral( "First" ) );
+    const auto second = HighlighterSet::createNewSet( QStringLiteral( "Second" ) );
+    collection.setHighlighterSets( { first, second } );
+    const auto before = collection.snapshot();
+    collection.activateSet( first.id() );
+    collection.deactivateSet( first.id() );
+    requireSameState( collection.snapshot(), before );
+    REQUIRE( collection.snapshot().revision == before.revision + 2 );
+    const auto unchanged = collection.snapshot().revision;
+    collection.activateSet( QStringLiteral( "missing" ) );
+    collection.deactivateSet( QStringLiteral( "missing" ) );
+    collection.deactivateAll();
+    REQUIRE( collection.snapshot().revision == unchanged );
+    collection.activateSet( first.id() );
+    collection.activateSet( first.id() );
+    REQUIRE( collection.snapshot().revision == unchanged + 1 );
+    collection.activateSet( second.id() );
+    collection.setHighlighterSets( { second } );
+    REQUIRE( collection.snapshot().activeSetIds == QStringList{ second.id() } );
+    REQUIRE( collection.snapshot().revision == unchanged + 3 );
+    collection.deactivateAll();
+    REQUIRE( collection.snapshot().revision == unchanged + 4 );
+
+    const QList<QuickHighlighter> palette{
+        { QStringLiteral( "Label" ), { QColor( Qt::red ), QColor( Qt::blue ) }, true } };
+    collection.setQuickHighlighters( palette );
+    for ( int field = 0; field < 4; ++field ) {
+        auto changed = palette;
+        if ( field == 0 ) changed.front().name = QStringLiteral( "Renamed" );
+        if ( field == 1 ) changed.front().color.foreColor = QColor( Qt::green );
+        if ( field == 2 ) changed.front().color.backColor = QColor( Qt::yellow );
+        if ( field == 3 ) changed.front().useInCycle = false;
+        const auto revision = collection.snapshot().revision;
+        collection.setQuickHighlighters( changed );
+        collection.setQuickHighlighters( changed );
+        collection.setQuickHighlighters( palette );
+        REQUIRE( collection.snapshot().revision == revision + 2 );
+    }
+    const auto defaults = collection.snapshot();
+    collection.setQuickHighlighterDefaults( { false, false } );
+    collection.setQuickHighlighterDefaults( { false, false } );
+    collection.setQuickHighlighterDefaults( { false, true } );
+    collection.setQuickHighlighterDefaults( defaults.quickHighlighterDefaults );
+    requireSameState( collection.snapshot(), defaults );
+    REQUIRE( collection.snapshot().revision == defaults.revision + 3 );
+}
+
+TEST_CASE( "Highlighter snapshot save and compiled caches are revision neutral",
+           "[highlighter][highlighter-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    auto collection = loadHighlighterSetCollection( dir.filePath( "collection.ini" ),
+                                                    makeRegressionPatterns() );
+    // The legacy default palette contains an invalid foreground color whose
+    // existing string persistence normalizes to black. Establish stored form
+    // before testing a semantically unchanged reload.
+    QSettings saved( dir.filePath( "saved.ini" ), QSettings::IniFormat );
+    collection.saveToStorage( saved );
+    collection.retrieveFromStorage( saved );
+    const auto before = collection.snapshot();
+    auto sets = collection.highlighterSets();
+    sets.front().compile();
+    auto rules = sets.front().highlighters();
+    rules.front().compile();
+    REQUIRE( rules == before.sets.front().highlighters() );
+    HighlightedMatchRanges matches;
+    REQUIRE( collection.currentActiveSet().matchLine( QStringLiteral( "ERROR" ), matches )
+             == HighlighterMatchType::WordMatch );
+    collection.setHighlighterSets( sets );
+    collection.saveToStorage( saved );
+    const auto keys = saved.allKeys();
+    QSignalSpy focus( qApp, &QApplication::focusChanged );
+    requireSameState( collection.snapshot(), before );
+    REQUIRE( collection.snapshot().revision == before.revision );
+    REQUIRE( saved.allKeys() == keys );
+    REQUIRE( focus.isEmpty() );
+    REQUIRE_FALSE( keys.contains( QStringLiteral( "HighlighterSetCollection/revision" ) ) );
+
+    collection.retrieveFromStorage( saved );
+    requireSameState( collection.snapshot(), before );
+    REQUIRE( collection.snapshot().revision == before.revision );
+}
+
+TEST_CASE( "Highlighter storage reload advances once and never resets the owner revision",
+           "[highlighter][highlighter-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto path = dir.filePath( "collection.ini" );
+    auto collection = loadHighlighterSetCollection( path, makeRegressionPatterns() );
+    QSettings settings( path, QSettings::IniFormat );
+    collection.saveToStorage( settings );
+    collection.retrieveFromStorage( settings );
+    const auto before = collection.snapshot();
+    settings.setValue( "HighlighterSetCollection/sets/1/HighlighterSet/name", "External" );
+    settings.setValue( "HighlighterSetCollection/quick_defaults/whole_word", true );
+    // A read must not pull external settings into application state.
+    requireSameState( collection.snapshot(), before );
+    collection.retrieveFromStorage( settings );
+    REQUIRE( collection.snapshot().sets.front().name() == QStringLiteral( "External" ) );
+    REQUIRE( collection.snapshot().quickHighlighterDefaults.wholeWord );
+    REQUIRE( collection.snapshot().revision == before.revision + 1 );
+    collection.retrieveFromStorage( settings );
+    REQUIRE( collection.snapshot().revision == before.revision + 1 );
+
+    settings.setValue( "HighlighterSetCollection/sets/1/HighlighterSet/name", before.sets.front().name() );
+    settings.setValue( "HighlighterSetCollection/quick_defaults/whole_word", false );
+    collection.retrieveFromStorage( settings );
+    requireSameState( collection.snapshot(), before );
+    REQUIRE( collection.snapshot().revision == before.revision + 2 );
+}
+
+TEST_CASE( "Highlighter collection assignment commits content not the draft revision",
+           "[highlighter][highlighter-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    auto owner = loadHighlighterSetCollection( dir.filePath( "collection.ini" ),
+                                               makeRegressionPatterns() );
+    const auto original = owner.snapshot();
+    auto draft = owner;
+    REQUIRE( draft.snapshot().revision == 0 );
+    for ( int edit = 0; edit < 3; ++edit ) {
+        draft.setQuickHighlighterDefaults( { false, true } );
+        draft.setQuickHighlighterDefaults( original.quickHighlighterDefaults );
+    }
+    owner = draft;
+    REQUIRE( owner.snapshot().revision == original.revision );
+    draft.setQuickHighlighterDefaults( { false, true } );
+    owner = draft;
+    REQUIRE( owner.snapshot().revision == original.revision + 1 );
+    requireSameState( owner.snapshot(), draft.snapshot() );
+    owner = std::move( draft );
+    REQUIRE( owner.snapshot().revision == original.revision + 1 );
+
+    HighlighterSetCollection replacement;
+    replacement.setHighlighterSets( original.sets );
+    replacement.setQuickHighlighters( original.quickHighlighters );
+    owner = std::move( replacement );
+    REQUIRE( owner.snapshot().revision == original.revision + 2 );
+    REQUIRE( owner.currentActiveSet().isEmpty() );
+    const auto& sameOwner = owner;
+    owner = sameOwner;
+    REQUIRE( owner.snapshot().revision == original.revision + 2 );
+}
+
+TEST_CASE( "Highlighter dialog Apply OK and Cancel share the committed revision owner",
+           "[highlighter][highlighter-state]" )
+{
+    auto& owner = HighlighterSetCollection::getSynced();
+    RestoreHighlighterCollection restore{ owner };
+    owner.setHighlighterSets( {} );
+    owner.save();
+    HighlighterSetCollection::getSynced(); // Normalize the legacy palette's stored color form.
+    const auto original = owner.snapshot();
+    HighlightersDialog dialog;
+    // Constructor posts icon loading to the GUI dispatcher; drain it while
+    // the dialog is alive, without sleeping or opening a modal event loop.
+    QCoreApplication::sendPostedEvents( QAbstractEventDispatcher::instance(), QEvent::MetaCall );
+    REQUIRE( owner.snapshot().revision == original.revision );
+    auto* const name = qobject_cast<QLineEdit*>( dialog.quickHighlightLayout->itemAtPosition( 1, 0 )->widget() );
+    REQUIRE( name != nullptr );
+    auto* const apply = dialog.buttonBox->button( QDialogButtonBox::Apply );
+    REQUIRE( apply != nullptr );
+    auto published = owner.snapshot();
+    QObject::connect( &dialog, &HighlightersDialog::optionsChanged, &dialog,
+                      [ & ] { published = owner.snapshot(); } );
+    name->selectAll();
+    QTest::keyClicks( name, "Human draft" );
+    requireSameState( owner.snapshot(), original );
+    apply->click();
+    REQUIRE( published.quickHighlighters.front().name == QStringLiteral( "Human draft" ) );
+    REQUIRE( published.revision == original.revision + 1 );
+    apply->click();
+    REQUIRE( owner.snapshot().revision == published.revision );
+    name->setText( original.quickHighlighters.front().name );
+    apply->click();
+    requireSameState( owner.snapshot(), original );
+    REQUIRE( owner.snapshot().revision == original.revision + 2 );
+
+    name->setText( QStringLiteral( "Cancelled draft" ) );
+    dialog.buttonBox->button( QDialogButtonBox::Cancel )->click();
+    requireSameState( owner.snapshot(), original );
+    REQUIRE( owner.snapshot().revision == original.revision + 2 );
+
+    HighlightersDialog accepted;
+    QCoreApplication::sendPostedEvents( QAbstractEventDispatcher::instance(), QEvent::MetaCall );
+    auto* const acceptedName = qobject_cast<QLineEdit*>(
+        accepted.quickHighlightLayout->itemAtPosition( 1, 0 )->widget() );
+    REQUIRE( acceptedName != nullptr );
+    acceptedName->setText( QStringLiteral( "Accepted draft" ) );
+    accepted.buttonBox->button( QDialogButtonBox::Ok )->click();
+    REQUIRE( owner.snapshot().quickHighlighters.front().name == QStringLiteral( "Accepted draft" ) );
+    REQUIRE( owner.snapshot().revision == original.revision + 3 );
+    REQUIRE( accepted.result() == QDialog::Accepted );
+}
+
+TEST_CASE( "Highlighter semantic edits invalidate previously compiled matchers",
+           "[highlighter][highlighter-state]" )
+{
+    Highlighter rule( QStringLiteral( "e.r" ), false, true, Qt::black, Qt::yellow );
+    klogg::vector<HighlightedMatch> matches;
+    REQUIRE( rule.matchLine( QStringLiteral( "ear" ), matches ) );
+
+    SECTION( "pattern" )
+    {
+        rule.setPattern( QStringLiteral( "warning" ) );
+        REQUIRE( rule.matchLine( QStringLiteral( "warning" ), matches ) );
+    }
+    SECTION( "case mode" )
+    {
+        rule.setIgnoreCase( true );
+        REQUIRE( rule.matchLine( QStringLiteral( "EAR" ), matches ) );
+    }
+    SECTION( "literal mode" )
+    {
+        rule.setUseRegex( false );
+        REQUIRE_FALSE( rule.matchLine( QStringLiteral( "ear" ), matches ) );
+        REQUIRE( rule.matchLine( QStringLiteral( "e.r" ), matches ) );
+    }
+    SECTION( "rule storage replacement" )
+    {
+        QTemporaryDir dir;
+        REQUIRE( dir.isValid() );
+        QSettings settings( dir.filePath( "rule.ini" ), QSettings::IniFormat );
+        rule.saveToStorage( settings );
+        settings.setValue( "regexp", "warning" );
+        rule.retrieveFromStorage( settings );
+        REQUIRE( rule.matchLine( QStringLiteral( "warning" ), matches ) );
+    }
+    SECTION( "set storage replacement" )
+    {
+        QTemporaryDir dir;
+        REQUIRE( dir.isValid() );
+        const auto path = dir.filePath( "set.ini" );
+        auto set = loadHighlighterSet( path, makeRegressionPatterns() );
+        HighlightedMatchRanges ranges;
+        REQUIRE( set.matchLine( QStringLiteral( "ERROR" ), ranges ) == HighlighterMatchType::WordMatch );
+        QSettings settings( path, QSettings::IniFormat );
+        settings.setValue( "HighlighterSet/highlighters/1/regexp", "warning" );
+        set.retrieveFromStorage( settings );
+        REQUIRE( set.matchLine( QStringLiteral( "warning" ), ranges ) == HighlighterMatchType::WordMatch );
+    }
+}
+
+TEST_CASE( "Highlighter dialog publishes edited active rules with their effective matcher",
+           "[highlighter][highlighter-state]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    auto& owner = HighlighterSetCollection::getSynced();
+    RestoreHighlighterCollection restore{ owner };
+    owner = loadHighlighterSetCollection( dir.filePath( "collection.ini" ), makeRegressionPatterns() );
+    owner.save();
+    HighlighterSetCollection::getSynced();
+    const auto before = owner.snapshot();
+    HighlightedMatchRanges matches;
+    // Populate both set-level and rule-level caches before editing the copy.
+    REQUIRE( before.sets.front().matchLine( QStringLiteral( "ERROR" ), matches )
+             == HighlighterMatchType::WordMatch );
+    REQUIRE( owner.currentActiveSet().matchLine( QStringLiteral( "ERROR" ), matches )
+             == HighlighterMatchType::WordMatch );
+
+    HighlightersDialog dialog;
+    auto* const pattern = dialog.findChild<QLineEdit*>( QStringLiteral( "patternEdit" ) );
+    REQUIRE( pattern != nullptr );
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( pattern->text() != makeRegressionPatterns().front().pattern && deadline.elapsed() < 500 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
+    }
+    REQUIRE( pattern->text() == makeRegressionPatterns().front().pattern );
+    auto published = before;
+    QObject::connect( &dialog, &HighlightersDialog::optionsChanged, &dialog,
+                      [ & ] { published = owner.snapshot(); } );
+    pattern->selectAll();
+    QTest::keyClicks( pattern, "WARNING" );
+    requireSameState( owner.snapshot(), before );
+    dialog.buttonBox->button( QDialogButtonBox::Apply )->click();
+    REQUIRE( published.revision == before.revision + 1 );
+    REQUIRE( published.sets.front().highlighters().front().pattern() == QStringLiteral( "WARNING" ) );
+    matches.clear();
+    CHECK( published.sets.front().matchLine( QStringLiteral( "WARNING" ), matches )
+           == HighlighterMatchType::WordMatch );
+    matches.clear();
+    CHECK( published.sets.front().matchLine( QStringLiteral( "ERROR" ), matches )
+           == HighlighterMatchType::NoMatch );
+    matches.clear();
+    REQUIRE( owner.currentActiveSet().matchLine( QStringLiteral( "WARNING" ), matches )
+             == HighlighterMatchType::WordMatch );
+    matches.clear();
+    REQUIRE( owner.currentActiveSet().matchLine( QStringLiteral( "ERROR" ), matches )
+             == HighlighterMatchType::NoMatch );
+}
 
 #ifdef KLOGG_HAS_VECTORSCAN
 TEST_CASE( "Vectorscan match contexts require explicit pattern counts", "[vectorscan][construction]" )
@@ -134,6 +558,21 @@ TEST_CASE( "Configured regex backend matches the built product", "[vectorscan][b
 #else
     REQUIRE( config.regexpEngine() == RegexpEngine::QRegularExpression );
 #endif
+}
+
+TEST_CASE( "Prepared highlighter matchers keep their captured backend across preference changes",
+           "[highlighter][review-highlighters][matcher-backend]" )
+{
+    ScopedRegexpEngine engine( RegexpEngine::QRegularExpression );
+    const auto patterns = makeRegressionPatterns();
+    MultiRegularExpression prepared( patterns );
+    REQUIRE( prepared.isValid() );
+    Configuration::get().setRegexpEnging( RegexpEngine::Vectorscan );
+    auto matcher = prepared.createMatcher();
+    const auto result = matcher->match( "ERROR https://example.invalid/evidence" );
+    REQUIRE( result.size() == patterns.size() );
+    CHECK( result[ 0 ].second );
+    CHECK( result[ 1 ].second );
 }
 
 TEST_CASE( "MultiRegularExpression matches representative highlighter patterns",

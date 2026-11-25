@@ -18,6 +18,7 @@
  */
 
 #include <catch2/catch.hpp>
+#include <vector>
 
 #include <QApplication>
 #include <QCheckBox>
@@ -25,6 +26,9 @@
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QSpinBox>
+#include <QMessageBox>
+
+#include "uimessage.h"
 
 #include "highlighterset.h"
 #include "optionsdialog.h"
@@ -43,6 +47,7 @@ class ConfigurationScope {
         , themeMode_( Configuration::getSynced().themeMode() )
         , language_( Configuration::getSynced().language() )
         , rollingMaxFileSize_( Configuration::getSynced().liveCaptureRollingMaxFileSize() )
+        , localControlEnabled_( Configuration::get().localControlEnabled() )
     {
     }
     ~ConfigurationScope()
@@ -53,6 +58,7 @@ class ConfigurationScope {
         // it too so later tests see the same process-wide configuration.
         Configuration::get().setLanguage( language_ );
         Configuration::get().setLiveCaptureRollingMaxFileSize( rollingMaxFileSize_ );
+        Configuration::get().setLocalControlEnabled( localControlEnabled_ );
         // updateConfigFromDialog() also calls save(), persisting the test's
         // values to the QSettings store. Persist the restored snapshot too, or
         // a later getSynced() reloads the leaked test configuration and the
@@ -68,6 +74,7 @@ class ConfigurationScope {
     ThemeMode themeMode_;
     QString language_;
     qint64 rollingMaxFileSize_;
+    bool localControlEnabled_;
 };
 
 // Restore the process-wide HighlighterSetCollection quick-defaults when the
@@ -353,6 +360,120 @@ TEST_CASE( "Applying the dialog while Classic Dark is pinned preserves the pre-p
     // so switching away from Classic Dark later can restore the original mode.
     REQUIRE( Configuration::get().style() == StyleManager::DarkStyleKey );
     REQUIRE( Configuration::get().themeMode() == ThemeMode::Auto );
+}
+
+TEST_CASE( "Options dialog edits the single local-control switch on Apply", "[control-settings]" )
+{
+    SavedSearches::getSynced();
+    RecentFiles::getSynced();
+    HighlighterSetCollection::getSynced();
+    ConfigurationScope scope;
+    auto& config = Configuration::get();
+    config.setStyle( StyleManager::DarkStyleKey );
+    config.setLocalControlEnabled( true );
+    OptionsDialog dialog;
+    auto* enabled = dialog.findChild<QCheckBox*>( QStringLiteral( "localControlEnabledCheckBox" ) );
+    REQUIRE( enabled != nullptr );
+    CHECK( enabled->isChecked() );
+    enabled->setChecked( false );
+    CHECK( config.localControlEnabled() );
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog", Qt::DirectConnection ) );
+    CHECK_FALSE( config.localControlEnabled() );
+    CHECK_FALSE( Configuration::getSynced().localControlEnabled() );
+    enabled->setChecked( true );
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog", Qt::DirectConnection ) );
+    CHECK( Configuration::getSynced().localControlEnabled() );
+}
+
+TEST_CASE( "Control CLI installation is explicit, previewed, and independent of control policy",
+           "[control-install-ui]" )
+{
+    using namespace klogg::control;
+    SavedSearches::getSynced();
+    RecentFiles::getSynced();
+    HighlighterSetCollection::getSynced();
+    ConfigurationScope scope;
+    const auto enabled = Configuration::get().localControlEnabled();
+    std::vector<InstallAction> actions;
+    InstallResult preview;
+    preview.status = InstallStatus::NotInstalled;
+    preview.message = QStringLiteral( "Ready to install" );
+    preview.plannedPaths = QStringList{ QStringLiteral( "/fixture/<home>/.bashrc" ),
+                                       QStringLiteral( "/fixture/bin/kloggctl" ) };
+    OptionsDialog dialog( nullptr, [&]( InstallAction action, const QStringList& approvedPaths ) {
+        actions.push_back( action );
+        if ( action == InstallAction::Install || action == InstallAction::Remove )
+            CHECK( approvedPaths == preview.plannedPaths );
+        else
+            CHECK( approvedPaths.isEmpty() );
+        if ( action == InstallAction::Check || action == InstallAction::CheckRemoval ) {
+            return preview;
+        }
+        InstallResult result;
+        result.status = InstallStatus::PartialFailure;
+        result.message = QStringLiteral( "Concurrent edit; inspect the backup" );
+        result.changedPaths = QStringList{ QStringLiteral( "/fixture/bin/kloggctl" ) };
+        result.backupPaths = QStringList{ QStringLiteral( "/fixture/backup" ) };
+        return result;
+    } );
+    CHECK( actions.empty() );
+    auto* check = dialog.findChild<QPushButton*>( QStringLiteral( "controlCliCheckButton" ) );
+    auto* install = dialog.findChild<QPushButton*>( QStringLiteral( "controlCliInstallButton" ) );
+    auto* remove = dialog.findChild<QPushButton*>( QStringLiteral( "controlCliRemoveButton" ) );
+    auto* status = dialog.findChild<QLabel*>( QStringLiteral( "controlCliStatusLabel" ) );
+    REQUIRE( check );
+    REQUIRE( install );
+    REQUIRE( remove );
+    REQUIRE( status );
+    check->click();
+    REQUIRE( actions == std::vector<InstallAction>{ InstallAction::Check } );
+    CHECK( status->textFormat() == Qt::PlainText );
+    CHECK( status->text().contains( preview.plannedPaths.front() ) );
+
+    int answer = QMessageBox::No; // lint-allow: platform-fragile -- enum result for injected non-modal dialog handler
+    int prompts = 0;
+    klogg::ui::ScopedDialogHandler handler( [&]( QDialog& confirmation ) {
+        auto* box = qobject_cast<QMessageBox*>( &confirmation ); // lint-allow: platform-fragile -- inspect intercepted dialog, never execute it
+        REQUIRE( box );
+        CHECK( box->textFormat() == Qt::PlainText );
+        CHECK( box->defaultButton() == box->button( QMessageBox::No ) ); // lint-allow: platform-fragile -- inspect default button inside injected handler
+        for ( const auto& path : preview.plannedPaths ) CHECK( box->text().contains( path ) );
+        ++prompts;
+        return answer;
+    } );
+    actions.clear();
+    install->click();
+    CHECK( actions == std::vector<InstallAction>{ InstallAction::Check } );
+    CHECK( prompts == 1 );
+    answer = QMessageBox::Yes; // lint-allow: platform-fragile -- injected result, no native modal execution
+    actions.clear();
+    install->click();
+    CHECK( actions == std::vector<InstallAction>{ InstallAction::Check, InstallAction::Install } );
+    CHECK( status->text().contains( QStringLiteral( "/fixture/backup" ) ) );
+    CHECK( status->text().contains( QStringLiteral( "Concurrent edit" ) ) );
+    preview.status = InstallStatus::Installed;
+    actions.clear();
+    remove->click();
+    CHECK( actions == std::vector<InstallAction>{ InstallAction::CheckRemoval, InstallAction::Remove } );
+    CHECK( Configuration::get().localControlEnabled() == enabled );
+
+    preview.status = InstallStatus::UnsafePath;
+    actions.clear();
+    const auto previousPrompts = prompts;
+    install->click();
+    CHECK( actions == std::vector<InstallAction>{ InstallAction::Check } );
+    CHECK( prompts == previousPrompts );
+    actions.clear();
+    remove->click();
+    CHECK( actions == std::vector<InstallAction>{ InstallAction::CheckRemoval } );
+    CHECK( prompts == previousPrompts );
+
+    preview.status = InstallStatus::NotInstalled;
+    preview.plannedPaths.clear();
+    actions.clear();
+    install->click();
+    CHECK( actions == std::vector<InstallAction>{ InstallAction::Check } );
+    CHECK( prompts == previousPrompts );
 }
 
 TEST_CASE( "ConfigurationScope restores the persisted configuration on disk" )

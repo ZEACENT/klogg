@@ -21,6 +21,9 @@
 
 #include <QFile>
 #include <QTextCodec>
+#include <QThread>
+
+#include "reviewmarks.h"
 
 #include <algorithm>
 
@@ -98,6 +101,19 @@ class FolderSearchResults::ReadSnapshot final : public klogg::LogSnapshot {
         const auto content = source( item );
         return { content->identity( local ), LineNumber( local.get() + 1 ), true,
                  !item.isMarkRow && record( item ).role == klogg::folder::RecordRole::Match };
+    }
+
+    std::optional<uint64_t> sourceBytesForLine( LineNumber index ) const override
+    {
+        const auto& item = at( index );
+        const auto content = source( item );
+        if ( item.isMarkRow ) return content->sourceBytesForLine( item.markLocalLine );
+        const auto& match = record( item );
+        const auto start = match.lineStartByte.get();
+        const auto end = match.lineEndByte.get();
+        if ( start < 0 || end < start || end > content->byteSize() )
+            throw klogg::SnapshotError( "Folder snapshot record extent is invalid" );
+        return static_cast<uint64_t>( end - start );
     }
 
     QString lineString( LineNumber index ) const override
@@ -241,7 +257,32 @@ bool FolderSearchResults::containsRowIdentity( const klogg::LogRowId& identity )
     }
     SharedLock lock( dataMutex_ );
     const auto member = retainedMembers_.find( { identity.incarnation, identity.member } );
-    return member != retainedMembers_.end() && identity.row < member->second.get();
+    return member != retainedMembers_.end() && identity.row < member->second.lineCount.get();
+}
+
+std::optional<klogg::folder::SourceRef>
+FolderSearchResults::sourceForIdentity( const klogg::LogRowId& identity ) const
+{
+    if ( identity.origin != klogg::LogRowId::Origin::IndexedFile ) return {};
+    SharedLock lock( dataMutex_ );
+    const auto member = retainedMembers_.find( { identity.incarnation, identity.member } );
+    if ( member == retainedMembers_.end() || identity.row >= member->second.lineCount.get() ) return {};
+    return klogg::folder::SourceRef{ member->second.filePath, LineNumber( identity.row ) };
+}
+
+void FolderSearchResults::retainSourceMetadata( const klogg::folder::FileGroup& group,
+    QHash<QString, klogg::folder::ScannedFileContent::Ptr>& sources, RetainedMembers& members )
+{
+    if ( !group.content ) return;
+    const auto previous = sources.value( group.filePath );
+    if ( previous ) {
+        const auto identity = previous->identity( 0_lnum );
+        members.erase( { identity.incarnation, identity.member } );
+    }
+    const auto identity = group.content->identity( 0_lnum );
+    members.insert_or_assign( { identity.incarnation, identity.member },
+        RetainedMember{ group.content->lineCount(), group.filePath } );
+    sources.insert( group.filePath, group.content );
 }
 
 bool FolderSearchResults::retainSource( const klogg::folder::FileGroup& group )
@@ -249,16 +290,7 @@ bool FolderSearchResults::retainSource( const klogg::folder::FileGroup& group )
     if ( !group.retentionError.isEmpty() && retentionError_.isEmpty() ) {
         retentionError_ = group.filePath + QLatin1String( ": " ) + group.retentionError;
     }
-    if ( group.content ) {
-        const auto previous = retainedSources_.value( group.filePath );
-        if ( previous ) {
-            const auto identity = previous->identity( 0_lnum );
-            retainedMembers_.erase( { identity.incarnation, identity.member } );
-        }
-        const auto identity = group.content->identity( 0_lnum );
-        retainedMembers_.insert_or_assign( { identity.incarnation, identity.member }, group.content->lineCount() );
-        retainedSources_.insert( group.filePath, group.content );
-    }
+    retainSourceMetadata( group, retainedSources_, retainedMembers_ );
     if ( !group.retentionError.isEmpty() ) {
         return true;
     }
@@ -269,14 +301,18 @@ bool FolderSearchResults::retainSource( const klogg::folder::FileGroup& group )
     return false;
 }
 
-void FolderSearchResults::rebuildSnapshotLayout()
+std::shared_ptr<const FolderSearchResults::SnapshotLayout>
+FolderSearchResults::buildSnapshotLayout( const LayoutInput& input,
+                                          const LayoutProjection& projection )
 {
+    const auto& groups = input.groups.get();
+    const auto& sources = input.sources.get();
     auto layout = std::make_shared<SnapshotLayout>();
-    layout->groups = groups_;
-    layout->visible = visibleRows_;
-    layout->presented.reserve( visibleRows_->size() );
-    for ( size_t index = 0; index < visibleRows_->size(); ++index ) {
-        const auto& row = ( *visibleRows_ )[ index ];
+    layout->groups = groups;
+    layout->visible = projection.visible;
+    layout->presented.reserve( projection.visible->size() );
+    for ( size_t index = 0; index < projection.visible->size(); ++index ) {
+        const auto& row = ( *projection.visible )[ index ];
         if ( row.kind != LineKind::Header ) {
             layout->presented.push_back( index );
         }
@@ -284,7 +320,7 @@ void FolderSearchResults::rebuildSnapshotLayout()
             // Match records already own group.content. Only visible marked
             // nonmatches need this lookup: sharing the entire registry would
             // detach/copy every earlier member on each streaming insertion.
-            layout->sources.insert( row.markFilePath, retainedSources_.value( row.markFilePath ) );
+            layout->sources.insert( row.markFilePath, sources.value( row.markFilePath ) );
         }
     }
     const auto registerMember = [&]( const klogg::folder::ScannedFileContent::Ptr& source,
@@ -294,20 +330,20 @@ void FolderSearchResults::rebuildSnapshotLayout()
             layout->members.emplace( std::make_pair( identity.incarnation, identity.member ), file );
         }
     };
-    for ( size_t file = 0; file < groups_.size(); ++file ) {
-        registerMember( groups_[ file ]->content, static_cast<klogg::folder::FileId>( file ) );
-        const auto& records = groups_[ file ]->matches;
+    for ( size_t file = 0; file < groups.size(); ++file ) {
+        registerMember( groups[ file ]->content, static_cast<klogg::folder::FileId>( file ) );
+        const auto& records = groups[ file ]->matches;
         for ( size_t match = 0; match < records.size(); ++match ) {
             if ( records[ match ].role == klogg::folder::RecordRole::Match ) {
                 layout->matches.push_back( { static_cast<klogg::folder::FileId>( file ), match } );
             }
         }
     }
-    for ( size_t file = 0; file < marksGroups_.size(); ++file ) {
-        registerMember( retainedSources_.value( marksGroups_[ file ].filePath ),
-                        static_cast<klogg::folder::FileId>( groups_.size() + file ) );
+    for ( size_t file = 0; file < projection.markGroups.size(); ++file ) {
+        registerMember( sources.value( projection.markGroups[ file ].filePath ),
+                        static_cast<klogg::folder::FileId>( groups.size() + file ) );
     }
-    snapshotLayout_ = std::move( layout );
+    return layout;
 }
 
 void FolderSearchResults::setResults( std::vector<klogg::folder::FileGroup> groups )
@@ -942,6 +978,11 @@ void FolderSearchResults::resetFileCaches()
     // deliberately survive this reset. File-handle slots grow lazily on reads so
     // streaming commits never wait behind potentially slow marked-line I/O.
     std::lock_guard<std::mutex> ioLock( fileIoMutex_ );
+    clearFileCaches();
+}
+
+void FolderSearchResults::clearFileCaches() noexcept
+{
     openFiles_.clear();
     markLineCache_.clear();
     markTextCache_.clear();
@@ -956,41 +997,316 @@ const FolderSearchResults::VisibleRow* FolderSearchResults::visibleRowAt( LineNu
     return &( *visibleRows_ )[ line.get() ];
 }
 
+struct FolderSearchResults::MarksLayoutCapture {
+    std::shared_ptr<const uint8_t> ownerIdentity;
+    std::shared_ptr<const SnapshotLayout> base;
+    QHash<QString, klogg::folder::ScannedFileContent::Ptr> sources;
+    QSet<klogg::folder::FileId> collapsed;
+    QSet<QString> expectedFiles;
+    bool restrictMarks = false;
+    Visibility visibility = Visibility::MarksAndMatches;
+    Visibility candidateVisibility = Visibility::MarksAndMatches;
+    const MarksStore* binding = nullptr; // Identity only; never dereferenced by workers.
+    MarksStore original;
+    MarksStore candidate;
+    QString retentionError;
+};
+struct FolderSearchResults::PreparedMarksLayout {
+    std::shared_ptr<const MarksLayoutCapture> captured;
+    LayoutProjection projection;
+    bool consumed = false;
+};
+struct FolderSearchResults::MarksLayoutPublication::State {
+    UniqueLock lock;
+    FolderSearchResults* owner;
+    std::shared_ptr<PreparedMarksLayout> prepared;
+};
+FolderSearchResults::MarksLayoutPublication::MarksLayoutPublication( std::unique_ptr<State> state )
+    : state_( std::move( state ) ) {}
+FolderSearchResults::MarksLayoutPublication::~MarksLayoutPublication() = default;
+bool FolderSearchResults::MarksLayoutPublication::install() noexcept
+{
+    Q_ASSERT( QThread::currentThread() == state_->owner->thread() );
+    if ( state_->prepared->consumed ) return false;
+    state_->owner->visibility_ = state_->prepared->captured->candidateVisibility;
+    state_->owner->installLayout( std::move( state_->prepared->projection ) );
+    state_->prepared->consumed = true;
+    return true;
+}
+
+std::shared_ptr<const FolderSearchResults::MarksLayoutCapture>
+FolderSearchResults::captureMarksLayout( const MarksStore& candidate, klogg::ReviewMarksBudget* budget,
+                                        std::optional<Visibility> candidateVisibility ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    SharedLock lock( dataMutex_ );
+    const auto markCount = []( const MarksStore& store ) -> std::optional<size_t> {
+        if ( static_cast<size_t>( store.size() ) > klogg::ReviewMarksOwner::MaxMembers ) return {};
+        size_t count = 0;
+        size_t text = 0;
+        for ( auto it = store.cbegin(); it != store.cend(); ++it ) {
+            if ( it->size() > klogg::ReviewMarksOwner::MaxMarks - count
+                 || static_cast<size_t>( it.key().size() ) > klogg::ReviewMarksOwner::MaxTextUnits - text ) return {};
+            count += it->size();
+            text += static_cast<size_t>( it.key().size() );
+        }
+        return count;
+    };
+    const auto count = markCount( candidate );
+    if ( !count || ( marksStore_ && !markCount( *marksStore_ ) ) ) return {};
+    // An upper bound admits the complete projection before copying anything.
+    // Groups/records remain shared; preparation never duplicates log payloads.
+    size_t rows = *count + static_cast<size_t>( candidate.size() );
+    for ( const auto& group : groups_ ) {
+        if ( rows >= MaxPreparedLayoutRows || group->matches.size() > MaxPreparedLayoutRows - rows - 1 ) return {};
+        rows += group->matches.size() + 1;
+    }
+    // Charge visible rows, snapshot references, group/member indexes and their
+    // container overhead against the transaction's shared preparation allowance.
+    constexpr size_t RowWorkBytes = 192;
+    if ( budget && !budget->charge( rows * RowWorkBytes ) ) return {};
+    auto captured = std::make_shared<MarksLayoutCapture>();
+    captured->ownerIdentity = layoutIdentity_;
+    captured->base = snapshotLayout_;
+    captured->collapsed = collapsed_;
+    captured->expectedFiles = expectedFilePaths_;
+    captured->restrictMarks = restrictMarksToExpectedFiles_;
+    captured->visibility = visibility_;
+    captured->candidateVisibility = candidateVisibility.value_or( visibility_ );
+    captured->binding = marksStore_;
+    if ( marksStore_ ) captured->original = *marksStore_;
+    captured->candidate = candidate;
+    captured->retentionError = retentionError_;
+    // Do not share the entire streaming source registry: a later insertion
+    // would otherwise detach/copy every previously scanned source on the GUI.
+    for ( auto it = candidate.cbegin(); it != candidate.cend(); ++it ) {
+        const auto source = retainedSources_.constFind( it.key() );
+        if ( source != retainedSources_.cend() ) captured->sources.insert( it.key(), source.value() );
+    }
+    return captured;
+}
+std::shared_ptr<FolderSearchResults::PreparedMarksLayout>
+FolderSearchResults::prepareMarksLayout( const std::shared_ptr<const MarksLayoutCapture>& captured )
+{
+    if ( !captured ) return {};
+    auto prepared = std::make_shared<PreparedMarksLayout>();
+    prepared->captured = captured;
+    prepared->projection = buildLayout( { captured->base->groups, captured->sources, captured->collapsed,
+        captured->expectedFiles, captured->restrictMarks, captured->candidateVisibility, &captured->candidate } );
+    return prepared;
+}
+std::unique_ptr<FolderSearchResults::MarksLayoutPublication>
+FolderSearchResults::lockMarksLayout( const std::shared_ptr<PreparedMarksLayout>& prepared )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( !prepared || prepared->consumed ) return {};
+    UniqueLock lock( dataMutex_, std::try_to_lock );
+    if ( !lock.owns_lock() ) return {};
+    const auto& captured = *prepared->captured;
+    if ( captured.ownerIdentity != layoutIdentity_ || captured.binding != marksStore_
+         || captured.base->groups != groups_ || captured.collapsed != collapsed_
+         || captured.expectedFiles != expectedFilePaths_
+         || captured.restrictMarks != restrictMarksToExpectedFiles_ || captured.visibility != visibility_
+         || captured.retentionError != retentionError_
+         || ( marksStore_ && captured.original != *marksStore_ ) ) return {};
+    for ( auto it = captured.candidate.cbegin(); it != captured.candidate.cend(); ++it ) {
+        if ( captured.sources.value( it.key() ) != retainedSources_.value( it.key() ) ) return {};
+    }
+    auto state = std::make_unique<MarksLayoutPublication::State>(
+        MarksLayoutPublication::State{ std::move( lock ), this, prepared } );
+    return std::unique_ptr<MarksLayoutPublication>( new MarksLayoutPublication( std::move( state ) ) );
+}
+
+struct FolderSearchResults::SearchReplacementCapture {
+    std::shared_ptr<const MarksLayoutCapture> context;
+    QSet<QString> collapsedPaths;
+};
+struct FolderSearchResults::PreparedSearchReplacement {
+    std::shared_ptr<const SearchReplacementCapture> captured;
+    std::vector<GroupPtr> groups;
+    QHash<QString, klogg::folder::ScannedFileContent::Ptr> sources;
+    RetainedMembers members;
+    QSet<QString> expectedFiles;
+    QSet<QString> pendingCollapsePaths;
+    QSet<klogg::folder::FileId> collapsed;
+    LayoutProjection projection;
+    bool consumed = false;
+};
+struct FolderSearchResults::SearchReplacementPublication::State {
+    UniqueLock lock;
+    std::unique_lock<std::mutex> ioLock;
+    FolderSearchResults* owner;
+    std::shared_ptr<PreparedSearchReplacement> prepared;
+};
+FolderSearchResults::SearchReplacementPublication::SearchReplacementPublication( std::unique_ptr<State> state )
+    : state_( std::move( state ) ) {}
+FolderSearchResults::SearchReplacementPublication::~SearchReplacementPublication() = default;
+bool FolderSearchResults::SearchReplacementPublication::install() noexcept
+{
+    auto& owner = *state_->owner;
+    auto& prepared = *state_->prepared;
+    Q_ASSERT( QThread::currentThread() == owner.thread() );
+    if ( prepared.consumed ) return false;
+    owner.groups_.swap( prepared.groups );
+    owner.retainedSources_.swap( prepared.sources );
+    owner.retainedMembers_.swap( prepared.members );
+    owner.expectedFilePaths_.swap( prepared.expectedFiles );
+    owner.collapsed_.swap( prepared.collapsed );
+    owner.restrictMarksToExpectedFiles_ = true;
+    owner.visibility_ = prepared.captured->context->candidateVisibility;
+    owner.retentionError_.clear();
+    owner.pendingByIndex_.clear();
+    owner.nextExpectedIndex_ = 0;
+    owner.pendingCollapsePaths_.swap( prepared.pendingCollapsePaths );
+    owner.clearFileCaches();
+    owner.installLayout( std::move( prepared.projection ) );
+    prepared.consumed = true;
+    return true;
+}
+std::shared_ptr<const FolderSearchResults::SearchReplacementCapture>
+FolderSearchResults::captureSearchReplacement( std::optional<Visibility> candidateVisibility ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    // Reuse the bounded, owner-thread marks/context capture. Workers receive
+    // values and immutable group leases, never the borrowed marks-store object.
+    const auto context = captureMarksLayout( marksStore_ ? *marksStore_ : MarksStore{}, nullptr, candidateVisibility );
+    if ( !context ) return {};
+    auto captured = std::make_shared<SearchReplacementCapture>();
+    captured->context = context;
+    SharedLock lock( dataMutex_ );
+    if ( groups_.empty() ) {
+        captured->collapsedPaths = pendingCollapsePaths_;
+    } else {
+        for ( const auto fileId : collapsed_ ) {
+            if ( fileId >= 0 && static_cast<size_t>( fileId ) < groups_.size() ) {
+                captured->collapsedPaths.insert( groups_[ static_cast<size_t>( fileId ) ]->filePath );
+            }
+        }
+    }
+    return captured;
+}
+std::shared_ptr<FolderSearchResults::PreparedSearchReplacement>
+FolderSearchResults::prepareSearchReplacement(
+    const std::shared_ptr<const SearchReplacementCapture>& captured, FolderSearchEngine::CompletedSearch completed )
+{
+    if ( !captured || completed.status != FolderSearchEngine::CompletionStatus::Ready
+         || completed.groups.size() != static_cast<size_t>( completed.filePaths.size() )
+         || completed.groups.size() > MaxPreparedLayoutRows ) return {};
+    const auto& context = *captured->context;
+    auto rows = static_cast<size_t>( context.original.size() );
+    for ( auto it = context.original.cbegin(); it != context.original.cend(); ++it ) rows += it->size();
+    for ( const auto& group : completed.groups ) {
+        if ( rows >= MaxPreparedLayoutRows || group.matches.size() > MaxPreparedLayoutRows - rows - 1
+             || !group.retentionError.isEmpty() || ( !group.matches.empty() && !group.content ) ) return {};
+        rows += group.matches.size() + 1;
+    }
+    auto prepared = std::make_shared<PreparedSearchReplacement>();
+    prepared->captured = captured;
+    prepared->groups.reserve( completed.groups.size() );
+    size_t index = 0;
+    for ( const auto& path : completed.filePaths ) {
+        auto& group = completed.groups[ index++ ];
+        if ( path != group.filePath || prepared->expectedFiles.contains( path ) ) return {};
+        prepared->expectedFiles.insert( path );
+        retainSourceMetadata( group, prepared->sources, prepared->members );
+        if ( !group.matches.empty() ) {
+            if ( captured->collapsedPaths.contains( path ) ) {
+                prepared->collapsed.insert( static_cast<klogg::folder::FileId>( prepared->groups.size() ) );
+            }
+            prepared->groups.push_back( std::make_shared<const klogg::folder::FileGroup>( std::move( group ) ) );
+        }
+    }
+    prepared->projection = buildLayout( { prepared->groups, prepared->sources, prepared->collapsed,
+        prepared->expectedFiles, true, context.candidateVisibility, &context.original } );
+    return prepared;
+}
+std::shared_ptr<FolderSearchResults::PreparedSearchReplacement>
+FolderSearchResults::prepareSearchReset( const std::shared_ptr<const SearchReplacementCapture>& captured,
+                                        const QStringList& expectedFileOrder )
+{
+    if ( !captured || static_cast<size_t>( expectedFileOrder.size() ) > MaxPreparedLayoutRows ) return {};
+    auto prepared = std::make_shared<PreparedSearchReplacement>();
+    prepared->captured = captured;
+    prepared->pendingCollapsePaths = captured->collapsedPaths;
+    for ( const auto& path : expectedFileOrder ) prepared->expectedFiles.insert( path );
+    const auto& context = *captured->context;
+    prepared->projection = buildLayout( { prepared->groups, prepared->sources, prepared->collapsed,
+        prepared->expectedFiles, true, context.candidateVisibility, &context.original } );
+    return prepared;
+}
+
+std::unique_ptr<FolderSearchResults::SearchReplacementPublication>
+FolderSearchResults::lockSearchReplacement( const std::shared_ptr<PreparedSearchReplacement>& prepared )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( !prepared || prepared->consumed ) return {};
+    UniqueLock lock( dataMutex_, std::try_to_lock );
+    if ( !lock.owns_lock() ) return {};
+    const auto& context = *prepared->captured->context;
+    // A complete query replacement deliberately requires the captured layout,
+    // not merely equivalent visible groups. A new empty search also supersedes it.
+    if ( context.ownerIdentity != layoutIdentity_ || context.base != snapshotLayout_
+         || context.binding != marksStore_ || ( marksStore_ && context.original != *marksStore_ )
+         // An empty native completion can discard pending collapse without
+         // publishing a different layout. That captured input must stay current too.
+         || ( groups_.empty() && prepared->captured->collapsedPaths != pendingCollapsePaths_ ) ) return {};
+    std::unique_lock<std::mutex> ioLock( fileIoMutex_, std::try_to_lock );
+    if ( !ioLock.owns_lock() ) return {};
+    auto state = std::make_unique<SearchReplacementPublication::State>(
+        SearchReplacementPublication::State{ std::move( lock ), std::move( ioLock ), this, prepared } );
+    return std::unique_ptr<SearchReplacementPublication>( new SearchReplacementPublication( std::move( state ) ) );
+}
+
+void FolderSearchResults::installLayout( LayoutProjection projection ) noexcept
+{
+    visibleRows_ = std::move( projection.visible );
+    marksGroups_ = std::move( projection.markGroups );
+    snapshotLayout_ = std::move( projection.snapshot );
+    maxLength_ = projection.maxLength;
+    maxLocalLine_ = projection.maxLocalLine;
+}
+
 void FolderSearchResults::rebuildVisibleRows()
 {
-    visibleRows_ = std::make_shared<std::vector<VisibleRow>>();
-    maxLength_ = 0_length;
-    maxLocalLine_ = 0_lnum;
+    installLayout( buildLayout( { groups_, retainedSources_, collapsed_, expectedFilePaths_,
+                                 restrictMarksToExpectedFiles_, visibility_, marksStore_ } ) );
+}
 
-    // maxLocalLine_ sizes the line-number gutter; it must cover ALL records
+FolderSearchResults::LayoutProjection FolderSearchResults::buildLayout( const LayoutInput& input )
+{
+    const auto& groups = input.groups.get();
+    const auto& collapsed = input.collapsed.get();
+    LayoutProjection result;
+
+    // result.maxLocalLine sizes the line-number gutter; it must cover ALL records
     // (independent of collapse/visibility) so the gutter is wide enough when a
     // collapsed group is later expanded.
-    for ( const auto& group : groups_ ) {
+    for ( const auto& group : groups ) {
         for ( const auto& rec : group->matches ) {
-            maxLocalLine_ = std::max( maxLocalLine_, rec.localLine );
+            result.maxLocalLine = std::max( result.maxLocalLine, rec.localLine );
         }
     }
 
-    const bool marksOnly = ( visibility_ == Visibility::Marks );
+    const bool marksOnly = ( input.visibility == Visibility::Marks );
     // Mark rows (marked non-match lines) are injected under Marks and
     // Marks-and-matches -- the single-file marks_ parity: a bookmark on a source
     // line stays visible across filter changes. Matches stays grep-pure (no marks).
     const bool injectMarks
-        = ( visibility_ == Visibility::Marks || visibility_ == Visibility::MarksAndMatches )
-        && marksStore_ != nullptr;
+        = ( input.visibility == Visibility::Marks || input.visibility == Visibility::MarksAndMatches )
+        && input.marks != nullptr;
 
     // Build marks-only groups: files with marks that have no real match group.
-    marksGroups_.clear();
+    result.markGroups.clear();
     if ( injectMarks ) {
         QSet<QString> groupFiles;
-        groupFiles.reserve( static_cast<int>( groups_.size() ) );
-        for ( const auto& g : groups_ ) {
-            groupFiles.insert( g->filePath );
+        groupFiles.reserve( static_cast<int>( groups.size() ) );
+        for ( const auto& group : groups ) {
+            groupFiles.insert( group->filePath );
         }
-        for ( auto it = marksStore_->constBegin(); it != marksStore_->constEnd(); ++it ) {
+        for ( auto it = input.marks->constBegin(); it != input.marks->constEnd(); ++it ) {
             if ( it.value().empty() || groupFiles.contains( it.key() )
-                 || ( restrictMarksToExpectedFiles_
-                      && !expectedFilePaths_.contains( it.key() ) ) ) {
+                 || ( input.restrictMarks
+                      && !input.expectedFiles.get().contains( it.key() ) ) ) {
                 continue;
             }
             MarksGroup mg;
@@ -1000,25 +1316,25 @@ void FolderSearchResults::rebuildVisibleRows()
                 mg.localLines.push_back( LineNumber( ln ) );
             }
             // std::set iterates ascending, so localLines is already sorted.
-            marksGroups_.push_back( std::move( mg ) );
+            result.markGroups.push_back( std::move( mg ) );
         }
-        // marksStore_ is a QHash (unspecified, per-process-salted iteration
+        // input.marks is a QHash (unspecified, per-process-salted iteration
         // order); sort so marks-only groups -- and their derived FileIds / row
         // indices -- appear in a stable, natural order across rebuilds and runs.
-        std::sort( marksGroups_.begin(), marksGroups_.end(),
+        std::sort( result.markGroups.begin(), result.markGroups.end(),
                    []( const MarksGroup& l, const MarksGroup& r ) {
                        return l.filePath < r.filePath;
                    } );
     }
 
     // Real groups: header + match rows + injected Mark rows.
-    for ( klogg::folder::FileId fid = 0; fid < static_cast<int>( groups_.size() ); ++fid ) {
-        const auto& group = *groups_[ static_cast<size_t>( fid ) ];
+    for ( klogg::folder::FileId fid = 0; fid < static_cast<int>( groups.size() ); ++fid ) {
+        const auto& group = *groups[ static_cast<size_t>( fid ) ];
 
         std::vector<LineNumber> markRows;
         if ( injectMarks ) {
-            const auto mIt = marksStore_->constFind( group.filePath );
-            if ( mIt != marksStore_->cend() ) {
+            const auto mIt = input.marks->constFind( group.filePath );
+            if ( mIt != input.marks->cend() ) {
                 // Lines already shown as a visible record (don't inject as a mark
                 // row -> avoids duplicates). Under Marks, context records and
                 // unmarked matches are hidden, so only marked Match records are
@@ -1031,7 +1347,7 @@ void FolderSearchResults::rebuildVisibleRows()
                         if ( rec.role != klogg::folder::RecordRole::Match ) {
                             continue;
                         }
-                        if ( !isLineMarked( group.filePath, rec.localLine ) ) {
+                        if ( !marksContain( input.marks, group.filePath, rec.localLine ) ) {
                             continue;
                         }
                     }
@@ -1051,7 +1367,7 @@ void FolderSearchResults::rebuildVisibleRows()
             if ( rec.role != klogg::folder::RecordRole::Match ) {
                 continue;
             }
-            if ( marksOnly && !isLineMarked( group.filePath, rec.localLine ) ) {
+            if ( marksOnly && !marksContain( input.marks, group.filePath, rec.localLine ) ) {
                 continue;
             }
             hasVisibleMatch = true;
@@ -1062,10 +1378,10 @@ void FolderSearchResults::rebuildVisibleRows()
         }
 
         // Header (always shown for a visible group).
-        visibleRows_->push_back( VisibleRow{ LineKind::Header, false, fid, 0, 0_lnum, {} } );
-        maxLength_ = std::max( maxLength_, LineLength( headerText( fid ).size() ) );
+        result.visible->push_back( VisibleRow{ LineKind::Header, false, fid, 0, 0_lnum, {} } );
+        result.maxLength = std::max( result.maxLength, LineLength( formatGroupHeader( group, collapsed.contains( fid ) ).size() ) );
 
-        if ( collapsed_.contains( fid ) ) {
+        if ( collapsed.contains( fid ) ) {
             continue;
         }
 
@@ -1089,22 +1405,22 @@ void FolderSearchResults::rebuildVisibleRows()
                     if ( rec.role != klogg::folder::RecordRole::Match ) {
                         continue; // hide context under Marks
                     }
-                    if ( !isLineMarked( group.filePath, rec.localLine ) ) {
+                    if ( !marksContain( input.marks, group.filePath, rec.localLine ) ) {
                         continue; // hide unmarked matches under Marks
                     }
                 }
-                visibleRows_->push_back(
+                result.visible->push_back(
                     VisibleRow{ LineKind::Data, false, fid, useIndex, 0_lnum, {} } );
-                maxLength_ = std::max( maxLength_, rec.lineLength );
-                maxLocalLine_ = std::max( maxLocalLine_, rec.localLine );
+                result.maxLength = std::max( result.maxLength, rec.lineLength );
+                result.maxLocalLine = std::max( result.maxLocalLine, rec.localLine );
             }
             else {
                 const auto ln = markRows[ mri ];
                 ++mri;
-                visibleRows_->push_back(
+                result.visible->push_back(
                     VisibleRow{ LineKind::Data, true, fid, 0, ln, group.filePath } );
-                maxLocalLine_ = std::max( maxLocalLine_, ln );
-                // maxLength_ for a mark row needs the fetched text; deferred (the
+                result.maxLocalLine = std::max( result.maxLocalLine, ln );
+                // result.maxLength for a mark row needs the fetched text; deferred (the
                 // horizontal scrollbar may be slightly narrow for long marked
                 // lines -- acceptable; doGetLineLength fetches the exact value).
             }
@@ -1113,31 +1429,37 @@ void FolderSearchResults::rebuildVisibleRows()
 
     // Marks-only groups (files with marks but no match group).
     if ( injectMarks ) {
-        for ( size_t mgi = 0; mgi < marksGroups_.size(); ++mgi ) {
-            const auto fid = static_cast<klogg::folder::FileId>( groups_.size() + mgi );
-            const auto& mg = marksGroups_[ mgi ];
-            visibleRows_->push_back( VisibleRow{ LineKind::Header, false, fid, 0, 0_lnum, {} } );
-            maxLength_ = std::max( maxLength_, LineLength( marksGroupHeader( mgi ).size() ) );
-            if ( collapsed_.contains( fid ) ) {
+        for ( size_t mgi = 0; mgi < result.markGroups.size(); ++mgi ) {
+            const auto fid = static_cast<klogg::folder::FileId>( groups.size() + mgi );
+            const auto& group = result.markGroups[ mgi ];
+            result.visible->push_back( VisibleRow{ LineKind::Header, false, fid, 0, 0_lnum, {} } );
+            result.maxLength = std::max( result.maxLength, LineLength( formatMarksHeader( group, collapsed.contains( fid ) ).size() ) );
+            if ( collapsed.contains( fid ) ) {
                 continue;
             }
-            for ( const auto& ln : mg.localLines ) {
-                visibleRows_->push_back(
-                    VisibleRow{ LineKind::Data, true, fid, 0, ln, mg.filePath } );
-                maxLocalLine_ = std::max( maxLocalLine_, ln );
+            for ( const auto& localLine : group.localLines ) {
+                result.visible->push_back(
+                    VisibleRow{ LineKind::Data, true, fid, 0, localLine, group.filePath } );
+                result.maxLocalLine = std::max( result.maxLocalLine, localLine );
             }
         }
     }
-    rebuildSnapshotLayout();
+    result.snapshot = buildSnapshotLayout( input, result );
+    return result;
 }
 
 bool FolderSearchResults::isLineMarked( const QString& filePath, LineNumber localLine ) const
 {
-    if ( marksStore_ == nullptr ) {
+    return marksContain( marksStore_, filePath, localLine );
+}
+
+bool FolderSearchResults::marksContain( const MarksStore* marks, const QString& filePath, LineNumber localLine )
+{
+    if ( marks == nullptr ) {
         return false;
     }
-    const auto it = marksStore_->constFind( filePath );
-    return it != marksStore_->cend() && it->count( localLine.get() ) > 0;
+    const auto fileMarks = marks->constFind( filePath );
+    return fileMarks != marks->cend() && fileMarks->count( localLine.get() ) > 0;
 }
 
 void FolderSearchResults::setVisibility( Visibility visibility )
@@ -1188,13 +1510,13 @@ void FolderSearchResults::refreshForMarksChange()
 
 QString FolderSearchResults::headerText( klogg::folder::FileId fileId ) const
 {
-    if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
-        return {};
-    }
-    const auto& group = *groups_[ static_cast<size_t>( fileId ) ];
+    if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) return {};
+    return formatGroupHeader( *groups_[ static_cast<size_t>( fileId ) ], collapsed_.contains( fileId ) );
+}
 
-    // ▸ (U+25B8) when collapsed, ▾ (U+25BE) when expanded — VS-Code style.
-    const QChar arrow = collapsed_.contains( fileId ) ? QChar( 0x25B8 ) : QChar( 0x25BE );
+QString FolderSearchResults::formatGroupHeader( const klogg::folder::FileGroup& group, bool collapsed )
+{
+    const QChar arrow = collapsed ? QChar( 0x25B8 ) : QChar( 0x25BE );
     QString text;
     text.reserve( group.filePath.size() + 24 );
     text += arrow;
@@ -1311,21 +1633,23 @@ QFile* FolderSearchResults::fileForGroup( klogg::folder::FileId fileId ) const
 
 QString FolderSearchResults::marksGroupHeader( size_t marksGroupIndex ) const
 {
-    if ( marksGroupIndex >= marksGroups_.size() ) {
-        return {};
-    }
-    const auto& mg = marksGroups_[ marksGroupIndex ];
+    if ( marksGroupIndex >= marksGroups_.size() ) return {};
     const auto fid = static_cast<klogg::folder::FileId>( groups_.size() + marksGroupIndex );
-    const QChar arrow = collapsed_.contains( fid ) ? QChar( 0x25B8 ) : QChar( 0x25BE );
+    return formatMarksHeader( marksGroups_[ marksGroupIndex ], collapsed_.contains( fid ) );
+}
+
+QString FolderSearchResults::formatMarksHeader( const MarksGroup& group, bool collapsed )
+{
+    const QChar arrow = collapsed ? QChar( 0x25B8 ) : QChar( 0x25BE );
     QString text;
-    text.reserve( mg.filePath.size() + 24 );
+    text.reserve( group.filePath.size() + 24 );
     text += arrow;
     text += QLatin1Char( ' ' );
-    text += mg.filePath;
+    text += group.filePath;
     text += QLatin1Char( ' ' );
     text += QChar( 0x2014 ); // em dash
     text += QLatin1Char( ' ' );
-    text += QString::number( static_cast<int>( mg.localLines.size() ) );
+    text += QString::number( static_cast<int>( group.localLines.size() ) );
     text += QLatin1String( " marks" );
     return text;
 }

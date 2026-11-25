@@ -20,8 +20,11 @@
 #ifndef KLOGG_COLORLABELSCONTROLLER_H
 #define KLOGG_COLORLABELSCONTROLLER_H
 
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <map>
+#include <utility>
 #include <vector>
 
 #include <QObject>
@@ -34,6 +37,7 @@
 class AbstractLogView;
 class QWidget;
 class QShortcut;
+class ReviewTransaction;
 
 // Owns one tab's ColorLabelsManager and keeps the quick highlighters of every
 // view the tab hosts in sync with it.
@@ -64,6 +68,30 @@ class ColorLabelsController : public QObject {
     ColorLabelsController( QWidget* shortcutsParent,
                            std::function<AbstractLogView*()> activeViewProvider );
 
+    struct Snapshot {
+        uint64_t revision = 0;
+        ColorLabelsManager::QuickHighlightersCollection labels;
+    };
+
+    struct Edit {
+        enum class Kind : uint8_t { Set, Remove, Clear };
+        Kind kind = Kind::Set;
+        size_t label = 0; // zero-based palette index; used only by Set
+        QStringList texts;
+        QuickHighlighterDefaults defaults;
+    };
+
+    enum class EditResult : uint8_t { Applied, Unchanged, Conflict, InvalidArgument, ResourceLimit };
+    static constexpr size_t MaxEdits = 128;
+    static constexpr size_t MaxEditTextUnits = size_t{ 1024 } * 1024;
+
+    // Owner-thread value observation; neither reads selection nor changes focus.
+    Snapshot snapshot() const;
+    // Validate the entire batch, prepare with the existing manager, then publish
+    // once. This is one tab's label scope, not a workspace-wide transaction.
+    EditResult apply( const std::vector<Edit>& edits,
+                      std::optional<uint64_t> expectedRevision = {} );
+
     // Connect the view's color-label signals and seed it with the labels
     // already set (no-op labels for the first view). Safe for views that are
     // destroyed later: QPointer guards drop them from the sync set.
@@ -74,13 +102,31 @@ class ColorLabelsController : public QObject {
     // CrawlerWidget::registerShortcuts.
     void registerShortcuts();
 
+  Q_SIGNALS:
+    // Emitted only after the owner and every live view have the committed state.
+    void labelsChanged();
+
   private:
+    friend class ReviewTransaction;
+    struct PreparedPublication {
+        ColorLabelsManager state;
+        std::vector<std::pair<QPointer<AbstractLogView>,
+                              ColorLabelsManager::QuickHighlightersCollection>> views;
+        bool changed = false;
+    };
+    static std::optional<EditResult> validateEdits( const std::vector<Edit>& edits,
+                                                   size_t labelCount, size_t& textUnits,
+                                                   size_t& textCount );
+    PreparedPublication preparePublication( ColorLabelsManager state ) const;
+    void install( PreparedPublication prepared );
+    static void applyEdit( ColorLabelsManager& manager, const Edit& edit );
+    void applyGuiEdit( const Edit& edit );
+    EditResult publish( ColorLabelsManager prepared );
     void addColorLabelToSelection( size_t label, const AbstractLogView* sourceView );
     void addNextColorLabelToSelection( const AbstractLogView* sourceView );
     void removeColorLabelFromSelection( const AbstractLogView* sourceView );
     void clearColorLabels();
     void setQuickColorLabelDefaults( bool ignoreCase, bool wholeWord );
-    void applyToViews( const ColorLabelsManager::QuickHighlightersCollection& labels );
     // The texts to (un)label: one entry per selected line of the emitting view
     // when known, else of the host-active view. Multi-line selections yield
     // per-line entries so every selected line gets labelled (an entry holding
@@ -89,6 +135,7 @@ class ColorLabelsController : public QObject {
     QStringList selectedTexts( const AbstractLogView* sourceView ) const;
 
     ColorLabelsManager manager_;
+    uint64_t revision_ = 0;
     QWidget* shortcutsParent_;
     std::function<AbstractLogView*()> activeViewProvider_;
     std::vector<QPointer<AbstractLogView>> views_;

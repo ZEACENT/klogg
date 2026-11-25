@@ -1233,6 +1233,28 @@ TEST_CASE( "Stopped restore creates one inert tab and zero transport starts",
     closeAndDeleteViews( *appSession, opened );
 }
 
+TEST_CASE( "File and folder extraction never bypasses live transport close policy",
+           "[livelog-restore-arming][session][document-retirement]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    WindowSession window{ appSession, QStringLiteral( "live-extraction-refusal" ), 0 };
+    auto spec = GENERATE( false, true ) ? makeIosSpec() : makeAndroidSpec();
+    spec.runIntent = live::RunIntent::Stopped;
+    std::unique_ptr<ViewInterface> view{ window.openAdbLogcat(
+        klogg::livelog::sessionDataFromSpec( spec ), [] { return new NullView; }, false ) };
+    REQUIRE( view );
+    CHECK_FALSE( window.extractDocument( view.get() ) );
+    CHECK( window.openedDocuments().size() == 1 );
+    CHECK( appSession->openedDocuments().size() == 1 );
+    CHECK( appSession->getLiveLogController( view.get() ) != nullptr );
+    CHECK( factory.totalStarts() == 0 );
+    window.close( view.get() );
+    CHECK( window.openedDocuments().empty() );
+    CHECK( appSession->openedDocuments().empty() );
+}
+
 TEST_CASE( "restored output binding applies rolling limits before opening the file",
            "[livelog-restore-arming][session][capture]" )
 {

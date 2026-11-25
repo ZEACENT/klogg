@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <optional>
 
+#include <QDateTime>
 #include <QFile>
 #include <QFileDevice>
 #include <QIODevice>
@@ -40,7 +41,7 @@ bool operator!=( const FileIdentity& left, const FileIdentity& right );
 std::optional<FileIdentity> fileIdentity( const QFileDevice& file );
 std::optional<FileIdentity> fileIdentity( const QString& path );
 
-enum class ReadOnlyFileOpenStatus : std::uint8_t { Opened, Missing, Failed };
+enum class ReadOnlyFileOpenStatus : std::uint8_t { Opened, Missing, Failed, NotRegular };
 
 struct ReadOnlyFileOpenResult {
     ReadOnlyFileOpenStatus status{ ReadOnlyFileOpenStatus::Failed };
@@ -50,6 +51,23 @@ struct ReadOnlyFileOpenResult {
 // Classify the native open operation itself, not a later pathname lookup.
 // On success QFile owns the descriptor; failures leave the closed file closed.
 ReadOnlyFileOpenResult openFileReadOnly( QFile& file );
+
+struct AcquiredFileMetadata {
+    FileIdentity identity;
+    qint64 size = 0;
+    QDateTime modified;
+};
+struct RegularFileOpenResult {
+    ReadOnlyFileOpenStatus status{ ReadOnlyFileOpenStatus::Failed };
+    QString error;
+    std::optional<AcquiredFileMetadata> metadata;
+};
+
+// Acquire once, validate the opened object, and report metadata from that handle.
+// Never creates a file; permits replacement on Windows and rejects POSIX FIFOs
+// without waiting for a writer. Call off the GUI thread: filesystem acquisition
+// itself may block. An already-open QFile is rejected without altering ownership.
+RegularFileOpenResult openRegularFileReadOnly( QFile& file );
 
 // Open a QFile with shared deletion/rename access. On Windows this adds
 // FILE_SHARE_DELETE to Qt's normal sharing contract, but QSaveFile replacement

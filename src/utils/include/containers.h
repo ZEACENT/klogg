@@ -23,7 +23,7 @@
 #include <mimalloc.h>
 #include <vector>
 
-#include <QByteArray>
+#include "qtcontainerindex.h"
 
 #include <type_safe/narrow_cast.hpp>
 #include <type_traits>
@@ -44,7 +44,7 @@ using vector = std::vector<T, mi_stl_allocator<T>>;
 // QStringView receiver -- QStringView has been qsizetype-native since Qt 5.8 on
 // BOTH versions, so its indices are plain qsizetype (see wrappedstring.h);
 // assigning a QStringView::size() to a ContainerIndex narrows on Qt 5.
-using ContainerIndex = decltype( QByteArray{}.size() );
+// Defined in qtcontainerindex.h, re-exported here for existing consumers.
 
 template <class C>
 constexpr auto ssize( const C& c )

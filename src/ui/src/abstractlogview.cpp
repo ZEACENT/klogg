@@ -75,6 +75,7 @@
 #include <QRect>
 #include <QScrollBar>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QStringView>
 #include <QStyle>
 #include <QtCore>
@@ -86,6 +87,7 @@
 #include "highlightedmatch.h"
 #include "highlightcompose.h"
 #include "matchprojection.h"
+#include "highlighterstatepublisher.h"
 #include "linetypes.h"
 
 #include "active_screen.h"
@@ -408,6 +410,8 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
     setMouseTracking( true );
 
     createMenu();
+    connect( &HighlighterStatePublisher::instance(), &HighlighterStatePublisher::changed,
+             this, [this] { forceRefresh(); } );
 
     connect( quickFindPattern_, SIGNAL( patternUpdated() ), this, SLOT( handlePatternUpdated() ) );
     connectQuickFindSource();
@@ -447,6 +451,22 @@ void AbstractLogView::connectQuickFindSource()
                 setQuickFindResult( result );
             }
         }, Qt::QueuedConnection );
+}
+
+std::vector<QFuture<void>> AbstractLogView::retireSearches()
+{
+    std::vector<QFuture<void>> completions;
+    completions.reserve( matchSelectionWorkers_.size() + 1 );
+    searchesRetiring_ = true;
+    acceptQuickFindResults_ = false;
+    if ( quickFind_ ) completions.push_back( quickFind_->retire() );
+    for ( const auto& worker : matchSelectionWorkers_ ) {
+        completions.push_back( worker.completion() );
+    }
+    // Cancellation can notify observers. Do not access this view afterward;
+    // the returned values already retain every dispatched task's completion.
+    cancelMatchSelection();
+    return completions;
 }
 
 void AbstractLogView::stopSearchAndWait()
@@ -648,7 +668,6 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 
         highlightersMenu_->createHighlightersMenu();
         highlightersMenu_->populateHighlightersMenu();
-        highlightersMenu_->setApplyChange( [ this ]() { Q_EMIT highlightersChange(); } );
 
         QActionGroup* colorLablesActionGroup = nullptr;
         colorLabelsMenu_->clear();
@@ -1449,6 +1468,7 @@ LineNumber AbstractLogView::getViewPosition() const
 
 void AbstractLogView::searchUsingFunction( QuickFindSearchFn searchFunction )
 {
+    if ( searchesRetiring_ ) return;
     cancelMatchSelection();
     acceptQuickFindResults_ = true;
     disableFollow();
@@ -1457,7 +1477,7 @@ void AbstractLogView::searchUsingFunction( QuickFindSearchFn searchFunction )
 
 void AbstractLogView::setQuickFindResult( const QuickFindResult& result ) try
 {
-    if ( !acceptQuickFindResults_ ) {
+    if ( searchesRetiring_ || !acceptQuickFindResults_ ) {
         return;
     }
     auto selected = result.selection;
@@ -1505,6 +1525,7 @@ void AbstractLogView::incrementallySearchBackward()
 
 void AbstractLogView::incrementalSearchAbort()
 {
+    if ( searchesRetiring_ ) return;
     // Reset routing clears the preview; restore only after those synchronous updates.
     const QPointer<AbstractLogView> guard{ this };
     Q_EMIT changeQuickFind( "", QuickFindMux::Forward );
@@ -1519,6 +1540,7 @@ void AbstractLogView::incrementalSearchAbort()
 
 void AbstractLogView::incrementalSearchStop()
 {
+    if ( searchesRetiring_ ) return;
     auto oldSelection = quickFind_->incrementalSearchStop();
     if ( selection_.isEmpty() && !selection_.hasStableNavigationAnchor() ) {
         selection_ = std::move( oldSelection );
@@ -1541,9 +1563,11 @@ void AbstractLogView::setSearchPattern( const RegularExpressionPattern& pattern 
 }
 
 void AbstractLogView::setQuickHighlighters(
-    const std::vector<QuickHighlighters>& quickHighlighters )
+    std::vector<QuickHighlighters> quickHighlighters )
 {
-    quickHighlighters_ = quickHighlighters;
+    // Callers may prepare the projection before a multi-owner commit. Adopting
+    // that owned value does not allocate or expose a partial label collection.
+    quickHighlighters_.swap( quickHighlighters );
     forceRefresh();
 }
 
@@ -2043,6 +2067,59 @@ void AbstractLogView::updateDisplaySize()
     }
 }
 
+AbstractLogView::PaneMetadata AbstractLogView::paneMetadata() const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    PaneMetadata state;
+    state.available = logData_ != nullptr;
+    if ( logData_ ) {
+        state.sourceRowCount = logData_->getNbLine();
+        if ( state.sourceRowCount > 0_lcount ) {
+            state.topPresentedRow = getTopLine();
+        }
+    }
+    state.selectedRow = selection_.selectedLine();
+    if ( state.selectedRow ) state.selectionKind = "line";
+    else if ( selection_.isPortion() ) state.selectionKind = "portion";
+    else if ( !selection_.isEmpty() ) state.selectionKind = "lines";
+    state.follow = isFollowEnabled();
+    state.wrap = isTextWrapEnabled();
+    state.visible = isVisible();
+    state.focused = hasFocus();
+    return state;
+}
+
+klogg::ReviewNavigation AbstractLogView::navigateReviewRow( const klogg::LogRowId& identity )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    using Error = klogg::ReviewNavigationError;
+    // Native selection disables Follow and can cancel a user's pending copy.
+    // Neither is a pane-local side effect: decline rather than interrupt either.
+    if ( !logData_ || searchesRetiring_ || followMode_ || selectionStarted_ || matchSelection_
+         || ( quickFind_ && quickFind_->isSearchRunning() ) ) return Error::NotAvailable;
+    OptionalLineNumber row;
+    try {
+        row = logData_->rowForIdentity( identity );
+        if ( !row || *row >= logData_->getNbLine() || !logData_->isLineCopyable( *row ) )
+            return Error::RowNotPresent;
+    }
+    catch ( ... ) { return Error::NotAvailable; }
+
+    // A human result click forwards newSelection to the main pane, and a
+    // scrollbar move can forward mouse hover to its overview. Keep native
+    // selection/scroll behavior but do not route those gestures to a peer.
+    const QSignalBlocker paneSignals{ this };
+    acceptQuickFindResults_ = false;
+    selectAndDisplayLine( *row );
+    return *row;
+}
+
+klogg::LogSnapshot::Ptr AbstractLogView::createPaneSnapshot( klogg::SnapshotScope scope ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    return logData_ ? logData_->createReadSnapshot( scope ) : klogg::LogSnapshot::Ptr{};
+}
+
 LineNumber AbstractLogView::getTopLine() const
 {
     return firstLine_;
@@ -2196,6 +2273,7 @@ LineKind AbstractLogView::lineKind( LineNumber /*lineNumber*/ ) const
 
 void AbstractLogView::setDataSource( const AbstractLogData* newLogData )
 {
+    if ( searchesRetiring_ ) return;
     auto nextSearch = std::make_unique<QuickFind>( *newLogData );
     stopSearchAndWait();
     invalidateMatchSelection();
@@ -2720,6 +2798,11 @@ void AbstractLogView::selectAndDisplayRange( FilePosition pos )
                          0_length );
 }
 
+void AbstractLogView::setCopyMatchesEnabled( bool enabled )
+{
+    copyMatchesAction_->setEnabled( enabled );
+}
+
 // Create the pop-up menu
 void AbstractLogView::createMenu()
 {
@@ -2733,6 +2816,16 @@ void AbstractLogView::createMenu()
     // No text as this action title depends on the type of selection
     connect( copyWithLineNumbersAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->copyWithLineNumbers(); } );
+
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    copyMatchesAction_ = new QAction( tr( "Copy Matches" ), this );
+    copyMatchesAction_->setObjectName( QStringLiteral( "copyMatchesAction" ) );
+    copyMatchesAction_->setStatusTip(
+        tr( "Copy all match fragments from the current filter results" ) );
+    copyMatchesAction_->setEnabled( false );
+    connect( copyMatchesAction_, &QAction::triggered, this,
+             &AbstractLogView::copyMatchesRequested );
 
     // QObject parentage owns this action.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
@@ -2849,6 +2942,7 @@ void AbstractLogView::createMenu()
              [ this ]( auto ) { Q_EMIT replaceScratchpadWithSelection(); } );
 
     popupMenu_ = new QMenu( this );
+    connect( popupMenu_, &QMenu::aboutToShow, this, &AbstractLogView::contextMenuAboutToShow );
     // popupMenu_ owns the submenu through QObject parentage.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     highlightersMenu_ = new HighlightersMenu( tr( "Highlighters" ), popupMenu_ );
@@ -2861,6 +2955,7 @@ void AbstractLogView::createMenu()
     popupMenu_->addSeparator();
     popupMenu_->addAction( copyAction_ );
     popupMenu_->addAction( copyWithLineNumbersAction_ );
+    popupMenu_->addAction( copyMatchesAction_ );
     popupMenu_->addAction( sendToScratchpadAction_ );
     popupMenu_->addAction( replaceInScratchpadAction_ );
     popupMenu_->addSeparator();

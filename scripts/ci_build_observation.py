@@ -42,6 +42,21 @@ def build_provenance(build_root, environment=None):
               "environment": env.get("KLOGG_CI_ENVIRONMENT_IDENTITY") or
                              "/".join(filter(None, (env.get("ImageOS"), env.get("ImageVersion")))),
               "cmake_options": {}, "build_type": None, "compilers": {}, "source_root": None}
+    acquisition_path = env.get("KLOGG_CI_CACHE_ACQUISITION_REPORT")
+    if acquisition_path:
+        path = Path(acquisition_path)
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
+            raise MetricsError("missing or oversized cache acquisition report")
+        acquisition = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(acquisition, dict) or not isinstance(acquisition.get("consumer"), dict):
+            raise MetricsError("invalid cache acquisition report")
+        for field, variable in (("run_id", "GITHUB_RUN_ID"), ("run_attempt", "GITHUB_RUN_ATTEMPT"),
+                                ("checkout_sha", "GITHUB_SHA")):
+            if not env.get(variable) or str(acquisition["consumer"].get(field)) != env[variable]:
+                raise MetricsError("cache acquisition consumer identity mismatch: " + field)
+        # Acquisition is not a measured hit rate. A bridge miss may coexist with
+        # useful backend objects, and imported objects still face compiler checks.
+        result["cache_acquisition"] = acquisition
     for language in ("C", "CXX"):
         paths = list(Path(build_root).glob(f"CMakeFiles/*/CMake{language}Compiler.cmake"))
         if len(paths) != 1:

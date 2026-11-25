@@ -116,6 +116,8 @@ public:
         uint64_t incarnation() const { return incarnation_; }
         uint64_t version() const { return visibleRevision_; }
         klogg::SnapshotRow row( LineNumber index ) const;
+        // Retained physical extent only; never opens a spill file or copies payload.
+        uint64_t sourceBytesForLine( LineNumber index ) const;
         OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const;
         bool isAppendOf( const Snapshot& previous ) const;
         // Exact committed rows, including zero-byte sealed records. Reads only

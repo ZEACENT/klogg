@@ -410,6 +410,21 @@ cmake -E chdir build_root ctest --build-config RelWithDebInfo --parallel 4
 
 CI also runs independent test entries concurrently.
 
+### Fast test-determinism guard
+
+Run `python3 scripts/lint_test_determinism.py` before building the C++ tests.
+The same guard runs in the CI lint workflow. Filter fixtures passed directly to
+`searchFor` or `replaceSearch` should use explicit ASCII classes for ASCII
+input, rather than unbounded Unicode word classes such as `\w+`. Their
+Vectorscan compilation can consume a UI completion deadline under sanitizers
+before the behavior under test runs (PR #86). Do not compensate by increasing
+the deadline or switching off the product's search backend.
+
+A test intentionally covering Unicode Filter semantics must put
+`// lint-allow: unicode-filter-regex -- <reason>` in a real comment within the
+call's line span. Quick Find and direct Qt regex tests use a different
+compilation path and are not subject to this rule.
+
 ### Performance budgets (local-only gates)
 
 Wall-clock budget assertions never gate CI: they are compiled into the tests

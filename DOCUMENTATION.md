@@ -157,6 +157,11 @@ Use `Alt+Enter` on Windows/Linux or `Option+Enter` on macOS, then the normal
 Copy command (`Ctrl+C` / `Command+C`). **Edit > Copy Matches** performs both
 steps. The shortcuts are configurable in Options > Shortcuts.
 
+Both log panes also offer **Copy Matches** in their right-click menu. This entry
+always copies all match fragments from the active Filter results, not just the
+clicked line or the manual selection, and does not use the Quick Find pattern.
+It is unavailable until supported, non-empty Filter results have completed.
+
 Filter and Quick Find share the same projection: participating, non-empty
 capturing groups determine the fragments when captures are present; otherwise
 the whole regex match is used. For example:
@@ -176,8 +181,8 @@ rows and folder headers. Matching rows remain eligible in Marks-only views and
 collapsed folder groups; selection does not change visibility or expand groups.
 Boolean and inverse filters do not define extractable fragments for this operation.
 
-When the Quick Find input has focus, these commands instead use its current
-pattern and originating view's presented data rows, excluding headers. The
+When the Quick Find input has focus, the Edit-menu commands and shortcuts instead
+use its current pattern and originating view's presented data rows, excluding headers. The
 matching and capture-projection rules are the same as Filter; only the candidate
 scope differs. Initial command routing may focus the log view for ordinary Copy,
 but asynchronous completion does not steal focus from another input.

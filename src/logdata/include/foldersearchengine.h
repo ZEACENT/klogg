@@ -21,10 +21,13 @@
 #define FOLDERSEARCHENGINE_H
 
 #include <QObject>
+#include <QFuture>
+#include <QFutureInterface>
 #include <QString>
 #include <QStringList>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -35,6 +38,7 @@
 
 #include "foldersearchtypes.h"
 #include "regularexpressionpattern.h"
+#include "searchsettings.h"
 
 class PatternMatcher;
 
@@ -63,9 +67,9 @@ class FolderSearchEngine : public QObject {
     static constexpr int BinaryDetectionWindow = 32 * 1024;
 
     using StopPredicate = std::function<bool()>;
-    // A stalled request may overlap one replacement request. Implementations must
-    // therefore be safe for at most two concurrent invocations and must own any
-    // captured state until each invocation returns.
+    // One native engine can overlap a stalled enumeration with its replacement.
+    // Captures must outlive every invocation, including any calls made by
+    // independent preparation workers sharing the same enumerator.
     using FolderEnumerator
         = std::function<QStringList( const QString&, const StopPredicate& )>;
 
@@ -110,6 +114,10 @@ class FolderSearchEngine : public QObject {
     // the generation; the running scan emits its own searchFinished as it winds
     // down.
     void interrupt();
+    // Terminal owner-thread cancellation without joining here. Completion covers
+    // coordinator/scanner work; isolated enumeration quarantine retains its own
+    // values and follows the existing bounded shutdown policy.
+    QFuture<void> retire();
 
     // Advance the generation without starting a search, so any queued signals
     // from the previous search are recognised as stale (mirrors
@@ -124,6 +132,39 @@ class FolderSearchEngine : public QObject {
     // remain explicit.
     std::vector<klogg::folder::FileGroup> takeResults();
 
+    struct ScanSettings {
+        SearchSettings search;
+        int defaultEncodingMib = -1;
+        static ScanSettings capture();
+    };
+    enum class CompletionStatus : std::uint8_t {
+        Ready, Cancelled, CompileFailure, EnumerationFailure, RetentionFailure,
+        ResultsConsumed, Failed
+    };
+    struct CompletedSearch {
+        quint64 generation = 0;
+        CompletionStatus status = CompletionStatus::Failed;
+        QStringList filePaths;
+        std::vector<klogg::folder::FileGroup> groups;
+        // Requested policy snapshot, not a claim about fallback backend choice
+        // or the folder engine's separate bounded file-worker pool size.
+        ScanSettings requestSettings{};
+    };
+    // Run entirely within the caller's worker lifetime: enumeration is inline,
+    // and all scanner threads join before return. The stop predicate can be
+    // called concurrently; an empty predicate means never stop.
+    static CompletedSearch prepareFolderSearch( const QString& folderPath,
+                                                const RegularExpressionPattern& pattern,
+                                                klogg::folder::ContextOptions context,
+                                                const ScanSettings& settings,
+                                                const FolderEnumerator& enumerate,
+                                                const StopPredicate& shouldStop );
+
+    // Thread-safe, consume-once bulk handoff for the current generation. A
+    // terminal signal alone is not success, and streaming drains must not turn
+    // a partially consumed result into a successful complete search.
+    std::optional<CompletedSearch> takeCompletedSearch( quint64 generation );
+
     // Thread-safe: move out the per-file streaming group for `fileIndex` (the
     // main-thread consumer pulls each finished group this way as fileGroupReady
     // fires). Returns nullopt if the index is out of range or the group was
@@ -131,11 +172,18 @@ class FolderSearchEngine : public QObject {
     // path uses takeResults() instead.
     std::optional<klogg::folder::FileGroup> takeCompletedGroup( int fileIndex );
 
-    // Scan a single file synchronously. Returns its FileGroup (empty matches if
-    // the file is binary, unreadable, or has no matches). The pure, testable
-    // unit: a function of (path, matcher, block size, stop predicate, context)
-    // only. `context` captures grep -A/-B/-C rows around each match.
+    // Scan a single file synchronously using caller-captured policy. Returns its
+    // FileGroup (empty matches if the file is binary, unreadable, or has no matches).
+    // `context` captures grep -A/-B/-C rows around each match.
     static klogg::folder::FileGroup scanFile( const QString& path, const PatternMatcher& matcher,
+                                              qint64 blockSize = DefaultBlockSize,
+                                              std::function<bool()> shouldStop = {},
+                                              klogg::folder::ContextOptions context = {},
+                                              std::shared_ptr<klogg::folder::ScanArena> arena = {} );
+    // Explicit captured policy for dispatched scans; scanFile above captures
+    // settings on its caller before entering the scanner.
+    static klogg::folder::FileGroup scanFileWithSettings( const QString& path, const PatternMatcher& matcher,
+                                              const ScanSettings& settings,
                                               qint64 blockSize = DefaultBlockSize,
                                               std::function<bool()> shouldStop = {},
                                               klogg::folder::ContextOptions context = {},
@@ -152,10 +200,15 @@ class FolderSearchEngine : public QObject {
     // The main thread responds by calling takeCompletedGroup(fileIndex).
     void fileGroupReady( int fileIndex, quint64 generation );
 
+  private Q_SLOTS:
+    void finishRetirement();
+
   private:
     enum class RequestSource : std::uint8_t { FilePaths, Folder };
 
     void workerLoop();
+    void requestShutdown();
+    QFutureInterface<void> retirementCompletion_;
 
     std::atomic<quint64> generation_{ 0 };
     std::atomic<bool> interruptRequested_{ false };
@@ -170,10 +223,16 @@ class FolderSearchEngine : public QObject {
         QString folderPath;
         RegularExpressionPattern pattern;
         klogg::folder::ContextOptions context;
+        ScanSettings settings;
         bool valid = false;
     };
     quint64 submit( Request request );
     void runFolderSearch( const Request& request );
+    void runSearchWithSettings( quint64 generation, const QStringList& filePaths,
+                                const RegularExpressionPattern& pattern,
+                                klogg::folder::ContextOptions context, const ScanSettings& settings );
+    void finishSearch( quint64 generation, CompletionStatus status, const ScanSettings& settings,
+                       const QStringList& filePaths = QStringList{} );
     Request pendingRequest_; // guarded by requestMutex_
 
     FolderEnumerator folderEnumerator_;
@@ -186,7 +245,18 @@ class FolderSearchEngine : public QObject {
     // completed group; synchronous consumers move all groups via takeResults.
     // No second result owner copies records or retains drained source leases.
     std::vector<std::optional<klogg::folder::FileGroup>> pending_;
+    // Receipt metadata only; pending_ remains the sole group/lease owner.
+    std::optional<CompletedSearch> completion_;
+    bool resultsConsumed_ = false;
     std::atomic<quint64> matchCount_{ 0 };
 };
+
+namespace klogg::folder::detail {
+// Explicit worker count and launcher keep partial native launch failure testable
+// independent of host core count. A failing task/launch stops and joins peers.
+using ScannerTask = std::function<void( std::size_t, const std::atomic<bool>& )>;
+using ScannerLauncher = std::function<std::thread( std::function<void()> )>;
+bool runScannerPool( std::size_t count, const ScannerTask& scan, const ScannerLauncher& launch );
+} // namespace klogg::folder::detail
 
 #endif // FOLDERSEARCHENGINE_H

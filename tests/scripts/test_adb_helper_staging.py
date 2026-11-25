@@ -77,6 +77,7 @@ class AdbHelperStagingTest(unittest.TestCase):
             'set(KLOGG_ADB_HELPER_PACKAGE_STAGE "${CMAKE_SOURCE_DIR}/package support")\n'
             f"set(KLOGG_ADB_HELPER_AVAILABLE {'TRUE' if available else 'FALSE'})\n"
             "add_custom_target(klogg_grep)\n"
+            "add_custom_target(kloggctl)\n"
             "add_custom_target(ci_build)\n"
             "add_subdirectory(packaging/adb)\n"
             "add_subdirectory(src/app)\n",

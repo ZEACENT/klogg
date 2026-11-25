@@ -43,6 +43,20 @@ private:
 };
 
 namespace detail {
+// A fixture may redirect submissions from its own thread without occupying the
+// Qt global pool (which some Qt versions also use for synchronous raster work).
+inline QThreadPool*& ownedTaskPoolOverride()
+{
+    static thread_local QThreadPool* pool = nullptr;
+    return pool;
+}
+
+inline QThreadPool* ownedTaskPool()
+{
+    auto* pool = ownedTaskPoolOverride();
+    return pool != nullptr ? pool : QThreadPool::globalInstance();
+}
+
 inline std::mutex& ownedTaskPublicationMutex()
 {
     static std::mutex mutex;
@@ -50,8 +64,18 @@ inline std::mutex& ownedTaskPublicationMutex()
 }
 } // namespace detail
 
+// Completion observers never own a result. A single consumer can move it out
+// on publication; a polling registry may instead share it for repeatable reads.
+// This future comes from a packaged task, never from std::async: dropping it
+// on abort does not wait for the worker.
+template <typename Result>
+struct SingleOwnerTaskFuture {
+    QFuture<void> finished;
+    std::future<Result> result;
+};
+
 template <typename Function>
-auto runOwnedTask( Function function ) -> OwnedTaskFuture<std::invoke_result_t<Function>>
+auto runSingleOwnerTask( Function function ) -> SingleOwnerTaskFuture<std::invoke_result_t<Function>>
 {
     using Result = std::invoke_result_t<Function>;
     struct Task final : QRunnable {
@@ -86,13 +110,20 @@ auto runOwnedTask( Function function ) -> OwnedTaskFuture<std::invoke_result_t<F
     QFutureInterface<void> completion;
     completion.reportStarted();
     auto task = std::make_unique<Task>( std::move( function ), completion );
-    auto result = task->function.get_future().share();
+    auto result = task->function.get_future();
     {
         const std::lock_guard<std::mutex> lock( detail::ownedTaskPublicationMutex() );
-        // Preserve the shared pool's concurrency bound; Qt owns the runnable.
-        QThreadPool::globalInstance()->start( task.release() );
+        // Qt takes ownership; production submissions retain the global pool bound.
+        detail::ownedTaskPool()->start( task.release() );
     }
     return { completion.future(), std::move( result ) };
+}
+
+template <typename Function>
+auto runOwnedTask( Function function ) -> OwnedTaskFuture<std::invoke_result_t<Function>>
+{
+    auto task = runSingleOwnerTask( std::move( function ) );
+    return { std::move( task.finished ), task.result.share() };
 }
 
 } // namespace klogg

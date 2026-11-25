@@ -1,0 +1,164 @@
+#include "controlrpc.h"
+
+#include <cstdint>
+#include <utility>
+
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonParseError>
+
+#include "controlframing.h"
+
+namespace klogg::control {
+namespace {
+constexpr int MaxIdentifierUnits = 128;
+
+bool validId( const QString& requestId )
+{
+    return !requestId.isEmpty() && requestId.size() <= MaxIdentifierUnits;
+}
+
+RpcError failure( int code, const QString& message, const QString& symbol,
+                  QJsonValue requestId = QJsonValue( QJsonValue::Null ), bool replyAllowed = true )
+{
+    return { std::move( requestId ), code, message,
+             QJsonObject{ { QStringLiteral( "code" ), symbol } }, replyAllowed, false };
+}
+
+std::variant<QJsonObject, RpcError> parseObject( const QByteArray& payload )
+{
+    if ( static_cast<std::uint64_t>( payload.size() ) > MaxFrameBytes ) {
+        return failure( -32000, QStringLiteral( "Control message exceeds its size limit" ),
+                        QStringLiteral( "RESOURCE_LIMIT" ) );
+    }
+    // QJsonDocument cannot represent scalar roots on Qt 5. Parse one value
+    // through an array so valid JSON scalars remain Invalid Request (-32600),
+    // rather than being misreported as invalid JSON (-32700).
+    QByteArray wrapped( "[" );
+    wrapped.reserve( payload.size() + 2 );
+    if ( payload.startsWith( "\xEF\xBB\xBF" ) ) {
+        wrapped.append( payload.constData() + 3, payload.size() - 3 );
+    }
+    else {
+        wrapped.append( payload );
+    }
+    wrapped.append( ']' );
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson( wrapped, &parseError );
+    if ( parseError.error != QJsonParseError::NoError || document.array().size() != 1 ) {
+        return failure( -32700, QStringLiteral( "Invalid JSON" ), QStringLiteral( "PARSE_ERROR" ) );
+    }
+    const auto root = document.array().first();
+    if ( !root.isObject() ) {
+        return failure( -32600, QStringLiteral( "A single JSON-RPC object is required" ),
+                        QStringLiteral( "INVALID_REQUEST" ) );
+    }
+    return root.toObject();
+}
+
+std::optional<QByteArray> serialize( const QJsonObject& response )
+{
+    auto bytes = QJsonDocument( response ).toJson( QJsonDocument::Compact );
+    if ( static_cast<std::uint64_t>( bytes.size() ) > MaxFrameBytes ) {
+        return {};
+    }
+    return bytes;
+}
+} // namespace
+
+DecodedRequest decodeRequest( const QByteArray& payload )
+{
+    auto parsed = parseObject( payload );
+    if ( const auto* error = std::get_if<RpcError>( &parsed ) ) {
+        return *error;
+    }
+    const auto& object = std::get<QJsonObject>( parsed );
+    const auto requestId = object.value( QStringLiteral( "id" ) );
+    const auto method = object.value( QStringLiteral( "method" ) );
+    // A notification must never get an error response either. The application
+    // dispatcher accepts only RpcRequest, so it cannot execute this rejection.
+    const bool supportedVersion
+        = object.value( QStringLiteral( "jsonrpc" ) ).toString() == QStringLiteral( "2.0" );
+    const bool validMethod = method.isString() && !method.toString().isEmpty()
+                             && method.toString().size() <= MaxIdentifierUnits;
+    const bool notification = !object.contains( QStringLiteral( "id" ) )
+                              && supportedVersion && validMethod;
+    const auto responseId = requestId.isString() && validId( requestId.toString() )
+                                ? requestId : QJsonValue( QJsonValue::Null );
+    if ( !supportedVersion || !requestId.isString() || !validId( requestId.toString() ) || !validMethod ) {
+        return failure( -32600, QStringLiteral( "Expected JSON-RPC 2.0, string id, and method" ),
+                        QStringLiteral( "INVALID_REQUEST" ), responseId, !notification );
+    }
+    const auto params = object.value( QStringLiteral( "params" ) );
+    if ( !params.isUndefined() && !params.isObject() ) {
+        return failure( -32602, QStringLiteral( "Control parameters must be a named object" ),
+                        QStringLiteral( "INVALID_PARAMS" ), requestId );
+    }
+    return RpcRequest{ requestId.toString(), method.toString(), params.toObject() };
+}
+
+DecodedResponse decodeResponse( const QByteArray& payload, const QString& expectedId )
+{
+    auto parsed = parseObject( payload );
+    if ( auto* error = std::get_if<RpcError>( &parsed ) ) {
+        error->id = expectedId;
+        return *error;
+    }
+    const auto invalid = [ &expectedId ] {
+        return failure( -32600, QStringLiteral( "Invalid or uncorrelated JSON-RPC response" ),
+                        QStringLiteral( "INVALID_RESPONSE" ), expectedId );
+    };
+    const auto& object = std::get<QJsonObject>( parsed );
+    const auto requestId = object.value( QStringLiteral( "id" ) );
+    if ( !validId( expectedId ) || !requestId.isString() || requestId.toString() != expectedId
+         || object.value( QStringLiteral( "jsonrpc" ) ).toString() != QStringLiteral( "2.0" )
+         || object.contains( QStringLiteral( "result" ) )
+                == object.contains( QStringLiteral( "error" ) ) ) {
+        return invalid();
+    }
+    if ( object.contains( QStringLiteral( "result" ) ) ) {
+        return object.value( QStringLiteral( "result" ) );
+    }
+    const auto errorValue = object.value( QStringLiteral( "error" ) );
+    if ( !errorValue.isObject() ) {
+        return invalid();
+    }
+    const auto error = errorValue.toObject();
+    const auto codeValue = error.value( QStringLiteral( "code" ) );
+    // toInt returns its default (zero) for non-integral or out-of-range numbers.
+    // Only accept it if the exact JSON number survives the conversion.
+    const int code = codeValue.toInt();
+    if ( codeValue != QJsonValue( code ) || !error.value( QStringLiteral( "message" ) ).isString() ) {
+        return invalid();
+    }
+    return RpcError{ requestId, code,
+                     error.value( QStringLiteral( "message" ) ).toString(),
+                     error.value( QStringLiteral( "data" ) ), true, true };
+}
+
+std::optional<QByteArray> encodeSuccess( const QString& requestId, const QJsonValue& result )
+{
+    if ( !validId( requestId ) || result.isUndefined() ) {
+        return {};
+    }
+    return serialize( { { QStringLiteral( "jsonrpc" ), QStringLiteral( "2.0" ) },
+                        { QStringLiteral( "id" ), requestId }, { QStringLiteral( "result" ), result } } );
+}
+
+std::optional<QByteArray> encodeError( const RpcError& error )
+{
+    if ( !error.replyAllowed || ( !error.id.isNull()
+                                 && ( !error.id.isString() || !validId( error.id.toString() ) ) ) ) {
+        return {};
+    }
+    QJsonObject detail{ { QStringLiteral( "code" ), error.code },
+                        { QStringLiteral( "message" ), error.message } };
+    if ( !error.data.isUndefined() ) {
+        detail.insert( QStringLiteral( "data" ), error.data );
+    }
+    return serialize( { { QStringLiteral( "jsonrpc" ), QStringLiteral( "2.0" ) },
+                        { QStringLiteral( "id" ), error.id },
+                        { QStringLiteral( "error" ), detail } } );
+}
+
+} // namespace klogg::control

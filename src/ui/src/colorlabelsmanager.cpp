@@ -39,7 +39,7 @@ bool sameQuickLabelEntry( const QuickLabelEntry& lhs, const QuickLabelEntry& rhs
            && lhs.wholeWord == rhs.wholeWord;
 }
 
-bool containsQuickLabelEntry( const AbstractLogView::QuickHighlighters& entries,
+bool containsQuickLabelEntry( const QList<QuickLabelEntry>& entries,
                               const QuickLabelEntry& entry )
 {
     return std::any_of( entries.cbegin(), entries.cend(),
@@ -53,6 +53,19 @@ bool containsQuickLabelEntry( const AbstractLogView::QuickHighlighters& entries,
 ColorLabelsManager::QuickHighlightersCollection ColorLabelsManager::colorLabels() const
 {
     return quickHighlighters_;
+}
+
+bool ColorLabelsManager::hasSameState( const ColorLabelsManager& other ) const
+{
+    return currentLabel_ == other.currentLabel_
+           && quickHighlighters_.size() == other.quickHighlighters_.size()
+           && std::equal( quickHighlighters_.cbegin(), quickHighlighters_.cend(),
+                          other.quickHighlighters_.cbegin(),
+                          []( const auto& lhs, const auto& rhs ) {
+                              return lhs.size() == rhs.size()
+                                     && std::equal( lhs.cbegin(), lhs.cend(), rhs.cbegin(),
+                                                    sameQuickLabelEntry );
+                          } );
 }
 
 ColorLabelsManager::QuickHighlightersCollection ColorLabelsManager::clear()
@@ -235,7 +248,7 @@ ColorLabelsManager::updateColorLabel( size_t label, const QString& text,
         return quickHighlighters_;
     }
 
-    AbstractLogView::QuickHighlighters matchingEntries;
+    QList<QuickLabelEntry> matchingEntries;
     for ( auto& quickHighlighter : quickHighlighters_ ) {
         quickHighlighter.erase(
             std::remove_if( quickHighlighter.begin(), quickHighlighter.end(),

@@ -65,6 +65,12 @@ class ConcatenatedReadSnapshot final : public klogg::LogSnapshot {
         return result;
     }
 
+    std::optional<uint64_t> sourceBytesForLine( LineNumber index ) const override
+    {
+        const auto& source = sourceForRow( index );
+        return source.snapshot->sourceBytesForLine( localRow( source, index ) );
+    }
+
     QString lineString( LineNumber index ) const override
     {
         const auto& source = sourceForRow( index );

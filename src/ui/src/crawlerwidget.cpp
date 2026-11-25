@@ -42,6 +42,7 @@
 // It also interacts with the sets of data (full and filtered).
 
 #include "abstractlogview.h"
+#include "logdata.h"
 #include "active_screen.h"
 #include "emptyfilterpolicy.h"
 #include "linetypes.h"
@@ -56,6 +57,7 @@
 #include <QApplication>
 #include <QCompleter>
 #include <QEvent>
+#include <QCoreApplication>
 #include <QFontMetrics>
 #include <QInputDialog>
 #include <QJsonDocument>
@@ -66,6 +68,7 @@
 #include <QShortcut>
 #include <QStandardItemModel>
 #include <QStringListModel>
+#include <QThread>
 #include <qglobal.h>
 #include <qobject.h>
 #include <string>
@@ -76,7 +79,6 @@
 
 #include "configuration.h"
 #include "crawlershortcuts.h"
-#include "dispatch_to.h"
 #include "filewatcher.h"
 #include "fontutils.h"
 #include "infoline.h"
@@ -187,16 +189,108 @@ CrawlerWidget::~CrawlerWidget()
     }
     for ( const auto& entry : filteredViewsData_ ) {
         if ( entry.first != nullptr ) {
+            // QWidget deletes child views after this object's members. A
+            // pending close's destroyed callback must not touch the retired map.
+            disconnect( entry.first, nullptr, this, nullptr );
             entry.first->stopSearchAndWait();
         }
     }
 }
 
-CrawlerWidget::CrawlerWidget( QWidget* parent )
+CrawlerWidget::CrawlerWidget( QWidget* parent, InitialFocusPolicy initialFocus )
     : QSplitter( parent )
     , iconLoader_{ this }
     , colorLabelsController_( this, [ this ]() { return activeView(); } )
+    , initialFocusPolicy_( initialFocus )
 {
+}
+
+std::vector<QFuture<void>> CrawlerWidget::retireResources()
+{
+    const auto sourceData = logData_;
+    const auto models = filteredViewsData_; // Includes panes already queued for deletion.
+    const auto currentModel = logFilteredData_;
+    std::vector<QPointer<AbstractLogView>> views;
+    views.reserve( models.size() + 1 );
+    views.emplace_back( logMainView_ );
+    for ( const auto& entry : models ) views.emplace_back( entry.first );
+    std::vector<QFuture<void>> completions;
+    completions.reserve( models.size() * 2 + 3 );
+
+    resourcesRetiring_ = true;
+    presentationActive_ = false;
+    presentationDirty_ = false;
+    presentationCatchUpQueued_ = false;
+    presentationSearchCatchUpPending_ = false;
+    searchUpdatePending_ = false;
+    searchUpdateThrottleTimer_.stop();
+    // Closed kept panes still belong to this QObject tree. Claim all of their
+    // deferred deletion before any cancellation can reenter an observer.
+    for ( const auto& view : views ) {
+        if ( view ) QCoreApplication::removePostedEvents( view.data(), QEvent::DeferredDelete );
+    }
+    setEnabled( false );
+
+    // Hold model/source values across cancellation observers. No widget members
+    // are read below: an observer may destroy or otherwise retire this widget.
+    for ( const auto& view : views ) {
+        if ( !view ) continue;
+        const auto pending = view->retireSearches();
+        completions.insert( completions.end(), pending.begin(), pending.end() );
+    }
+    for ( const auto& entry : models ) {
+        if ( entry.second ) completions.push_back( entry.second->retire() );
+    }
+    if ( currentModel && std::none_of( models.begin(), models.end(),
+            [&]( const auto& entry ) { return entry.second == currentModel; } ) ) {
+        completions.push_back( currentModel->retire() );
+    }
+    if ( auto* indexed = dynamic_cast<LogData*>( sourceData.get() ) ) {
+        completions.push_back( indexed->retire() );
+    }
+    return completions;
+}
+
+std::vector<klogg::ReviewMarksOwner*> CrawlerWidget::reviewMarksOwners()
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    std::vector<klogg::ReviewMarksOwner*> result;
+    for ( const auto& entry : filteredViewsData_ ) {
+        if ( tabbedFilteredView_ && tabbedFilteredView_->indexOf( entry.first ) >= 0 && entry.second )
+            result.push_back( entry.second.get() );
+    }
+    return result;
+}
+
+std::vector<AbstractCrawlerWidget::PaneReference> CrawlerWidget::reviewPanes() const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    std::vector<PaneReference> result;
+    if ( logMainView_ ) result.push_back( { logMainView_, Pane::Main, tr( "Main view" ), true,
+        logFilteredData_ ? logFilteredData_->reviewMarksId() : QString{} } );
+    for ( int index = 0; tabbedFilteredView_ && index < tabbedFilteredView_->count(); ++index ) {
+        auto* view = qobject_cast<FilteredView*>( tabbedFilteredView_->widget( index ) );
+        if ( !view ) continue;
+        const auto owner = filteredViewsData_.find( view );
+        const auto* model = owner != filteredViewsData_.end() ? owner->second.get() : nullptr;
+        result.push_back( { view, Pane::Results, tabbedFilteredView_->tabText( index ), true,
+            model ? model->reviewMarksId() : QString{},
+            model ? std::optional<klogg::ReviewAppliedFilter>{ {
+                model->appliedSearchPattern(), model->isSearchComplete() } } : std::nullopt } );
+    }
+    return result;
+}
+
+const AbstractLogView* CrawlerWidget::reviewPane( Pane pane ) const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    switch ( pane ) {
+    case Pane::Main:
+        return logMainView_;
+    case Pane::Results:
+        return filteredView_;
+    }
+    return nullptr;
 }
 
 // The top line is first one on the main display
@@ -299,7 +393,7 @@ void CrawlerWidget::doSendAllStateSignals()
 void CrawlerWidget::changeEvent( QEvent* event )
 {
     if ( event->type() == QEvent::StyleChange ) {
-        dispatchToMainThread( [ this ] {
+        QTimer::singleShot( 0, this, [ this ] {
             loadIcons();
             searchInfoLineDefaultPalette_ = this->palette();
         } );
@@ -320,6 +414,7 @@ void CrawlerWidget::stopLoading()
 
 void CrawlerWidget::reload()
 {
+    if ( resourcesRetiring_ ) return;
     invalidateMatchSelections();
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
@@ -357,6 +452,7 @@ void CrawlerWidget::setEncoding( std::optional<int> mib )
 
 void CrawlerWidget::setPresentationActive( bool active )
 {
+    if ( resourcesRetiring_ ) return;
     if ( presentationActive_ == active ) {
         return;
     }
@@ -383,6 +479,7 @@ void CrawlerWidget::setPresentationActive( bool active )
 
 void CrawlerWidget::queuePresentationRefresh( bool searchCatchUp )
 {
+    if ( resourcesRetiring_ ) return;
     presentationDirty_ = true;
     presentationSearchCatchUpPending_ = presentationSearchCatchUpPending_ || searchCatchUp;
     if ( !presentationActive_ || presentationCatchUpQueued_ ) {
@@ -400,6 +497,7 @@ void CrawlerWidget::queuePresentationRefresh( bool searchCatchUp )
 
 void CrawlerWidget::deliverPresentationCatchUp()
 {
+    if ( resourcesRetiring_ ) return;
     if ( !presentationCatchUpQueued_ ) {
         return;
     }
@@ -508,6 +606,7 @@ void CrawlerWidget::goToLine()
 void CrawlerWidget::doSetData( std::shared_ptr<SearchableLogData> logData,
                                std::shared_ptr<LogFilteredData> filteredData )
 {
+    if ( resourcesRetiring_ ) return;
     logData_ = std::move( logData );
     logFilteredData_ = std::move( filteredData );
 }
@@ -519,6 +618,7 @@ void CrawlerWidget::doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> qfp
 
 void CrawlerWidget::doSetSavedSearches( SavedSearches* saved_searches )
 {
+    if ( resourcesRetiring_ ) return;
     savedSearches_ = saved_searches;
 
     // We do setup now, assuming doSetData has been called before
@@ -567,6 +667,7 @@ std::shared_ptr<const ViewContextInterface> CrawlerWidget::doGetViewContext() co
 
 void CrawlerWidget::startNewSearch()
 {
+    if ( resourcesRetiring_ ) return;
     if ( searchToolbar_->isKeepResultsChecked() ) {
         searchToolbar_->setKeepResultsChecked( false );
 
@@ -587,7 +688,7 @@ void CrawlerWidget::startNewSearch()
         tabbedFilteredView_->setTabsClosable( true );
         tabbedFilteredView_->setCurrentIndex( index );
 
-        connectSearchPublication( logFilteredData_.get() );
+        connectModelPublication( logFilteredData_.get() );
 
         logMainView_->useNewFiltering( logFilteredData_.get() );
 
@@ -659,8 +760,29 @@ void CrawlerWidget::editSearchHistory()
     updateSearchCombo();
 }
 
-void CrawlerWidget::connectSearchPublication( LogFilteredData* source )
+void CrawlerWidget::connectModelPublication( LogFilteredData* source )
 {
+    connect( source, &LogFilteredData::marksChanged, this, [this, source] {
+        const auto found = std::find_if( filteredViewsData_.cbegin(), filteredViewsData_.cend(),
+            [source]( const auto& item ) { return item.second.get() == source; } );
+        if ( found == filteredViewsData_.cend() || tabbedFilteredView_->indexOf( found->first ) < 0 ) return;
+        auto* view = found->first;
+        if ( view != filteredView_ ) {
+            // A kept model owns its presentation; never switch or rebind the
+            // active pane/main view merely because its marks were published.
+            view->updateData();
+        }
+        else if ( presentationActive_ ) {
+            view->updateData();
+            logMainView_->updateData();
+            overview_.updateData( logData_->getNbLine() );
+            update();
+        }
+        else {
+            view->refreshMatchSelection();
+            queuePresentationRefresh( false );
+        }
+    } );
     connect( source, &LogFilteredData::searchProgressed, this,
              [ this, source ]( LinesCount nbMatches, int progress, LineNumber initialPosition,
                               quint64 generation ) {
@@ -678,7 +800,7 @@ void CrawlerWidget::connectSearchPublication( LogFilteredData* source )
 bool CrawlerWidget::acceptsSearchPublication( const LogFilteredData* source,
                                                quint64 generation ) const
 {
-    if ( source == nullptr || source != logFilteredData_.get() ) {
+    if ( resourcesRetiring_ || source == nullptr || source != logFilteredData_.get() ) {
         return false;
     }
     return !klogg::isStaleSearchGeneration( generation,
@@ -805,16 +927,7 @@ void CrawlerWidget::markLinesFromMain( const klogg::vector<LineNumber>& lines )
         }
     }
 
-    if ( presentationActive_ ) {
-        filteredView_->updateData();
-        logMainView_->updateData();
-        overview_.updateData( logData_->getNbLine() );
-        update();
-    }
-    else {
-        filteredView_->refreshMatchSelection();
-        queuePresentationRefresh( false );
-    }
+    Q_EMIT logFilteredData_->marksChanged();
 }
 
 void CrawlerWidget::markLinesFromFiltered( const klogg::vector<LineNumber>& lines )
@@ -846,16 +959,7 @@ void CrawlerWidget::deleteMarkLinesFromMain( const klogg::vector<LineNumber>& li
         }
     }
 
-    if ( presentationActive_ ) {
-        filteredView_->updateData();
-        logMainView_->updateData();
-        overview_.updateData( logData_->getNbLine() );
-        update();
-    }
-    else {
-        filteredView_->refreshMatchSelection();
-        queuePresentationRefresh( false );
-    }
+    Q_EMIT logFilteredData_->marksChanged();
 }
 
 void CrawlerWidget::deleteMarkLinesFromFiltered( const klogg::vector<LineNumber>& lines )
@@ -874,25 +978,34 @@ void CrawlerWidget::deleteMarkLinesFromFiltered( const klogg::vector<LineNumber>
     deleteMarkLinesFromMain( linesInMain );
 }
 
-void CrawlerWidget::applyConfiguration()
+QFont CrawlerWidget::configuredViewFont() const
 {
     const auto& config = Configuration::get();
     QFont font = config.mainFont();
-
-    LOG_DEBUG << "CrawlerWidget::applyConfiguration";
-
-    registerShortcuts();
-
-    // Whatever font we use, we should NOT use kerning
     font.setKerning( false );
     font.setFixedPitch( true );
-
-    // Necessary on systems doing subpixel positionning (e.g. Ubuntu 12.04)
     if ( config.forceFontAntialiasing() ) {
         font.setStyleStrategy( QFont::PreferAntialias );
     }
-
     font.setBold( config.useBoldFont() );
+    return font;
+}
+
+void CrawlerWidget::configureFilteredView( FilteredView* view ) const
+{
+    const auto& config = Configuration::get();
+    view->setLineNumbersVisible( config.filteredLineNumbersVisible() );
+    view->allowFollowMode( logData_ && ( logData_->isLiveSource() || config.anyFileWatchEnabled() ) );
+    view->updateFont( configuredViewFont() );
+}
+
+void CrawlerWidget::applyConfiguration()
+{
+    const auto& config = Configuration::get();
+    const auto font = configuredViewFont();
+
+    LOG_DEBUG << "CrawlerWidget::applyConfiguration";
+    registerShortcuts();
 
     if ( config.renderAnsiColorSequences() ) {
         logData_->setAnsiProcessingMode( AnsiProcessingMode::Render );
@@ -915,9 +1028,7 @@ void CrawlerWidget::applyConfiguration()
 
     for ( auto i = 0; i < tabbedFilteredView_->count(); ++i ) {
         auto fv = qobject_cast<FilteredView*>( tabbedFilteredView_->widget( i ) );
-        fv->setLineNumbersVisible( config.filteredLineNumbersVisible() );
-        fv->allowFollowMode( isFollowModeAllowed );
-        fv->updateFont( font );
+        configureFilteredView( fv );
     }
 
     // Update the SearchLine (history)
@@ -979,6 +1090,7 @@ void CrawlerWidget::exitingQuickFind()
 
 void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
 {
+    if ( resourcesRetiring_ ) return;
     LOG_INFO << "file loading finished, status " << static_cast<int>( status );
 
     // The model remains authoritative while hidden, but expensive view work is
@@ -1059,12 +1171,14 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
         for ( const auto& m : savedMarkedLines_ ) {
             logFilteredData_->addMark( m );
         }
-        if ( presentationActive_ ) {
-            logMainView_->setFocus();
-        }
-        else {
-            presentationFocusPending_ = true;
-            queuePresentationRefresh( false );
+        if ( initialFocusPolicy_ == InitialFocusPolicy::FocusMainView ) {
+            if ( presentationActive_ ) {
+                logMainView_->setFocus();
+            }
+            else {
+                presentationFocusPending_ = true;
+                queuePresentationRefresh( false );
+            }
         }
     }
 
@@ -1079,6 +1193,7 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
 
 void CrawlerWidget::fireThrottledSearchUpdate()
 {
+    if ( resourcesRetiring_ ) return;
     if ( !presentationActive_ ) {
         queuePresentationRefresh( true );
         return;
@@ -1338,7 +1453,7 @@ void CrawlerWidget::setup()
     setFocusProxy( searchToolbar_ );
 
     // Shared view-signal wiring (scratchpad / search composition / splitter /
-    // font zoom / exitView / highlightersChange / hover) -- the same component
+    // font zoom / exitView / hover) -- the same component
     // FolderCrawlerWidget uses. Hooks adapt the host-specific parts.
     {
         ViewSignalWiring::Hooks hooks;
@@ -1346,6 +1461,11 @@ void CrawlerWidget::setup()
             = [ this ]( const QString& text ) { Q_EMIT sendToScratchpad( text ); };
         hooks.replaceScratchpad
             = [ this ]( const QString& text ) { Q_EMIT replaceDataInScratchpad( text ); };
+        hooks.canCopyMatches = [ this ]( AbstractLogView* fromView ) {
+            return ( fromView == logMainView_ || fromView == filteredView_ )
+                   && canSelectAllMatches();
+        };
+        hooks.copyMatches = [ this ] { selectAllMatches( false, true ); };
         hooks.saveSplitterSizes = [ this ]() { saveSplitterSizes(); };
         hooks.exitView = [ this ]( AbstractLogView* fromView ) {
             if ( fromView == logMainView_ ) {
@@ -1357,7 +1477,6 @@ void CrawlerWidget::setup()
                 logMainView_->setFocus();
             }
         };
-        hooks.applyConfiguration = [ this ]() { applyConfiguration(); };
         hooks.hoveredOverLine = [ this ]( AbstractLogView*, LineNumber line ) {
             overviewWidget_->highlightLine( logFilteredData_->getMatchingLineNumber( line ) );
         };
@@ -1500,7 +1619,7 @@ void CrawlerWidget::setup()
     connect( logMainView_, &LogMainView::deleteMarkLines, this,
              &CrawlerWidget::deleteMarkLinesFromMain );
 
-    // Shared view-signal wiring: highlightersChange, add/exclude/replace-search,
+    // Shared view-signal wiring: add/exclude/replace-search,
     // saveDefaultSplitterSizes, changeFontSize, scratchpad, exitView.
     viewSignalWiring_->wireView( logMainView_ );
 
@@ -1526,7 +1645,7 @@ void CrawlerWidget::setup()
     connect( tabbedFilteredView_, &QTabWidget::tabCloseRequested, this,
              &CrawlerWidget::closeFilteredView );
 
-    connectSearchPublication( logFilteredData_.get() );
+    connectModelPublication( logFilteredData_.get() );
 
     // Throttle timer for search updates during live streaming
     searchUpdateThrottleTimer_.setSingleShot( true );
@@ -1559,6 +1678,7 @@ void CrawlerWidget::setup()
 
 void CrawlerWidget::changeFilteredView( int tabIndex )
 {
+    if ( resourcesRetiring_ ) return;
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
     presentationSelectionRestorePending_ = false;
@@ -1584,6 +1704,7 @@ void CrawlerWidget::changeFilteredView( int tabIndex )
 
 void CrawlerWidget::closeFilteredView( int tabIndex )
 {
+    if ( resourcesRetiring_ ) return;
     if ( tabIndex < 0 || tabIndex >= tabbedFilteredView_->count()
          || tabbedFilteredView_->count() <= 1 ) {
         return;
@@ -1604,6 +1725,10 @@ void CrawlerWidget::closeFilteredView( int tabIndex )
     if ( tabbedFilteredView_->count() == 2 ) {
         tabbedFilteredView_->setTabsClosable( false );
     }
+    // Retire membership now, but keep its model in filteredViewsData_ until the
+    // view has stopped using it. deleteLater alone leaves a closed pane targetable
+    // until the event loop runs, and releasing its model here would race workers.
+    tabbedFilteredView_->removeTab( tabIndex );
     tabFilteredView->deleteLater();
 }
 
@@ -1650,7 +1775,7 @@ void CrawlerWidget::connectAllFilteredViewSlots( FilteredView* view )
     // controller, seeded with any labels already set on the other views.
     colorLabelsController_.watchView( view );
 
-    // Shared view-signal wiring (highlightersChange / search composition /
+    // Shared view-signal wiring (search composition /
     // splitter / font zoom / scratchpad / exitView) + hover -> minimap
     // highlight (single-file wires hover on the filtered view only).
     viewSignalWiring_->wireView( view );
@@ -1693,10 +1818,26 @@ void CrawlerWidget::loadIcons()
     searchToolbar_->loadIcons();
 }
 
+void CrawlerWidget::setAppliedSearchPattern( const RegularExpressionPattern& pattern,
+                                              bool updateHiddenViews )
+{
+    currentSearchPattern_ = pattern;
+    if ( presentationActive_ || updateHiddenViews ) {
+        presentationSearchPatternPending_ = false;
+        logMainView_->setSearchPattern( currentSearchPattern_ );
+        filteredView_->setSearchPattern( currentSearchPattern_ );
+    }
+    else {
+        presentationSearchPatternPending_ = true;
+        queuePresentationRefresh( false );
+    }
+}
+
 // Create a new search using the text passed, replace the currently
 // used one and destroy the old one.
 void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 {
+    if ( resourcesRetiring_ ) return;
     LOG_INFO << "replacing current search with " << searchText;
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
@@ -1764,16 +1905,7 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
             // Accept auto-refresh of the search
             searchState_.startSearch();
             searchInfoLine_->hide();
-            currentSearchPattern_ = regexpPattern;
-            if ( presentationActive_ ) {
-                presentationSearchPatternPending_ = false;
-                logMainView_->setSearchPattern( currentSearchPattern_ );
-                filteredView_->setSearchPattern( currentSearchPattern_ );
-            }
-            else {
-                presentationSearchPatternPending_ = true;
-                queuePresentationRefresh( false );
-            }
+            setAppliedSearchPattern( regexpPattern );
         }
         else {
             // The regexp is wrong
@@ -1800,29 +1932,11 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
             searchInfoLine_->setText( errorMessage );
             searchInfoLine_->show();
 
-            currentSearchPattern_ = {};
-            if ( presentationActive_ ) {
-                presentationSearchPatternPending_ = false;
-                logMainView_->setSearchPattern( currentSearchPattern_ );
-                filteredView_->setSearchPattern( currentSearchPattern_ );
-            }
-            else {
-                presentationSearchPatternPending_ = true;
-                queuePresentationRefresh( false );
-            }
+            setAppliedSearchPattern( {} );
         }
     }
     else {
-        currentSearchPattern_ = {};
-        if ( presentationActive_ ) {
-            presentationSearchPatternPending_ = false;
-            logMainView_->setSearchPattern( currentSearchPattern_ );
-            filteredView_->setSearchPattern( currentSearchPattern_ );
-        }
-        else {
-            presentationSearchPatternPending_ = true;
-            queuePresentationRefresh( false );
-        }
+        setAppliedSearchPattern( {} );
         searchState_.resetState();
         printSearchInfoMessage();
     }

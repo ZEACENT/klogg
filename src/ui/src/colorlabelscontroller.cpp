@@ -20,8 +20,11 @@
 #include "colorlabelscontroller.h"
 
 #include <array>
+#include <limits>
+#include <utility>
 
 #include <QShortcut>
+#include <QThread>
 
 #include "abstractlogview.h"
 #include "configuration.h"
@@ -34,6 +37,139 @@ ColorLabelsController::ColorLabelsController(
     , shortcutsParent_( shortcutsParent )
     , activeViewProvider_( std::move( activeViewProvider ) )
 {
+}
+
+ColorLabelsController::Snapshot ColorLabelsController::snapshot() const
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    return { revision_, manager_.colorLabels() };
+}
+
+ColorLabelsController::EditResult ColorLabelsController::apply(
+    const std::vector<Edit>& edits, std::optional<uint64_t> expectedRevision )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( expectedRevision && *expectedRevision != revision_ ) {
+        return EditResult::Conflict;
+    }
+    size_t textUnits = 0;
+    size_t textCount = 0;
+    if ( const auto error = validateEdits( edits, manager_.colorLabels().size(), textUnits,
+                                          textCount ) ) {
+        return *error;
+    }
+    auto prepared = manager_;
+    for ( const auto& edit : edits ) {
+        applyEdit( prepared, edit );
+    }
+    return publish( std::move( prepared ) );
+}
+
+std::optional<ColorLabelsController::EditResult> ColorLabelsController::validateEdits(
+    const std::vector<Edit>& edits, size_t labelCount, size_t& textUnits, size_t& textCount )
+{
+    if ( edits.size() > MaxEdits ) {
+        return EditResult::ResourceLimit;
+    }
+    for ( const auto& edit : edits ) {
+        switch ( edit.kind ) {
+        case Edit::Kind::Set:
+            if ( edit.label >= labelCount ) {
+                return EditResult::InvalidArgument;
+            }
+            break;
+        case Edit::Kind::Remove:
+        case Edit::Kind::Clear:
+            break;
+        default:
+            return EditResult::InvalidArgument;
+        }
+        // Explicit requests fail instead of inheriting the legacy selection
+        // truncation policy. No prefix of an invalid batch is ever published.
+        const auto count = static_cast<size_t>( edit.texts.size() );
+        if ( count > ColorLabelsManager::MaxBulkLabelTexts - textCount ) {
+            return EditResult::ResourceLimit;
+        }
+        textCount += count;
+        for ( const auto& text : edit.texts ) {
+            const auto size = static_cast<size_t>( text.size() );
+            if ( size > MaxEditTextUnits - textUnits ) {
+                return EditResult::ResourceLimit;
+            }
+            textUnits += size;
+        }
+    }
+    return {};
+}
+
+void ColorLabelsController::applyEdit( ColorLabelsManager& manager, const Edit& edit )
+{
+    switch ( edit.kind ) {
+    case Edit::Kind::Set:
+        manager.setColorLabel( edit.label, edit.texts, edit.defaults );
+        break;
+    case Edit::Kind::Remove:
+        manager.removeColorLabel( edit.texts );
+        break;
+    case Edit::Kind::Clear:
+        manager.clear();
+        break;
+    }
+}
+
+void ColorLabelsController::applyGuiEdit( const Edit& edit )
+{
+    // GUI selections retain the existing manager's deduplication/truncation
+    // behavior, but use exactly the same mutation and publication path.
+    auto prepared = manager_;
+    applyEdit( prepared, edit );
+    publish( std::move( prepared ) );
+}
+
+ColorLabelsController::EditResult ColorLabelsController::publish( ColorLabelsManager prepared )
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( manager_.hasSameState( prepared ) ) {
+        return EditResult::Unchanged;
+    }
+    if ( revision_ == std::numeric_limits<uint64_t>::max() ) {
+        return EditResult::ResourceLimit;
+    }
+    install( preparePublication( std::move( prepared ) ) );
+    Q_EMIT labelsChanged();
+    return EditResult::Applied;
+}
+
+ColorLabelsController::PreparedPublication ColorLabelsController::preparePublication(
+    ColorLabelsManager state ) const
+{
+    PreparedPublication prepared;
+    prepared.changed = !manager_.hasSameState( state );
+    prepared.state = std::move( state );
+    if ( prepared.changed ) {
+        const auto labels = prepared.state.colorLabels();
+        prepared.views.reserve( views_.size() );
+        for ( const auto& view : views_ ) {
+            if ( view ) {
+                prepared.views.emplace_back( view, labels );
+            }
+        }
+    }
+    return prepared;
+}
+
+void ColorLabelsController::install( PreparedPublication prepared )
+{
+    if ( !prepared.changed ) {
+        return;
+    }
+    manager_ = std::move( prepared.state );
+    ++revision_;
+    for ( auto& projection : prepared.views ) {
+        if ( projection.first ) {
+            projection.first->setQuickHighlighters( std::move( projection.second ) );
+        }
+    }
 }
 
 void ColorLabelsController::watchView( AbstractLogView* view )
@@ -104,25 +240,26 @@ void ColorLabelsController::registerShortcuts()
 void ColorLabelsController::addColorLabelToSelection( size_t label,
                                                       const AbstractLogView* sourceView )
 {
-    applyToViews( manager_.setColorLabel(
-        label, selectedTexts( sourceView ),
-        HighlighterSetCollection::get().quickHighlighterDefaults() ) );
+    applyGuiEdit( { Edit::Kind::Set, label, selectedTexts( sourceView ),
+                    HighlighterSetCollection::get().quickHighlighterDefaults() } );
 }
 
 void ColorLabelsController::addNextColorLabelToSelection( const AbstractLogView* sourceView )
 {
-    applyToViews( manager_.setNextColorLabel(
-        selectedTexts( sourceView ), HighlighterSetCollection::get().quickHighlighterDefaults() ) );
+    auto prepared = manager_;
+    prepared.setNextColorLabel(
+        selectedTexts( sourceView ), HighlighterSetCollection::get().quickHighlighterDefaults() );
+    publish( std::move( prepared ) );
 }
 
 void ColorLabelsController::removeColorLabelFromSelection( const AbstractLogView* sourceView )
 {
-    applyToViews( manager_.removeColorLabel( selectedTexts( sourceView ) ) );
+    applyGuiEdit( { Edit::Kind::Remove, 0, selectedTexts( sourceView ), {} } );
 }
 
 void ColorLabelsController::clearColorLabels()
 {
-    applyToViews( manager_.clear() );
+    applyGuiEdit( { Edit::Kind::Clear, 0, {}, {} } );
 }
 
 void ColorLabelsController::setQuickColorLabelDefaults( bool ignoreCase, bool wholeWord )
@@ -131,16 +268,6 @@ void ColorLabelsController::setQuickColorLabelDefaults( bool ignoreCase, bool wh
     highlighterSetCollection.setQuickHighlighterDefaults(
         QuickHighlighterDefaults{ ignoreCase, wholeWord } );
     highlighterSetCollection.save();
-}
-
-void ColorLabelsController::applyToViews(
-    const ColorLabelsManager::QuickHighlightersCollection& labels )
-{
-    for ( const auto& view : views_ ) {
-        if ( view != nullptr ) {
-            view->setQuickHighlighters( labels );
-        }
-    }
 }
 
 QStringList ColorLabelsController::selectedTexts( const AbstractLogView* sourceView ) const

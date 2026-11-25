@@ -1008,18 +1008,42 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("Q_EMIT notify( QFNotification{ message } );", delivery)
         self.assertIn("void deliverNotification( const QString& message );", QUICKFIND_HEADER.read_text())
 
+    def test_file_index_workers_never_acquire_the_launcher_mutex(self):
+        # Admission can run with the index locked, as in the source-retirement
+        # regression. Taking the launcher's mutex around IndexOperation::run
+        # establishes the reverse lock order and can deadlock a join as well.
+        source = (ROOT / "src/logdata/src/logdataworker.cpp").read_text()
+        workers = re.findall(r"opThread_\s*=\s*std::thread\s*\((.*?)\}\s*\);", source, re.S)
+        self.assertTrue(workers)
+        for worker in workers:
+            self.assertNotRegex(worker, r"\b\w*[Mm]utex_\b")
+            self.assertNotIn("interruptRequest_.clear()", worker)
+        self.assertEqual(len(workers), 1, "all file operations share one launch boundary")
+        # Clearing after spawning can erase retirement before first worker entry;
+        # clearing before the previous join can restart the outgoing generation.
+        launch = function_body(source, "void LogDataWorker::startOperation")
+        self.assertEqual(source.count("interruptRequest_.clear();"), 1)
+        self.assertLess(launch.index("opThread_.join();"), launch.index("interruptRequest_.clear();"))
+        self.assertLess(launch.index("interruptRequest_.clear();"), launch.index("opThread_ = std::thread("))
+
     def test_snapshot_tasks_use_owned_execution_not_uninstrumented_qt_pool_handoffs(self):
-        for relative in ("src/ui/src/quickfind.cpp", "src/ui/src/matchselection.cpp"):
+        for relative, submit in (
+            ("src/ui/src/quickfind.cpp", "runOwnedTask"),
+            ("src/ui/src/matchselection.cpp", "runOwnedTask"),
+            ("src/ui/src/reviewtransaction.cpp", "runSingleOwnerTask"),
+            ("src/ui/src/reviewcontentadapter.cpp", "runSingleOwnerTask"),
+        ):
             with self.subTest(source=relative):
                 source = (ROOT / relative).read_text()
                 self.assertNotIn("QtConcurrent::run", source)
-                self.assertIn("klogg::runOwnedTask(", source)
+                self.assertIn(f"klogg::{submit}(", source)
         bridge = (ROOT / "src/utils/include/ownedtaskfuture.h").read_text()
         self.assertIn("std::packaged_task<Result()>", bridge)
         self.assertIn("std::shared_future<Result>", bridge)
         self.assertIn("QFutureInterface<void>", bridge)
         self.assertEqual(bridge.count("lock( detail::ownedTaskPublicationMutex() )"), 2)
-        self.assertIn("QThreadPool::globalInstance()->start( task.release() )", bridge)
+        self.assertIn("detail::ownedTaskPool()->start( task.release() )", bridge)
+        self.assertIn("QThreadPool::globalInstance()", function_body(bridge, "inline QThreadPool* ownedTaskPool()"))
         self.assertLess(bridge.index("function();"), bridge.index("completion.reportFinished();"))
 
     def test_quickfind_clears_interrupt_before_submission_not_worker_entry(self):

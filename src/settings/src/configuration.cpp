@@ -420,6 +420,8 @@ void Configuration::retrieveFromStorage( QSettings& settings )
     confirmTabClose_
         = settings.value( "session.confirmTabClose", DefaultConfiguration.confirmTabClose_ )
               .toBool();
+    localControlEnabled_
+        = settings.value( "control.enabled", DefaultConfiguration.localControlEnabled_ ).toBool();
 
     style_ = settings.value( "view.style", DefaultConfiguration.style_ ).toString();
 
@@ -565,6 +567,7 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "session.multipleWindows", allowMultipleWindows_ );
     settings.setValue( "session.followOnLoad", followFileOnLoad_ );
     settings.setValue( "session.confirmTabClose", confirmTabClose_ );
+    settings.setValue( "control.enabled", localControlEnabled_ );
 
     settings.setValue( "logging.enableLogging", enableLogging_ );
     settings.setValue( "logging.verbosity", loggingLevel_ );

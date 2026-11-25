@@ -75,13 +75,14 @@ class FileWatcher : public QObject {
     }
 #endif
 
-    // Adds the file to the list of file to watch
-    // (do nothing if a file is already monitored)
-    void addFile( const QString& fileName );
+    // Add an owner's claim on a file. Repeated registration by the same owner
+    // is idempotent; different sources retain independent claims. Owner addresses
+    // are opaque identities, never dereferenced by the serial watcher worker.
+    void addFile( const QString& fileName, const void* owner );
 
-    // Removes the file to the list of file to watch
-    // (do nothing if said file is not monitored)
-    void removeFile( const QString& fileName );
+    // Release only this owner's claim; remove the native watch after the last
+    // claim is gone. The owner must queue removal before its address is reused.
+    void removeFile( const QString& fileName, const void* owner );
 
     void updateConfiguration();
 

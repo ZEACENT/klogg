@@ -38,7 +38,6 @@
 
 #include <QtGlobal>
 #include <chrono>
-#include <cmath>
 #include <exception>
 #include <iostream>
 #include <locale>
@@ -52,7 +51,6 @@
 #include <tbb/flow_graph.h>
 #include <vector>
 
-#include "configuration.h"
 #include "linetypes.h"
 #include "log.h"
 #include "progress.h"
@@ -172,21 +170,19 @@ struct SearchBlockData {
 
 PartialSearchResults filterLines( const PatternMatcher& matcher,
                                   const SearchableLogData::RawLines& rawLines,
-                                  LineNumber chunkStart )
+                                  LineNumber chunkStart, bool useBlockScan )
 {
     LOG_DEBUG << "Filter lines at " << chunkStart;
     PartialSearchResults results;
     results.chunkStart = chunkStart;
     results.processedLines = LinesCount{ rawLines.endOfLines.size() };
 
-    const auto& config = Configuration::get();
-
     // Normalize once for both backends. Plain valid UTF8 borrows its original
     // buffer; transformed/CRLF/invalid input keeps the same block-scan fast path
     // over a normalized LF-framed buffer with matching boundaries.
     const auto block = rawLines.buildUtf8Block();
     const auto& lines = block.lines;
-    const bool blockScanEligible = config.useBlockScan() && matcher.hasBufferScan()
+    const bool blockScanEligible = useBlockScan && matcher.hasBufferScan()
         && !block.buffer.empty() && !block.endOfLines.empty()
         && block.buffer.size() <= std::numeric_limits<unsigned int>::max();
 
@@ -317,7 +313,6 @@ LogFilteredDataWorker::~LogFilteredDataWorker() noexcept
     // before any other members are destroyed.  std::thread::join() guarantees
     // the OS thread has completely exited -- no race with internal Qt thread-pool
     // cleanup (QMutex::lock / QThread::isRunning crashes seen in Qt 5.15/6.9).
-    interruptRequested_.set();
     shutdownAndWait();
 }
 
@@ -344,7 +339,7 @@ void LogFilteredDataWorker::connectSignalsAndRun( SearchOperation* operationRequ
                      auto completed = std::make_shared<CompletedSearchResult>(
                          CompletedSearchResult{ std::move( results.newMatches ), results.maxLength,
                              results.processedLines, request.sourceSnapshot, generation,
-                             operationId, request.requestTicket } );
+                             operationId, request.requestTicket, request.compiled } );
                      std::lock_guard<std::mutex> lock( completedMutex_ );
                      if ( generation == operationGeneration_.load()
                           && operationId == operationId_.load()
@@ -382,6 +377,7 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
                                     LineNumber endLine,
                                     SearchableLogData::ReadSnapshot::Ptr sourceSnapshot )
 {
+    if ( retiring_ ) return;
     const auto generation = operationGeneration_.fetch_add( 1 ) + 1;
     const auto operationId = operationId_.fetch_add( 1 ) + 1;
     quint64 ticket;
@@ -401,8 +397,9 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
         return;
     }
     LOG_INFO << "Search requested (async dispatch, gen " << generation << ")";
+    const auto settings = SearchSettings::capture();
     traceSearchStart( "compile.begin", generation, operationId );
-    compiledExpression_ = std::make_shared<RegularExpression>( regExp );
+    compiledExpression_ = std::make_shared<RegularExpression>( regExp, settings.backend );
     traceSearchStart( "compile.end", generation, operationId );
 
     // A new full search implicitly cancels any pending or coalesced live
@@ -418,7 +415,7 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
     traceSearchStart( "enqueue.request", generation, operationId );
     enqueueRequest( SearchRequest{ SearchRequest::Type::Full, regExp, startLine, endLine, {},
                                    generation, operationId, compiledExpression_,
-                                   std::move( sourceSnapshot ), ticket } );
+                                   std::move( sourceSnapshot ), ticket, settings } );
 }
 
 SearchableLogData::ReadSnapshot::Ptr LogFilteredDataWorker::updateSearch(
@@ -426,6 +423,7 @@ SearchableLogData::ReadSnapshot::Ptr LogFilteredDataWorker::updateSearch(
                                           LineNumber startLine, LineNumber endLine,
                                           LineNumber position )
 {
+    if ( retiring_ ) return {};
     updateRequests_.fetch_add( 1 );
     quint64 ticket;
     {
@@ -442,6 +440,7 @@ SearchableLogData::ReadSnapshot::Ptr LogFilteredDataWorker::updateSearch(
         return {};
     }
     const auto boundSnapshot = snapshot;
+    const auto settings = SearchSettings::capture();
 
     if ( sourceLogData_.isLiveSource() ) {
         liveTargetEndLine_.store( endLine.get() );
@@ -452,7 +451,7 @@ SearchableLogData::ReadSnapshot::Ptr LogFilteredDataWorker::updateSearch(
                 // The ticket independently revokes readiness for the older fixed prefix.
                 followupLiveRequest_ = SearchRequest{ SearchRequest::Type::LiveUpdate, regExp,
                     startLine, endLine, position, operationGeneration_.load(), 0,
-                    compiledExpression_, std::move( snapshot ), ticket };
+                    compiledExpression_, std::move( snapshot ), ticket, settings };
                 coalescedLiveUpdates_.fetch_add( 1 );
                 return boundSnapshot;
             }
@@ -466,10 +465,10 @@ SearchableLogData::ReadSnapshot::Ptr LogFilteredDataWorker::updateSearch(
 
         auto request = SearchRequest{ SearchRequest::Type::LiveUpdate, regExp, startLine, endLine,
                                       position, generation, operationId, compiledExpression_,
-                                      std::move( snapshot ), ticket };
+                                      std::move( snapshot ), ticket, settings };
         const auto processedLine = searchData_.getLastProcessedLine();
         const auto pendingLines = endLine > processedLine ? ( endLine - processedLine ).get() : 0;
-        if ( pendingLines < liveUpdateCoalesceThreshold() ) {
+        if ( pendingLines < liveUpdateCoalesceThreshold( settings ) ) {
             liveUpdateRunning_.store( false );
             enqueueOrDeferLiveRequest( std::move( request ) );
         }
@@ -498,7 +497,7 @@ SearchableLogData::ReadSnapshot::Ptr LogFilteredDataWorker::updateSearch(
 
     enqueueRequest( SearchRequest{ SearchRequest::Type::Update, regExp, startLine, endLine, position,
                                    generation, operationId, compiledExpression_,
-                                   std::move( snapshot ), ticket } );
+                                   std::move( snapshot ), ticket, settings } );
     return boundSnapshot;
 }
 
@@ -509,6 +508,7 @@ void LogFilteredDataWorker::enqueueRequest( SearchRequest request, bool interrup
     }
     {
         std::lock_guard<std::mutex> lock( requestMutex_ );
+        if ( dispatchShutdown_ ) return;
         if ( request.type == SearchRequest::Type::LiveUpdate ) {
             deferredLiveRequest_.reset();
         }
@@ -521,6 +521,7 @@ void LogFilteredDataWorker::enqueueOrDeferLiveRequest( SearchRequest request )
 {
     {
         std::lock_guard<std::mutex> lock( requestMutex_ );
+        if ( dispatchShutdown_ ) return;
         auto coalesceRequest = [ &request, this ]( SearchRequest& existing ) {
             existing.endLine = qMax( existing.endLine, request.endLine );
             existing.position = qMin( existing.position, request.position );
@@ -528,6 +529,7 @@ void LogFilteredDataWorker::enqueueOrDeferLiveRequest( SearchRequest request )
             existing.compiled = request.compiled;
             existing.sourceSnapshot = request.sourceSnapshot;
             existing.requestTicket = request.requestTicket;
+            existing.settings = request.settings;
             coalescedLiveUpdates_.fetch_add( 1 );
         };
 
@@ -561,7 +563,7 @@ void LogFilteredDataWorker::dispatchLoop()
             if ( dispatchShutdown_ ) {
                 pendingRequest_.reset();
                 deferredLiveRequest_.reset();
-                return;
+                break;
             }
             while ( !pendingRequest_.has_value() && deferredLiveRequest_.has_value()
                     && !dispatchShutdown_ ) {
@@ -576,7 +578,7 @@ void LogFilteredDataWorker::dispatchLoop()
             if ( dispatchShutdown_ ) {
                 pendingRequest_.reset();
                 deferredLiveRequest_.reset();
-                return;
+                break;
             }
             if ( !pendingRequest_.has_value() ) {
                 continue;
@@ -640,15 +642,15 @@ void LogFilteredDataWorker::dispatchLoop()
                 if ( incremental ) {
                     operation = std::make_unique<UpdateSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
-                        request.endLine, request.position, request.compiled,
+                        request.endLine, request.position, request.settings, request.compiled,
                         request.type == SearchRequest::Type::LiveUpdate ? &liveTargetEndLine_ : nullptr,
                         &matcherCreations_, &matcherCache_, request.sourceSnapshot );
                 }
                 else {
                     operation = std::make_unique<FullSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
-                        request.endLine, request.compiled, &matcherCreations_, &matcherCache_,
-                        request.sourceSnapshot );
+                        request.endLine, request.settings, request.compiled, &matcherCreations_,
+                        &matcherCache_, request.sourceSnapshot );
                 }
                 connectSignalsAndRun( operation.get(), request );
                 if ( request.type == SearchRequest::Type::LiveUpdate ) {
@@ -658,22 +660,18 @@ void LogFilteredDataWorker::dispatchLoop()
         }
         operationStarted.acquire();
     }
+    // Drain the last operation here, not on the GUI thread requesting retirement.
+    // The owner callback joins this dispatch thread's final return before it
+    // acknowledges quiescence, matching the native indexing completion contract.
+    joinOperationThread();
+    QMetaObject::invokeMethod( this, "deliverRetired", Qt::QueuedConnection );
 }
 
-LinesCount::UnderlyingType LogFilteredDataWorker::liveUpdateCoalesceThreshold() const
+LinesCount::UnderlyingType LogFilteredDataWorker::liveUpdateCoalesceThreshold(
+    const SearchSettings& settings )
 {
-    const auto& config = Configuration::get();
-    const auto matchingThreadsCount = static_cast<LinesCount::UnderlyingType>( [ &config ]() {
-        if ( !config.useParallelSearch() ) {
-            return 1;
-        }
-        const auto configuredThreadPoolSize = config.searchThreadPoolSize();
-        return qMax( 1, configuredThreadPoolSize == 0 ? tbb::info::default_concurrency()
-                                                      : configuredThreadPoolSize );
-    }() );
-
-    return static_cast<LinesCount::UnderlyingType>( config.searchReadBufferSizeLines() )
-         * matchingThreadsCount;
+    return static_cast<LinesCount::UnderlyingType>( settings.readBufferSizeLines )
+         * settings.matchingThreads;
 }
 
 void LogFilteredDataWorker::promoteDeferredLiveRequest()
@@ -749,21 +747,48 @@ void LogFilteredDataWorker::waitForDone()
     joinOperationThread();
 }
 
-void LogFilteredDataWorker::shutdownAndWait()
+void LogFilteredDataWorker::requestShutdown()
 {
     {
         std::lock_guard<std::mutex> lock( requestMutex_ );
         dispatchShutdown_ = true;
+        interruptRequested_.set();
+        cancelledThroughOperation_.store( operationId_.load() );
+        requestPending_ = false;
         pendingRequest_.reset();
         deferredLiveRequest_.reset();
         followupLiveRequest_.reset();
     }
     requestCv_.notify_one();
+}
+
+QFuture<void> LogFilteredDataWorker::retire()
+{
+    if ( !retiring_ ) {
+        retiring_ = true;
+        retirementCompletion_.reportStarted();
+        requestShutdown();
+        // Also support a caller that already completed blocking teardown.
+        if ( !dispatchThread_.joinable() ) retirementCompletion_.reportFinished();
+    }
+    return retirementCompletion_.future();
+}
+
+void LogFilteredDataWorker::deliverRetired()
+{
+    if ( retiring_ ) shutdownAndWait();
+}
+
+void LogFilteredDataWorker::shutdownAndWait()
+{
+    requestShutdown();
     if ( dispatchThread_.joinable() ) {
         dispatchThread_.join();
     }
-
     joinOperationThread();
+    if ( retiring_ && !retirementCompletion_.isFinished() ) {
+        retirementCompletion_.reportFinished();
+    }
 }
 
 void LogFilteredDataWorker::joinOperationThread()
@@ -806,7 +831,7 @@ void LogFilteredDataWorker::deliverSearchProgressed( LinesCount nbMatches, int p
                                                      LineNumber initialLine, quint64 generation,
                                                      quint64 operationId )
 {
-    if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
+    if ( retiring_ || generation != operationGeneration_.load() || operationId != operationId_.load() ) {
         if ( percent == 100 && traceSearchTerminals() ) {
             LOG_WARNING << "Search terminal rejected generation " << generation << " operation "
                      << operationId << " current generation " << operationGeneration_.load()
@@ -840,7 +865,7 @@ void LogFilteredDataWorker::deliverSearchProgressed( LinesCount nbMatches, int p
 
 void LogFilteredDataWorker::deliverSearchFinished( quint64 generation, quint64 operationId )
 {
-    if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
+    if ( retiring_ || generation != operationGeneration_.load() || operationId != operationId_.load() ) {
         return;
     }
     Q_EMIT searchFinished();
@@ -866,24 +891,46 @@ CompletedSearchResult::Ptr LogFilteredDataWorker::completedSearchResult() const
     return completedResult_;
 }
 
+bool LogFilteredDataWorker::adoptPreparedResult( PreparedResult&& prepared )
+{
+    const auto& result = prepared.result_;
+    if ( retiring_ || !result || !result->source
+         || !result->compiled || !result->compiled->isValid() || result->generation != 0
+         || result->operationId != 0 || result->requestTicket != 0 ) return false;
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        const auto exhausted = std::numeric_limits<quint64>::max();
+        if ( dispatchShutdown_ || operationGeneration_.load() == exhausted
+             || operationId_.load() == exhausted || requestedTicket_.load() == exhausted ) return false;
+    }
+    bumpGeneration();
+    installCompletedResult( std::move( prepared ).result_ );
+    return true;
+}
+
 void LogFilteredDataWorker::restoreCompletedResult( const CompletedSearchResult& result )
 {
-    auto restored = std::make_shared<CompletedSearchResult>( result );
-    restored->generation = operationGeneration_.load();
-    restored->operationId = operationId_.load();
-    restored->requestTicket = requestedTicket_.load();
+    installCompletedResult( std::make_shared<CompletedSearchResult>( result ) );
+}
+
+void LogFilteredDataWorker::installCompletedResult( std::shared_ptr<CompletedSearchResult> result )
+{
+    result->generation = operationGeneration_.load();
+    result->operationId = operationId_.load();
+    result->requestTicket = requestedTicket_.load();
+    compiledExpression_ = result->compiled;
     std::lock_guard<std::mutex> lock( completedMutex_ );
-    completedResult_ = std::move( restored );
+    completedResult_ = std::move( result );
 }
 
 //
 // Operations implementation
 //
 
-SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
+SearchOperation::SearchOperation( const SearchableLogData* sourceLogData,
                                   AtomicFlag& interruptRequested,
                                   const RegularExpressionPattern& regExp, LineNumber startLine,
-                                  LineNumber endLine,
+                                  LineNumber endLine, SearchSettings settings,
                                   std::shared_ptr<RegularExpression> compiledRegExp,
                                   std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine,
                                   std::atomic<quint64>* matcherCreations,
@@ -893,6 +940,7 @@ SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
     : interruptRequested_( interruptRequested )
     , regexp_( regExp )
     , sourceLogData_( sourceLogData )
+    , settings_( settings )
     , startLine_( startLine )
     , endLine_( endLine )
     , compiledRegExp_( std::move( compiledRegExp ) )
@@ -905,13 +953,16 @@ SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
 
 LinesCount SearchOperation::sourceLineCount() const
 {
-    return sourceSnapshot_ ? sourceSnapshot_->lineCount() : sourceLogData_.getNbLine();
+    if ( !sourceSnapshot_ && !sourceLogData_ ) {
+        throw klogg::SnapshotError{ "Search requires a source snapshot" };
+    }
+    return sourceSnapshot_ ? sourceSnapshot_->lineCount() : sourceLogData_->getNbLine();
 }
 
 SearchableLogData::RawLines SearchOperation::readLines( LineNumber first, LinesCount count ) const
 {
     auto lines = sourceSnapshot_ ? sourceSnapshot_->getLinesRaw( first, count )
-                                 : sourceLogData_.getLinesRaw( first, count );
+                                 : sourceLogData_->getLinesRaw( first, count );
     if ( sourceSnapshot_ && lines.endOfLines.size() != count.get() ) {
         throw klogg::SnapshotError{ "Search snapshot returned an incomplete range" };
     }
@@ -932,16 +983,8 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     using namespace std::chrono;
     high_resolution_clock::time_point t1 = high_resolution_clock::now();
 
-    const auto& config = Configuration::get();
-    const auto configuredChunkSize = config.searchReadBufferSizeLines();
-    const auto matchingThreadsCount = static_cast<uint32_t>( [ &config ]() {
-        if ( !config.useParallelSearch() ) {
-            return 1;
-        }
-        const auto configuredThreadPoolSize = config.searchThreadPoolSize();
-        return qMax( 1, configuredThreadPoolSize == 0 ? tbb::info::default_concurrency()
-                                                      : configuredThreadPoolSize );
-    }() );
+    const auto configuredChunkSize = settings_.readBufferSizeLines;
+    const auto matchingThreadsCount = settings_.matchingThreads;
 
     const auto cutoff = qMin( LineNumber( sourceLineCount().get() ), requestedEndLine() );
     initialLine = qMin( qMax( initialLine, startLine_ ), cutoff );
@@ -985,7 +1028,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         // Vectorscan database recompilation on incremental search updates.
         std::shared_ptr<RegularExpression> ownedExpression;
         if ( !compiledRegExp_ ) {
-            ownedExpression = std::make_shared<RegularExpression>( regexp_ );
+            ownedExpression = std::make_shared<RegularExpression>( regexp_, settings_.backend );
         }
         const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression;
 #ifdef KLOGG_PERF_MEASURE_STREAMING
@@ -1029,7 +1072,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
                                                                 - lineSourceStartTime );
 
             auto matchStartTime = high_resolution_clock::now();
-            auto searchResults = filterLines( *matcher, lines, chunkStart );
+            auto searchResults = filterLines( *matcher, lines, chunkStart, settings_.useBlockScan );
             auto matchEndTime = high_resolution_clock::now();
             matchDuration += duration_cast<microseconds>( matchEndTime - matchStartTime );
 
@@ -1076,7 +1119,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         LOG_INFO << "Matching took " << matchDuration;
 
         const auto totalFileSize = sourceSnapshot_ ? sourceSnapshot_->byteSize()
-                                                  : sourceLogData_.getFileSize();
+                                                  : sourceLogData_->getFileSize();
         const auto searchedLines = static_cast<double>( ( endLine - initialLine ).get() );
         const auto linesPerSecond = durationSeconds > 0.0 ? searchedLines / durationSeconds : 0.0;
         const auto mebibytesPerSecond
@@ -1139,7 +1182,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     matcherData.reserve( matchingThreadsCount );
     std::shared_ptr<RegularExpression> ownedExpression;
     if ( !compiledRegExp_ ) {
-        ownedExpression = std::make_shared<RegularExpression>( regexp_ );
+        ownedExpression = std::make_shared<RegularExpression>( regexp_, settings_.backend );
     }
     const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression;
     for ( auto index = 0u; index < matchingThreadsCount; ++index ) {
@@ -1178,7 +1221,8 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
                     const auto& matcher = *matcherData[ index ].matcher;
                     const auto matchStartTime = high_resolution_clock::now();
                     blockData->searchResults
-                        = filterLines( matcher, blockData->lines, blockData->chunkStart );
+                        = filterLines( matcher, blockData->lines, blockData->chunkStart,
+                                       settings_.useBlockScan );
                     const auto matchEndTime = high_resolution_clock::now();
                     matcherData[ index ].matchTime
                         += duration_cast<microseconds>( matchEndTime - matchStartTime );
@@ -1300,7 +1344,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 
     high_resolution_clock::time_point t2 = high_resolution_clock::now();
     const auto durationUs = duration_cast<microseconds>( t2 - t1 );
-    const auto durationMs = duration_cast<milliseconds>( t2 - t1 );
+    const auto durationSeconds = duration<double>( t2 - t1 ).count();
 
     LOG_INFO << "Searching done, overall duration " << durationUs;
     LOG_INFO << "Line reading took " << fileReadingDuration;
@@ -1311,18 +1355,15 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     }
 
     const auto totalFileSize = sourceSnapshot_ ? sourceSnapshot_->byteSize()
-                                                  : sourceLogData_.getFileSize();
-
-    LOG_INFO << "Searching perf "
-             << static_cast<uint64_t>(
-                    std::floor( 1000.f * static_cast<float>( ( endLine - initialLine ).get() )
-                                / static_cast<float>( durationMs.count() ) ) )
-             << " lines/s";
-    LOG_INFO << "Searching io perf "
-             << ( 1000.f * static_cast<float>( totalFileSize )
-                  / static_cast<float>( durationMs.count() ) )
-                    / ( 1024 * 1024 )
-             << " MiB/s";
+                                               : sourceLogData_->getFileSize();
+    const auto searchedLines = static_cast<double>( ( endLine - initialLine ).get() );
+    const auto linesPerSecond = durationSeconds > 0.0 ? searchedLines / durationSeconds : 0.0;
+    const auto mebibytesPerSecond
+        = durationSeconds > 0.0
+              ? static_cast<double>( totalFileSize ) / durationSeconds / ( 1024.0 * 1024.0 )
+              : 0.0;
+    LOG_INFO << "Searching perf " << linesPerSecond << " lines/s";
+    LOG_INFO << "Searching io perf " << mebibytesPerSecond << " MiB/s";
 
     completed_ = !interruptRequested_ && chunkStart >= endLine;
     if ( completed_ ) {
@@ -1338,6 +1379,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 void SearchOperation::failSearch( SearchData& searchData, LineNumber initialLine, const char* message )
 {
     completed_ = false;
+    failed_ = true;
     searchData.clear();
     LOG_ERROR << "Search operation failed: " << message;
     // Resource/read/normalization failures are terminal data errors, not modal

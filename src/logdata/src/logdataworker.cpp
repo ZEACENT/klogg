@@ -40,6 +40,8 @@
 #include <cstdio>
 #include <exception>
 #include <functional>
+#include <new>
+#include <stdexcept>
 #include <qglobal.h>
 #include <qthread.h>
 #include <string_view>
@@ -48,14 +50,13 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMessageBox>
-#include <QSemaphore>
 #include <tuple>
 
-#include "configuration.h"
 #include "containers.h"
 #include "dispatch_to.h"
 #include "encodingdetector.h"
 #include "encodingutils.h"
+#include "indexedlinelength.h"
 #include "issuereporter.h"
 #include "linepositionarray.h"
 #include "linetypes.h"
@@ -68,6 +69,13 @@
 #include "logdataworker.h"
 
 constexpr int IndexingBlockSize = 5 * 1024 * 1024;
+
+namespace {
+class IndexingLimitError final : public std::runtime_error {
+public:
+    IndexingLimitError() : std::runtime_error( "Source line exceeds the indexing limit" ) {}
+};
+}
 
 qint64 IndexingData::getIndexedSize() const
 {
@@ -158,13 +166,16 @@ void IndexingData::setProgress( int progress )
 
 void IndexingData::clear()
 {
-    const auto& config = Configuration::get();
+    clear( IndexingSettings::capture() );
+}
 
+void IndexingData::clear( const IndexingSettings& settings )
+{
     maxLength_ = 0_length;
     hash_ = {};
     hashBuilder_.reset();
     contentSnapshot_.reset();
-    if ( config.useCompressedIndex() ) {
+    if ( settings.compressedIndex ) {
         linePosition_ = LinePositionArrayType( LinePositionArray{} );
     }
     else {
@@ -174,7 +185,7 @@ void IndexingData::clear()
     encodingForced_ = nullptr;
 
     progress_ = {};
-    useFastModificationDetection_ = config.fastModificationDetection();
+    useFastModificationDetection_ = settings.fastModificationDetection;
 }
 
 size_t IndexingData::allocatedSize() const
@@ -197,82 +208,52 @@ LogDataWorker::~LogDataWorker() noexcept
     // the OS thread has completely exited -- no race with internal Qt thread-pool
     // cleanup (QMutex::lock / QThread::isRunning crashes seen in Qt 5.15/6.9).
     interruptRequest_.set();
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
+    waitForDone();
 }
 
 void LogDataWorker::attachFile( const QString& fileName )
 {
-    ScopedLock locker( operationsMutex_ );
-    interruptRequest_.clear();
+    ScopedLock locker( launchMutex_ );
     fileName_ = fileName;
+}
+
+template <typename Operation, typename... Args>
+void LogDataWorker::startOperation( Args... args )
+{
+    ScopedLock locker( launchMutex_ );
+    if ( opThread_.joinable() ) {
+        opThread_.join();
+    }
+    interruptRequest_.clear();
+
+    // std::thread publishes the immutable request to the worker. It never
+    // needs the launcher lock, including when it acquires the index lock or
+    // queues completion. Interrupts after launch are observed even if the
+    // thread has not started running yet.
+    opThread_ = std::thread( [this, fileName = fileName_, settings = IndexingSettings::capture(), args...] {
+        Operation operation{ fileName, indexing_data_, interruptRequest_, args..., settings };
+        connectSignalsAndRun( &operation );
+    } );
 }
 
 void LogDataWorker::indexAll( QTextCodec* forcedEncoding )
 {
-    ScopedLock locker( operationsMutex_ );
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
-    interruptRequest_.clear();
-
     LOG_INFO << "FullIndex requested, forced encoding: "
              << ( forcedEncoding != nullptr ? forcedEncoding->name().toStdString()
                                             : std::string{ "none" } );
-    QSemaphore operationStarted;
-    opThread_ = std::thread( [ this, &operationStarted, forcedEncoding, fileName = fileName_ ] {
-        LOG_INFO << "FullIndex thread started";
-        operationStarted.release();
-        ScopedLock operationLock( operationsMutex_ );
-        auto operationRequested = std::make_unique<FullIndexOperation>(
-            fileName, indexing_data_, interruptRequest_, forcedEncoding );
-        connectSignalsAndRun( operationRequested.get() );
-    } );
-    operationStarted.acquire();
+    startOperation<FullIndexOperation>( forcedEncoding );
 }
 
 void LogDataWorker::indexAdditionalLines()
 {
-    ScopedLock locker( operationsMutex_ );
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
-    interruptRequest_.clear();
-
     LOG_INFO << "PartialIndex requested";
-
-    QSemaphore operationStarted;
-    opThread_ = std::thread( [ this, &operationStarted, fileName = fileName_ ] {
-        LOG_INFO << "PartialIndex thread started";
-        operationStarted.release();
-        ScopedLock operationLock( operationsMutex_ );
-        auto operationRequested = std::make_unique<PartialIndexOperation>( fileName, indexing_data_,
-                                                                           interruptRequest_ );
-        connectSignalsAndRun( operationRequested.get() );
-    } );
-    operationStarted.acquire();
+    startOperation<PartialIndexOperation>();
 }
 
 void LogDataWorker::checkFileChanges()
 {
-    ScopedLock locker( operationsMutex_ );
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
-    interruptRequest_.clear();
-
     LOG_INFO << "Check file changes requested";
-
-    QSemaphore operationStarted;
-    opThread_ = std::thread( [ this, &operationStarted, fileName = fileName_ ] {
-        operationStarted.release();
-        ScopedLock operationLock( operationsMutex_ );
-        auto operationRequested = std::make_unique<CheckFileChangesOperation>(
-            fileName, indexing_data_, interruptRequest_ );
-        connectSignalsAndRun( operationRequested.get() );
-    } );
-    operationStarted.acquire();
+    startOperation<CheckFileChangesOperation>();
 }
 
 OperationResult LogDataWorker::connectSignalsAndRun( IndexOperation* operationRequested )
@@ -304,6 +285,7 @@ void LogDataWorker::interrupt()
 
 void LogDataWorker::waitForDone()
 {
+    ScopedLock locker( launchMutex_ );
     if ( opThread_.joinable() ) {
         opThread_.join();
     }
@@ -392,9 +374,8 @@ expandTabsInLine( const klogg::vector<char>& block, std::string_view blockToExpa
 
         LOG_DEBUG << "Tab at " << tabPosWithinBlock;
 
-        const auto currentExpandedSize = tabPosWithinBlock - posWithinBlock + additionalSpaces;
-
-        additionalSpaces += TabStop - ( currentExpandedSize % TabStop ) - 1;
+        additionalSpaces = klogg::indexing::tabSpaces(
+            additionalSpaces, tabPosWithinBlock - posWithinBlock, TabStop );
         if ( nextTab >= blockToExpand.size() ) {
             break;
         }
@@ -465,10 +446,8 @@ FastLinePositionArray IndexOperation::parseDataBlock( OffsetInFile::UnderlyingTy
 
         const auto currentDataEnd = posWithinBlock + blockBeginning;
 
-        const auto length
-            = type_safe::narrow_cast<LineLength::UnderlyingType>( currentDataEnd - state.pos )
-                  / state.encodingParams.lineFeedWidth
-              + state.additional_spaces;
+        const auto length = klogg::indexing::lineLength(
+            currentDataEnd - state.pos, state.additional_spaces, state.encodingParams.lineFeedWidth );
 
         state.max_length = std::max( state.max_length, length );
 
@@ -488,7 +467,8 @@ void IndexOperation::guessEncoding( const klogg::vector<char>& block,
                                     IndexingState& state ) const
 {
     if ( !state.encodingGuess ) {
-        state.encodingGuess = EncodingDetector::getInstance().detectEncoding( block );
+        state.encodingGuess = EncodingDetector::getInstance().detectEncoding(
+            block, settings_.defaultEncodingMib );
         LOG_INFO << "Encoding guess " << state.encodingGuess->name().toStdString();
     }
 
@@ -511,7 +491,8 @@ void IndexOperation::guessEncoding( const klogg::vector<char>& block,
 }
 
 std::chrono::microseconds IndexOperation::readFileInBlocks( QFile& file,
-                                                            BlockPrefetcher& blockPrefetcher )
+                                                            BlockPrefetcher& blockPrefetcher,
+                                                            std::optional<qint64> extent )
 {
     using namespace std::chrono;
     using clock = high_resolution_clock;
@@ -521,21 +502,27 @@ std::chrono::microseconds IndexOperation::readFileInBlocks( QFile& file,
     int sentBlocksCount = 0;
 
     microseconds ioDuration{};
-    while ( !file.atEnd() ) {
+    while ( extent ? file.pos() < *extent : !file.atEnd() ) {
 
         if ( interruptRequest_ ) {
             break;
         }
 
         BlockData blockData{ file.pos(), std::make_shared<BlockBuffer>( IndexingBlockSize ) };
+        const auto requested = extent
+            ? std::min<qint64>( IndexingBlockSize, *extent - file.pos() )
+            : static_cast<qint64>( IndexingBlockSize );
 
         clock::time_point ioT1 = clock::now();
-        const auto readBytes
-            = file.read( blockData.second->data(), klogg::ssize( *blockData.second ) );
+        const auto readBytes = file.read( blockData.second->data(), requested );
 
         if ( readBytes < 0 ) {
             throw IndexedContentError( "Cannot read block for indexing: "
                                        + file.errorString().toStdString() );
+        }
+
+        if ( extent && readBytes == 0 ) {
+            throw IndexedContentError( "Source ended before its captured indexing extent" );
         }
 
         if ( readBytes < klogg::ssize( *blockData.second ) ) {
@@ -565,7 +552,8 @@ std::chrono::microseconds IndexOperation::readFileInBlocks( QFile& file,
     return ioDuration;
 }
 
-void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& blockData )
+void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& blockData,
+                                     std::optional<LineLength> maximumLineLength )
 {
     const auto& blockBeginning = blockData.first;
     const auto& block = *blockData.second;
@@ -583,6 +571,9 @@ void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& bloc
 
     if ( !block.empty() ) {
         const auto linePositions = parseDataBlock( blockBeginning, block, state );
+        if ( maximumLineLength && state.max_length > maximumLineLength->get() ) {
+            throw IndexingLimitError{};
+        }
         // Retain exactly the bytes parsed above, before releasing the block.
         // Spill writes and boundary reads must stay outside the index mutex.
         contentBuilder_->appendBlock( blockBeginning, block.data(), block.size(),
@@ -627,8 +618,6 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
     if ( initialPosition.get() != 0 && !previousContent ) {
         throw IndexedContentError( "Indexed bytes are unavailable for append continuation" );
     }
-    contentBuilder_ = std::make_unique<IndexedContentBuilder>( previousContent );
-
     if ( !( file.isOpen() || file.open( QIODevice::ReadOnly ) ) ) {
         // TODO: Check that the file is seekable?
         // If the file cannot be open, we do as if it was empty
@@ -636,9 +625,9 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
 
         IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
 
-        scopedAccessor.clear();
+        scopedAccessor.clear( settings_ );
         QTextCodec* fallbackCodec = nullptr;
-        const auto defaultEncodingMib = Configuration::get().defaultEncodingMib();
+        const auto defaultEncodingMib = settings_.defaultEncodingMib;
         if ( defaultEncodingMib >= 0 ) {
             fallbackCodec = QTextCodec::codecForMib( defaultEncodingMib );
         }
@@ -654,11 +643,19 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
         return;
     }
 
-    LOG_INFO << "File size " << file.size();
+    doIndex( file, initialPosition, previousContent );
+}
 
+void IndexOperation::doIndex( QFile& file, OffsetInFile initialPosition,
+                             const IndexedContentSnapshot::Ptr& previousContent,
+                             std::optional<qint64> extent,
+                             std::optional<LineLength> maximumLineLength )
+{
+    contentBuilder_ = std::make_unique<IndexedContentBuilder>( previousContent );
     IndexingState state;
     state.pos = initialPosition.get();
-    state.file_size = file.size();
+    state.file_size = extent ? *extent : file.size();
+    LOG_INFO << "Indexing extent " << state.file_size;
 
     {
         IndexingData::ConstAccessor scopedAccessor{ indexing_data_.get() };
@@ -674,8 +671,7 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
                                                      : std::string{ "auto" } );
     }
 
-    const auto& config = Configuration::get();
-    const auto prefetchBufferSize = static_cast<size_t>( config.indexReadBufferSizeMb() );
+    const auto prefetchBufferSize = settings_.prefetchBlockCount;
 
     LOG_INFO << "Prefetch buffer " << readableSize( prefetchBufferSize * IndexingBlockSize );
 
@@ -692,10 +688,10 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
     std::exception_ptr indexingError;
     auto blockParser = tbb::flow::function_node<BlockData, tbb::flow::continue_msg>(
         indexingGraph, tbb::flow::serial,
-        [ this, &state, &indexingError ]( const BlockData& blockData ) {
+        [ this, &state, &indexingError, maximumLineLength ]( const BlockData& blockData ) {
             if ( !indexingError ) {
                 try {
-                    indexNextBlock( state, blockData );
+                    indexNextBlock( state, blockData, maximumLineLength );
                 } catch ( ... ) {
                     // Unblock the producer before propagating an IO failure.
                     // Throwing through TBB here could strand it at the limiter.
@@ -714,7 +710,7 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
         throw IndexedContentError( "Cannot seek source for indexing" );
     }
     try {
-        ioDuration = readFileInBlocks( file, blockPrefetcher );
+        ioDuration = readFileInBlocks( file, blockPrefetcher, extent );
     } catch ( ... ) {
         interruptRequest_.set();
         indexingGraph.wait_for_all();
@@ -724,9 +720,14 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
     if ( indexingError ) {
         std::rethrow_exception( indexingError );
     }
+    if ( extent && interruptRequest_ ) {
+        IndexingData::MutateAccessor{ indexing_data_.get() }.clear( settings_ );
+        contentBuilder_.reset();
+        return;
+    }
 
     if ( !state.encodingGuess ) {
-        const auto defaultEncodingMib = Configuration::get().defaultEncodingMib();
+        const auto defaultEncodingMib = settings_.defaultEncodingMib;
         state.encodingGuess = defaultEncodingMib >= 0
                                   ? QTextCodec::codecForMib( defaultEncodingMib ) : nullptr;
         if ( !state.encodingGuess ) {
@@ -740,6 +741,19 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
     const auto finalLine = finalSnapshot->lineCount().get() > 0
                               ? finalSnapshot->lineEnd( LineNumber( finalSnapshot->lineCount().get() - 1 ) )
                               : 0_offset;
+    // Change detection must describe the indexed version, not a second read of
+    // an original source that may already have changed. Spill IO stays outside
+    // the index mutex, just like retained-block publication above.
+    const auto hashSize = std::min<qint64>( finalSnapshot->byteSize(), IndexingBlockSize );
+    const auto digestRange = [&]( qint64 offset ) {
+        const auto bytes = finalSnapshot->readBytes( offset, hashSize );
+        FileDigest digest;
+        digest.addData( bytes.constData(), static_cast<size_t>( bytes.size() ) );
+        return digest.digest();
+    };
+    const auto headerHash = digestRange( 0 );
+    const auto tailOffset = finalSnapshot->byteSize() - hashSize;
+    const auto tailHash = tailOffset == 0 ? headerHash : digestRange( tailOffset );
     IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
 
     LOG_DEBUG << "Indexed up to " << state.pos;
@@ -755,26 +769,8 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
         scopedAccessor.addAll( {}, 0_length, line_position, state.encodingGuess );
     }
 
-    const auto endFilePos = file.pos();
-    file.reset();
-    QByteArray hashBuffer( IndexingBlockSize, Qt::Uninitialized );
-    const auto headerHashSize = file.read( hashBuffer.data(), hashBuffer.size() );
-    FileDigest fastHashDigest;
-    fastHashDigest.addData( hashBuffer.data(), static_cast<size_t>( headerHashSize ) );
-
-    scopedAccessor.setHeaderHash( fastHashDigest.digest(), headerHashSize );
-
-    if ( endFilePos <= hashBuffer.size() ) {
-        scopedAccessor.setTailHash( fastHashDigest.digest(), 0, headerHashSize );
-    }
-    else {
-        const auto tailHashOffset = endFilePos - hashBuffer.size();
-        file.seek( tailHashOffset );
-        const auto tailHashSize = file.read( hashBuffer.data(), hashBuffer.size() );
-        fastHashDigest.reset();
-        fastHashDigest.addData( hashBuffer.data(), static_cast<size_t>( tailHashSize ) );
-        scopedAccessor.setTailHash( fastHashDigest.digest(), tailHashOffset, tailHashSize );
-    }
+    scopedAccessor.setHeaderHash( headerHash, hashSize );
+    scopedAccessor.setTailHash( tailHash, tailOffset, hashSize );
 
     const auto indexingEndTime = high_resolution_clock::now();
     const auto duration = duration_cast<microseconds>( indexingEndTime - indexingStartTime );
@@ -795,22 +791,23 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
     scopedAccessor.setContentSnapshot( finalSnapshot );
 
     if ( interruptRequest_ ) {
-        scopedAccessor.clear();
+        scopedAccessor.clear( settings_ );
     }
 
     if ( scopedAccessor.getMaxLength().get()
          == std::numeric_limits<LineLength::UnderlyingType>::max() ) {
+        if ( maximumLineLength ) throw IndexingLimitError{};
         dispatchToMainThread( [] {
             QMessageBox::critical( nullptr, "Klogg", "Can't index file: some lines are too long",
                                    QMessageBox::Close );
         } );
 
-        scopedAccessor.clear();
+        scopedAccessor.clear( settings_ );
     }
 
     if ( !scopedAccessor.getEncodingGuess() ) {
         QTextCodec* fallbackCodec = nullptr;
-        const auto defaultEncodingMib = Configuration::get().defaultEncodingMib();
+        const auto defaultEncodingMib = settings_.defaultEncodingMib;
         if ( defaultEncodingMib >= 0 ) {
             fallbackCodec = QTextCodec::codecForMib( defaultEncodingMib );
         }
@@ -819,6 +816,46 @@ void IndexOperation::doIndex( OffsetInFile initialPosition )
         }
         scopedAccessor.setEncodingGuess( fallbackCodec );
     }
+}
+
+PreparedIndexResult FullIndexOperation::prepare( QFile& source, qint64 extent,
+                                                 std::optional<LineLength> maximumLineLength )
+{
+    using Status = PreparedIndexResult::Status;
+    PreparedIndexResult failure;
+    try {
+        {
+            IndexingData::MutateAccessor indexed{ indexing_data_.get() };
+            indexed.clear( settings_ );
+            indexed.forceEncoding( forcedEncoding_ );
+        }
+        if ( interruptRequest_ ) return { Status::Cancelled, {} };
+        if ( !source.isOpen() || !source.isReadable() || source.isSequential()
+             || extent < 0 || settings_.prefetchBlockCount == 0 ) {
+            return { Status::InvalidInput, QStringLiteral( "Invalid acquired indexing input" ) };
+        }
+        const auto nativeMaximum = std::numeric_limits<LineLength::UnderlyingType>::max() - 1;
+        const LineLength limit{ std::min( nativeMaximum,
+            maximumLineLength ? maximumLineLength->get() : nativeMaximum ) };
+        doIndex( source, 0_offset, {}, extent, limit );
+        if ( interruptRequest_ ) {
+            IndexingData::MutateAccessor{ indexing_data_.get() }.clear( settings_ );
+            return { Status::Cancelled, {} };
+        }
+        const auto snapshot = IndexingData::ConstAccessor{ indexing_data_.get() }.getContentSnapshot();
+        if ( !snapshot || snapshot->byteSize() != extent ) {
+            throw IndexedContentError( "Prepared index does not cover its captured extent" );
+        }
+        return { Status::Ready, {} };
+    } catch ( const IndexingLimitError& ) {
+        failure = { Status::ResourceLimit, QStringLiteral( "Source line exceeds the indexing limit" ) };
+    } catch ( const std::bad_alloc& ) {
+        failure = { Status::ResourceLimit, QStringLiteral( "Insufficient memory for private indexing" ) };
+    } catch ( const std::exception& error ) {
+        failure = { Status::ReadFailure, QString::fromUtf8( error.what() ) };
+    }
+    IndexingData::MutateAccessor{ indexing_data_.get() }.clear( settings_ );
+    return failure;
 }
 
 // Called in the worker thread's context
@@ -831,7 +868,7 @@ OperationResult FullIndexOperation::run()
 
         {
             IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
-            scopedAccessor.clear();
+            scopedAccessor.clear( settings_ );
             scopedAccessor.forceEncoding( forcedEncoding_ );
         }
 
@@ -852,7 +889,7 @@ OperationResult FullIndexOperation::run()
 
         {
             IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
-            scopedAccessor.clear();
+            scopedAccessor.clear( settings_ );
         }
 
         Q_EMIT indexingFinished( false );
@@ -888,7 +925,7 @@ OperationResult PartialIndexOperation::run()
 
         {
             IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
-            scopedAccessor.clear();
+            scopedAccessor.clear( settings_ );
         }
 
         Q_EMIT indexingFinished( false );
@@ -931,7 +968,6 @@ MonitoredFileStatus CheckFileChangesOperation::doCheckFileChanges()
         QByteArray buffer{ IndexingBlockSize, Qt::Uninitialized };
 
         bool isFileModified = false;
-        const auto& config = Configuration::get();
 
         if ( !file.isOpen() && !file.open( QIODevice::ReadOnly ) ) {
             LOG_INFO << "File failed to open";
@@ -956,7 +992,7 @@ MonitoredFileStatus CheckFileChangesOperation::doCheckFileChanges()
 
             return fileDigest.digest();
         };
-        if ( config.fastModificationDetection() ) {
+        if ( settings_.fastModificationDetection ) {
             const auto headerDigest = getDigest( indexedHash.headerSize );
 
             LOG_INFO << "indexed header xxhash " << indexedHash.headerDigest;

@@ -50,6 +50,21 @@ class SnapshotError : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+class SnapshotLimitError : public SnapshotError {
+  public:
+    using SnapshotError::SnapshotError;
+};
+
+class SnapshotReadUnsupported : public SnapshotError {
+  public:
+    using SnapshotError::SnapshotError;
+};
+
+struct BoundedSnapshotLine {
+    QString text;
+    uint64_t sourceBytes = 0;
+};
+
 // Implementations own immutable content/row membership and frozen text settings.
 // Readers may run off the GUI thread. They must not call back into a mutable
 // AbstractLogData or convert read failures into warning strings masquerading as data.
@@ -60,6 +75,14 @@ class LogSnapshot {
     virtual LinesCount lineCount() const = 0;
     virtual SnapshotRow row( LineNumber index ) const = 0;
     virtual QString lineString( LineNumber index ) const = 0;
+    // Exact retained physical record extent, including source framing but not
+    // synthetic separators. Metadata lookup must not read/materialize payload.
+    // Unknown providers fail closed; never estimate this from lineString().
+    virtual std::optional<uint64_t> sourceBytesForLine( LineNumber ) const { return {}; }
+    // Source admission happens before payload I/O/decoding. The separate UTF-16
+    // limit is checked after that bounded decode; callers also bound JSON output.
+    BoundedSnapshotLine readLineBounded( LineNumber index, uint64_t maxSourceBytes,
+                                         uint64_t maxTextUnits ) const;
     // A positive proof that former source identities keep their interpretation
     // and presented positions, including identities that were hidden. Only newly
     // appended source identities may appear; unknown means false.

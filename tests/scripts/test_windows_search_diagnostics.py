@@ -119,7 +119,7 @@ class WindowsSearchDiagnosticsTest(unittest.TestCase):
         self.assertLess(helper_start, helpers.index("if(WIN32)"))
         self.assertIn("Qt${QT_VERSION_MAJOR}::Core project_options project_warnings", helpers)
         self.assertIn("klogg_configure_test_target(search_start_empty_env_launcher)", helpers)
-        self.assertIn("add_dependencies(klogg_tests search_start_empty_env_launcher)", units)
+        self.assertRegex(units, r"add_dependencies\(\s*klogg_tests\s+[^)]*\bsearch_start_empty_env_launcher\b[^)]*\)")
         launcher = (ROOT / "tests/helpers/search_start_empty_env_launcher.cpp").read_text()
         self.assertIn("QProcessEnvironment::systemEnvironment()", launcher)
         self.assertRegex(launcher, r'environment\.insert\(\s*QStringLiteral\(\s*"KLOGG_TEST_TRACE_SEARCH_STARTS"\s*\),\s*QStringLiteral\(\s*""\s*\)\s*\)')

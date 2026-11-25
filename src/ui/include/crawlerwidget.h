@@ -41,6 +41,7 @@
 #define CRAWLERWIDGET_H
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 
 #include <QButtonGroup>
@@ -89,8 +90,68 @@ class CrawlerWidget : public QSplitter,
     Q_OBJECT
 
   public:
-    CrawlerWidget( QWidget* parent = nullptr );
+    enum class InitialFocusPolicy : std::uint8_t { FocusMainView, Preserve };
+    CrawlerWidget( QWidget* parent = nullptr,
+                   InitialFocusPolicy initialFocus = InitialFocusPolicy::FocusMainView );
     ~CrawlerWidget() override;
+    std::vector<QFuture<void>> retireResources() override;
+
+    // Private query publication. GUI staging owns unpublished pane resources;
+    // the low-level capture/lock pair below only replaces the current pane.
+    // Preparation must not change focus or emit early presentation signals.
+    struct FilterUpdateCapture;
+    struct PreparedFilterUpdate;
+    struct FilterUpdatePreparation {
+        SearchPreparation::Status status = SearchPreparation::Status::InvalidInput;
+        std::shared_ptr<PreparedFilterUpdate> update;
+    };
+    class FilterUpdateStaging;
+    class FilterUpdatePublication {
+      public:
+        ~FilterUpdatePublication();
+        bool install();
+        QString paneId() const;
+        void release();
+        void notify();
+      private:
+        friend class CrawlerWidget;
+        friend class FilterUpdateStaging;
+        struct State;
+        explicit FilterUpdatePublication( std::unique_ptr<State> state );
+        std::unique_ptr<State> state_;
+    };
+    // GUI-owned resources never enter the worker capture or prepared payload.
+    // Keep this staging handle on the owner thread through acquisition.
+    class FilterUpdateStaging {
+      public:
+        ~FilterUpdateStaging();
+        FilterUpdateStaging( const FilterUpdateStaging& ) = delete;
+        FilterUpdateStaging& operator=( const FilterUpdateStaging& ) = delete;
+        std::shared_ptr<const FilterUpdateCapture> capture() const;
+        SearchToolbar::FilterSpec effectiveFilter() const;
+        std::unique_ptr<FilterUpdatePublication> lock(
+            const std::shared_ptr<PreparedFilterUpdate>& prepared );
+      private:
+        friend class CrawlerWidget;
+        friend class FilterUpdatePublication;
+        struct State;
+        explicit FilterUpdateStaging( std::shared_ptr<State> state );
+        std::shared_ptr<State> state_;
+    };
+    std::unique_ptr<FilterUpdateStaging> stageFilterUpdate(
+        const SearchToolbar::FilterSpec& candidate );
+    std::shared_ptr<const FilterUpdateCapture> captureFilterUpdate(
+        const SearchToolbar::FilterSpec& candidate ) const;
+    static FilterUpdatePreparation prepareFilterUpdate(
+        const std::shared_ptr<const FilterUpdateCapture>& captured, AtomicFlag& cancelled );
+    std::unique_ptr<FilterUpdatePublication> lockFilterUpdate(
+        const std::shared_ptr<PreparedFilterUpdate>& prepared );
+
+    std::vector<klogg::ReviewMarksOwner*> reviewMarksOwners() override;
+    ReviewControls reviewControls() override
+    {
+        return { searchToolbar_, &colorLabelsController_ };
+    }
 
     // Get the line number of the first line displayed.
     LineNumber getTopLine() const;
@@ -149,6 +210,9 @@ class CrawlerWidget : public QSplitter,
     struct access_by;
 
   protected:
+    const AbstractLogView* reviewPane( Pane pane ) const override;
+    std::vector<PaneReference> reviewPanes() const override;
+
     // Implementation of the ViewInterface functions
     void doSetData( std::shared_ptr<SearchableLogData> logData,
                     std::shared_ptr<LogFilteredData> filteredData ) override;
@@ -323,6 +387,12 @@ class CrawlerWidget : public QSplitter,
     };
 
     // Private functions
+    std::shared_ptr<FilterUpdateCapture> captureFilterUpdateState(
+        const SearchToolbar::FilterSpec& candidate ) const;
+    bool isFilterUpdateCurrent( const PreparedFilterUpdate& prepared ) const;
+    QFont configuredViewFont() const;
+    void configureFilteredView( FilteredView* view ) const;
+    void setAppliedSearchPattern( const RegularExpressionPattern& pattern, bool updateHiddenViews = false );
     void setup();
     void setShortcuts();
     void replaceCurrentSearch( const QString& searchText );
@@ -339,7 +409,7 @@ class CrawlerWidget : public QSplitter,
     void resetStateOnSearchPatternChanges();
 
     void connectAllFilteredViewSlots( FilteredView* view);
-    void connectSearchPublication( LogFilteredData* source );
+    void connectModelPublication( LogFilteredData* source );
     bool acceptsSearchPublication( const LogFilteredData* source, quint64 generation ) const;
     void queuePresentationRefresh( bool searchCatchUp );
     void deliverPresentationCatchUp();
@@ -368,7 +438,7 @@ class CrawlerWidget : public QSplitter,
     LogMainView* logMainView_ = nullptr;
     FilteredView* filteredView_ = nullptr;
     std::unordered_map<FilteredView*, std::shared_ptr<LogFilteredData>> filteredViewsData_;
-    QTabWidget* tabbedFilteredView_;
+    QTabWidget* tabbedFilteredView_ = nullptr;
 
     OverviewWidget* overviewWidget_;
 
@@ -432,7 +502,7 @@ class CrawlerWidget : public QSplitter,
     ColorLabelsController colorLabelsController_;
 
     // Shared view-signal wiring (scratchpad / search composition / splitter /
-    // font zoom / exitView / highlightersChange / hover) -- unique_ptr because
+    // font zoom / exitView / hover) -- unique_ptr because
     // it needs searchToolbar_, created in setup(). Shared with
     // FolderCrawlerWidget so both tab kinds get identical wiring.
     std::unique_ptr<ViewSignalWiring> viewSignalWiring_;
@@ -446,6 +516,8 @@ class CrawlerWidget : public QSplitter,
     bool searchUpdatePending_ = false;
     LineNumber pendingSearchEndLine_;
 
+    const InitialFocusPolicy initialFocusPolicy_;
+    bool resourcesRetiring_ = false;
     bool presentationActive_ = true;
     bool presentationDirty_ = false;
     bool presentationCatchUpQueued_ = false;

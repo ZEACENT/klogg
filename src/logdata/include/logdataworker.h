@@ -41,7 +41,10 @@
 
 #include "containers.h"
 #include "linetypes.h"
+#include <cstdint>
+#include <optional>
 #include <thread>
+#include <utility>
 #include <variant>
 
 #include <QFile>
@@ -62,6 +65,7 @@
 #include "linepositionarray.h"
 #include "indexedcontent.h"
 #include "loadingstatus.h"
+#include "indexingsettings.h"
 
 struct IndexedHash {
     qint64 size = 0;
@@ -190,6 +194,11 @@ public:
         data_->clear();
     }
 
+    void clear( const IndexingSettings& settings )
+    {
+        data_->clear( settings );
+    }
+
     size_t allocatedSize() const
     {
         return data_->allocatedSize();
@@ -237,6 +246,7 @@ private:
 
     // Completely clear the indexing data.
     void clear();
+    void clear( const IndexingSettings& settings );
 
     size_t allocatedSize() const;
 
@@ -281,14 +291,22 @@ struct IndexingState {
 
 using OperationResult = std::variant<bool, MonitoredFileStatus>;
 
+struct PreparedIndexResult {
+    enum class Status : std::uint8_t { Ready, Cancelled, InvalidInput, ReadFailure, ResourceLimit };
+    Status status = Status::InvalidInput;
+    QString error;
+};
+
 class IndexOperation : public QObject {
     Q_OBJECT
 public:
     IndexOperation( const QString& fileName, const std::shared_ptr<IndexingData>& indexingData,
-                    AtomicFlag& interruptRequest )
+                    AtomicFlag& interruptRequest,
+                    IndexingSettings settings = IndexingSettings::capture() )
         : fileName_( fileName )
         , indexing_data_( indexingData )
         , interruptRequest_( interruptRequest )
+        , settings_( settings )
     {
     }
 
@@ -309,10 +327,15 @@ protected:
     // Returns the total size indexed
     // Modify the passed linePosition and maxLength
     void doIndex( OffsetInFile initialPosition );
+    void doIndex( QFile& file, OffsetInFile initialPosition,
+                  const IndexedContentSnapshot::Ptr& previousContent,
+                  std::optional<qint64> extent = std::nullopt,
+                  std::optional<LineLength> maximumLineLength = std::nullopt );
 
     QString fileName_;
     std::shared_ptr<IndexingData> indexing_data_;
     AtomicFlag& interruptRequest_;
+    const IndexingSettings settings_;
 
 private:
     FastLinePositionArray parseDataBlock( OffsetInFile::UnderlyingType blockBegining,
@@ -321,8 +344,10 @@ private:
     void guessEncoding( const BlockBuffer& block, IndexingData::MutateAccessor& scopedAccessor,
                         IndexingState& state ) const;
 
-    std::chrono::microseconds readFileInBlocks( QFile& file, BlockPrefetcher& blockPrefetcher );
-    void indexNextBlock( IndexingState& state, const BlockData& blockData );
+    std::chrono::microseconds readFileInBlocks( QFile& file, BlockPrefetcher& blockPrefetcher,
+                                              std::optional<qint64> extent );
+    void indexNextBlock( IndexingState& state, const BlockData& blockData,
+                         std::optional<LineLength> maximumLineLength );
     std::unique_ptr<IndexedContentBuilder> contentBuilder_;
 };
 
@@ -330,12 +355,17 @@ class FullIndexOperation : public IndexOperation {
     Q_OBJECT
 public:
     FullIndexOperation( const QString& fileName, const std::shared_ptr<IndexingData>& indexingData,
-                        AtomicFlag& interruptRequest, QTextCodec* forcedEncoding = nullptr )
-        : IndexOperation( fileName, indexingData, interruptRequest )
+                        AtomicFlag& interruptRequest, QTextCodec* forcedEncoding = nullptr,
+                        IndexingSettings settings = IndexingSettings::capture() )
+        : IndexOperation( fileName, indexingData, interruptRequest, settings )
         , forcedEncoding_( forcedEncoding )
     {
     }
     OperationResult run() override;
+    // Worker-only preparation into a private index, using an already acquired
+    // regular source. No path reopening, legacy completion signal or GUI dialog.
+    PreparedIndexResult prepare( QFile& source, qint64 extent,
+                                 std::optional<LineLength> maximumLineLength = std::nullopt );
 
 private:
     QTextCodec* forcedEncoding_;
@@ -346,8 +376,9 @@ class PartialIndexOperation : public IndexOperation {
 public:
     PartialIndexOperation( const QString& fileName,
                            const std::shared_ptr<IndexingData>& indexingData,
-                           AtomicFlag& interruptRequest )
-        : IndexOperation( fileName, indexingData, interruptRequest )
+                           AtomicFlag& interruptRequest,
+                           IndexingSettings settings = IndexingSettings::capture() )
+        : IndexOperation( fileName, indexingData, interruptRequest, settings )
     {
     }
 
@@ -359,8 +390,9 @@ class CheckFileChangesOperation : public IndexOperation {
 public:
     CheckFileChangesOperation( const QString& fileName,
                                const std::shared_ptr<IndexingData>& indexingData,
-                               AtomicFlag& interruptRequest )
-        : IndexOperation( fileName, indexingData, interruptRequest )
+                               AtomicFlag& interruptRequest,
+                               IndexingSettings settings = IndexingSettings::capture() )
+        : IndexOperation( fileName, indexingData, interruptRequest, settings )
     {
     }
 
@@ -423,12 +455,16 @@ Q_SIGNALS:
     void deliverCheckFileFinished( MonitoredFileStatus status );
 
   private:
+    template <typename Operation, typename... Args>
+    void startOperation( Args... args );
     OperationResult connectSignalsAndRun( IndexOperation* operationRequested );
     void emitIndexingProgressedOnOwnerThread( int percent );
     void emitIndexingFinishedOnOwnerThread( LoadingStatus status );
     void emitCheckFileFinishedOnOwnerThread( MonitoredFileStatus status );
 
-    Mutex operationsMutex_;
+    // Serializes controller access to fileName_ and opThread_. The background
+    // operation uses its captured request and must never take this lock.
+    Mutex launchMutex_;
     AtomicFlag interruptRequest_;
 
     QString fileName_;

@@ -135,6 +135,98 @@ keyboard commands, and saving. It is also available from the application's Help
 menu. The **[documentation hub](docs/README.md)** separates everyday workflows
 from architecture, build instructions, benchmarks, and future plans.
 
+## Agent-assisted review: in development
+
+Developer builds now include an experimental, provider-neutral `kloggctl` client
+for the running GUI. The current surface discovers instances, reads window/tab
+inventory, stable pane/mark-owner metadata and filter drafts, and reads or changes
+shared marks, color labels and global highlighter sets. Mark additions/removals use
+retained source snapshots rather than unverified paths or row guesses. Mixed transactions stage changes privately,
+detect relevant human edits, and publish together without changing application
+focus. Explicit snapshot reads return bounded log content asynchronously; ordinary
+state observation does not read log lines. `documents.open` and `documents.close`
+provide single-command file/folder lifecycle operations without activation;
+background preparation shares `operation.get` and `operation.cancel` with content
+reads and implicit `filter.apply` requests. Closing a document never deletes the
+file on disk. `filter.apply` works on file, live and folder tabs. It replaces the
+current pane's filter or prepares a kept pane without returning log content.
+Empty text resets the query rather than matching every row. File/live queries
+require an unchanged source snapshot, so continuous appends can cause a conflict.
+Folder queries retain the bytes scanned from each member; they do not freeze the
+filesystem.
+`capabilities.get` reports supported methods, feature flags and selected limits;
+use `schema.get` with `{"method":"filter.apply"}` for a method's parameter and result schemas.
+
+```sh
+kloggctl instance list
+kloggctl --instance INSTANCE call capabilities.get --params '{}'
+kloggctl --instance INSTANCE state get
+kloggctl --instance INSTANCE tab get --tab TAB
+kloggctl --instance INSTANCE call filter.apply --params \
+  '{"tab_id":"TAB","filter":{"text":"ERROR","keep_results":false}}'
+kloggctl --instance INSTANCE call operation.get --params '{"operation_id":"OPERATION"}'
+kloggctl --help
+```
+
+`instance list` checks a local kernel lease, not a timestamp or PID. A GUI that
+exited without cleanup is not counted as a second live instance. Listing never
+connects to candidate endpoints or sends credentials. Start a matching GUI if
+upgrading from a development build that predates leased discovery.
+
+Use IDs returned by the GUI and operation responses. The `filter` object is a
+strict patch: `text` is a string; `match_case`, `use_regexp`, `inverse`, `boolean`,
+`auto_refresh`, and `keep_results` are booleans. Omitted fields retain the current
+draft values. Optional top-level `expected_revision` is a canonical unsigned
+decimal string from `tab.get.filter_draft.revision`. For file/live tabs,
+`keep_results:true` retains the old pane and starts a new model without copying
+its marks. For folder tabs the same command scans current folder membership;
+marks are shared across panes. A nonempty folder search consumes Keep and opens
+a new pane only if the previous pane has rows after revealing matches. Empty
+text clears matches in place without consuming Keep. If the human changes the
+relevant state before publication, the operation can fail with `CONFLICT` and
+leave their changes intact. `tab.get.filter_draft` describes the editor draft, not result membership. Use `pane.get` or `pane.list` to read each result pane's
+`applied_filter` (including retained file/live/folder results), independently of
+unsubmitted drafts and deferred painting. Its `complete` flag reports native
+result readiness, not a running/stopped/error classification. Main panes omit
+this field. Request content separately with `source.capture` and `source.read`.
+
+Local control is enabled by default. **Options > General > Local command-line
+control** disables it for all windows and clients in that GUI instance and
+discards pending transactions. Programs running as your operating-system user
+share the same review state; there are no per-program authorization prompts.
+The control service does not open a TCP listener. Inventory responses omit log
+lines; requested filter and label values remain visible to the caller.
+
+The same settings group offers optional shell-installation Check, Install / repair,
+and Remove actions. Installation changes are previewed and require confirmation;
+opening settings or enabling control does not alter shell configuration. Backups
+and partial failures are reported. Shell installation and control enablement are
+independent.
+
+Use `transaction.begin` to stage an open, filter and annotations privately. Wait
+for each `documents.open` or `filter.apply` staging operation via `operation.get`
+without `transaction_id`, then address the staged tab using its ID **and** the
+transaction ID. `source.capture` and `source.read` inside the transaction produce
+private IDs: pass the same transaction ID when reading or polling that read.
+`transaction.commit` publishes; `transaction.abort` discards. A transaction may
+adopt one private document or publish one visible document/filter change. It may
+also publish labels and highlighters, and marks on the private document. Visible
+mark writes cannot be combined with a visible document/filter change. These
+bounds are enforced before publication, not simulated by sequential GUI calls.
+
+To select a whole row without activating a tab, call `pane.navigate` with
+`tab_id`, `pane_id`, a public `snapshot_id` and a decimal `row` in that snapshot.
+A missing/stale or non-presented row is rejected, not guessed. `pane.get`
+reports `selection_kind` and `selected_row` without returning selected text.
+Device lifecycle control, durable transactions and event subscriptions are not
+part of this local API.
+A relocated macOS Qt/CLI payload has passed native Cocoa startup checks; this is not
+full release-artifact acceptance. Existing launcher and headless-search command-line
+roles are unchanged.
+See the [accepted design](docs/AGENT_CONTROL_PROPOSAL.md) and the
+[implementation record](docs/AGENT_CONTROL_IMPLEMENTATION.md) for supported scope,
+verification evidence, and remaining gates.
+
 ## Built for demanding logs
 
 The interface is backed by C++17 and Qt, 64-bit line addressing, parallel search,

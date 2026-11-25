@@ -39,6 +39,9 @@
 #ifndef highlighterSet_H
 #define highlighterSet_H
 
+#include <cstdint>
+
+#include <cstddef>
 #include <QColor>
 #include <QList>
 #include <QMetaType>
@@ -101,6 +104,10 @@ class Highlighter {
 
     const QRegularExpression& compile() const;
 
+    // Semantic value equality; compiled matcher caches are not application state.
+    bool operator==( const Highlighter& other ) const;
+    bool operator!=( const Highlighter& other ) const { return !( *this == other ); }
+
   private:
     std::pair<QColor, QColor> vairateColors( const QString& match ) const;
 
@@ -128,11 +135,16 @@ class HighlighterSet {
     }
 
     static HighlighterSet createNewSet( const QString& name );
+    static HighlighterSet fromDescription( QString setId, QString name, QList<Highlighter> rules );
 
     HighlighterSet() = default;
 
     QString name() const;
     QString id() const;
+    QList<Highlighter> highlighters() const;
+
+    bool operator==( const HighlighterSet& other ) const;
+    bool operator!=( const HighlighterSet& other ) const { return !( *this == other ); }
 
     // Returns weither the passed line match a filter of the set,
     // if so, it returns the fore/back colors the line should use.
@@ -146,6 +158,7 @@ class HighlighterSet {
     void retrieveFromStorage( QSettings& settings );
 
     void compile() const;
+    void compile( RegexpEngine engine ) const;
 
   private:
     explicit HighlighterSet( const QString& name );
@@ -170,6 +183,9 @@ struct QuickHighlighter {
     QString name;
     HighlightColor color;
     bool useInCycle;
+
+    bool operator==( const QuickHighlighter& other ) const;
+    bool operator!=( const QuickHighlighter& other ) const { return !( *this == other ); }
 };
 
 struct QuickLabelEntry {
@@ -181,6 +197,12 @@ struct QuickLabelEntry {
 struct QuickHighlighterDefaults {
     bool ignoreCase = true;
     bool wholeWord = false;
+
+    bool operator==( const QuickHighlighterDefaults& other ) const
+    {
+        return ignoreCase == other.ignoreCase && wholeWord == other.wholeWord;
+    }
+    bool operator!=( const QuickHighlighterDefaults& other ) const { return !( *this == other ); }
 };
 
 class HighlighterSetCollection final : public Persistable<HighlighterSetCollection> {
@@ -189,6 +211,55 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
     {
         return "HighlighterSetCollection";
     }
+
+    HighlighterSetCollection() = default;
+    // A copy is an independent owner. Assignment commits semantic content to
+    // the recipient, never imports a dialog draft's revision or matcher cache.
+    HighlighterSetCollection( const HighlighterSetCollection& other );
+    HighlighterSetCollection& operator=( const HighlighterSetCollection& other );
+
+    struct Snapshot {
+        uint64_t revision = 0;
+        QList<HighlighterSet> sets;
+        QStringList activeSetIds;
+        QList<QuickHighlighter> quickHighlighters;
+        QuickHighlighterDefaults quickHighlighterDefaults;
+    };
+
+    // Owner-thread, detached value observation of committed global state. Does
+    // not synchronize storage, compile matchers, or publish/persist changes.
+    // The revision belongs to this collection instance, not its saved config.
+    Snapshot snapshot() const;
+    // Admit control-plane reads before detaching potentially large GUI imports.
+    std::optional<Snapshot> boundedSnapshot() const;
+    uint64_t revision() const { return revision_; }
+
+    enum class UpdateResult : std::uint8_t { Applied, Unchanged, Conflict, InvalidArgument, ResourceLimit };
+    static constexpr std::size_t MaxPreparedSets = 128;
+    static constexpr std::size_t MaxPreparedRules = 1024;
+    static constexpr std::size_t MaxSnapshotPalette = 128;
+    static constexpr std::size_t MaxPreparedTextUnits = std::size_t{ 1024 } * 1024;
+    class PreparedUpdate {
+      public:
+        PreparedUpdate( PreparedUpdate&& other ) noexcept;
+        PreparedUpdate& operator=( PreparedUpdate&& other ) noexcept;
+        PreparedUpdate( const PreparedUpdate& ) = delete;
+        PreparedUpdate& operator=( const PreparedUpdate& ) = delete;
+        std::optional<UpdateResult> error() const { return error_; }
+      private:
+        friend class HighlighterSetCollection;
+        friend class ReviewTransaction;
+        PreparedUpdate() = default;
+        void installApproved( HighlighterSetCollection& owner, UpdateResult approval ) && noexcept;
+        Snapshot state_;
+        HighlighterSet combined_;
+        std::optional<UpdateResult> error_;
+    };
+    // Pure private preparation: callers capture the backend on the owner thread
+    // and may build this sealed value on a worker. Installation never compiles.
+    static std::optional<UpdateResult> validateUpdate( const Snapshot& candidate );
+    static PreparedUpdate prepareUpdate( Snapshot state, RegexpEngine engine );
+    UpdateResult applyPrepared( PreparedUpdate&& prepared, uint64_t expectedRevision );
 
     QList<HighlighterSet> highlighterSets() const;
     void setHighlighterSets( const QList<HighlighterSet>& highlighters );
@@ -214,11 +285,18 @@ class HighlighterSetCollection final : public Persistable<HighlighterSetCollecti
     void retrieveFromStorage( QSettings& settings );
 
   private:
+    // Only the owner-thread coordinator may separate approval from installation,
+    // within one non-yielding publication and with no intervening global writes.
+    friend class ReviewTransaction;
+    UpdateResult preflightPrepared( const PreparedUpdate& prepared, uint64_t expectedRevision ) const;
     static constexpr int HighlighterSetCollection_VERSION = 3;
+    static bool withinSnapshotLimits( const Snapshot& candidate );
 
     void updateCombinedSet();
+    void loadFromStorage( QSettings& settings );
 
   private:
+    uint64_t revision_ = 0;
     QList<HighlighterSet> highlighters_;
     QStringList activeSets_;
     HighlighterSet combinedActiveSet_;

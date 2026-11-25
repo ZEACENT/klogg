@@ -3,9 +3,14 @@
 
 #include "taskschedulerlifetime.h"
 #include "ownedtaskfuture.h"
+#include "configuration.h"
+#include "logdata.h"
+#include "preparedfilesource.h"
+#include "searchpreparation.h"
 
 #include <QCoreApplication>
 #include <QProcess>
+#include <QTemporaryFile>
 
 #include <mimalloc.h>
 #include <tbb/task_arena.h>
@@ -123,6 +128,50 @@ int applicationLifetimeChild( int argc, char* argv[] )
         ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+int privatePreparationChild( bool search )
+{
+    QTemporaryFile input;
+    if ( !input.open() || input.write( "hit\nmiss\nhit\n" ) != 13 ) return 2;
+    const auto path = input.fileName();
+    input.close();
+    AtomicFlag cancelled;
+    std::thread dispatcher;
+    std::promise<void> release;
+    auto released = release.get_future();
+    bool ready = false;
+    {
+        klogg::TaskSchedulerLifetime scheduler;
+        SearchableLogData::ReadSnapshot::Ptr snapshot;
+        if ( search ) {
+            // Seed the parallel search independently of the borrowed dispatch thread.
+            Configuration::getDefaultForTests();
+            auto prepared = prepareFileSource( path, {}, cancelled );
+            auto model = LogData::fromPrepared( prepared.source );
+            if ( !model ) return 2;
+            snapshot = model->searchableSnapshot();
+        }
+        std::promise<bool> finished;
+        auto result = finished.get_future();
+        dispatcher = std::thread( [&, snapshot, completion = std::move( finished )]() mutable {
+            if ( search ) {
+                const auto outcome = prepareFullSearch( { snapshot, RegularExpressionPattern{ QStringLiteral( "hit" ) },
+                    { 1, 2, false, RegexpEngine::QRegularExpression }, 0_lnum, {} }, cancelled );
+                completion.set_value( outcome.status == SearchPreparation::Status::Ready );
+            } else {
+                const auto outcome = prepareFileSource( path, {}, cancelled );
+                completion.set_value( outcome.status == FileSourcePreparation::Status::Ready );
+            }
+            // Reusable dispatcher threads outlive the call (Qt pool / MSVC std::async).
+            // They are deliberately still alive while the scheduler finalizes.
+            released.wait();
+        } );
+        ready = result.get();
+    }
+    release.set_value();
+    dispatcher.join();
+    return ready ? EXIT_SUCCESS : 2;
+}
+
 struct ChildResult {
     int exitCode;
     QByteArray diagnostic;
@@ -183,6 +232,15 @@ TEST_CASE( "Application teardown follows native producer joins before scheduler 
     CHECK( child.exitCode == EXIT_SUCCESS );
 }
 
+TEST_CASE( "Private preparations release scheduler ownership before the dispatcher exits", "[private-producer]" )
+{
+    const auto mode = GENERATE( QStringLiteral( "--private-index-caller" ), QStringLiteral( "--private-search-caller" ) );
+    CAPTURE( mode.toStdString() );
+    const auto child = runChild( mode );
+    INFO( child.diagnostic.constData() );
+    REQUIRE( child.exitCode == EXIT_SUCCESS );
+}
+
 int main( int argc, char* argv[] )
 {
     if ( argc == 2 && std::string{ argv[1] } == "--application-lifetime" ) {
@@ -195,5 +253,7 @@ int main( int argc, char* argv[] )
     if ( argc == 2 && std::string{ argv[1] } == "--active-scheduler-producer" ) {
         return activeProducerChild();
     }
+    if ( argc == 2 && std::string{ argv[1] } == "--private-index-caller" ) return privatePreparationChild( false );
+    if ( argc == 2 && std::string{ argv[1] } == "--private-search-caller" ) return privatePreparationChild( true );
     return Catch::Session().run( argc, argv );
 }

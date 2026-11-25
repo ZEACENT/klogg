@@ -23,6 +23,7 @@
 #include <QEvent>
 #include <QSemaphore>
 #include <QThread>
+#include <QtConcurrentRun>
 
 #include <atomic>
 #include <memory>
@@ -36,6 +37,7 @@
 #include "highlighterset.h"
 #include "logsnapshot.h"
 #include "ownedtaskfuture.h"
+#include "ownedtaskpoolgate.h"
 #include "quickfind.h"
 #include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
@@ -271,6 +273,53 @@ void requireCaptureReferenceParity( const QString& query,
     }
 }
 } // namespace
+
+TEST_CASE( "Quick Find retirement drains accepted work without joining or publishing late results",
+           "[quickfind-snapshot][quickfind-retirement]" )
+{
+    NavigationData source;
+    const auto observations = source.observations;
+    observations->gate = std::make_shared<ReadGate>();
+    QuickFindPattern pattern;
+    pattern.changeSearchPattern( QStringLiteral( "accepted" ) );
+    QuickFind finder{ source };
+    SearchCleanup cleanup{ finder, observations->gate };
+    SafeQSignalSpy completed{ &finder, &QuickFind::searchDone };
+    int notifications = 0;
+    QObject::connect( &finder, &QuickFind::notify, &finder, [&] { ++notifications; } );
+    Selection cursor;
+    cursor.setNavigationBounds( FilePosition{ 0_lnum, 100_lcol },
+                                FilePosition{ 0_lnum, 0_lcol } );
+    startNavigation( finder, pattern, cursor, false, false );
+    REQUIRE( observations->gate->entered.tryAcquire( 1, 5000 ) );
+    REQUIRE( QMetaObject::invokeMethod( &finder, "deliverNotification", Qt::QueuedConnection,
+                                        Q_ARG( QString, QStringLiteral( "queued before retirement" ) ) ) );
+    const auto retired = finder.retire();
+    CHECK_FALSE( retired.isFinished() );
+    observations->gate->resume.release();
+    REQUIRE( waitUiState( [&] { return !finder.isSearchRunning() && retired.isFinished(); } ) );
+    QCoreApplication::sendPostedEvents();
+    CHECK( completed.count() == 0 );
+    CHECK( notifications == 0 );
+    const auto request = finder.currentRequestId();
+    for ( const bool backward : { false, true } ) {
+        for ( const bool incremental : { false, true } ) {
+            startNavigation( finder, pattern, cursor, backward, incremental );
+        }
+    }
+    CHECK( finder.currentRequestId() == request );
+    CHECK( observations->acquisitions.load() == 1 );
+    CHECK( finder.retire().isFinished() );
+}
+
+TEST_CASE( "Idle Quick Find retirement needs no source acquisition", "[quickfind-retirement]" )
+{
+    NavigationData source;
+    QuickFind finder{ source };
+    CHECK( finder.retire().isFinished() );
+    CHECK( finder.retire().isFinished() );
+    CHECK( source.observations->acquisitions.load() == 0 );
+}
 
 TEST_CASE( "Quick Find navigation reads the accepted source version after mutation",
            "[quickfind-snapshot]" )
@@ -581,6 +630,23 @@ TEST_CASE( "Shared query options preserve literal escaping and whole-word bounda
             REQUIRE( matches.size() == expectedCount );
         }
     }
+}
+
+TEST_CASE( "Gating owned work leaves Qt's global pool available for repainting",
+           "[owned-task-future][pool-isolation]" )
+{
+    ScopedOwnedTaskPoolGate gate;
+    REQUIRE( gate.entered.tryAcquire( 1, 5000 ) );
+    const auto owned = klogg::runOwnedTask( [] {} );
+    QSemaphore ran;
+    auto unrelated = QtConcurrent::run( QThreadPool::globalInstance(), [&ran] { ran.release(); } );
+    const bool progressed = ran.tryAcquire( 1, 5000 );
+    const bool stillGated = !owned.isFinished();
+    gate.release.release();
+    unrelated.waitForFinished();
+    owned.waitForFinished();
+    CHECK( progressed );
+    CHECK( stillGated );
 }
 
 TEST_CASE( "Owned tasks release captures before publishing results or exceptions",

@@ -1,6 +1,46 @@
 add_executable(adb_server_test_helper adb_server_test_helper.cpp)
 target_link_libraries(adb_server_test_helper PRIVATE project_options project_warnings)
 
+# Control tests need no display, GUI configuration, or log data.
+find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+function(klogg_add_control_console_test name runtime_target)
+  if(WIN32)
+    add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E env
+      "PATH=$<TARGET_FILE_DIR:${runtime_target}>$<SEMICOLON>$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>$<SEMICOLON>$ENV{PATH}"
+      ${ARGN})
+  else()
+    add_test(NAME ${name} COMMAND ${ARGN})
+  endif()
+  set_tests_properties(${name} PROPERTIES TIMEOUT 120)
+  klogg_set_test_isolation(${name})
+endfunction()
+add_executable(klogg_control_protocol_tests
+  controlframing_test.cpp controlrpc_test.cpp controlschema_test.cpp pure_catch_main.cpp
+)
+target_link_libraries(klogg_control_protocol_tests PRIVATE klogg_control Catch2)
+target_include_directories(klogg_control_protocol_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/utils/include")
+klogg_configure_test_target(klogg_control_protocol_tests)
+klogg_add_control_console_test(klogg_control_protocol_tests klogg_control_protocol_tests
+  $<TARGET_FILE:klogg_control_protocol_tests>)
+
+find_package(Threads REQUIRED)
+add_executable(klogg_control_tests
+  controltransport_main.cpp controltransport_test.cpp controlcli_test.cpp controlruntime_env_test.cpp
+)
+# These installer fixtures exercise POSIX homes, modes, and temporary shell
+# launchers. Native Windows registry/ACL acceptance has a separate platform gate.
+if(UNIX)
+  target_sources(klogg_control_tests PRIVATE controlinstall_test.cpp)
+endif()
+target_link_libraries(klogg_control_tests PRIVATE klogg_control Catch2 Qt${QT_VERSION_MAJOR}::Network Threads::Threads)
+target_include_directories(klogg_control_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/utils/include")
+klogg_configure_test_target(klogg_control_tests)
+klogg_add_control_console_test(klogg_control_tests klogg_control_tests
+  $<TARGET_FILE:klogg_control_tests>)
+add_dependencies(klogg_control_tests kloggctl)
+klogg_add_control_console_test(klogg_control_cli_smoke kloggctl
+  "${Python3_EXECUTABLE}" -I "${CMAKE_CURRENT_SOURCE_DIR}/controlcli_smoke.py" $<TARGET_FILE:kloggctl>)
+
 # The native iOS protocol core is deliberately tested without Qt, a device, or
 # libimobiledevice. The production adapter owns that integration boundary.
 add_executable(
@@ -90,6 +130,7 @@ klogg_set_test_isolation(klogg_configuration_preapplication_tests)
 # This executable owns its scheduler per case instead of nesting a second
 # lifetime handle inside the unit runner's process-wide owner.
 add_executable(klogg_task_scheduler_lifetime_tests taskschedulerlifetime_test.cpp)
+target_compile_definitions(klogg_task_scheduler_lifetime_tests PRIVATE KLOGG_TESTS)
 target_link_libraries(
   klogg_task_scheduler_lifetime_tests PRIVATE klogg_logdata Catch2
 )
@@ -97,8 +138,6 @@ klogg_configure_test_target(klogg_task_scheduler_lifetime_tests)
 add_test(NAME klogg_task_scheduler_lifetime_tests COMMAND klogg_task_scheduler_lifetime_tests)
 set_tests_properties(klogg_task_scheduler_lifetime_tests PROPERTIES TIMEOUT 120)
 klogg_set_test_isolation(klogg_task_scheduler_lifetime_tests)
-
-find_package(Threads REQUIRED)
 
 # Native iOS discovery and stream-worker lifecycle are specified against an
 # injected C-ABI table. Tests include no Qt or libimobiledevice APIs directly:
@@ -246,6 +285,14 @@ add_executable(klogg_tests
     capturestore_test.cpp
     cli_test.cpp
     colorlabelsmanager_test.cpp
+    colorlabelscontroller_test.cpp
+    reviewtransaction_test.cpp
+    reviewtransaction_highlighter_test.cpp
+    reviewtransaction_marks_test.cpp
+    reviewhighlightercodec_test.cpp
+    reviewpanes_test.cpp
+    reviewcontent_test.cpp
+    asyncworkbudget_test.cpp
     configuration_test.cpp
     encodingdetector_test.cpp
     droppathclassification_test.cpp
@@ -253,6 +300,8 @@ add_executable(klogg_tests
     filterfavoritesmodel_test.cpp
     recentfolders_test.cpp
     highlighter_vectorscan_test.cpp
+    highlighterpublication_test.cpp
+    highlighterstatepublisher_test.cpp
     linehighlight_compose_test.cpp
     match_projection_test.cpp
     match_selection_test.cpp
@@ -266,14 +315,30 @@ add_executable(klogg_tests
     overview_test.cpp
     optionsdialog_test.cpp
     pathutils_test.cpp
+    platform_file_preparation_test.cpp
+    fileholder_preparation_test.cpp
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
     qt_event_queue_test.cpp
     searchgeneration_test.cpp
     searchtoolbar_test.cpp
+    filterdraftpublication_test.cpp
+    crawlerfilterpublication_test.cpp
     selection_test.cpp
     logfiltereddataworker_test.cpp
+    searchpreparation_test.cpp
+    preparedsearchpublication_test.cpp
+    logdataretirement_test.cpp
+    indexingpreparation_test.cpp
+    preparedindexoperation_test.cpp
+    preparedfilesource_test.cpp
+    preparedsourcelifecycle_test.cpp
+    indexhashsnapshot_test.cpp
+    indexedlinelength_test.cpp
+    logsnapshot_bounded_test.cpp
     sessioninfo_test.cpp
+    sessionpreparation_test.cpp
+    sessionpreparedsource_test.cpp
     shortcut_bindings_test.cpp
     styles_test.cpp
     streaminglogdata_test.cpp
@@ -298,9 +363,12 @@ add_executable(klogg_tests
 
 target_link_libraries(klogg_tests klogg_ui klogg_utils klogg_logging klogg_versioncheck klogg_livecapture klogg_adb_smartsocket Catch2 Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Test test_utils test_crash_trace)
 add_dependencies(klogg_tests adb_server_test_helper)
-add_dependencies(klogg_tests search_start_empty_env_launcher)
+add_dependencies(klogg_tests search_start_empty_env_launcher regular_file_open_helper)
 target_compile_definitions(
   klogg_tests PRIVATE KLOGG_ADB_SERVER_TEST_HELPER_PATH="$<TARGET_FILE:adb_server_test_helper>"
+)
+set_property(SOURCE platform_file_preparation_test.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+  KLOGG_REGULAR_FILE_HELPER_PATH="$<TARGET_FILE:regular_file_open_helper>"
 )
 target_include_directories(klogg_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/app")
 target_include_directories(klogg_tests PRIVATE "${CMAKE_BINARY_DIR}/src/ui/klogg_ui_autogen/include")

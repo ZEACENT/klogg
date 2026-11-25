@@ -50,6 +50,13 @@ if(WIN32)
 endif()
 
 add_test(
+  NAME control_cli_packaging_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_control_cli_packaging.py
+)
+set_tests_properties(control_cli_packaging_contract PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(control_cli_packaging_contract)
+
+add_test(
   NAME windows_runtime_verifier_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_verify_windows_runtime.py
 )

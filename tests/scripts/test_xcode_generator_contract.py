@@ -86,8 +86,10 @@ class XcodeGeneratorContractTest(unittest.TestCase):
 
         self.assertEqual(
             set(executables),
-            {"klogg", "klogg_portable", "klogg_grep"},
+            {"klogg", "klogg_portable", "klogg_grep", "kloggctl"},
         )
+        # The local console client neither owns nor links GUI resources.
+        self.assertEqual(executables["kloggctl"], ["${CMAKE_CURRENT_SOURCE_DIR}/kloggctl.cpp"])
         for target in ("klogg", "klogg_portable", "klogg_grep"):
             with self.subTest(target=target):
                 self.assertIn(

@@ -1357,6 +1357,19 @@ jobs:
           check-container: ${{ env.KLOGG_CHECK_CONTAINER }}
           check-command: ${{ env.KLOGG_CHECK_COMMAND }}
 
+      # Product smoke, independent of environment qualification. Inspect the exact
+      # package destined for upload without changing it or its ADB receipt.
+      - name: Verify packaged AppImage control CLI
+        if: ${{ env.KLOGG_PACKAGE_ENABLED == 'true' && env.KLOGG_CONFIG_OS == 'ubuntu_appimage' }}
+        shell: bash
+        run: |
+          docker run --pull=never --rm --network none \
+            -v "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/packages:/packages:ro" \
+            -v "$KLOGG_WORKSPACE/scripts/verify_appimage_cli.py:/verify_appimage_cli.py:ro" \
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}" \
+            python3 -I /verify_appimage_cli.py \
+            "/packages/klogg-${KLOGG_VERSION}-appimage-${KLOGG_PACKAGE_TAG}.AppImage"
+
       - name: Bound Linux ccache before save
         if: ${{ success() && env.KLOGG_SANITIZER != 'thread' && (github.event_name == 'push' || steps.shared-cache-descriptor.outputs.eligible == 'true') }}
         shell: bash

@@ -20,6 +20,7 @@
 #include "foldersearchengine.h"
 
 #include <QFile>
+#include <QMetaObject>
 #include <QTextCodec>
 
 #include <algorithm>
@@ -65,7 +66,86 @@ struct FolderEnumerationState {
     std::exception_ptr failure;
 };
 
+// The only variation between a worker-owned batch and the native streaming
+// engine is where each finished group goes. The matcher, arena, cancellation
+// and bounded file pool must have identical semantics for both consumers.
+using Status = FolderSearchEngine::CompletionStatus;
+
+template <typename Publish>
+Status scanMembers( const QStringList& paths, const RegularExpression& expression,
+                    klogg::folder::ContextOptions context, const FolderSearchEngine::ScanSettings& settings,
+                    const FolderSearchEngine::StopPredicate& stop, Publish publish )
+{
+    if ( stop() ) return Status::Cancelled;
+    if ( paths.isEmpty() ) return Status::Ready;
+    auto cores = std::thread::hardware_concurrency();
+    if ( cores == 0 ) cores = 4;
+    const auto count = std::min<size_t>( std::min( cores, 16u ), static_cast<size_t>( paths.size() ) );
+
+    // hs_clone_scratch reads the shared prototype. Build matchers serially,
+    // then grant each worker exclusive use of its matcher until the pool joins.
+    std::vector<std::unique_ptr<PatternMatcher>> matchers;
+    matchers.reserve( count );
+    for ( size_t i = 0; i < count; ++i ) {
+        if ( stop() ) return Status::Cancelled;
+        matchers.push_back( expression.createMatcher() );
+    }
+    const auto arena = std::make_shared<klogg::folder::ScanArena>();
+    std::atomic<int> next{ 0 };
+    std::atomic<bool> retentionFailed{ false };
+    const auto scan = [&]( size_t workerIndex, const std::atomic<bool>& failed ) {
+        const FolderSearchEngine::StopPredicate shouldStop = [&] {
+            return failed.load( std::memory_order_relaxed ) || stop();
+        };
+        while ( true ) {
+            const int fileIndex = next.fetch_add( 1, std::memory_order_relaxed );
+            if ( fileIndex >= paths.size() || shouldStop() ) break;
+            auto group = FolderSearchEngine::scanFileWithSettings( paths[ fileIndex ], *matchers[ workerIndex ],
+                settings, FolderSearchEngine::DefaultBlockSize, shouldStop, context, arena );
+            if ( !group.retentionError.isEmpty() ) retentionFailed = true;
+            publish( fileIndex, std::move( group ) );
+        }
+    };
+    const auto launch = []( std::function<void()> task ) { return std::thread( std::move( task ) ); };
+    if ( !klogg::folder::detail::runScannerPool( count, scan, launch ) ) return Status::Failed;
+    if ( stop() ) return Status::Cancelled;
+    return retentionFailed ? Status::RetentionFailure : Status::Ready;
+}
+
 } // namespace
+
+bool klogg::folder::detail::runScannerPool( size_t count, const ScannerTask& scan,
+                                           const ScannerLauncher& launch )
+{
+    std::atomic<bool> failed{ false };
+    const auto work = [&]( size_t index ) {
+        try {
+            scan( index, failed );
+        } catch ( ... ) {
+            failed = true;
+        }
+    };
+    if ( count == 1 ) {
+        work( 0 ); // Single file/core: no thread or launch overhead.
+    } else {
+        std::vector<std::thread> pool;
+        try {
+            pool.reserve( count ); // Moving a launched thread into its slot cannot throw.
+            for ( size_t i = 0; i < count && !failed; ++i ) {
+                pool.push_back( launch( [&, i] { work( i ); } ) );
+            }
+        } catch ( ... ) {
+            failed = true;
+        }
+        for ( auto& thread : pool ) thread.join();
+    }
+    return !failed;
+}
+
+FolderSearchEngine::ScanSettings FolderSearchEngine::ScanSettings::capture()
+{
+    return { SearchSettings::capture(), Configuration::get().defaultEncodingMib() };
+}
 
 FolderSearchEngine::FolderSearchEngine( QObject* parent )
     : FolderSearchEngine( FolderEnumerator{}, parent )
@@ -81,6 +161,12 @@ FolderSearchEngine::FolderSearchEngine( FolderEnumerator folderEnumerator, QObje
 
 FolderSearchEngine::~FolderSearchEngine()
 {
+    requestShutdown();
+    finishRetirement();
+}
+
+void FolderSearchEngine::requestShutdown()
+{
     {
         std::lock_guard<std::mutex> lock( requestMutex_ );
         shutdown_ = true;
@@ -88,13 +174,30 @@ FolderSearchEngine::~FolderSearchEngine()
     }
     interruptRequested_ = true;
     requestCv_.notify_all();
-    if ( workerThread_.joinable() ) {
-        workerThread_.join();
+}
+
+QFuture<void> FolderSearchEngine::retire()
+{
+    if ( !retirementCompletion_.isStarted() ) {
+        retirementCompletion_.reportStarted();
+        requestShutdown();
+        bumpGeneration();
+    }
+    return retirementCompletion_.future();
+}
+
+void FolderSearchEngine::finishRetirement()
+{
+    if ( workerThread_.joinable() ) workerThread_.join();
+    if ( retirementCompletion_.isStarted() && !retirementCompletion_.isFinished() ) {
+        retirementCompletion_.reportFinished();
     }
 }
 
 quint64 FolderSearchEngine::submit( Request request )
 {
+    if ( shutdown_.load( std::memory_order_relaxed ) ) return currentGeneration();
+    request.settings = ScanSettings::capture();
     request.generation = bumpGeneration();
     request.valid = true;
     interruptRequested_ = false;
@@ -135,9 +238,11 @@ quint64 FolderSearchEngine::scanSynchronously( const QStringList& filePaths,
                                                const RegularExpressionPattern& pattern,
                                                klogg::folder::ContextOptions context )
 {
+    if ( shutdown_.load( std::memory_order_relaxed ) ) return currentGeneration();
+    const auto settings = ScanSettings::capture();
     const quint64 gen = bumpGeneration();
     interruptRequested_ = false;
-    runSearch( gen, filePaths, pattern, context );
+    runSearchWithSettings( gen, filePaths, pattern, context, settings );
     return gen;
 }
 
@@ -145,6 +250,8 @@ quint64 FolderSearchEngine::bumpGeneration()
 {
     const auto generation = generation_.fetch_add( 1, std::memory_order_relaxed ) + 1;
     const std::lock_guard<std::mutex> lock( resultsMutex_ );
+    completion_.reset();
+    resultsConsumed_ = false;
     // Keep the slots allocated while old workers unwind, but release all
     // unclaimed leases. Publication checks the generation under this same lock.
     for ( auto& group : pending_ ) {
@@ -165,6 +272,7 @@ std::vector<klogg::folder::FileGroup> FolderSearchEngine::takeResults()
     std::lock_guard<std::mutex> lock( resultsMutex_ );
     std::vector<klogg::folder::FileGroup> out;
     for ( auto& group : pending_ ) {
+        if ( group ) resultsConsumed_ = true;
         if ( group && ( !group->matches.empty() || group->content
                         || !group->retentionError.isEmpty() ) ) {
             out.push_back( std::move( *group ) );
@@ -174,146 +282,161 @@ std::vector<klogg::folder::FileGroup> FolderSearchEngine::takeResults()
     return out;
 }
 
+std::optional<FolderSearchEngine::CompletedSearch> FolderSearchEngine::takeCompletedSearch( quint64 generation )
+{
+    std::lock_guard<std::mutex> lock( resultsMutex_ );
+    if ( !completion_ || completion_->generation != generation
+         || currentGeneration() != generation ) return {};
+    const bool sizeMatches = pending_.size() == static_cast<size_t>( completion_->filePaths.size() );
+    std::vector<klogg::folder::FileGroup> groups;
+    if ( !resultsConsumed_ && completion_->status == CompletionStatus::Ready && sizeMatches ) {
+        groups.reserve( pending_.size() ); // Allocate before consuming the receipt.
+        for ( auto& group : pending_ ) {
+            if ( !group ) break;
+            groups.push_back( std::move( *group ) );
+        }
+    }
+    auto result = std::move( *completion_ );
+    completion_.reset();
+    if ( resultsConsumed_ ) {
+        // Reject a competing bulk owner without destroying the streaming
+        // consumer's remaining groups or retained source leases.
+        if ( result.status == CompletionStatus::Ready ) result.status = CompletionStatus::ResultsConsumed;
+        return result;
+    }
+    if ( result.status == CompletionStatus::Ready ) {
+        if ( sizeMatches && groups.size() == pending_.size() ) {
+            result.groups = std::move( groups );
+        } else {
+            result.status = CompletionStatus::Failed;
+        }
+    }
+    for ( auto& group : pending_ ) group.reset();
+    resultsConsumed_ = true;
+    return result;
+}
+
+void FolderSearchEngine::finishSearch( quint64 generation, CompletionStatus status,
+                                       const ScanSettings& settings, const QStringList& filePaths )
+{
+    {
+        std::lock_guard<std::mutex> lock( resultsMutex_ );
+        if ( currentGeneration() == generation ) {
+            completion_ = CompletedSearch{ generation, status, filePaths, {}, settings };
+        }
+    }
+    Q_EMIT searchFinished( generation );
+}
+
 std::optional<klogg::folder::FileGroup> FolderSearchEngine::takeCompletedGroup( int fileIndex )
 {
     std::lock_guard<std::mutex> lock( resultsMutex_ );
     if ( fileIndex < 0 || static_cast<size_t>( fileIndex ) >= pending_.size() ) {
         return std::nullopt;
     }
-    return std::exchange( pending_[ static_cast<size_t>( fileIndex ) ], std::nullopt );
+    auto& group = pending_[ static_cast<size_t>( fileIndex ) ];
+    if ( group ) resultsConsumed_ = true;
+    return std::exchange( group, std::nullopt );
 }
 
 void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
                                     const RegularExpressionPattern& pattern,
                                     klogg::folder::ContextOptions context )
 {
-    // A queued request whose generation is no longer current must do nothing.
-    if ( generation_.load( std::memory_order_relaxed ) != gen ) {
-        Q_EMIT searchFinished( gen );
-        return;
-    }
+    runSearchWithSettings( gen, filePaths, pattern, context, ScanSettings::capture() );
+}
 
-    // The compiled expression is constructed ONCE on this thread. Its
-    // createMatcher() clones the shared HsDatabase (shared_ptr refcount, safe)
-    // but also prototypes a private HsScratch via hs_clone_scratch, whose read
-    // of the shared scratch prototype races under TSan when run concurrently.
-    // The per-worker matchers are therefore built SERIALLY on this thread
-    // before the pool is spawned (workerMatchers below) and each worker is
-    // handed its own pre-built matcher. Concurrent hasMatch() on distinct
-    // matchers is safe.
-    RegularExpression expression( pattern );
-    if ( !expression.isValid() ) {
-        LOG_WARNING << "FolderSearchEngine: invalid pattern" << pattern.pattern;
-        Q_EMIT searchFinished( gen );
-        return;
-    }
-
-    const int total = static_cast<int>( filePaths.size() );
-
-    {
-        std::lock_guard<std::mutex> lock( resultsMutex_ );
-        pending_.assign( static_cast<size_t>( std::max( 0, total ) ), std::nullopt );
-    }
-    matchCount_ = 0;
-
-    Q_EMIT searchStarted( gen );
-
-    // Bounded pool of bare std::threads, joined before searchFinished. The
-    // engine already owns a coordinator std::thread (workerThread_) which runs
-    // runSearch; spawning additional threads here and joining them keeps the
-    // existing destructor/join flow intact (no deadlock, no orphan threads).
-    std::atomic<int> nextFileIndex{ 0 };
-    std::atomic<int> completedCount{ 0 };
-
-    const auto shouldStop = [ this, gen ]() {
-        return generation_.load( std::memory_order_relaxed ) != gen
-               || interruptRequested_.load( std::memory_order_relaxed );
+void FolderSearchEngine::runSearchWithSettings( quint64 gen, const QStringList& filePaths,
+                                    const RegularExpressionPattern& pattern,
+                                    klogg::folder::ContextOptions context, const ScanSettings& settings )
+{
+    if ( shutdown_.load( std::memory_order_relaxed ) ) return;
+    const StopPredicate stop = [this, gen] {
+        return currentGeneration() != gen || interruptRequested_.load( std::memory_order_relaxed );
     };
-
-    const auto arena = std::make_shared<klogg::folder::ScanArena>();
-    auto worker = [ this, &filePaths, total, gen, context, &nextFileIndex, &completedCount,
-                    &shouldStop, &arena ]( std::unique_ptr<PatternMatcher> matcher ) {
-        // Each worker owns its own PatternMatcher (private vectorscan scratch +
-        // matcher context), pre-built serially by the caller and reused across
-        // every file it processes. Concurrent hasMatch() on distinct matchers
-        // is safe.
-        while ( true ) {
-            const int i = nextFileIndex.fetch_add( 1, std::memory_order_relaxed );
-            if ( i >= total ) {
-                break;
-            }
-            if ( shouldStop() ) {
-                break;
-            }
-
-            auto group = scanFile( filePaths[ i ], *matcher, DefaultBlockSize, shouldStop, context, arena );
-
-            if ( !group.matches.empty() ) {
-                // Count ONLY real matches: with -A/-B/-C the vector also holds
-                // Context rows that must not inflate the status/header count.
-                const auto trueMatches = std::count_if(
-                    group.matches.begin(), group.matches.end(),
-                    []( const klogg::folder::MatchRecord& record ) {
-                        return record.role == klogg::folder::RecordRole::Match;
-                    } );
-                matchCount_.fetch_add( static_cast<quint64>( trueMatches ),
-                                       std::memory_order_relaxed );
-            }
+    const auto run = [&] {
+        if ( stop() ) return Status::Cancelled;
+        const RegularExpression expression( pattern, settings.search.backend );
+        if ( !expression.isValid() ) return Status::CompileFailure;
+        {
+            std::lock_guard<std::mutex> lock( resultsMutex_ );
+            if ( currentGeneration() != gen ) return Status::Cancelled;
+            pending_.assign( static_cast<size_t>( filePaths.size() ), std::nullopt );
+            completion_.reset();
+            resultsConsumed_ = false;
+            matchCount_ = 0;
+        }
+        Q_EMIT searchStarted( gen );
+        std::atomic<int> completedCount{ 0 };
+        const auto publish = [&]( int fileIndex, klogg::folder::FileGroup group ) {
+            // Context rows must not inflate the native status/header count.
+            const auto matches = std::count_if( group.matches.begin(), group.matches.end(),
+                []( const auto& record ) { return record.role == klogg::folder::RecordRole::Match; } );
             {
                 std::lock_guard<std::mutex> lock( resultsMutex_ );
-                if ( generation_.load( std::memory_order_relaxed ) != gen ) {
-                    break;
-                }
-                pending_[ static_cast<size_t>( i ) ] = std::move( group );
+                if ( currentGeneration() != gen ) return;
+                pending_[ static_cast<size_t>( fileIndex ) ] = std::move( group );
+                matchCount_.fetch_add( static_cast<quint64>( matches ), std::memory_order_relaxed );
             }
-            Q_EMIT fileGroupReady( i, gen );
-
-            const int done = completedCount.fetch_add( 1, std::memory_order_relaxed ) + 1;
-            const int percent = total > 0 ? done * 100 / total : 100;
-            Q_EMIT searchProgressed( matchCount_.load( std::memory_order_relaxed ), percent, gen );
-        }
+            Q_EMIT fileGroupReady( fileIndex, gen );
+            const auto done = completedCount.fetch_add( 1, std::memory_order_relaxed ) + 1;
+            const auto percent = static_cast<int>( qint64{ done } * 100 / filePaths.size() );
+            Q_EMIT searchProgressed( matchCount(), percent, gen );
+        };
+        return scanMembers( filePaths, expression, context, settings, stop, publish );
     };
+    Status status;
+    try {
+        status = run();
+    } catch ( ... ) {
+        // A setup failure (e.g. cloning the matcher scratch) is request-local.
+        status = Status::Failed;
+    }
+    finishSearch( gen, status, settings, filePaths );
+}
 
-    unsigned int hwThreads = std::thread::hardware_concurrency();
-    if ( hwThreads == 0 ) {
-        hwThreads = 4;
-    }
-    hwThreads = std::min<unsigned int>( hwThreads, 16u );
-    int poolSize = static_cast<int>( std::min<unsigned int>( hwThreads, static_cast<unsigned int>( std::max( 0, total ) ) ) );
-    if ( poolSize < 1 ) {
-        poolSize = 1;
-    }
-
-    // Build one matcher per worker SERIALLY on this thread before spawning
-    // the pool. createMatcher() on a shared const RegularExpression races under
-    // TSan (it prototypes the shared hs scratch via hs_clone_scratch, and the
-    // PatternMatcher ctor likewise clones blockScratch_ for the buffer scanner),
-    // so it must not run concurrently. Each matcher is then handed exclusively
-    // to one worker, preserving the "each worker owns its matcher" design.
-    std::vector<std::unique_ptr<PatternMatcher>> workerMatchers;
-    workerMatchers.reserve( static_cast<size_t>( poolSize ) );
-    for ( int wi = 0; wi < poolSize; ++wi ) {
-        workerMatchers.push_back( expression.createMatcher() );
-    }
-
-    if ( poolSize <= 1 ) {
-        // Single-file / single-core path: run inline to avoid thread overhead.
-        worker( std::move( workerMatchers[ 0 ] ) );
-    }
-    else {
-        std::vector<std::thread> pool;
-        pool.reserve( static_cast<size_t>( poolSize ) );
-        for ( int t = 0; t < poolSize; ++t ) {
-            pool.emplace_back( worker, std::move( workerMatchers[ static_cast<size_t>( t ) ] ) );
+FolderSearchEngine::CompletedSearch FolderSearchEngine::prepareFolderSearch(
+    const QString& folderPath, const RegularExpressionPattern& pattern,
+    klogg::folder::ContextOptions context, const ScanSettings& settings,
+    const FolderEnumerator& enumerate, const StopPredicate& shouldStop )
+{
+    CompletedSearch result;
+    result.requestSettings = settings;
+    // Enumeration and all scanners share one decision. Once any participant
+    // abandons work, a later false poll must not turn partial groups into Ready.
+    std::atomic<bool> cancelled{ false };
+    const StopPredicate stop = [&] {
+        if ( cancelled.load( std::memory_order_relaxed ) ) return true;
+        if ( !stopped( shouldStop ) ) return false;
+        cancelled.store( true, std::memory_order_relaxed );
+        return true;
+    };
+    const auto run = [&] {
+        if ( stop() ) return Status::Cancelled;
+        const RegularExpression expression( pattern, settings.search.backend );
+        if ( !expression.isValid() ) return Status::CompileFailure;
+        if ( !enumerate ) return Status::EnumerationFailure;
+        try {
+            // A blocked filesystem call stays on the caller's private worker,
+            // keeping its admission permit owned until that worker really exits.
+            result.filePaths = enumerate( folderPath, stop );
+        } catch ( ... ) {
+            return stop() ? Status::Cancelled : Status::EnumerationFailure;
         }
-        for ( auto& thread : pool ) {
-            if ( thread.joinable() ) {
-                thread.join();
-            }
-        }
+        if ( stop() ) return Status::Cancelled;
+        result.groups.resize( static_cast<size_t>( result.filePaths.size() ) );
+        return scanMembers( result.filePaths, expression, context, settings, stop,
+                            [&]( int fileIndex, klogg::folder::FileGroup group ) {
+                                result.groups[ static_cast<size_t>( fileIndex ) ] = std::move( group );
+                            } );
+    };
+    try {
+        result.status = run();
+    } catch ( ... ) {
+        result.status = Status::Failed;
     }
-
-    Q_EMIT searchFinished( gen );
+    if ( result.status != Status::Ready ) result.groups.clear();
+    return result;
 }
 
 void FolderSearchEngine::runFolderSearch( const Request& request )
@@ -324,7 +447,7 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
                || interruptRequested_.load( std::memory_order_relaxed );
     };
     if ( requestStopped() ) {
-        Q_EMIT searchFinished( request.generation );
+        finishSearch( request.generation, CompletionStatus::Cancelled, request.settings );
         return;
     }
 
@@ -334,10 +457,11 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
         pending_.clear();
     }
 
-    const RegularExpression validation( request.pattern );
+    const RegularExpression validation( request.pattern, request.settings.search.backend );
     if ( !validation.isValid() || !folderEnumerator_ ) {
         LOG_WARNING << "FolderSearchEngine: folder request has no valid enumerator or pattern";
-        Q_EMIT searchFinished( request.generation );
+        finishSearch( request.generation, !validation.isValid() ? CompletionStatus::CompileFailure
+                                                              : CompletionStatus::EnumerationFailure, request.settings );
         return;
     }
 
@@ -369,7 +493,7 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
         } );
     } catch ( const std::exception& error ) {
         LOG_WARNING << "FolderSearchEngine: failed to start folder enumeration: " << error.what();
-        Q_EMIT searchFinished( request.generation );
+        finishSearch( request.generation, CompletionStatus::EnumerationFailure, request.settings );
         return;
     }
 
@@ -425,7 +549,7 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
                     state->detached = true;
                 }
                 enumerationThread.detach();
-                Q_EMIT searchFinished( request.generation );
+                finishSearch( request.generation, CompletionStatus::Cancelled, request.settings );
                 return;
             }
         }
@@ -433,7 +557,7 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
     enumerationThread.join();
 
     if ( requestStopped() ) {
-        Q_EMIT searchFinished( request.generation );
+        finishSearch( request.generation, CompletionStatus::Cancelled, request.settings );
         return;
     }
     if ( enumerationFailure != nullptr ) {
@@ -444,12 +568,12 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
         } catch ( ... ) {
             LOG_WARNING << "FolderSearchEngine: folder enumeration failed";
         }
-        Q_EMIT searchFinished( request.generation );
+        finishSearch( request.generation, CompletionStatus::EnumerationFailure, request.settings );
         return;
     }
 
     Q_EMIT folderSnapshotReady( filePaths, request.generation );
-    runSearch( request.generation, filePaths, request.pattern, request.context );
+    runSearchWithSettings( request.generation, filePaths, request.pattern, request.context, request.settings );
 }
 
 void FolderSearchEngine::workerLoop()
@@ -462,22 +586,38 @@ void FolderSearchEngine::workerLoop()
                 return shutdown_.load( std::memory_order_relaxed ) || pendingRequest_.valid;
             } );
             if ( shutdown_.load( std::memory_order_relaxed ) ) {
-                return;
+                break;
             }
             req = std::move( pendingRequest_ );
             pendingRequest_.valid = false;
         }
-        if ( req.source == RequestSource::Folder ) {
-            runFolderSearch( req );
-        }
-        else {
-            runSearch( req.generation, req.filePaths, req.pattern, req.context );
+        try {
+            if ( req.source == RequestSource::Folder ) {
+                runFolderSearch( req );
+            } else {
+                runSearchWithSettings( req.generation, req.filePaths, req.pattern, req.context, req.settings );
+            }
+        } catch ( ... ) {
+            finishSearch( req.generation, CompletionStatus::Failed, req.settings );
         }
     }
+    QMetaObject::invokeMethod( this, "finishRetirement", Qt::QueuedConnection );
 }
 
 klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                                                        const PatternMatcher& matcher,
+                                                       qint64 blockSize,
+                                                       std::function<bool()> shouldStop,
+                                                       klogg::folder::ContextOptions context,
+                                                       std::shared_ptr<klogg::folder::ScanArena> arena )
+{
+    return scanFileWithSettings( path, matcher, ScanSettings::capture(), blockSize,
+                                 std::move( shouldStop ), context, std::move( arena ) );
+}
+
+klogg::folder::FileGroup FolderSearchEngine::scanFileWithSettings( const QString& path,
+                                                       const PatternMatcher& matcher,
+                                                       const ScanSettings& settings,
                                                        qint64 blockSize,
                                                        std::function<bool()> shouldStop,
                                                        klogg::folder::ContextOptions context,
@@ -544,7 +684,7 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
         // single-file parity -- competitive with / faster than ripgrep. The streaming
         // per-line scan below remains the fallback for multi-byte encodings,
         // boolean/inverse patterns, context capture, or files over the cap.
-        if ( Configuration::get().useBlockScan() && matcher.hasBufferScan()
+        if ( settings.search.useBlockScan && matcher.hasBufferScan()
              && context.before == 0 && context.after == 0 ) {
             const qint64 fastFileSize = file.size();
             if ( fastFileSize > 0 && fastFileSize <= FastPathMaxBytes ) {
@@ -575,7 +715,7 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                     }
                     const klogg::vector<char> firstVec( wdata, wdata + detectLen );
                     QTextCodec* fastCodec
-                        = EncodingDetector::getInstance().detectEncoding( firstVec );
+                        = EncodingDetector::getInstance().detectEncoding( firstVec, settings.defaultEncodingMib );
                     EncodingParameters fastParams;
                     if ( fastCodec != nullptr ) {
                         fastParams = EncodingParameters( fastCodec );
@@ -821,7 +961,7 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                 // klogg::vector<char> for uchardet + QTextCodec::codecForUtfText,
                 // exactly as the indexer does.
                 klogg::vector<char> firstBlockVec( blockData, blockData + blockBytes );
-                codec = EncodingDetector::getInstance().detectEncoding( firstBlockVec );
+                codec = EncodingDetector::getInstance().detectEncoding( firstBlockVec, settings.defaultEncodingMib );
                 if ( codec != nullptr ) {
                     params = EncodingParameters( codec );
                     group.sourceCodec = codec;
@@ -975,9 +1115,9 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
         }
         return finish();
     }
-    catch ( const std::exception& error ) {
-        // Keep already-found records but refuse immutable reads of this member.
-        // Never let retention/normalization failures escape the scanner worker.
+    catch ( const IndexedContentError& error ) {
+        // Only known retention errors describe unavailable source bytes. An
+        // unexpected scanner/matcher failure belongs to the whole request.
         LOG_WARNING << "Folder scanned source unavailable for" << path << error.what();
         group.content.reset();
         group.retentionError = QString::fromUtf8( error.what() );

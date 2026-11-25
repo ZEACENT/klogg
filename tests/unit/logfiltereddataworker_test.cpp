@@ -420,6 +420,101 @@ protected:
     QString doGetLineString( LineNumber line ) const override { return version->lineString( line ); }
 };
 
+TEST_CASE( "Search worker retirement closes admission without waiting for a blocked snapshot read",
+           "[filtered-snapshot][search-retirement]" )
+{
+    SnapshotSearchConfiguration configuration;
+    SnapshotSearchSource source;
+    const auto gate = std::make_shared<SnapshotReadGate>( 0_lnum );
+    source.version = std::make_shared<FrozenSearchRows>(
+        QStringList{ QStringLiteral( "ERROR captured" ), QStringLiteral( "plain" ) }, gate );
+    LogFilteredDataWorker worker{ source };
+    ReleaseSnapshotGate release{ gate };
+    const RegularExpressionPattern pattern{ QStringLiteral( "ERROR" ) };
+    QSignalSpy progress{ &worker, &LogFilteredDataWorker::searchProgressed };
+    worker.search( pattern, 0_lnum, 2_lnum );
+    REQUIRE( gate->waitForEntry() );
+    worker.search( pattern, 0_lnum, 2_lnum ); // Pending replacement must not run.
+    const auto retired = worker.retire();
+    CHECK_FALSE( retired.isFinished() );
+    const auto generation = worker.currentGeneration();
+    source.failAcquisition = true;
+    worker.search( pattern, 0_lnum, 2_lnum );
+    CHECK( worker.currentGeneration() == generation );
+    CHECK_FALSE( worker.updateSearch( pattern, 0_lnum, 2_lnum, 0_lnum ) );
+    gate->release();
+    REQUIRE( waitUiState( [&] { return retired.isFinished(); } ) );
+    CHECK( worker.retire().isFinished() );
+    CHECK( worker.performanceCounters().operationStarts == 1 );
+    CHECK( progress.isEmpty() );
+}
+
+TEST_CASE( "Filtered-model retirement drains work before detaching its reader and rejects late updates",
+           "[filtered-snapshot][search-retirement]" )
+{
+    class TrackedSource final : public SnapshotSearchSource {
+      public:
+        mutable int readers = 0;
+      protected:
+        void doAttachReader() const override { ++readers; }
+        void doDetachReader() const override { --readers; }
+    } source;
+    SnapshotSearchConfiguration configuration;
+    const auto gate = std::make_shared<SnapshotReadGate>( 0_lnum );
+    source.version = std::make_shared<FrozenSearchRows>(
+        QStringList{ QStringLiteral( "ERROR captured" ), QStringLiteral( "plain" ) }, gate );
+    LogFilteredData filtered{ &source };
+    ReleaseSnapshotGate release{ gate };
+    const RegularExpressionPattern pattern{ QStringLiteral( "ERROR" ) };
+    QSignalSpy progress{ &filtered, &LogFilteredData::searchProgressed };
+    filtered.runSearch( pattern );
+    REQUIRE( gate->waitForEntry() );
+    REQUIRE( source.readers == 1 );
+    const auto retired = filtered.retire();
+    CHECK_FALSE( retired.isFinished() );
+    CHECK( source.readers == 1 );
+    const auto generation = filtered.currentSearchGeneration();
+    filtered.runSearch( pattern );
+    filtered.updateSearch( 0_lnum, 2_lnum );
+    source.changeInterpretation();
+    Q_EMIT source.loadingFinished( LoadingStatus::Successful );
+    CHECK( filtered.currentSearchGeneration() == generation );
+    gate->release();
+    REQUIRE( waitUiState( [&] { return retired.isFinished(); } ) );
+    CHECK( source.readers == 0 );
+    CHECK( filtered.retire().isFinished() );
+    CHECK( progress.isEmpty() );
+}
+
+TEST_CASE( "Search retirement is repeatable and teardown completes outstanding retirement futures",
+           "[search-retirement]" )
+{
+    SnapshotSearchSource source;
+    QFuture<void> retired;
+    {
+        LogFilteredDataWorker worker{ source };
+        retired = worker.retire();
+        SECTION( "normal owner event completion" ) {
+            REQUIRE( waitUiState( [&] { return retired.isFinished(); } ) );
+            CHECK( worker.retire().isFinished() );
+        }
+        SECTION( "owner teardown before queued completion" ) {}
+    }
+    CHECK( retired.isFinished() );
+}
+
+TEST_CASE( "Filtered-model teardown completes retirement without requiring another event turn",
+           "[search-retirement]" )
+{
+    SnapshotSearchSource source;
+    QFuture<void> retired;
+    {
+        LogFilteredData filtered{ &source };
+        retired = filtered.retire();
+    }
+    CHECK( retired.isFinished() );
+}
+
 void finishFilteredSearch( LogFilteredData& filtered )
 {
     QElapsedTimer deadline;
@@ -623,6 +718,16 @@ struct LogFilteredDataWorkerPrivate {};
 
 template <>
 struct LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate> {
+    static void stopConsumerForInspection( LogFilteredDataWorker* worker )
+    {
+        worker->shutdownAndWait();
+        // These private state-machine tests need admission but no consumer.
+        // Production shutdown remains terminal; only this test visitor reopens
+        // the queue after the dispatch thread has fully joined.
+        std::lock_guard<std::mutex> lock( worker->requestMutex_ );
+        worker->dispatchShutdown_ = false;
+    }
+
     static void enqueueOrDeferLiveRequest( LogFilteredDataWorker* worker, quint64 operationId,
                                            LineNumber endLine )
     {
@@ -1483,7 +1588,7 @@ TEST_CASE( "Search start trace emits and flushes the real maximum-identity reque
     REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
-    worker.shutdownAndWait();
+    WorkerVisitor::stopConsumerForInspection( &worker );
     const auto maximum = std::numeric_limits<quint64>::max();
     WorkerVisitor::setActiveOperation( &worker, maximum - 1, maximum - 1 );
 
@@ -1510,7 +1615,7 @@ TEST_CASE( "Search start trace ignores and preserves hostile stderr formatting",
     REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
-    worker.shutdownAndWait();
+    WorkerVisitor::stopConsumerForInspection( &worker );
     const auto maximum = std::numeric_limits<quint64>::max();
     WorkerVisitor::setActiveOperation( &worker, maximum - 1, maximum - 1 );
 
@@ -1562,7 +1667,7 @@ TEST_CASE( "Search start trace failures cannot change the primary request or esc
                     SearchTraceBuffer::Failure::ThrowSync );
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
-    worker.shutdownAndWait();
+    WorkerVisitor::stopConsumerForInspection( &worker );
     const auto maximum = std::numeric_limits<quint64>::max();
     WorkerVisitor::setActiveOperation( &worker, maximum - 1, maximum - 1 );
     SearchTraceBuffer buffer( failure );
@@ -1594,7 +1699,7 @@ TEST_CASE( "Search start trace tolerates a missing stderr buffer", "[.search-sta
     REQUIRE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
-    worker.shutdownAndWait();
+    WorkerVisitor::stopConsumerForInspection( &worker );
     bool escaped = false;
     {
         StderrCapture capture( nullptr );
@@ -1614,7 +1719,7 @@ TEST_CASE( "Search start trace is silent when the opt-in is absent", "[.search-s
     REQUIRE_FALSE( qEnvironmentVariableIsSet( "KLOGG_TEST_TRACE_SEARCH_STARTS" ) );
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
-    worker.shutdownAndWait();
+    WorkerVisitor::stopConsumerForInspection( &worker );
     SearchTraceBuffer buffer;
     {
         StderrCapture capture( &buffer );
@@ -1635,17 +1740,9 @@ TEST_CASE(
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
 
-    // The constructor starts a dispatch thread whose dispatchLoop() consumes
-    // deferredLiveRequest_ under requestMutex_.  Inspecting that same private
-    // state from this test thread (hasDeferredLiveRequest also takes
-    // requestMutex_) is reported by TSan as a double-lock/deadlock risk.
-    // Stop the dispatch thread before the enqueue/inspect sequence so this
-    // thread is the only one touching requestMutex_; enqueueRequest and
-    // enqueueOrDeferLiveRequest manipulate the deferred/pending optionals
-    // under the lock regardless of whether a consumer is running, so the
-    // assertions below remain meaningful and become deterministic.  The
-    // destructor performs the final shutdownAndWait() teardown.
-    worker.shutdownAndWait();
+    // Inspect admission/coalescing without racing the dispatch consumer. This
+    // is not a test of public shutdown, which deliberately rejects new work.
+    WorkerVisitor::stopConsumerForInspection( &worker );
 
     WorkerVisitor::enqueueOrDeferLiveRequest( &worker, 1, 10_lnum );
     REQUIRE( WorkerVisitor::hasDeferredLiveRequest( &worker ) );
@@ -1661,7 +1758,7 @@ TEST_CASE( "LogFilteredDataWorker deterministically coalesces deferred live endp
 
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
-    worker.shutdownAndWait();
+    WorkerVisitor::stopConsumerForInspection( &worker );
 
     for ( quint64 operationId = 1; operationId <= 4; ++operationId ) {
         const auto endLine = LineNumber( 10000 + operationId * 10000 );

@@ -40,12 +40,15 @@
 #define LOGFILTEREDDATAWORKERTHREAD_H
 
 #include <QObject>
+#include <QFuture>
+#include <QFutureInterface>
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <chrono>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <thread>
 
@@ -61,6 +64,7 @@
 #include "regularexpression.h"
 #include "synchronization.h"
 #include "searchablelogdata.h"
+#include "searchsettings.h"
 
 class SearchableLogData;
 
@@ -109,6 +113,8 @@ struct CompletedSearchResult {
     quint64 generation = 0;
     quint64 operationId = 0;
     quint64 requestTicket = 0;
+    // Retain the exact compiled query with its result, including cache hits.
+    std::shared_ptr<RegularExpression> compiled;
 };
 
 struct SearchPerformanceCounters {
@@ -161,9 +167,9 @@ private:
 class SearchOperation : public QObject {
     Q_OBJECT
 public:
-    SearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
+    SearchOperation( const SearchableLogData* sourceLogData, AtomicFlag& interruptRequested,
                      const RegularExpressionPattern& regExp, LineNumber startLine,
-                     LineNumber endLine,
+                     LineNumber endLine, SearchSettings settings,
                      std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
                      std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine = nullptr,
                      std::atomic<quint64>* matcherCreations = nullptr,
@@ -174,6 +180,7 @@ public:
     // and false if it has been cancelled (results not copied)
     virtual void run( SearchData& result ) = 0;
     bool completed() const { return completed_; }
+    bool failed() const { return failed_; }
 
 Q_SIGNALS:
     // Operations are unaware of search generations -- the worker assigns and
@@ -189,7 +196,9 @@ protected:
 
     AtomicFlag& interruptRequested_;
     const RegularExpressionPattern regexp_;
-    const SearchableLogData& sourceLogData_;
+    // Null for private preparation: every read then comes from sourceSnapshot_.
+    const SearchableLogData* sourceLogData_;
+    const SearchSettings settings_;
     LineNumber startLine_;
     LineNumber endLine_;
     std::shared_ptr<RegularExpression> compiledRegExp_;
@@ -198,6 +207,7 @@ protected:
     MatcherCache* matcherCache_;
     SearchableLogData::ReadSnapshot::Ptr sourceSnapshot_;
     bool completed_ = false;
+    bool failed_ = false;
 
     LinesCount sourceLineCount() const;
     SearchableLogData::RawLines readLines( LineNumber first, LinesCount count ) const;
@@ -208,13 +218,23 @@ class FullSearchOperation : public SearchOperation {
 public:
     FullSearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
                          const RegularExpressionPattern& regExp, LineNumber startLine,
-                         LineNumber endLine,
+                         LineNumber endLine, SearchSettings settings,
                          std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
                          std::atomic<quint64>* matcherCreations = nullptr,
                          MatcherCache* matcherCache = nullptr,
                          SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = {} )
-        : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine,
+        : SearchOperation( &sourceLogData, interruptRequested, regExp, startLine, endLine, settings,
                            std::move( compiledRegExp ), nullptr, matcherCreations, matcherCache,
+                           std::move( sourceSnapshot ) )
+    {
+    }
+
+    FullSearchOperation( SearchableLogData::ReadSnapshot::Ptr sourceSnapshot,
+                         AtomicFlag& interruptRequested, const RegularExpressionPattern& regExp,
+                         LineNumber startLine, LineNumber endLine, SearchSettings settings,
+                         std::shared_ptr<RegularExpression> compiledRegExp )
+        : SearchOperation( nullptr, interruptRequested, regExp, startLine, endLine, settings,
+                           std::move( compiledRegExp ), nullptr, nullptr, nullptr,
                            std::move( sourceSnapshot ) )
     {
     }
@@ -227,13 +247,13 @@ class UpdateSearchOperation : public SearchOperation {
 public:
     UpdateSearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
                            const RegularExpressionPattern& regExp, LineNumber startLine,
-                           LineNumber endLine, LineNumber position,
+                           LineNumber endLine, LineNumber position, SearchSettings settings,
                            std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
                            std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine = nullptr,
                            std::atomic<quint64>* matcherCreations = nullptr,
                            MatcherCache* matcherCache = nullptr,
                            SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = {} )
-        : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine,
+        : SearchOperation( &sourceLogData, interruptRequested, regExp, startLine, endLine, settings,
                            std::move( compiledRegExp ), liveTargetEndLine, matcherCreations, matcherCache,
                            std::move( sourceSnapshot ) )
         , initialPosition_( position )
@@ -286,11 +306,31 @@ public:
     // detaching the reader; waitForDone() intentionally keeps dispatch alive
     // for normal progress-completion waits.
     void shutdownAndWait();
+    // Owner-thread terminal cancellation. The event loop must keep running until
+    // both dispatch and operation threads have retired; this call never joins.
+    QFuture<void> retire();
 
     // get the current indexing data
     SearchResults getSearchResults() const;
     CompletedSearchResult::Ptr completedSearchResult() const;
     void restoreCompletedResult( const CompletedSearchResult& result );
+    // Preallocate the mutable publication stamp without exposing writable aliases.
+    // This move-only handoff can be constructed on the preparation worker.
+    class PreparedResult {
+      public:
+        PreparedResult() = default;
+        explicit PreparedResult( const CompletedSearchResult& result )
+            : result_( std::make_shared<CompletedSearchResult>( result ) ) {}
+        PreparedResult( PreparedResult&& ) = default;
+        PreparedResult& operator=( PreparedResult&& ) = default;
+        explicit operator bool() const { return bool( result_ ); }
+      private:
+        friend class LogFilteredDataWorker;
+        std::shared_ptr<CompletedSearchResult> result_;
+    };
+    // Owner-thread handoff. Revoke old work without joining or emitting progress.
+    // The next update may rebuild the prefix if serialized state has not caught up.
+    bool adoptPreparedResult( PreparedResult&& prepared );
 
     // Alias kept for callers that prefer a self-documenting name; the wire
     // type used in signals is plain quint64 because moc / QSignalSpy treat
@@ -307,6 +347,8 @@ public:
     // this value to drop signals that were already in their event queue when
     // the search was replaced.
     OperationGeneration currentGeneration() const { return operationGeneration_.load(); }
+    // Unlike query generation, this also advances for incremental update requests.
+    quint64 currentRequestTicket() const { return requestedTicket_.load(); }
 
     SearchPerformanceCounters performanceCounters() const
     {
@@ -359,11 +401,13 @@ private Q_SLOTS:
     void deliverSearchProgressed( LinesCount nbMatches, int percent, LineNumber initialLine,
                                   quint64 generation, quint64 operationId );
     void deliverSearchFinished( quint64 generation, quint64 operationId );
+    void deliverRetired();
 
 private:
     using OperationId = quint64;
 
     struct SearchRequest;
+    void installCompletedResult( std::shared_ptr<CompletedSearchResult> result );
     void connectSignalsAndRun( SearchOperation* operationRequested, const SearchRequest& request );
     void emitSearchProgressedOnOwnerThread( LinesCount nbMatches, int percent,
                                             LineNumber initialLine,
@@ -386,14 +430,16 @@ private:
         std::shared_ptr<RegularExpression> compiled;
         SearchableLogData::ReadSnapshot::Ptr sourceSnapshot = nullptr;
         quint64 requestTicket = 0;
+        SearchSettings settings{};
     };
 
     void dispatchLoop();
+    void requestShutdown();
     void enqueueRequest( SearchRequest request, bool interruptRunningSearch = true );
     void enqueueOrDeferLiveRequest( SearchRequest request );
     void joinOperationThread();
     void finishLiveUpdateAndRestartIfNeeded( const SearchRequest& request );
-    LinesCount::UnderlyingType liveUpdateCoalesceThreshold() const;
+    static LinesCount::UnderlyingType liveUpdateCoalesceThreshold( const SearchSettings& settings );
     void promoteDeferredLiveRequest();
 
     std::thread dispatchThread_;
@@ -404,6 +450,9 @@ private:
     std::optional<SearchRequest> followupLiveRequest_;
     std::chrono::steady_clock::time_point deferredLiveDeadline_{};
     bool dispatchShutdown_ = false;
+    // Owner-thread state; dispatchShutdown_ is the mutex-protected worker gate.
+    bool retiring_ = false;
+    QFutureInterface<void> retirementCompletion_;
     // Protected by requestMutex_: completed/idle results are not cancellable work.
     bool requestPending_ = false;
 

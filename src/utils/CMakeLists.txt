@@ -1,6 +1,8 @@
 add_library(
   klogg_utils
   ${CMAKE_CURRENT_SOURCE_DIR}/include/atomicflag.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/asyncworkbudget.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/qtcontainerindex.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/coalescingtimer.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/uuid.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/dispatch_to.h

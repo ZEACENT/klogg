@@ -24,21 +24,27 @@
 #include <QDir>
 #include <QEvent>
 #include <QMenu>
+#include <QLineEdit>
 #include <QProxyStyle>
+#include <QPointer>
 #include <QStyleFactory>
+#include <QSignalSpy>
 #include <QTabBar>
 #include <QTimer>
 #include <QTranslator>
 #include <QTest>
 #include <QWidget>
 
+#include <memory>
 #include <utility>
 
 #include "configuration.h"
 #include "pathutils.h"
 #include "styles.h"
 #include "tabbedcrawlerwidget.h"
+#include "tabgroup.h"
 #include "tabnamemapping.h"
+#include "test_utils.h"
 
 class DummyCrawlerWidget : public QWidget {
     Q_OBJECT
@@ -105,6 +111,254 @@ class LiveStatusTranslator : public QTranslator {
         return {};
     }
 };
+
+TEST_CASE( "Prepared group removal reconciles all tab facades before global notification",
+           "[workspace-publication]" )
+{
+    auto& groups = TabGroupManager::getSynced();
+    struct Cleanup {
+        QString id;
+        ~Cleanup() { TabGroupManager::get().deleteGroup( id ); }
+    } cleanup;
+    bool publishing = false;
+    QPointer<TabbedCrawlerWidget> first;
+    QPointer<TabbedCrawlerWidget> second;
+    QObject observer;
+    const auto checkFinal = [&] {
+        if ( !publishing ) return;
+        REQUIRE( first );
+        REQUIRE( second );
+        CHECK( first->tabBar()->tabData( 0 ).toMap().value( "groupId" ).toString().isEmpty() );
+        CHECK( second->tabBar()->tabData( 0 ).toMap().value( "groupId" ).toString().isEmpty() );
+    };
+    // Register before either facade: the observer must not depend on Qt's slot
+    // connection order to see both windows' final group projection.
+    QObject::connect( &groups, &TabGroupManager::groupsChanged, &observer, checkFinal );
+    TabbedCrawlerWidget firstTabs;
+    TabbedCrawlerWidget secondTabs;
+    first = &firstTabs;
+    second = &secondTabs;
+    firstTabs.addCrawler( new DummyCrawlerWidget, "group-publication-first" );
+    secondTabs.addCrawler( new DummyCrawlerWidget, "group-publication-second" );
+    groups.createGroup( "Shared", Qt::red );
+    cleanup.id = groups.groups().back().id;
+    groups.addTabToGroup( cleanup.id, "group-publication-first" );
+    groups.addTabToGroup( cleanup.id, "group-publication-second" );
+    REQUIRE( firstTabs.tabBar()->tabData( 0 ).toMap().value( "groupId" ).toString() == cleanup.id );
+    REQUIRE( secondTabs.tabBar()->tabData( 0 ).toMap().value( "groupId" ).toString() == cleanup.id );
+    QSignalSpy firstChanged{ &firstTabs, &TabbedCrawlerWidget::crawlerInventoryChanged };
+    QSignalSpy secondChanged{ &secondTabs, &TabbedCrawlerWidget::crawlerInventoryChanged };
+    QSignalSpy groupsChanged{ &groups, &TabGroupManager::groupsChanged };
+    QObject::connect( &firstTabs, &TabbedCrawlerWidget::crawlerInventoryChanged, &observer, checkFinal );
+    QObject::connect( &secondTabs, &TabbedCrawlerWidget::crawlerInventoryChanged, &observer, checkFinal );
+    auto removal = groups.prepareTabRemovals( { "group-publication-first", "group-publication-second" } );
+    auto firstPublication = firstTabs.beginPublication();
+    auto secondPublication = secondTabs.beginPublication();
+    REQUIRE( removal->install() );
+    firstTabs.onGroupsChanged();
+    secondTabs.onGroupsChanged();
+    CHECK( firstChanged.count() == 0 );
+    CHECK( secondChanged.count() == 0 );
+    CHECK( groupsChanged.count() == 0 );
+    firstPublication->release();
+    secondPublication->release();
+    publishing = true;
+    removal->notify();
+    firstPublication->notify();
+    secondPublication->notify();
+    CHECK( groupsChanged.count() == 1 );
+    CHECK( firstChanged.count() > 0 );
+    CHECK( secondChanged.count() > 0 );
+}
+
+TEST_CASE( "Background tab insertion preserves selection without a transient activation",
+           "[tab-inventory][background-tab-publication]" )
+{
+    const bool empty = GENERATE( false, true );
+    QWidget editorWindow;
+    QLineEdit editor{ &editorWindow };
+    editorWindow.show();
+    editor.setFocus();
+    REQUIRE( waitUiState( [&] { return QApplication::focusWidget() == &editor; } ) );
+    TabbedCrawlerWidget tabs;
+    auto* first = new DummyCrawlerWidget;
+    if ( !empty ) tabs.addCrawler( first, QStringLiteral( "/background/first.log" ) );
+    else first->setParent( &editorWindow );
+    QSignalSpy selected( &tabs, &QTabWidget::currentChanged );
+    QSignalSpy added( &tabs, &TabbedCrawlerWidget::crawlerAdded );
+    QWidget* observedSelection = nullptr;
+    QObject::connect( &tabs, &TabbedCrawlerWidget::crawlerAdded, &tabs,
+        [&] { observedSelection = tabs.currentWidget(); } );
+    const auto* focus = QApplication::focusWidget();
+    const auto* active = QApplication::activeWindow();
+    auto* second = new DummyCrawlerWidget;
+    const auto index = tabs.addCrawler( second, QStringLiteral( "/background/second.log" ), {}, {},
+        std::nullopt, TabbedCrawlerWidget::SelectionPolicy::PreserveCurrent );
+    CHECK( tabs.widget( index ) == second );
+    CHECK( tabs.currentWidget() == ( empty ? second : first ) );
+    CHECK( observedSelection == ( empty ? second : first ) );
+    CHECK( selected.count() == ( empty ? 1 : 0 ) );
+    CHECK( added.count() == 1 );
+    CHECK( QApplication::focusWidget() == focus );
+    CHECK( QApplication::activeWindow() == active );
+}
+
+TEST_CASE( "Tab publication waits for every workspace installation and coalesces notifications",
+           "[tab-inventory][workspace-publication]" )
+{
+    TabbedCrawlerWidget first;
+    TabbedCrawlerWidget second;
+    first.addCrawler( new DummyCrawlerWidget, QStringLiteral( "/publication/old.log" ) );
+    QSignalSpy firstSelected{ &first, &QTabWidget::currentChanged };
+    QSignalSpy secondSelected{ &second, &QTabWidget::currentChanged };
+    QSignalSpy firstAdded{ &first, &TabbedCrawlerWidget::crawlerAdded };
+    QSignalSpy secondAdded{ &second, &TabbedCrawlerWidget::crawlerAdded };
+    QSignalSpy firstInventory{ &first, &TabbedCrawlerWidget::crawlerInventoryChanged };
+    QSignalSpy secondInventory{ &second, &TabbedCrawlerWidget::crawlerInventoryChanged };
+    auto* a = new DummyCrawlerWidget;
+    auto* b = new DummyCrawlerWidget;
+    bool coherent = true;
+    const auto observe = [&] {
+        coherent = coherent && first.count() == 1 && second.count() == 1
+            && first.currentWidget() == a && second.currentWidget() == b
+            && !first.tabText( 0 ).isEmpty() && !second.tabText( 0 ).isEmpty();
+    };
+    QObject::connect( &first, &QTabWidget::currentChanged, &first, observe );
+    QObject::connect( &first, &TabbedCrawlerWidget::crawlerAdded, &first, observe );
+    QObject::connect( &first, &TabbedCrawlerWidget::crawlerInventoryChanged, &first, observe );
+    QObject::connect( &second, &QTabWidget::currentChanged, &second, observe );
+    QObject::connect( &second, &TabbedCrawlerWidget::crawlerAdded, &second, observe );
+    QObject::connect( &second, &TabbedCrawlerWidget::crawlerInventoryChanged, &second, observe );
+    auto firstPublication = first.beginPublication();
+    auto secondPublication = second.beginPublication();
+    REQUIRE( firstPublication );
+    REQUIRE( secondPublication );
+    CHECK_FALSE( first.beginPublication() );
+    first.addCrawler( a, QStringLiteral( "/publication/a.log" ), {}, {}, std::nullopt,
+                      TabbedCrawlerWidget::SelectionPolicy::PreserveCurrent );
+    first.removeCrawler( 0 );
+    second.addCrawler( b, QStringLiteral( "/publication/b.log" ), {}, {}, std::nullopt,
+                       TabbedCrawlerWidget::SelectionPolicy::PreserveCurrent );
+    CHECK( firstSelected.isEmpty() );
+    CHECK( secondSelected.isEmpty() );
+    CHECK( firstAdded.isEmpty() );
+    CHECK( secondAdded.isEmpty() );
+    CHECK( firstInventory.isEmpty() );
+    CHECK( secondInventory.isEmpty() );
+    firstPublication->release();
+    secondPublication->release();
+    CHECK( firstInventory.isEmpty() );
+    CHECK( secondInventory.isEmpty() );
+    firstPublication->notify();
+    secondPublication->notify();
+    CHECK( coherent );
+    CHECK( firstSelected.count() == 1 );
+    CHECK( secondSelected.count() == 1 );
+    CHECK( firstAdded.count() == 1 );
+    CHECK( secondAdded.count() == 1 );
+    CHECK( firstInventory.count() == 1 );
+    CHECK( secondInventory.count() == 1 );
+    firstPublication->notify();
+    secondPublication->notify();
+    CHECK( firstInventory.count() == 1 );
+    CHECK( secondInventory.count() == 1 );
+}
+
+TEST_CASE( "Tab publication tolerates owner destruction and preserves prior signal blocking",
+           "[tab-inventory][workspace-publication]" )
+{
+    auto tabs = std::make_unique<TabbedCrawlerWidget>();
+    SECTION( "observer destroys owner during publication" ) {
+        QObject observer;
+        int publications = 0;
+        bool notifying = false;
+        QObject::connect( tabs.get(), &TabbedCrawlerWidget::crawlerInventoryChanged, &observer,
+                          [&] { ++publications; if ( notifying ) tabs.reset(); } );
+        auto publication = tabs->beginPublication();
+        tabs->addCrawler( new DummyCrawlerWidget, QStringLiteral( "/publication/closed.log" ) );
+        CHECK( publications == 0 );
+        publication->release();
+        notifying = true;
+        publication->notify();
+        CHECK_FALSE( tabs );
+        CHECK( publications == 1 );
+    }
+    SECTION( "observer retires the publication during notification" ) {
+        auto publication = tabs->beginPublication();
+        QSignalSpy added{ tabs.get(), &TabbedCrawlerWidget::crawlerAdded };
+        QObject::connect( tabs.get(), &TabbedCrawlerWidget::crawlerInventoryChanged, tabs.get(),
+                          [&] { publication.reset(); } );
+        tabs->addCrawler( new DummyCrawlerWidget, QStringLiteral( "/publication/reentrant.log" ) );
+        publication->release();
+        publication->notify();
+        CHECK_FALSE( publication );
+        CHECK( added.count() == 1 );
+    }
+    SECTION( "no-op barrier has no notifications" ) {
+        QSignalSpy inventory{ tabs.get(), &TabbedCrawlerWidget::crawlerInventoryChanged };
+        QSignalSpy selected{ tabs.get(), &QTabWidget::currentChanged };
+        auto publication = tabs->beginPublication();
+        publication->release();
+        publication->notify();
+        CHECK( inventory.isEmpty() );
+        CHECK( selected.isEmpty() );
+    }
+    SECTION( "owner dies before release" ) {
+        auto publication = tabs->beginPublication();
+        tabs.reset();
+        publication->release();
+        publication->notify();
+    }
+    SECTION( "existing signal block is restored" ) {
+        QSignalSpy inventory{ tabs.get(), &TabbedCrawlerWidget::crawlerInventoryChanged };
+        tabs->blockSignals( true );
+        auto publication = tabs->beginPublication();
+        tabs->addCrawler( new DummyCrawlerWidget, QStringLiteral( "/publication/blocked.log" ) );
+        publication->release();
+        CHECK( tabs->signalsBlocked() );
+        publication->notify();
+        CHECK( inventory.isEmpty() );
+    }
+}
+
+TEST_CASE( "Tab inventory notifications observe immediate moves and background removal during drag",
+           "[tab-inventory]" )
+{
+    TabbedCrawlerWidget tabs;
+    auto* const first = new DummyCrawlerWidget;
+    auto* const second = new DummyCrawlerWidget;
+    auto* const third = new DummyCrawlerWidget;
+    tabs.addCrawler( first, QStringLiteral( "/inventory/a.log" ) );
+    tabs.addCrawler( second, QStringLiteral( "/inventory/b.log" ) );
+    tabs.addCrawler( third, QStringLiteral( "/inventory/c.log" ) );
+    tabs.setCurrentIndex( 0 );
+    QSignalSpy changed( &tabs, &TabbedCrawlerWidget::crawlerInventoryChanged );
+    QSignalSpy settled( &tabs, &TabbedCrawlerWidget::tabsReordered );
+    QList<QWidget*> observed;
+    QObject::connect( &tabs, &TabbedCrawlerWidget::crawlerInventoryChanged, &tabs, [ & ] {
+        observed.clear();
+        for ( int index = 0; index < tabs.count(); ++index ) {
+            observed.append( tabs.widget( index ) );
+        }
+    } );
+    auto* const bar = qobject_cast<CrawlerTabBar*>( tabs.tabBar() );
+    REQUIRE( bar != nullptr );
+    Q_EMIT bar->tabDragStarted();
+    bar->moveTab( 1, 2 );
+    REQUIRE( changed.count() > 0 );
+    REQUIRE( settled.isEmpty() );
+    REQUIRE( observed == QList<QWidget*>{ first, third, second } );
+    changed.clear();
+    tabs.removeCrawler( 2 );
+    REQUIRE( tabs.currentWidget() == first );
+    REQUIRE( changed.count() > 0 );
+    REQUIRE( observed == QList<QWidget*>{ first, third } );
+    Q_EMIT bar->tabDragFinished();
+    changed.clear();
+    tabs.updateCrawler( 1, QStringLiteral( "New title" ), QStringLiteral( "Tooltip" ) );
+    REQUIRE( changed.count() > 0 );
+    REQUIRE( tabs.tabText( 1 ) == QStringLiteral( "New title" ) );
+}
 
 TEST_CASE( "displayNameForPath is robust to trailing slashes and never blanks a label" )
 {
@@ -782,6 +1036,39 @@ TEST_CASE( "setLiveTabStatus updates the tab icon with colored dots" )
     // In test builds without qrc resources, this may legitimately be null.
     // The important verification is that the setter does not crash and the
     // status-to-icon dispatch path is exercised.
+}
+
+TEST_CASE( "Tab status signals belong to exact widgets rather than reused document paths",
+           "[tab-status-ownership]" )
+{
+    TabbedCrawlerWidget tabs;
+    runPendingMainThreadEvents();
+    auto* original = new DummyCrawlerWidget;
+    const auto originalIndex = tabs.addCrawler( original, QStringLiteral( "same.log" ) );
+    tabs.setLiveTabStatus( originalIndex, LiveTabStatus::Connected );
+    const auto originalIcon = tabs.tabIcon( originalIndex ).cacheKey();
+    REQUIRE_FALSE( tabs.tabIcon( originalIndex ).isNull() );
+
+    SECTION( "a retiring source cannot change its replacement" ) {
+        tabs.removeCrawler( originalIndex );
+        original->setParent( nullptr );
+        std::unique_ptr<DummyCrawlerWidget> retired{ original };
+        auto* replacement = new DummyCrawlerWidget;
+        const auto index = tabs.addCrawler( replacement, QStringLiteral( "same.log" ) );
+        tabs.setLiveTabStatus( index, LiveTabStatus::Connected );
+        const auto before = tabs.tabIcon( index ).cacheKey();
+        original->dataStatusChanged( DataStatus::NEW_DATA );
+        CHECK( tabs.tabIcon( index ).cacheKey() == before );
+    }
+    SECTION( "duplicate paths retain independent status" ) {
+        auto* duplicate = new DummyCrawlerWidget;
+        const auto index = tabs.addCrawler( duplicate, QStringLiteral( "same.log" ) );
+        tabs.setLiveTabStatus( index, LiveTabStatus::Connected );
+        const auto before = tabs.tabIcon( index ).cacheKey();
+        duplicate->dataStatusChanged( DataStatus::NEW_DATA );
+        CHECK( tabs.tabIcon( originalIndex ).cacheKey() == originalIcon );
+        CHECK( tabs.tabIcon( index ).cacheKey() != before );
+    }
 }
 
 TEST_CASE( "setTabDataStatus toggles between old and new data icons" )

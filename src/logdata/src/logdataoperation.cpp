@@ -89,6 +89,17 @@ void OperationQueue::interrupt()
     }
 }
 
+bool OperationQueue::beginRetirement()
+{
+    ScopedLock guard( mutex_ );
+    shuttingDown_ = true;
+    pendingOperation_ = {};
+    if ( worker_ ) {
+        worker_->interrupt();
+    }
+    return executingOperation_.index() == 0;
+}
+
 void OperationQueue::shutdown()
 {
     std::unique_ptr<LogDataWorker> worker;

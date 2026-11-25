@@ -149,7 +149,7 @@ public:
         : watcher_{ watcher }
         , path_{ std::move( path ) }
     {
-        watcher_.addFile( path_ );
+        watcher_.addFile( path_, this );
     }
 
     ~ScopedFileWatchRegistration()
@@ -163,7 +163,7 @@ public:
     bool remove()
     {
         if ( active_ ) {
-            watcher_.removeFile( path_ );
+            watcher_.removeFile( path_, this );
             active_ = false;
         }
         return watcher_.waitForIdleForTest( WatcherIdleTimeoutMs );

@@ -29,6 +29,26 @@
 namespace klogg::platform {
 namespace {
 
+class NativeDescriptorGuard final {
+public:
+    explicit NativeDescriptorGuard( int descriptor ) noexcept : descriptor_( descriptor ) {}
+    ~NativeDescriptorGuard()
+    {
+        if ( descriptor_ >= 0 ) {
+#if defined( Q_OS_WIN )
+            _close( descriptor_ );
+#else
+            ::close( descriptor_ );
+#endif
+        }
+    }
+    NativeDescriptorGuard( const NativeDescriptorGuard& ) = delete;
+    NativeDescriptorGuard& operator=( const NativeDescriptorGuard& ) = delete;
+    void release() noexcept { descriptor_ = -1; }
+private:
+    int descriptor_;
+};
+
 #if defined( Q_OS_WIN )
 
 class NativeHandle final {
@@ -391,16 +411,96 @@ ReadOnlyFileOpenResult openFileReadOnly( QFile& file )
         return { status, QString::fromStdString( std::generic_category().message( openError ) ) };
     }
 #endif
+    NativeDescriptorGuard descriptorOwner{ descriptor };
     if ( file.open( descriptor, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle ) ) {
+        descriptorOwner.release();
         return { ReadOnlyFileOpenStatus::Opened, {} };
     }
-    const auto error = file.errorString();
+    return { ReadOnlyFileOpenStatus::Failed, file.errorString() };
+}
+
+RegularFileOpenResult openRegularFileReadOnly( QFile& file )
+{
+    if ( file.isOpen() || file.fileName().isEmpty() ) {
+        return { ReadOnlyFileOpenStatus::Failed,
+                 QStringLiteral( "regular-file acquisition requires a closed file and a nonempty path" ), {} };
+    }
 #if defined( Q_OS_WIN )
-    _close( descriptor );
+    const auto nativePath = extendedNativePath( file.fileName() );
+    const auto rawHandle = CreateFileW(
+        reinterpret_cast<LPCWSTR>( nativePath.utf16() ), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr );
+    const auto openError = rawHandle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    NativeHandle handle{ rawHandle };
+    if ( !handle ) {
+        const bool missing = openError == ERROR_FILE_NOT_FOUND || openError == ERROR_PATH_NOT_FOUND;
+        return { missing ? ReadOnlyFileOpenStatus::Missing : ReadOnlyFileOpenStatus::Failed,
+                 QString::fromStdString( std::system_category().message( static_cast<int>( openError ) ) ), {} };
+    }
+    if ( GetFileType( handle.get() ) != FILE_TYPE_DISK ) {
+        return { ReadOnlyFileOpenStatus::NotRegular, QStringLiteral( "source is not a regular file" ), {} };
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    if ( !GetFileInformationByHandle( handle.get(), &info ) ) {
+        const auto error = GetLastError();
+        return { ReadOnlyFileOpenStatus::Failed,
+                 QString::fromStdString( std::system_category().message( static_cast<int>( error ) ) ), {} };
+    }
+    if ( ( info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ) != 0 ) {
+        return { ReadOnlyFileOpenStatus::NotRegular, QStringLiteral( "source is not a regular file" ), {} };
+    }
+    const auto descriptor = _open_osfhandle(
+        reinterpret_cast<intptr_t>( handle.get() ), _O_RDONLY | _O_BINARY | _O_NOINHERIT );
+    const auto descriptorError = errno;
+    if ( descriptor == -1 ) {
+        return { ReadOnlyFileOpenStatus::Failed,
+                 QString::fromStdString( std::generic_category().message( descriptorError ) ), {} };
+    }
+    (void) handle.release(); // The CRT descriptor now owns the HANDLE.
 #else
-    ::close( descriptor );
+    const auto nativePath = QFile::encodeName( file.fileName() );
+    int descriptor;
+    int openError;
+    while ( true ) {
+        // Fixed read-only flags never create files. NONBLOCK prevents a FIFO open
+        // from waiting for a writer; it does not change regular-file read semantics.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+        descriptor = ::open( nativePath.constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK );
+        openError = errno;
+        if ( descriptor != -1 || openError != EINTR ) break;
+    }
+    if ( descriptor == -1 ) {
+        return { openError == ENOENT ? ReadOnlyFileOpenStatus::Missing : ReadOnlyFileOpenStatus::Failed,
+                 QString::fromStdString( std::generic_category().message( openError ) ), {} };
+    }
+    struct stat info{};
+    if ( ::fstat( descriptor, &info ) != 0 ) {
+        const auto error = errno;
+        ::close( descriptor );
+        return { ReadOnlyFileOpenStatus::Failed,
+                 QString::fromStdString( std::generic_category().message( error ) ), {} };
+    }
+    if ( !S_ISREG( info.st_mode ) ) {
+        ::close( descriptor );
+        return { ReadOnlyFileOpenStatus::NotRegular, QStringLiteral( "source is not a regular file" ), {} };
+    }
 #endif
-    return { ReadOnlyFileOpenStatus::Failed, error };
+    NativeDescriptorGuard descriptorOwner{ descriptor };
+    if ( !file.open( descriptor, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle ) ) {
+        return { ReadOnlyFileOpenStatus::Failed, file.errorString(), {} };
+    }
+    descriptorOwner.release();
+    const auto identity = fileIdentity( file );
+    const auto size = file.size();
+    if ( !identity || size < 0 ) {
+        file.close();
+        return { ReadOnlyFileOpenStatus::Failed,
+                 QStringLiteral( "acquired source metadata is unavailable" ), {} };
+    }
+    // QFileDevice queries its opened descriptor, unlike QFileInfo(path).
+    return { ReadOnlyFileOpenStatus::Opened, {},
+             AcquiredFileMetadata{ *identity, size, file.fileTime( QFileDevice::FileModificationTime ) } };
 }
 
 bool openFileSharedForReplacement( QFile& file, QIODevice::OpenMode mode )

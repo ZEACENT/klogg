@@ -12,6 +12,15 @@ md "%KLOGG_WORKSPACE%\release"
 echo "Copying klogg binaries..."
 xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg_portable.exe %KLOGG_WORKSPACE%\release\ /y
 xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg.exe %KLOGG_WORKSPACE%\release\ /y
+xcopy "%KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\kloggctl.exe" "%KLOGG_WORKSPACE%\release\" /y
+if errorlevel 1 (
+    echo ERROR: failed to stage the control CLI
+    exit /b 1
+)
+if not exist "%KLOGG_WORKSPACE%\release\kloggctl.exe" (
+    echo ERROR: control CLI missing from release\kloggctl.exe
+    exit /b 1
+)
 
 if not exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\helpers\adb.exe (
     echo ERROR: source-built ADB helper missing from output\helpers\adb.exe

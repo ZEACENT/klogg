@@ -148,7 +148,13 @@ parseBooleanExpressions( QString& pattern, bool isCaseSensitive, bool isPlainTex
 } // namespace
 
 RegularExpression::RegularExpression( const RegularExpressionPattern& pattern )
-    : isInverse_( pattern.isExclude )
+    : RegularExpression( pattern, Configuration::get().regexpEngine() )
+{
+}
+
+RegularExpression::RegularExpression( const RegularExpressionPattern& pattern, RegexpEngine engine )
+    : engine_( engine )
+    , isInverse_( pattern.isExclude )
     , isBooleanCombination_( pattern.isBoolean )
     , expression_( pattern.pattern )
 {
@@ -169,10 +175,9 @@ RegularExpression::RegularExpression( const RegularExpressionPattern& pattern )
             expression_ = QString::fromStdString( subPatterns_.front().id() );
         }
 
-        // Compile patterns with the backend selected in Configuration so validation
-        // matches the matcher implementation used by the product and tests.
-        const auto& config = Configuration::get();
-        if ( config.regexpEngine() == RegexpEngine::Vectorscan ) {
+        // Validation and all later matchers share this captured backend, even
+        // when application preferences change while a search is prepared.
+        if ( engine_ == RegexpEngine::Vectorscan ) {
             hsExpression_ = HsRegularExpression( subPatterns_ );
             isValid_ = hsExpression_.isValid();
             errorString_ = hsExpression_.errorString();
@@ -248,8 +253,7 @@ PatternMatcher::PatternMatcher( const RegularExpression& expression )
     , mainPatternId_( expression.subPatterns_.front().id() )
     , matcher_( expression.hsExpression_.createMatcher() )
 {
-    const auto& config = Configuration::get();
-    const auto useVectorscanEngine = config.regexpEngine() == RegexpEngine::Vectorscan;
+    const auto useVectorscanEngine = expression.engine_ == RegexpEngine::Vectorscan;
     if ( !useVectorscanEngine ) {
         matcher_ = DefaultRegularExpressionMatcher( expression.subPatterns_ );
     }
@@ -319,11 +323,16 @@ bool PatternMatcher::scanBuffer( const char* data, unsigned int size,
 
 MultiRegularExpression::MultiRegularExpression(
     const klogg::vector<RegularExpressionPattern>& patterns )
-    : patterns_( patterns )
+    : MultiRegularExpression( patterns, Configuration::get().regexpEngine() )
+{
+}
+
+MultiRegularExpression::MultiRegularExpression(
+    const klogg::vector<RegularExpressionPattern>& patterns, RegexpEngine engine )
+    : patterns_( patterns ), engine_( engine )
 {
     try {
-        const auto& config = Configuration::get();
-        if ( config.regexpEngine() == RegexpEngine::Vectorscan ) {
+        if ( engine_ == RegexpEngine::Vectorscan ) {
             hsExpression_ = HsRegularExpression( patterns_ );
             isValid_ = hsExpression_.isValid();
             errorString_ = hsExpression_.errorString();
@@ -362,13 +371,11 @@ QString MultiRegularExpression::errorString() const
 }
 
 MultiPatternMatcher::MultiPatternMatcher( const MultiRegularExpression& expression )
-    : matcher_( expression.hsExpression_.createMatcher() )
+    : matcher_( expression.engine_ == RegexpEngine::Vectorscan
+                    ? expression.hsExpression_.createMatcher()
+                    : MatcherVariant{ DefaultRegularExpressionMatcher( expression.patterns_ ) } )
     , patterns_( expression.patterns_ )
 {
-    const auto& config = Configuration::get();
-    if ( config.regexpEngine() != RegexpEngine::Vectorscan ) {
-        matcher_ = DefaultRegularExpressionMatcher( expression.patterns_ );
-    }
 }
 
 MultiPatternMatcher::~MultiPatternMatcher() = default;

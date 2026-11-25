@@ -34,6 +34,10 @@ class CaptureReadSnapshot final : public SearchableLogData::ReadSnapshot {
 
     LinesCount lineCount() const override { return snapshot_.lineCount(); }
     qint64 byteSize() const override { return snapshot_.byteSize(); }
+    std::optional<uint64_t> sourceBytesForLine( LineNumber index ) const override
+    {
+        return snapshot_.sourceBytesForLine( index );
+    }
     klogg::SnapshotRow row( LineNumber index ) const override { return snapshot_.row( index ); }
     OptionalLineNumber rowForIdentity( const klogg::LogRowId& identity ) const override
     {

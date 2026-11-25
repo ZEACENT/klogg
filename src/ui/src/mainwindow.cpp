@@ -102,7 +102,6 @@
 #include "clipboard.h"
 #include "crawlerwidget.h"
 #include "decompressor.h"
-#include "dispatch_to.h"
 #include "downloader.h"
 #include "droppathclassification.h"
 #include "encodings.h"
@@ -139,7 +138,7 @@ namespace {
 
 void signalCrawlerToFollowFile( CrawlerWidget* crawler_widget )
 {
-    dispatchToMainThread( [ crawler_widget ]() { crawler_widget->followSet( true ); } );
+    QTimer::singleShot( 0, crawler_widget, [ crawler_widget ]() { crawler_widget->followSet( true ); } );
 }
 
 // Debounce window for session persistence (see scheduleSessionPersistence).
@@ -404,6 +403,14 @@ MainWindow::MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
              [ this ]( int index ) { this->closeTab( index, ActionInitiator::User ); } );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::tabsCloseRequested, this,
              &MainWindow::closeTabs );
+    // Update observation before existing synchronous GUI consumers run. This
+    // projection resolves Session metadata by widget, never by path identity.
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::currentChanged, this,
+             &MainWindow::refreshInventory );
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerInventoryChanged, this,
+             &MainWindow::refreshInventory );
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerAdded, this,
+             &MainWindow::refreshInventory );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::currentChanged, this,
              &MainWindow::currentTabChanged );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerAdded, this,
@@ -459,6 +466,47 @@ MainWindow::MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
     updateTitleBar( "" );
     loadIcons();
     reTranslateUI();
+}
+
+bool MainWindow::TabInventoryEntry::operator==( const TabInventoryEntry& other ) const
+{
+    return tabId == other.tabId && kind == other.kind && documentId == other.documentId
+           && displayName == other.displayName && associatedPath == other.associatedPath
+           && tabTitle == other.tabTitle && widget == other.widget;
+}
+
+MainWindow::InventorySnapshot MainWindow::inventorySnapshot() const
+{
+    return inventory_;
+}
+
+void MainWindow::refreshInventory()
+{
+    auto current = readInventory();
+    if ( current.tabs != inventory_.tabs || current.currentTabId != inventory_.currentTabId ) {
+        current.revision = inventory_.revision + 1;
+        inventory_ = std::move( current );
+    }
+}
+
+MainWindow::InventorySnapshot MainWindow::readInventory() const
+{
+    InventorySnapshot result{ runtimeWindowId_, 0, {}, {} };
+    for ( int index = 0; index < mainTabWidget_.count(); ++index ) {
+        auto* const widget = mainTabWidget_.widget( index );
+        const auto* const document = dynamic_cast<const AbstractCrawlerWidget*>( widget );
+        if ( document == nullptr ) {
+            continue;
+        }
+        result.tabs.push_back( { document->runtimeTabId(), session_.getDocumentKind( document ),
+                                 session_.getDocumentId( document ), session_.getDisplayName( document ),
+                                 session_.getAssociatedPath( document ), mainTabWidget_.tabText( index ),
+                                 widget } );
+        if ( widget == mainTabWidget_.currentWidget() ) {
+            result.currentTabId = document->runtimeTabId();
+        }
+    }
+    return result;
 }
 
 void MainWindow::reloadGeometry()
@@ -1322,12 +1370,6 @@ void MainWindow::createMenus()
     highlightersMenu = new HighlightersMenu( tr( menu::highlightersTitle ), menuBar() );
     highlightersMenu->setObjectName( QStringLiteral( "highlightersMenu" ) );
     menuBar()->addMenu( highlightersMenu );
-    highlightersMenu->setApplyChange( [ this ]() {
-        auto crawler = currentCrawlerWidget();
-        if ( crawler != nullptr ) {
-            crawler->applyConfiguration();
-        }
-    } );
 
     toolsMenu->addAction( predefinedFiltersDialogAction );
     toolsMenu->addAction( importFilterFavoritesAction );
@@ -2162,7 +2204,7 @@ void MainWindow::tryOpenClipboard( int tryTimes )
     auto text = clipboard->text();
 
     if ( text.isEmpty() && tryTimes > 0 ) {
-        QTimer::singleShot( 50, [ tryTimes, this ]() { tryOpenClipboard( tryTimes - 1 ); } );
+        QTimer::singleShot( 50, this, [ tryTimes, this ]() { tryOpenClipboard( tryTimes - 1 ); } );
     }
     else {
         auto tempFile = new QTemporaryFile( tempDir_.filePath( "klogg_clipboard" ), this );
@@ -2198,13 +2240,9 @@ void MainWindow::openUrl()
 void MainWindow::editHighlighters()
 {
     HighlightersDialog dialog( this );
-    signalMux_.connect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
-
-    connect( &dialog, &HighlightersDialog::optionsChanged,
-             [ this ]() { updateHighlightersMenu(); } );
-
+    // HighlighterStatePublisher refreshes every view and invalidates every menu,
+    // including other windows and kept panes, through the same publication path.
     dialog.exec();
-    signalMux_.disconnect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
 }
 
 // Opens dialog to configure predefined filters
@@ -2284,9 +2322,7 @@ void MainWindow::exportFilterFavoritesToFile( QString file )
 void MainWindow::options()
 {
     OptionsDialog dialog( this );
-    signalMux_.connect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
-
-    connect( &dialog, &OptionsDialog::optionsChanged, [ this ]() {
+    connect( &dialog, &OptionsDialog::optionsChanged, this, [ this ]() {
         const auto& config = Configuration::get();
         logging::enableFileLogging( config.enableLogging(),
                                     static_cast<logging::LogLevel>( config.loggingLevel() ) );
@@ -2297,10 +2333,11 @@ void MainWindow::options()
         updateShortcuts();
         updateRecentFileActions();
         updateRecentFolderActions();
+        // Use the window's existing configuration fan-out for both views and
+        // application services. A dialog-only mux bypasses application policy.
+        Q_EMIT optionsChanged();
     } );
     dialog.exec();
-
-    signalMux_.disconnect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
 }
 
 void MainWindow::about()
@@ -3313,7 +3350,7 @@ void MainWindow::changeEvent( QEvent* event )
 
         if ( this->windowState() & Qt::WindowMinimized ) {
             if ( Configuration::get().minimizeToTray() ) {
-                dispatchToMainThread( [ this ] {
+                QTimer::singleShot( 0, this, [ this ] {
                     trayIcon_->show();
                     this->hide();
                 } );
@@ -3321,7 +3358,7 @@ void MainWindow::changeEvent( QEvent* event )
         }
     }
     else if ( event->type() == QEvent::StyleChange ) {
-        dispatchToMainThread( [ this ] {
+        QTimer::singleShot( 0, this, [ this ] {
             loadIcons();
             updateOpenedFilesMenu();
             updateFavoritesMenu();
@@ -3530,6 +3567,17 @@ bool MainWindow::extractAndLoadFile( const QString& fileName )
 // Create a CrawlerWidget for the passed file, start its loading
 // and update the title bar.
 // The loading is done asynchronously.
+QString MainWindow::previousFileContext( const QString& fileName )
+{
+    const auto& session = SessionInfo::getSynced();
+    for ( const auto& windowId : session.windows() ) {
+        for ( const auto& context : session.openFiles( windowId ) ) {
+            if ( context.fileName == fileName ) return context.viewContext;
+        }
+    }
+    return {};
+}
+
 bool MainWindow::loadFile( const QString& fileName, bool followFile )
 {
     LOG_DEBUG << "loadFile ( " << fileName.toStdString() << " )";
@@ -3567,22 +3615,7 @@ bool MainWindow::loadFile( const QString& fileName, bool followFile )
         loadingFileName = fileName;
 
         try {
-            const auto previousViewContext = [ &fileName ]() {
-                const auto& session = SessionInfo::getSynced();
-                const auto& windows = session.windows();
-                for ( const auto& windowId : windows ) {
-                    const auto openedFiles = session.openFiles( windowId );
-                    const auto existingContext
-                        = std::find_if( openedFiles.begin(), openedFiles.end(),
-                                        [ &fileName ]( const auto& context ) {
-                                            return context.fileName == fileName;
-                                        } );
-                    if ( existingContext != openedFiles.end() ) {
-                        return existingContext->viewContext;
-                    }
-                }
-                return QString{};
-            }();
+            const auto previousViewContext = previousFileContext( fileName );
 
             CrawlerWidget* crawler_widget = static_cast<CrawlerWidget*>(
                 session_.open( fileName, []() { return new CrawlerWidget(); } ) );
@@ -4399,7 +4432,7 @@ void MainWindow::selectOpenedFile()
                                                  QItemSelectionModel::SelectCurrent );
              } );
 
-    dispatchToMainThread( [ edit = filterEdit.get() ]() { edit->setFocus(); } );
+    QTimer::singleShot( 0, filterEdit.get(), [ edit = filterEdit.get() ]() { edit->setFocus(); } );
 
     connect( selectFileDialog.get(), &QDialog::finished,
              [ this, openedDocuments, dialog = selectFileDialog.get(), model = filteredModel.get(),

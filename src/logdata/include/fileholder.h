@@ -57,6 +57,12 @@ class FileHolder {
 
     void open( const QString& fileName );
 
+    // Adopt an acquired handle into a fresh holder without reopening its path.
+    // The file must belong to this thread or have no thread affinity/Qt parent.
+    // Success consumes file and owns one reader, released with detachReader().
+    bool adoptForReader( const QString& path, std::unique_ptr<QFile>& file,
+                         const FileId& identity );
+
     void lock();
     void unlock();
 

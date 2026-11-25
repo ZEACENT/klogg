@@ -38,6 +38,7 @@
 
 #include <QFileDialog>
 #include <QTimer>
+#include <QPointer>
 
 #include <qcheckbox.h>
 #include <qcolor.h>
@@ -47,8 +48,8 @@
 #include <utility>
 
 #include "containers.h"
-#include "dispatch_to.h"
 #include "highlightersdialog.h"
+#include "highlighterstatepublisher.h"
 #include "highlighterset.h"
 #include "iconloader.h"
 #include "log.h"
@@ -174,7 +175,7 @@ HighlightersDialog::HighlightersDialog( QWidget* parent )
         quickHighlightLayout->addWidget( cycleCheckbox, row, 3, Qt::AlignCenter );
     }
 
-    dispatchToMainThread( [ this ] {
+    QTimer::singleShot( 0, this, [ this ] {
         IconLoader iconLoader( this );
 
         addHighlighterButton->setIcon( iconLoader.load( "icons8-plus" ) );
@@ -251,7 +252,7 @@ void HighlightersDialog::removeHighlighterSet()
 
     if ( index >= 0 ) {
         setCurrentRow( -1 );
-        dispatchToMainThread( [ this, index ] {
+        QTimer::singleShot( 0, this, [ this, index ] {
             {
                 const auto& set = highlighterSetCollection_.highlighters_.at( index );
                 highlighterSetCollection_.deactivateSet( set.id() );
@@ -281,7 +282,7 @@ void HighlightersDialog::moveHighlighterSetUp()
     if ( index > 0 ) {
         highlighterSetCollection_.highlighters_.move( index, index - 1 );
 
-        dispatchToMainThread( [ this, index ] {
+        QTimer::singleShot( 0, this, [ this, index ] {
             QListWidgetItem* item = highlighterListWidget->takeItem( index );
             highlighterListWidget->insertItem( index - 1, item );
 
@@ -298,7 +299,7 @@ void HighlightersDialog::moveHighlighterSetDown()
     if ( ( index >= 0 ) && ( index < ( highlighterListWidget->count() - 1 ) ) ) {
         highlighterSetCollection_.highlighters_.move( index, index + 1 );
 
-        dispatchToMainThread( [ this, index ] {
+        QTimer::singleShot( 0, this, [ this, index ] {
             QListWidgetItem* item = highlighterListWidget->takeItem( index );
             highlighterListWidget->insertItem( index + 1, item );
 
@@ -319,25 +320,22 @@ void HighlightersDialog::resolveDialog( QAbstractButton* button )
 
     // persist it to disk
     auto& persistentHighlighterSet = HighlighterSetCollection::get();
-    if ( role == QDialogButtonBox::AcceptRole ) {
-        persistentHighlighterSet = std::move( highlighterSetCollection_ );
-        accept();
-    }
-    else if ( role == QDialogButtonBox::ApplyRole ) {
-        persistentHighlighterSet = highlighterSetCollection_;
-    }
-    else {
+    if ( role != QDialogButtonBox::AcceptRole && role != QDialogButtonBox::ApplyRole ) {
         LOG_ERROR << "unhandled role : " << role;
         return;
     }
-    persistentHighlighterSet.save();
+    persistentHighlighterSet = highlighterSetCollection_;
+    const QPointer<HighlightersDialog> guard{ this };
+    HighlighterStatePublisher::instance().publish();
+    if ( !guard ) return;
     Q_EMIT optionsChanged();
+    if ( guard && role == QDialogButtonBox::AcceptRole ) accept();
 }
 
 void HighlightersDialog::setCurrentRow( int row )
 {
     // ugly hack for mac
-    dispatchToMainThread( [ this, row ]() { highlighterListWidget->setCurrentRow( row ); } );
+    QTimer::singleShot( 0, this, [ this, row ]() { highlighterListWidget->setCurrentRow( row ); } );
 }
 
 void HighlightersDialog::updatePropertyFields()

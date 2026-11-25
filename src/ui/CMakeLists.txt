@@ -88,6 +88,19 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/fontutils.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelsmanager.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelscontroller.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewtransaction.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/highlighterstatepublisher.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/highlighterstatepublisher.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewcontroladapter.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewcontroladapter.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewhighlightercodec.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewhighlightercodec.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewpanemetadata.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractcrawlerwidget.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewcontentadapter.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewcontentadapter.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewcontrolservice.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewcontrolservice.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlershortcuts.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/emptyfilterpolicy.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/viewsignalwiring.h
@@ -108,10 +121,12 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adbtrackeddeviceprovider.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatsource.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerwidget.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerfilterpublication.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filteredview.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filterfavoritesmodel.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderenumeration.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderfilteredview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/folderfilterpublication.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/foldercrawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlightersdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlighteredit.cpp
@@ -138,6 +153,13 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livelogsession.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livesourcetransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindow.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/windowpublication.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewdocumentadapter.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewdocumentadapter.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewfilteradapter.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewfilteradapter.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/reviewfiltercodec.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewfiltercodec.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindowtext.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/matchselection.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/matchselectionjob.cpp
@@ -172,6 +194,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/displayfilepath.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/downloader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/colorlabelscontroller.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/reviewtransaction.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlershortcuts.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/viewsignalwiring.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/decompressor.cpp
@@ -191,12 +214,20 @@ set_target_properties(
 set_property(
   TARGET klogg_ui
   APPEND
-  PROPERTY AUTOUIC_SEARCH_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/ui"
+  PROPERTY AUTOUIC_SEARCH_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/ui" "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
 if(KLOGG_USE_LTO)
   set_property(TARGET klogg_ui PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
+
+# OptionsDialog owns its generated UI privately. Track the Designer input on
+# that one implementation TU as well: AUTOUIC may update the generated header
+# after Ninja has already evaluated previously compiled header consumers.
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/optionsdialog.cpp" APPEND
+  PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/optionsdialog.ui")
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/optionsdialog.cpp" APPEND
+  PROPERTY COMPILE_DEFINITIONS "KLOGG_CONTROL_EXECUTABLE_NAME=\"kloggctl${CMAKE_EXECUTABLE_SUFFIX}\"")
 
 target_include_directories(klogg_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(
@@ -204,6 +235,7 @@ target_link_libraries(
   PUBLIC project_options
          project_warnings
          klogg_logdata
+         klogg_control
          klogg_livecapture
          klogg_adb_smartsocket
          klogg_versioncheck

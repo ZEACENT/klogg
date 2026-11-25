@@ -13,6 +13,12 @@ target_link_libraries(
 )
 klogg_configure_test_target(search_start_empty_env_launcher)
 
+# Isolate special-file acquisition so a missing nonblocking-open guard cannot
+# hang the test runner or its shared worker pool.
+add_executable(regular_file_open_helper regular_file_open_helper.cpp)
+target_link_libraries(regular_file_open_helper PRIVATE klogg_utils project_options project_warnings)
+klogg_configure_test_target(regular_file_open_helper)
+
 add_library(test_utils INTERFACE)
 target_include_directories(test_utils SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 

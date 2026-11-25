@@ -17,9 +17,7 @@
 #include <QShortcut>
 #include <QScrollBar>
 #include <QTest>
-#include <QSemaphore>
-#include <QThreadPool>
-#include "ownedtaskfuture.h"
+#include "ownedtaskpoolgate.h"
 
 #include "abstractlogview.h"
 #include "containers.h"
@@ -62,7 +60,24 @@ struct AbstractLogView::access_by<MatchPaintWindowAccess> {
     }
 };
 
+class MatchWorkerAccess;
+template <>
+struct AbstractLogView::access_by<MatchWorkerAccess> {
+    static bool hasPendingWorker( const AbstractLogView& view )
+    {
+        return std::any_of( view.matchSelectionWorkers_.begin(), view.matchSelectionWorkers_.end(),
+                            []( const auto& worker ) { return !worker.isFinished(); } );
+    }
+};
+
 namespace {
+// The pool gate holds the worker; pump both timer and metacall dispatch until
+// the view owns its completion, independent of how Qt implements singleShot(0).
+bool waitForMatchWorker( const AbstractLogView& view )
+{
+    return waitUiState( [&] { return AbstractLogView::access_by<MatchWorkerAccess>::hasPendingWorker( view ); } );
+}
+
 class MatchSelectionData : public AbstractLogData {
 public:
     QStringList lines;
@@ -233,29 +248,6 @@ protected:
         return std::find( matches.begin(), matches.end(), line ) != matches.end()
                    ? AbstractLogData::LineTypeFlags::Match
                    : AbstractLogData::LineTypeFlags::Mark;
-    }
-};
-
-struct WorkerGate {
-    QThreadPool* pool = QThreadPool::globalInstance();
-    int previousThreads = pool->maxThreadCount();
-    QSemaphore entered;
-    QSemaphore release;
-    klogg::OwnedTaskFuture<void> worker;
-    WorkerGate()
-    {
-        pool->setMaxThreadCount( 1 );
-        worker = klogg::runOwnedTask( [ this ] {
-            entered.release();
-            release.acquire();
-        } );
-    }
-    ~WorkerGate()
-    {
-        release.release();
-        worker.waitForFinished();
-        pool->waitForDone();
-        pool->setMaxThreadCount( previousThreads );
     }
 };
 
@@ -846,15 +838,14 @@ TEST_CASE( "A newer numbered-copy command supersedes an already dispatched forma
     QCoreApplication::processEvents();
     selectMatches( view, true );
 
-    WorkerGate gate;
+    ScopedOwnedTaskPoolGate gate;
     REQUIRE( gate.entered.tryAcquire( 1, 5000 ) );
     const bool numberedFirst = GENERATE( false, true );
     SafeQSignalSpy copied{ &view, &AbstractLogView::matchSelectionFinished };
     REQUIRE( QMetaObject::invokeMethod( &view, numberedFirst ? "copyWithLineNumbers" : "copy",
                                         Qt::DirectConnection ) );
-    // Dispatch the zero-delay continuation while the sole pool worker is held.
-    // Its serialization policy is captured, but no serialization can complete.
-    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    // The first serialization policy must already be captured before the next copy.
+    REQUIRE( waitForMatchWorker( view ) );
     REQUIRE( copied.count() == 0 );
     REQUIRE( QMetaObject::invokeMethod( &view, numberedFirst ? "copy" : "copyWithLineNumbers",
                                         Qt::DirectConnection ) );
@@ -869,6 +860,27 @@ TEST_CASE( "A newer numbered-copy command supersedes an already dispatched forma
     REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
     REQUIRE( QApplication::clipboard()->text()
              == ( numberedFirst ? QStringLiteral( "match" ) : QStringLiteral( "1: match" ) ) );
+}
+
+TEST_CASE( "View retirement includes queued Quick Find work", "[match-selection][view-retirement]" )
+{
+    MatchSelectionData data;
+    data.lines = QStringList{ QStringLiteral( "match" ) };
+    QuickFindPattern pattern;
+    pattern.changeSearchPattern( QStringLiteral( "match" ) );
+    MatchSelectionView view{ &data, &pattern };
+    ScopedOwnedTaskPoolGate gate;
+    REQUIRE( gate.entered.tryAcquire( 1, 5000 ) );
+    view.searchForward();
+    const auto pending = view.retireSearches();
+    REQUIRE( pending.size() == 1 );
+    CHECK_FALSE( pending.front().isFinished() );
+    pattern.changeSearchPattern( QStringLiteral( "changed while retiring" ) );
+    gate.release.release();
+    REQUIRE( waitUiState( [&] { return pending.front().isFinished(); } ) );
+    const auto repeated = view.retireSearches();
+    REQUIRE( repeated.size() == 1 );
+    CHECK( repeated.front().isFinished() );
 }
 
 TEST_CASE( "Retiring a view drains dispatched work without late copy or retained leases",
@@ -893,14 +905,35 @@ TEST_CASE( "Retiring a view drains dispatched work without late copy or retained
     if ( serializing ) {
         selectMatches( *view, true );
     }
-    WorkerGate gate;
+    ScopedOwnedTaskPoolGate gate;
     REQUIRE( gate.entered.tryAcquire( 1, 5000 ) );
     QApplication::clipboard()->setText( QStringLiteral( "keep clipboard" ) );
     SafeQSignalSpy finished{ view.get(), &AbstractLogView::matchSelectionFinished };
     REQUIRE( ( serializing ? view->deferCopyUntilMatchSelection()
                            : view->selectAllMatches( true, true ) ) );
-    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    REQUIRE( waitForMatchWorker( *view ) );
     REQUIRE( finished.count() == 0 );
+    SECTION( "Asynchronous retirement exposes pending work and closes admission" ) {
+        const auto pending = view->retireSearches();
+        REQUIRE_FALSE( pending.empty() );
+        CHECK( std::any_of( pending.begin(), pending.end(),
+                           []( const auto& future ) { return !future.isFinished(); } ) );
+        CHECK_FALSE( view->selectAllMatches( true, true ) );
+        CHECK_FALSE( view->deferCopyUntilMatchSelection() );
+        const auto acquisitions = data.snapshots.size();
+        view->setDataSource( &data ); // A late source callback must not create a new search owner.
+        view->searchForward();
+        CHECK( data.snapshots.size() == acquisitions );
+        gate.release.release();
+        REQUIRE( waitUiState( [&] {
+            return std::all_of( pending.begin(), pending.end(),
+                                []( const auto& future ) { return future.isFinished(); } );
+        } ) );
+        const auto repeated = view->retireSearches();
+        CHECK( std::all_of( repeated.begin(), repeated.end(),
+                           []( const auto& future ) { return future.isFinished(); } ) );
+        view.reset();
+    }
     SECTION( "Hide cancels a dispatched operation" ) {
         view->hide();
         REQUIRE( finished.count() == 1 );
@@ -912,7 +945,7 @@ TEST_CASE( "Retiring a view drains dispatched work without late copy or retained
         gate.release.release();
         view.reset();
     }
-    gate.pool->waitForDone();
+    gate.pool.waitForDone();
     QCoreApplication::processEvents();
     REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "keep clipboard" ) );
     REQUIRE_FALSE( data.snapshots.empty() );

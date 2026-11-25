@@ -43,4 +43,6 @@ runs:
         python3 scripts/ci_compiler_object_transport.py restore \
           --descriptor "$KLOGG_COMPILER_ARTIFACT_DESCRIPTOR" \
           --cache "$KLOGG_COMPILER_ARTIFACT_CACHE" \
-          --output "$session/restore.json"
+          --output "$session/restore.json" \
+          --summary "$GITHUB_STEP_SUMMARY"
+        echo "KLOGG_CI_CACHE_ACQUISITION_REPORT=$session/restore.json" >> "$GITHUB_ENV"

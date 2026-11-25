@@ -29,6 +29,26 @@
 #include "regularexpression.h"
 #include "test_utils.h"
 
+TEST_CASE( "Prepared search matchers retain their backend across preference changes",
+           "[patternmatcher][matcher-backend]" )
+{
+    ScopedRegexpEngine engine( RegexpEngine::QRegularExpression );
+    RegularExpressionPattern pattern{ QStringLiteral( "ERROR" ) };
+    SECTION( "single pattern" ) {}
+    SECTION( "inverse pattern" ) { pattern.isExclude = true; }
+    SECTION( "boolean operands" ) {
+        pattern.pattern = QStringLiteral( "\"ERROR\" | \"WARN\"" );
+        pattern.isBoolean = true;
+    }
+    RegularExpression expression{ pattern };
+    REQUIRE( expression.isValid() );
+    Configuration::get().setRegexpEnging( RegexpEngine::Vectorscan );
+    const auto matcher = expression.createMatcher();
+    CHECK( matcher->hasMatch( "ERROR: operation failed" ) == !pattern.isExclude );
+    CHECK( matcher->hasMatch( "ordinary data" ) == pattern.isExclude );
+    CHECK_FALSE( matcher->hasBufferScan() );
+}
+
 SCENARIO( "Pattern matcher in boolean mode", "[patternmatcher]" )
 {
     std::string_view matchLine = "\"This\" is matching pattern";

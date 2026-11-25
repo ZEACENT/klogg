@@ -19,18 +19,21 @@
 
 #include <catch2/catch.hpp>
 
-#include <QShortcut>
-#include <QSignalSpy>
+#include <QAction>
 #include <QLineEdit>
-#include <QProxyStyle>
+#include <QMenu>
 #include <QPointer>
+#include <QProxyStyle>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QSignalBlocker>
+#include <QSignalSpy>
 #include <QSpinBox>
 #include <QStyle>
 #include <QTemporaryFile>
 #include <QTest>
 #include <QTimer>
+#include <QVBoxLayout>
 #include <qglobal.h>
 #include <qnamespace.h>
 #include <qtestmouse.h>
@@ -48,6 +51,7 @@
 
 #include "savedsearches.h"
 #include "session.h"
+#include "ownedtaskpoolgate.h"
 #include "test_utils.h"
 
 #include "adblogcatsource.h"
@@ -57,9 +61,10 @@
 #include "streaminglogdata.h"
 
 #include "crawlerwidget.h"
-#include "quickfindpattern.h"
 #include "infoline.h"
 #include "platform/platform_input.h"
+#include "quickfindpattern.h"
+#include "searchtoolbar.h"
 #include "shortcuts.h"
 
 static const qint64 SL_NB_LINES = 100LL;
@@ -1231,9 +1236,14 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->updateEncoding();
     }
 
-    void closeFilteredView( int index )
+    void queueFilteredViewClose( int index )
     {
         crawler->closeFilteredView( index );
+    }
+
+    void closeFilteredView( int index )
+    {
+        queueFilteredViewClose( index );
         QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
         QCoreApplication::processEvents();
     }
@@ -1387,6 +1397,95 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
 };
 
 using CrawlerWidgetVisitor = CrawlerWidget::access_by<CrawlerWidgetPrivate>;
+
+TEST_CASE( "Private file loading preserves editor focus through deferred presentation",
+           "[ui][initial-focus][session-preparation]" )
+{
+    const bool deferred = GENERATE( false, true );
+    const auto policy = GENERATE( CrawlerWidget::InitialFocusPolicy::Preserve,
+                                 CrawlerWidget::InitialFocusPolicy::FocusMainView );
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    REQUIRE( file.write( "one\ntwo\n" ) == 8 );
+    REQUIRE( file.flush() );
+    Session session;
+    QWidget host;
+    QVBoxLayout layout{ &host };
+    QLineEdit editor;
+    layout.addWidget( &editor );
+    CrawlerWidgetVisitor visitor;
+    auto prepared = session.prepareFile( file.fileName(), [&] {
+        return new CrawlerWidget( nullptr, policy );
+    } );
+    REQUIRE( prepared );
+    auto* widget = dynamic_cast<CrawlerWidget*>( prepared->view() );
+    REQUIRE( widget );
+    layout.addWidget( widget );
+    host.show();
+    editor.setFocus();
+    REQUIRE( waitUiState( [&] { return editor.hasFocus(); } ) );
+    widget->setPresentationActive( !deferred );
+    SafeQSignalSpy loaded{ prepared->source(), &SearchableLogData::loadingFinished };
+    REQUIRE( prepared->startLoading() );
+    visitor.crawler.reset( static_cast<CrawlerWidget*>( session.adoptPrepared( prepared ) ) );
+    REQUIRE( visitor.crawler );
+    REQUIRE( loaded.safeWait( 10000 ) );
+    if ( deferred ) CHECK( editor.hasFocus() );
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+    if ( policy == CrawlerWidget::InitialFocusPolicy::Preserve ) CHECK( editor.hasFocus() );
+    else CHECK( visitor.mainView()->hasFocus() );
+    session.close( widget );
+}
+
+TEST_CASE( "File document retirement retains all panes until their owned work completes",
+           "[ui][document-retirement]" )
+{
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    REQUIRE( file.write( "one\ntwo\n" ) == 8 );
+    REQUIRE( file.flush() );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>( session.open( file.fileName(), [] {
+        return new CrawlerWidget( nullptr, CrawlerWidget::InitialFocusPolicy::Preserve );
+    } ) ) );
+    REQUIRE( waitUiState( [&] { return visitor.isLoadingFinished(); } ) );
+    QPointer<FilteredView> closedPane{ visitor.activeFilteredView() };
+    visitor.createAdditionalFilteredView();
+    REQUIRE( visitor.filteredViewCount() == 2 );
+    session.quickFindPattern()->changeSearchPattern( QStringLiteral( "one" ) );
+    ScopedOwnedTaskPoolGate gate;
+    REQUIRE( gate.entered.tryAcquire( 1, 5000 ) );
+    visitor.mainView()->searchForward();
+    closedPane->searchForward();
+    visitor.activeFilteredView()->searchForward();
+    visitor.queueFilteredViewClose( 0 );
+    const auto pending = visitor.crawler->retireResources();
+    REQUIRE( pending.size() >= 6 ); // Source, both models, main and both result views.
+    CHECK( std::any_of( pending.begin(), pending.end(),
+                       []( const auto& future ) { return !future.isFinished(); } ) );
+    // A close queued before document retirement must not force a blocking view
+    // destructor while the pool is still held. The document now owns teardown.
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+    CHECK( closedPane );
+    visitor.createAdditionalFilteredView();
+    CHECK( visitor.filteredViewCount() == 1 );
+    CHECK( visitor.filteredViewDataCount() == 2 );
+    visitor.reload();
+    CHECK( visitor.isLoadingFinished() );
+    gate.release.release();
+    REQUIRE( waitUiState( [&] {
+        return std::all_of( pending.begin(), pending.end(),
+                            []( const auto& future ) { return future.isFinished(); } );
+    } ) );
+    const auto repeated = visitor.crawler->retireResources();
+    CHECK( std::all_of( repeated.begin(), repeated.end(),
+                       []( const auto& future ) { return future.isFinished(); } ) );
+    session.close( visitor.crawler.get() );
+    visitor.crawler.reset();
+    CHECK_FALSE( closedPane );
+}
 
 TEST_CASE( "Crawler widget preserves its final filtered results view", "[ui]" )
 {
@@ -4054,6 +4153,176 @@ SCENARIO( "Crawler widget color labels apply to every line of a multi-line selec
     }
 }
 
+namespace {
+QAction* refreshedCopyMatchesAction( AbstractLogView* view )
+{
+    auto* const action = view->findChild<QAction*>( QStringLiteral( "copyMatchesAction" ) );
+    REQUIRE( action != nullptr );
+    const auto menus = view->findChildren<QMenu*>( QString{}, Qt::FindDirectChildrenOnly );
+    for ( auto* menu : menus ) {
+        if ( menu->actions().contains( action ) ) {
+            REQUIRE( QMetaObject::invokeMethod( menu, "aboutToShow", Qt::DirectConnection ) );
+            return action;
+        }
+    }
+    FAIL( "Copy Matches must belong to the log-view context menu" );
+    return nullptr;
+}
+} // namespace
+
+TEST_CASE( "Crawler context Copy Matches extracts all Filter captures from either view",
+           "[ui][match-selection][context-copy-matches]" )
+{
+    const bool fromMainView = GENERATE( false, true );
+    const bool cancel = GENERATE( false, true );
+    CAPTURE( fromMainView, cancel );
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    file.write( "ERROR one\ncontext\nERROR two\n" );
+    file.flush();
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+    visitor.crawler->show();
+    visitor.setUseRegexp( true );
+    visitor.replaceSearch( QStringLiteral( "ERROR ([a-z]+)" ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
+    Q_EMIT visitor.mainView()->markLines( { 1_lnum } );
+    visitor.changeContextLinesMode( 3 );
+    visitor.changeContextLinesValue( 1 );
+    session.quickFindPattern()->changeSearchPattern( QStringLiteral( "context" ), false, true,
+                                                     false );
+    auto* const origin = fromMainView
+                             ? visitor.mainView()
+                             : static_cast<AbstractLogView*>( visitor.activeFilteredView() );
+    origin->selectAll();
+    auto* const action = refreshedCopyMatchesAction( origin );
+    REQUIRE( action->text() == QStringLiteral( "Copy Matches" ) );
+    REQUIRE( action->isEnabled() );
+    REQUIRE( action->shortcuts().isEmpty() );
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ visitor.activeFilteredView(), &AbstractLogView::matchSelectionFinished };
+    action->trigger();
+    if ( cancel ) {
+        visitor.activeFilteredView()->cancelMatchSelection();
+        REQUIRE( copied.count() == 1 );
+        REQUIRE_FALSE( copied.at( 0 ).at( 0 ).toBool() );
+        REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "unchanged" ) );
+        return;
+    }
+    REQUIRE( copied.safeWait( 5000 ) );
+    REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
+    const auto contextCopy = QApplication::clipboard()->text();
+    REQUIRE( QString{ contextCopy }.replace( "\r\n", "\n" ) == QStringLiteral( "one\ntwo" ) );
+
+    SafeQSignalSpy documentCopy{ visitor.activeFilteredView(),
+                                 &AbstractLogView::matchSelectionFinished };
+    REQUIRE( visitor.crawler->selectAllMatches( false, true ) );
+    REQUIRE( documentCopy.safeWait( 5000 ) );
+    REQUIRE( documentCopy.at( 0 ).at( 0 ).toBool() );
+    REQUIRE( QApplication::clipboard()->text() == contextCopy );
+}
+
+TEST_CASE( "Crawler context Copy Matches rechecks readiness at menu opening and activation",
+           "[ui][match-selection][context-copy-matches]" )
+{
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    file.write( "ERROR one\ncontext\nERROR two\n" );
+    file.flush();
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+    auto* const origin = visitor.mainView();
+    auto* const action = refreshedCopyMatchesAction( origin );
+    REQUIRE_FALSE( action->isEnabled() );
+    visitor.replaceSearch( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
+    refreshedCopyMatchesAction( origin );
+    REQUIRE( action->isEnabled() );
+    auto* const source = visitor.rawFilteredData();
+    source->updateSearch( 0_lnum, LineNumber{ visitor.rawLogData()->getNbLine().get() } );
+    REQUIRE_FALSE( source->isSearchComplete() );
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ visitor.activeFilteredView(), &AbstractLogView::matchSelectionFinished };
+    // The menu was enabled before the update. Activation must check again.
+    action->trigger();
+    REQUIRE_FALSE( visitor.activeFilteredView()->hasMatchSelection() );
+    refreshedCopyMatchesAction( origin );
+    REQUIRE_FALSE( action->isEnabled() );
+    REQUIRE( waitUiState( [ & ] { return source->isSearchComplete(); } ) );
+    REQUIRE( copied.count() == 0 );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "unchanged" ) );
+    refreshedCopyMatchesAction( origin );
+    REQUIRE( action->isEnabled() );
+
+    SECTION( "no matching rows" )
+    {
+        visitor.replaceSearch( QStringLiteral( "absent" ) );
+        REQUIRE( waitUiState( [ & ] { return source->isSearchComplete(); } ) );
+    }
+    SECTION( "inverse filter" )
+    {
+        auto* const toolbar = visitor.crawler->findChild<SearchToolbar*>();
+        REQUIRE( toolbar != nullptr );
+        toolbar->setInverse( true );
+        visitor.replaceSearch( QStringLiteral( "ERROR" ) );
+        REQUIRE( waitUiState( [ & ] { return source->isSearchComplete(); } ) );
+        REQUIRE( source->getNbMatches() > 0_lcount );
+    }
+    SECTION( "boolean filter" )
+    {
+        auto* const toolbar = visitor.crawler->findChild<SearchToolbar*>();
+        REQUIRE( toolbar != nullptr );
+        toolbar->setBoolean( true );
+        visitor.replaceSearch( QStringLiteral( "\"ERROR\" or \"context\"" ) );
+        REQUIRE( waitUiState( [ & ] { return source->isSearchComplete(); } ) );
+        REQUIRE( source->getNbMatches() > 0_lcount );
+    }
+    refreshedCopyMatchesAction( origin );
+    REQUIRE_FALSE( action->isEnabled() );
+}
+
+TEST_CASE( "Crawler context Copy Matches never redirects a stale filtered-pane action",
+           "[ui][match-selection][context-copy-matches]" )
+{
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+    file.write( "ERROR one\nWARN two\n" );
+    file.flush();
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+    visitor.crawler->show();
+    visitor.replaceSearch( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
+    auto* const previous = visitor.activeFilteredView();
+    auto* const staleAction = refreshedCopyMatchesAction( previous );
+    REQUIRE( staleAction->isEnabled() );
+    visitor.createAdditionalFilteredView();
+    visitor.replaceSearch( QStringLiteral( "WARN" ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
+    REQUIRE( visitor.activeFilteredView() != previous );
+    QApplication::clipboard()->setText( QStringLiteral( "unchanged" ) );
+    SafeQSignalSpy copied{ visitor.activeFilteredView(), &AbstractLogView::matchSelectionFinished };
+    staleAction->trigger();
+    REQUIRE_FALSE( previous->hasMatchSelection() );
+    REQUIRE_FALSE( visitor.activeFilteredView()->hasMatchSelection() );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "unchanged" ) );
+    refreshedCopyMatchesAction( previous );
+    REQUIRE_FALSE( staleAction->isEnabled() );
+    refreshedCopyMatchesAction( visitor.mainView() )->trigger();
+    REQUIRE( copied.safeWait( 5000 ) );
+    REQUIRE( copied.at( 0 ).at( 0 ).toBool() );
+    REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "WARN" ) );
+}
+
 TEST_CASE( "Crawler match command selects Filter fragments even with main view focus",
            "[ui][match-selection]" )
 {
@@ -4351,8 +4620,10 @@ TEST_CASE( "Stopped crawler results are not advertised as all matches",
 }
 
 TEST_CASE( "Live crawler match selection is a snapshot and clear retires it",
-           "[ui][live][match-selection]" )
+           "[ui][live][match-selection][context-copy-matches]" )
 {
+    const bool fromContextMenu = GENERATE( false, true );
+    CAPTURE( fromContextMenu );
     auto& config = Configuration::get();
     const auto autoRefresh = config.isSearchAutoRefreshDefault();
     config.setSearchAutoRefreshDefault( false );
@@ -4379,9 +4650,20 @@ TEST_CASE( "Live crawler match selection is a snapshot and clear retires it",
     REQUIRE( waitUiState( [ & ] { return visitor.crawler->canSelectAllMatches(); } ) );
     SafeQSignalSpy selected( visitor.activeFilteredView(),
                             SIGNAL( matchSelectionFinished( bool ) ) );
-    REQUIRE( visitor.crawler->selectAllMatches() );
+    if ( fromContextMenu ) {
+        auto* const action = refreshedCopyMatchesAction( visitor.mainView() );
+        REQUIRE( action->isEnabled() );
+        action->trigger();
+    }
+    else {
+        REQUIRE( visitor.crawler->selectAllMatches() );
+    }
     REQUIRE( selected.safeWait( 5000 ) );
+    REQUIRE( selected.at( 0 ).at( 0 ).toBool() );
     const auto snapshot = visitor.filteredViewSelectedText();
+    if ( fromContextMenu ) {
+        REQUIRE( QApplication::clipboard()->text() == snapshot );
+    }
     REQUIRE( QString{ snapshot }.replace( "\r\n", "\n" ) == QStringLiteral( "ERROR\nERROR" ) );
 
     SafeQSignalSpy appended( source, &SearchableLogData::loadingFinished );
@@ -4799,6 +5081,59 @@ TEST_CASE( "Inactive CrawlerWidget clears context in the model and defers presen
     visitor.setPresentationActive( true );
     visitor.flushPresentationCatchUp();
     CHECK( visitor.filteredUpdateCount() == 1 );
+}
+
+TEST_CASE( "Prepared marks refresh their actual file pane without activation",
+           "[ui][review-mark-publication]" )
+{
+    QTemporaryFile file{ "crawler_prepared_marks_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [&] { return visitor.isLoadingFinished(); } ) );
+    visitor.flushPresentationCatchUp();
+    auto* target = visitor.rawFilteredData();
+    auto* view = visitor.activeFilteredView();
+    bool activeDocument = true;
+    bool keptPane = false;
+    SECTION( "current visible pane" ) {}
+    SECTION( "current pane in inactive document" ) { activeDocument = false; }
+    SECTION( "inactive kept pane" ) { visitor.createAdditionalFilteredView(); keptPane = true; }
+    visitor.resetPresentationCounts();
+    using ViewAccess = AbstractLogView::access_by<AbstractLogViewPrivate>;
+    ViewAccess::resetRefreshCounts( view );
+    visitor.setPresentationActive( activeDocument );
+    const auto index = visitor.currentFilteredViewIndex();
+    const auto* focus = QApplication::focusWidget();
+    auto candidate = *target->reviewMarksSnapshot();
+    candidate.groups = { { {}, { 1_lnum } } };
+    klogg::ReviewMarksBudget budget;
+    const auto prepare = target->prepareReviewMarks( candidate, budget );
+    REQUIRE( prepare );
+    const std::atomic<bool> cancelled{ false };
+    const auto prepared = prepare( cancelled );
+    REQUIRE( prepared );
+    auto publication = prepared->acquire();
+    REQUIRE( publication );
+    publication->install();
+    CHECK( ViewAccess::updateDataCount( view ) == 0 );
+    publication->release();
+    publication->notify();
+    CHECK( target->getNbMarks() == 1_lcount );
+    CHECK( ViewAccess::updateDataCount( view ) == ( activeDocument ? 1 : 0 ) );
+    CHECK( visitor.currentFilteredViewIndex() == index );
+    CHECK( QApplication::focusWidget() == focus );
+    if ( keptPane ) {
+        CHECK( visitor.rawFilteredData()->getNbMarks() == 0_lcount );
+        CHECK( visitor.filteredUpdateCount() == 0 );
+    }
+    if ( !activeDocument ) {
+        visitor.setPresentationActive( true );
+        visitor.flushPresentationCatchUp();
+        CHECK( ViewAccess::updateDataCount( view ) == 1 );
+    }
 }
 
 TEST_CASE( "Inactive CrawlerWidget keeps marks authoritative and defers their presentation",

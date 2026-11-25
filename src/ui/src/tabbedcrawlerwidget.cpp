@@ -56,6 +56,89 @@
 #include "tabgroupdropresolver.h"
 #include "tabnamemapping.h"
 
+struct TabbedCrawlerWidget::Publication::State {
+    QPointer<TabbedCrawlerWidget> owner;
+    QPointer<QWidget> selected;
+    int selectedIndex = -1;
+    bool previouslyBlocked = false;
+    bool released = false;
+    bool notified = false;
+    bool inventory = false;
+    bool added = false;
+    bool reordered = false;
+    bool selection = false;
+};
+
+TabbedCrawlerWidget::Publication::Publication( TabbedCrawlerWidget& owner )
+    : state_( std::make_unique<State>() )
+{
+    state_->owner = &owner;
+    state_->selected = owner.currentWidget();
+    state_->selectedIndex = owner.currentIndex();
+    // Block only the facade. Internal tab-bar/stack signals must keep Qt's
+    // selection and membership synchronized throughout installation.
+    state_->previouslyBlocked = owner.blockSignals( true );
+    owner.publication_ = this;
+}
+
+TabbedCrawlerWidget::Publication::~Publication() { release(); }
+
+void TabbedCrawlerWidget::Publication::release() noexcept
+{
+    if ( state_->released ) return;
+    state_->released = true;
+    if ( auto* owner = state_->owner.data() ) {
+        state_->selection = state_->selection || state_->selected != owner->currentWidget()
+            || state_->selectedIndex != owner->currentIndex();
+        owner->publication_ = nullptr;
+        owner->blockSignals( state_->previouslyBlocked );
+    }
+}
+
+void TabbedCrawlerWidget::Publication::notify()
+{
+    if ( !state_->released || state_->notified ) return;
+    state_->notified = true;
+    // An observer may destroy either the owner or this publication. Retain only
+    // local values across callbacks and route reentrant barriers normally.
+    const auto owner = state_->owner;
+    const bool inventory = state_->inventory;
+    const bool added = state_->added;
+    const bool reordered = state_->reordered;
+    const bool selection = state_->selection;
+    if ( owner && inventory ) owner->notifyInventoryChanged();
+    if ( owner && added ) owner->notifyCrawlerAdded();
+    if ( owner && reordered ) owner->notifyTabsReordered();
+    if ( owner && selection ) owner->notifySelectionChanged();
+}
+
+std::unique_ptr<TabbedCrawlerWidget::Publication> TabbedCrawlerWidget::beginPublication()
+{
+    if ( publication_ ) return {};
+    return std::unique_ptr<Publication>( new Publication( *this ) );
+}
+
+void TabbedCrawlerWidget::notifyCrawlerAdded()
+{
+    if ( publication_ ) publication_->state_->added = true;
+    else Q_EMIT crawlerAdded();
+}
+void TabbedCrawlerWidget::notifyInventoryChanged()
+{
+    if ( publication_ ) publication_->state_->inventory = true;
+    else Q_EMIT crawlerInventoryChanged();
+}
+void TabbedCrawlerWidget::notifyTabsReordered()
+{
+    if ( publication_ ) publication_->state_->reordered = true;
+    else Q_EMIT tabsReordered();
+}
+void TabbedCrawlerWidget::notifySelectionChanged()
+{
+    if ( publication_ ) publication_->state_->selection = true;
+    else Q_EMIT currentChanged( currentIndex() );
+}
+
 namespace {
 constexpr QLatin1String PathKey = QLatin1String( "path", 4 );
 constexpr QLatin1String TitleKey = QLatin1String( "title", 5 );
@@ -418,7 +501,7 @@ void TabbedCrawlerWidget::changeEvent( QEvent* event )
 
 void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
                                          const QString& displayName, const QString& toolTip,
-                                         const QString& associatedPath )
+                                         const QString& associatedPath, SelectionPolicy selection )
 {
     // Robust to trailing-slash document paths (drag-dropped folders): Qt's
     // QFileInfo(path).fileName() returns "" for "/.../Logs/". The label must
@@ -443,7 +526,10 @@ void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
 
     myTabBar_.setTabData( index, tabData );
 
-    setCurrentIndex( index );
+    // Preserve at the insertion boundary, not by selecting and restoring: an
+    // intermediate currentChanged would already route the window to the new view.
+    // Qt selects the first page naturally when the workspace was empty.
+    if ( selection == SelectionPolicy::Activate ) setCurrentIndex( index );
 
     if ( count() > 1 )
         myTabBar_.show();
@@ -453,12 +539,16 @@ void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
 
 void TabbedCrawlerWidget::removeCrawler( int index )
 {
+    // A removed widget can remain alive while its searches retire or it moves
+    // to another window. It no longer owns any signals into this tab facade.
+    if ( auto* crawler = widget( index ) ) crawler->disconnect( this );
     QTabWidget::removeTab( index );
 
     if ( count() <= 1 )
         myTabBar_.hide();
 
     onGroupsChanged();
+    notifyInventoryChanged();
 }
 
 void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
@@ -488,6 +578,7 @@ void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
     if ( myTabBar_.tabText( index ) != label ) {
         myTabBar_.setTabText( index, label );
     }
+    notifyInventoryChanged();
 }
 
 void TabbedCrawlerWidget::selectNextTab()
@@ -558,9 +649,10 @@ void TabbedCrawlerWidget::handleTabMoved( int fromIndex, int toIndex )
         return;
     }
 
+    notifyInventoryChanged();
     const bool dragActive = tabDragInProgress_ || QApplication::mouseButtons().testFlag( Qt::LeftButton );
     if ( !dragActive ) {
-        Q_EMIT tabsReordered();
+        notifyTabsReordered();
         return;
     }
 
@@ -587,7 +679,7 @@ void TabbedCrawlerWidget::handleTabDragFinished()
 
     if ( reorderChangedDuringDrag_ ) {
         applyPendingDragGrouping();
-        Q_EMIT tabsReordered();
+        notifyTabsReordered();
     }
     else if ( pendingGroupsRefresh_ ) {
         pendingGroupsRefresh_ = false;
@@ -958,12 +1050,14 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
             else {
                 myTabBar_.setTabText( tab, newName );
             }
+            notifyInventoryChanged();
         }
     } );
 
     connect( resetTabName, &QAction::triggered, this, [ this, tab, tabPath ] {
         TabNameMapping::getSynced().setTabName( tabPath, "" ).save();
         myTabBar_.setTabText( tab, myTabBar_.tabData( tab ).toMap().value( TitleKey ).toString() );
+        notifyInventoryChanged();
     } );
 
     menu.exec( globalPoint );
@@ -1383,6 +1477,7 @@ void TabbedCrawlerWidget::onGroupsChanged()
     }
 
     myTabBar_.update();
+    notifyInventoryChanged();
 }
 
 void TabbedCrawlerWidget::populateGroupActions( QMenu* menu, const QString& groupId )

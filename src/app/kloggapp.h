@@ -67,6 +67,8 @@
 #include "mainwindow.h"
 #include "messagereceiver.h"
 #include "newversiondialog.h"
+#include "persistentinfo.h"
+#include "reviewcontrolservice.h"
 #include "updatedownloadhelper.h"
 #include "versionchecker.h"
 
@@ -374,7 +376,34 @@ class KloggApp : public QApplication {
         connect( window, &MainWindow::checkForNewVersionRequested,
                  [ this ] { versionChecker_.forceCheck(); } );
 
+        if ( !localControl_ ) {
+            klogg::control::RuntimeOptions runtime;
+            runtime.installationId = QCoreApplication::applicationFilePath();
+            runtime.profileId = PersistentInfo::getSettings( app_settings{} ).fileName();
+            localControl_ = std::make_unique<ReviewControlService>( [ this ] {
+                std::vector<QPointer<MainWindow>> windows;
+                windows.reserve( mainWindows_.size() );
+                for ( const auto& item : mainWindows_ ) windows.emplace_back( item.second );
+                return windows;
+            }, std::move( runtime ), this );
+            connect( this, &QCoreApplication::aboutToQuit, this, [ this ] {
+                localControl_->setEnabled( false );
+                // Cancellation may enqueue private graphs. Drain them while Qt's
+                // GUI infrastructure still exists, after closing IPC admission.
+                session_->drainRetiredDocuments();
+            } );
+        }
+        connect( window, &MainWindow::optionsChanged, this,
+                 &KloggApp::synchronizeLocalControl );
+        synchronizeLocalControl();
         return window;
+    }
+
+    void synchronizeLocalControl()
+    {
+        if ( localControl_ && !localControl_->setEnabled( Configuration::get().localControlEnabled() ) ) {
+            LOG_WARNING << "Local control unavailable: " << localControl_->lastError();
+        }
     }
 
     void onWindowActivated( MainWindow& window )
@@ -531,6 +560,8 @@ class KloggApp : public QApplication {
     std::stack<QPointer<MainWindow>> activeWindows_;
 
     VersionChecker versionChecker_;
+    // Retire IPC admission/candidates before the window registry and Session.
+    std::unique_ptr<ReviewControlService> localControl_;
 };
 
 #endif // KLOGG_KLOGGAPP_H
