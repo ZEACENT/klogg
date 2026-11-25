@@ -23,6 +23,7 @@
 #include <QEvent>
 #include <QSemaphore>
 #include <QThread>
+#include <QtConcurrentRun>
 
 #include <atomic>
 #include <memory>
@@ -36,6 +37,7 @@
 #include "highlighterset.h"
 #include "logsnapshot.h"
 #include "ownedtaskfuture.h"
+#include "ownedtaskpoolgate.h"
 #include "quickfind.h"
 #include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
@@ -628,6 +630,23 @@ TEST_CASE( "Shared query options preserve literal escaping and whole-word bounda
             REQUIRE( matches.size() == expectedCount );
         }
     }
+}
+
+TEST_CASE( "Gating owned work leaves Qt's global pool available for repainting",
+           "[owned-task-future][pool-isolation]" )
+{
+    ScopedOwnedTaskPoolGate gate;
+    REQUIRE( gate.entered.tryAcquire( 1, 5000 ) );
+    const auto owned = klogg::runOwnedTask( [] {} );
+    QSemaphore ran;
+    auto unrelated = QtConcurrent::run( QThreadPool::globalInstance(), [&ran] { ran.release(); } );
+    const bool progressed = ran.tryAcquire( 1, 5000 );
+    const bool stillGated = !owned.isFinished();
+    gate.release.release();
+    unrelated.waitForFinished();
+    owned.waitForFinished();
+    CHECK( progressed );
+    CHECK( stillGated );
 }
 
 TEST_CASE( "Owned tasks release captures before publishing results or exceptions",

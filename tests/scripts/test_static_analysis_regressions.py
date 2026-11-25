@@ -1042,7 +1042,8 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("std::shared_future<Result>", bridge)
         self.assertIn("QFutureInterface<void>", bridge)
         self.assertEqual(bridge.count("lock( detail::ownedTaskPublicationMutex() )"), 2)
-        self.assertIn("QThreadPool::globalInstance()->start( task.release() )", bridge)
+        self.assertIn("detail::ownedTaskPool()->start( task.release() )", bridge)
+        self.assertIn("QThreadPool::globalInstance()", function_body(bridge, "inline QThreadPool* ownedTaskPool()"))
         self.assertLess(bridge.index("function();"), bridge.index("completion.reportFinished();"))
 
     def test_quickfind_clears_interrupt_before_submission_not_worker_entry(self):

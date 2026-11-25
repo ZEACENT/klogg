@@ -43,6 +43,20 @@ private:
 };
 
 namespace detail {
+// A fixture may redirect submissions from its own thread without occupying the
+// Qt global pool (which some Qt versions also use for synchronous raster work).
+inline QThreadPool*& ownedTaskPoolOverride()
+{
+    static thread_local QThreadPool* pool = nullptr;
+    return pool;
+}
+
+inline QThreadPool* ownedTaskPool()
+{
+    auto* pool = ownedTaskPoolOverride();
+    return pool != nullptr ? pool : QThreadPool::globalInstance();
+}
+
 inline std::mutex& ownedTaskPublicationMutex()
 {
     static std::mutex mutex;
@@ -99,8 +113,8 @@ auto runSingleOwnerTask( Function function ) -> SingleOwnerTaskFuture<std::invok
     auto result = task->function.get_future();
     {
         const std::lock_guard<std::mutex> lock( detail::ownedTaskPublicationMutex() );
-        // Preserve the shared pool's concurrency bound; Qt owns the runnable.
-        QThreadPool::globalInstance()->start( task.release() );
+        // Qt takes ownership; production submissions retain the global pool bound.
+        detail::ownedTaskPool()->start( task.release() );
     }
     return { completion.future(), std::move( result ) };
 }

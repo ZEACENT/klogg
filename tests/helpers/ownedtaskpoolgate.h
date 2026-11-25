@@ -1,23 +1,24 @@
 #ifndef KLOGG_TEST_OWNEDTASKPOOLGATE_H
 #define KLOGG_TEST_OWNEDTASKPOOLGATE_H
 
+#include <QScopedValueRollback>
 #include <QSemaphore>
 #include <QThreadPool>
 
 #include "ownedtaskfuture.h"
 
-// Hold the only shared-pool worker while a test dispatches owned tasks. Declare
-// this after the objects under test so failed assertions unblock before teardown.
+// Park only owned tasks submitted on this thread, never Qt's unrelated work.
+// Declare after the objects under test so unwinding opens the gate before teardown.
 struct ScopedOwnedTaskPoolGate {
-    QThreadPool* pool = QThreadPool::globalInstance();
-    int previousThreads = pool->maxThreadCount();
+    QThreadPool pool;
+    QScopedValueRollback<QThreadPool*> redirect{ klogg::detail::ownedTaskPoolOverride(), &pool };
     QSemaphore entered;
     QSemaphore release;
     klogg::OwnedTaskFuture<void> worker;
 
     ScopedOwnedTaskPoolGate()
     {
-        pool->setMaxThreadCount( 1 );
+        pool.setMaxThreadCount( 1 );
         worker = klogg::runOwnedTask( [ this ] {
             entered.release();
             release.acquire();
@@ -27,8 +28,7 @@ struct ScopedOwnedTaskPoolGate {
     {
         release.release();
         worker.waitForFinished();
-        pool->waitForDone();
-        pool->setMaxThreadCount( previousThreads );
+        pool.waitForDone();
     }
     ScopedOwnedTaskPoolGate( const ScopedOwnedTaskPoolGate& ) = delete;
     ScopedOwnedTaskPoolGate& operator=( const ScopedOwnedTaskPoolGate& ) = delete;

@@ -945,7 +945,7 @@ TEST_CASE( "Retiring a view drains dispatched work without late copy or retained
         gate.release.release();
         view.reset();
     }
-    gate.pool->waitForDone();
+    gate.pool.waitForDone();
     QCoreApplication::processEvents();
     REQUIRE( QApplication::clipboard()->text() == QStringLiteral( "keep clipboard" ) );
     REQUIRE_FALSE( data.snapshots.empty() );
